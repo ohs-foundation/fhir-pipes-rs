@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use octofhir_sof::output::get_writer;
+use octofhir_sof::output::{OutputWriter, get_writer};
 use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
 use sqlx_postgres::PgPool;
@@ -79,6 +79,13 @@ enum Command {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+
+        /// Parquet only: how date, dateTime, instant and time columns are
+        /// encoded. `text` keeps the FHIR string (spec default); `native`
+        /// writes Arrow Date32 / Timestamp(µs, UTC) / Time64(µs), flooring
+        /// partial dates (`2026`, `2026-03`) to the start of the period.
+        #[arg(long, default_value = "text", value_parser = ["text", "native"])]
+        parquet_temporal: String,
     },
 
     /// Validate a ViewDefinition's structure against the spec, offline (no FHIR
@@ -222,6 +229,23 @@ fn output_extension(format: &str) -> &'static str {
         "parquet" => "parquet",
         _ => "csv",
     }
+}
+
+/// Select the output writer for `format`, applying Parquet-only options.
+///
+/// `--parquet-temporal` is accepted (and validated by clap) for every format
+/// so scripts can pass it unconditionally, but it only affects Parquet output.
+fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputWriter>> {
+    #[cfg(feature = "parquet")]
+    if format.eq_ignore_ascii_case("parquet") {
+        use octofhir_sof::output::{ParquetWriter, TemporalEncoding};
+        let temporal =
+            TemporalEncoding::parse(parquet_temporal).context("parsing --parquet-temporal")?;
+        return Ok(Box::new(ParquetWriter::new().with_temporal(temporal)));
+    }
+    #[cfg(not(feature = "parquet"))]
+    let _ = parquet_temporal;
+    get_writer(format).context("selecting output format")
 }
 
 /// The default DDL table name for a view: its `name`, else `<resource>_view`.
@@ -580,6 +604,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             db,
             output,
             out,
+            parquet_temporal,
         } => {
             // A directory of ViewDefinitions runs every view in one pass, writing
             // one output file per view into the --out directory.
@@ -621,7 +646,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                 }
             };
 
-            let writer = get_writer(&output).context("selecting output format")?;
+            let writer = select_writer(&output, &parquet_temporal)?;
 
             if multi {
                 let out_dir =

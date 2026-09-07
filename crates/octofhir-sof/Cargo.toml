@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 csv = { workspace = true }
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 # Async
 async-trait = { workspace = true }
@@ -46,9 +47,10 @@ tracing = { workspace = true }
 
 [features]
 default = []
-parquet = ["dep:arrow", "dep:parquet"]
+parquet = ["dep:arrow", "dep:parquet", "dep:chrono"]
 
 [dev-dependencies]
 tokio-test = "0.4"
+bytes = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

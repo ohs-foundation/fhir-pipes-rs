@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Native temporal types in Parquet output** — `ParquetWriter::with_temporal(
+  TemporalEncoding::Native)` (CLI: `run --output parquet --parquet-temporal
+  native`) writes `date` columns as Arrow `Date32`, `dateTime`/`instant` as
+  `Timestamp(Microsecond, UTC)` and `time` as `Time64(Microsecond)`, so DuckDB,
+  ClickHouse, Spark and pandas see real temporal types without a cast. The
+  default (`TemporalEncoding::Text`) is unchanged and keeps the FHIR string
+  representation per the spec's ANSI type mapping. In native mode,
+  reduced-precision FHIR values are floored to the start of the period they
+  name (`2026` → `2026-01-01`, `2026-03` → `2026-03-01`, a date-only
+  `dateTime` → midnight UTC); offsets are normalized to UTC; unparseable
+  values are written as null and logged at `warn`.
+
 ## [0.1.2]
 
 ### Added

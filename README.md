@@ -10,7 +10,8 @@ database required, or by generating PostgreSQL.
   content-test suite (144/144):
   - a **database-free in-memory evaluator** over `serde_json`, and
   - a **PostgreSQL generator** that lowers FHIRPath to SQL over JSONB.
-- **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated).
+- **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated; temporal columns
+  as strings by default or native Arrow types with `--parquet-temporal native`).
 - **Offline lint & validation** of ViewDefinitions (FH01–FH10) with rustc-style
   diagnostics, plus JSON and SARIF output for CI.
 - Full support for the v2.1 additions: the `repeat` directive and the
@@ -47,6 +48,11 @@ cat export/*.ndjson | octofhir-sof run view.json --input - --output ndjson
 
 # Run every view in a directory in one pass, one output file per view
 octofhir-sof run views/ --input data/ --output csv --out out/
+
+# Parquet with native temporal types (Date32 / Timestamp(µs, UTC) / Time64)
+# instead of the spec-default strings; partial dates floor to period start
+octofhir-sof run view.json --input data.ndjson --output parquet \
+  --parquet-temporal native --out view.parquet
 
 # Generate SQL for the view (PostgreSQL JSONB by default, or DuckDB JSON)
 octofhir-sof generate view.json

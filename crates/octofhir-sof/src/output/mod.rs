@@ -18,7 +18,7 @@ pub use ndjson::{JsonArrayWriter, NdjsonWriter};
 mod parquet_writer;
 
 #[cfg(feature = "parquet")]
-pub use parquet_writer::{ParquetCompression, ParquetWriter};
+pub use parquet_writer::{ParquetCompression, ParquetWriter, TemporalEncoding};
 
 use std::io::Write;
 use std::pin::Pin;
