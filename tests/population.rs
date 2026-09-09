@@ -32,7 +32,7 @@ fn admin(id: &str, name: &str, part_of: Option<&str>, boundary: Option<&str>) ->
         "meta": {"versionId": "3"},
         "name": name,
         "type": [{"coding": [{
-            "system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type",
+            "system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
             "code": "admin-unit"
         }]}],
     });
@@ -56,7 +56,7 @@ fn facility(id: &str, part_of: &str, lon: f64, lat: f64) -> Value {
         "meta": {"versionId": "3"},
         "name": id,
         "type": [{"coding": [{
-            "system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type",
+            "system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
             "code": "facility"
         }]}],
         "partOf": {"reference": format!("Location/{part_of}")},
@@ -524,4 +524,65 @@ fn a_leaf_whose_group_id_is_too_long_is_skipped_and_its_ancestors_are_flagged() 
     let rep = report(dir.path());
     assert_eq!(rep["counts"]["group_id_too_long"], 1);
     assert_eq!(rep["counts"]["rollup_incomplete"], 1);
+}
+
+/// `--type CODE` measures every Location of that type on its own — a catchment tiling
+/// is not the admin tree — and rolls nothing up: the admin units' own Groups are not
+/// (re)written from a partial set of polygons.
+#[test]
+fn type_mode_measures_each_polygon_and_never_rolls_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut resources = two_state_country(Some(&rect(5.0, 4.0, 7.0, 7.0)));
+    for (id, b) in [
+        ("c1", rect(3.0, 4.0, 4.0, 7.0)),
+        ("c2", rect(4.0, 4.0, 5.0, 7.0)),
+    ] {
+        let mut c = admin(id, id, Some("west"), Some(&b));
+        c["type"] = json!([{"coding": [{
+            "system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
+            "code": "facility-catchment"
+        }]}]);
+        resources.push(c);
+    }
+    write_snapshot(dir.path(), &resources);
+
+    let assert = run(dir.path(), FIXTURE, &["--type", "facility-catchment"]).success();
+    let out = stdout(&assert);
+    assert!(
+        out.contains("2 measured at type facility-catchment, 0 rolled up"),
+        "{out}"
+    );
+    let gs = groups(dir.path());
+    let ids: Vec<&str> = gs.iter().map(|g| g["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["pop-worldpop-2026-c1", "pop-worldpop-2026-c2"]);
+    // The two catchments tile West State exactly, so their sums add to its level-1 figure.
+    run(dir.path(), FIXTURE, &["--level", "1"]).success();
+    let west_total = groups(dir.path())
+        .iter()
+        .find(|g| g["id"] == "pop-worldpop-2026-west")
+        .map(|g| g["quantity"].as_u64().unwrap())
+        .unwrap();
+    let tiled: u64 = gs.iter().map(|g| g["quantity"].as_u64().unwrap()).sum();
+    assert_eq!(tiled, west_total);
+    for g in &gs {
+        assert_eq!(ext(g, "is-calculated")["valueBoolean"], json!(false));
+        assert!(
+            ext(g, "denominator-source")["valueCodeableConcept"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("over type facility-catchment")
+        );
+    }
+
+    run(dir.path(), FIXTURE, &["--type", "school"])
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("no Locations of type school"));
+    run(
+        dir.path(),
+        FIXTURE,
+        &["--type", "facility-catchment", "--level", "1"],
+    )
+    .failure()
+    .code(2);
 }

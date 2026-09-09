@@ -301,8 +301,16 @@ pub struct PopulationArgs {
     #[arg(long)]
     pub raster: String,
     /// Admin level to measure from the raster (0 = country); every admin ancestor gets a rolled-up total
-    #[arg(long)]
-    pub level: u8,
+    #[arg(
+        long,
+        required_unless_present = "type_code",
+        conflicts_with = "type_code"
+    )]
+    pub level: Option<u8>,
+    /// Instead of an admin level: measure every Location whose icr-location-type code is this
+    /// (e.g. facility-catchment). Each polygon is summed on its own; nothing is rolled up into ancestors
+    #[arg(long = "type", value_name = "CODE")]
+    pub type_code: Option<String>,
     /// Reference year of the raster; part of each Group's id and the default estimate-date
     #[arg(long)]
     pub year: u16,

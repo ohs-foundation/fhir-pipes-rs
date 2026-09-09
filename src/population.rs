@@ -3,7 +3,9 @@
 //! Reads the snapshot with the same pass-one index `transform` uses, so the
 //! hierarchy (and its report) come for free; sums the raster under every
 //! admin unit at `--level` with the pixel-centroid rule; rolls the sums up
-//! the partOf chain so every admin ancestor gets a calculated total; and
+//! the partOf chain so every admin ancestor gets a calculated total (or, with
+//! `--type CODE`, sums every Location of that type — e.g. facility-catchment —
+//! on its own, with no roll-up); and
 //! writes one `ICRTargetPopulation` Group per unit as FHIR NDJSON for
 //! `fhir-pipes load`. Group ids are deterministic (`pop-SOURCE-YEAR-LOCATIONID`),
 //! so re-running replaces the same resources. Locations are never touched.
@@ -32,6 +34,14 @@ use crate::raster::zonal::{ZonalSum, raster_total, zonal_sum};
 use crate::report::Report;
 use crate::snapshot::Snapshot;
 use crate::transform::write_report;
+
+/// Which Locations to measure: every admin unit at one level, or every Location of one
+/// type code (catchments, operational areas). Only the level mode rolls up: a catchment
+/// tiling is not the admin tree, and its sums must not overwrite the admin units' own.
+enum Selector {
+    Level(i8),
+    Type(String),
+}
 
 /// One unit's figure: measured from the raster at `--level`, or rolled up
 /// from measured descendants.
@@ -241,17 +251,43 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             "not a code in icr-denominator-source-cs; written as given (extensible binding)",
         );
     }
-    let level = i8::try_from(args.level)
-        .map_err(|_| PipesError::Usage(format!("--level {} is out of range", args.level)))?;
+    // What to measure: every admin unit at one level (then rolled up the admin chain), or
+    // every Location of one type code — catchments, operational areas — summed on its own.
+    let selector = match (args.level, &args.type_code) {
+        (Some(l), None) => Selector::Level(
+            i8::try_from(l)
+                .map_err(|_| PipesError::Usage(format!("--level {l} is out of range")))?,
+        ),
+        (None, Some(t)) if !t.is_empty() => Selector::Type(t.clone()),
+        _ => {
+            return Err(PipesError::Usage(
+                "give exactly one of --level or --type".to_string(),
+            ));
+        }
+    };
+    // "level 2" / "type facility-catchment" in messages; "admin level 2" in the source text;
+    // "level-2" / "facility-catchment" before "units".
+    let (scope, scope_long, unit_label) = match &selector {
+        Selector::Level(l) => (
+            format!("level {l}"),
+            format!("admin level {l}"),
+            format!("level-{l}"),
+        ),
+        Selector::Type(t) => (format!("type {t}"), format!("type {t}"), t.clone()),
+    };
     let targets: Vec<usize> = (0..index.records.len())
-        .filter(|&i| index.hierarchy.get(i).and_then(|f| f.admin_level) == Some(level))
+        .filter(|&i| match &selector {
+            Selector::Level(level) => {
+                index.hierarchy.get(i).and_then(|f| f.admin_level) == Some(*level)
+            }
+            Selector::Type(t) => index.records[i].type_code.as_deref() == Some(t.as_str()),
+        })
         .collect();
     if targets.is_empty() {
-        return Err(PipesError::Usage(format!(
-            "no admin units at level {} in {}",
-            args.level,
-            ndjson.display()
-        )));
+        return Err(PipesError::Usage(match &selector {
+            Selector::Level(l) => format!("no admin units at level {l} in {}", ndjson.display()),
+            Selector::Type(t) => format!("no Locations of type {t} in {}", ndjson.display()),
+        }));
     }
 
     let cache_dir = args.cache_dir.clone().unwrap_or_else(|| snapshot.rasters());
@@ -303,20 +339,22 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
                 },
             );
         }
-        roll_up(&mut totals, &index.hierarchy, i, measured);
+        if matches!(selector, Selector::Level(_)) {
+            roll_up(&mut totals, &index.hierarchy, i, measured);
+        }
     }
 
     let measured_any = totals.values().any(|t| !t.calculated && t.pixels > 0);
     if !measured_any {
         return Err(PipesError::Usage(format!(
-            "no admin unit at level {} has a raster pixel centre inside it (raster total {:.0}); is {} the right raster for this snapshot?",
-            args.level, grand.sum, loaded.label
+            "no Location at {scope} has a raster pixel centre inside it (raster total {:.0}); is {} the right raster for this snapshot?",
+            grand.sum, loaded.label
         )));
     }
 
     let source_text = format!(
-        "{}; pixel-centroid zonal sum over admin level {}",
-        loaded.label, args.level
+        "{}; pixel-centroid zonal sum over {scope_long}",
+        loaded.label
     );
     let tmp = with_suffix(&args.out, ".tmp");
     let mut out = Output::create(&tmp, is_gz(&args.out))?;
@@ -389,28 +427,29 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
         0.0
     };
     println!(
-        "Wrote {} Groups to {} ({measured_n} measured at level {}, {rolled_n} rolled up)",
+        "Wrote {} Groups to {} ({measured_n} measured at {scope}, {rolled_n} rolled up)",
         measured_n + rolled_n,
         args.out.display(),
-        args.level
     );
     println!(
-        "Raster total {:.0}; assigned to level-{} units {:.0} ({share:.1}%)",
-        grand.sum, args.level, assigned
+        "Raster total {:.0}; assigned to {unit_label} units {:.0} ({share:.1}%)",
+        grand.sum, assigned
     );
-    let other_level_admin_units = (0..index.records.len())
-        .filter(|&i| {
-            index
-                .hierarchy
-                .get(i)
-                .and_then(|f| f.admin_level)
-                .is_some_and(|l| l != level)
-        })
-        .count();
-    if other_level_admin_units > 0 {
-        println!(
-            "{other_level_admin_units} admin units at other levels were not measured directly"
-        );
+    if let Selector::Level(level) = selector {
+        let other_level_admin_units = (0..index.records.len())
+            .filter(|&i| {
+                index
+                    .hierarchy
+                    .get(i)
+                    .and_then(|f| f.admin_level)
+                    .is_some_and(|l| l != level)
+            })
+            .count();
+        if other_level_admin_units > 0 {
+            println!(
+                "{other_level_admin_units} admin units at other levels were not measured directly"
+            );
+        }
     }
     println!("{}", report.summary());
     if let Some(path) = &args.report {

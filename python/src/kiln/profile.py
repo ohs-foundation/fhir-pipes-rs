@@ -42,7 +42,7 @@ ADMIN_UNIT_TYPE = "admin-unit"
 ICR_LOCATION_PROFILE_URL = (
     "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
 )
-LOCATION_TYPE_SYSTEM = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type"
+LOCATION_TYPE_SYSTEM = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs"
 PHYSICAL_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/location-physical-type"
 NATIONAL_ADMIN_CODE_SYSTEM = (
     "https://icr.healthcampaigns.org/identifiers/national-admin-code"

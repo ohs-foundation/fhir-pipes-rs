@@ -425,7 +425,7 @@ mod tests {
             "resourceType":"Location","id":"clinic","name":"Gama Clinic","status":"active",
             "meta":{"versionId":"3","lastUpdated":"2026-01-02T03:04:05Z"},
             "alias":["GC"],"description":"d",
-            "type":[{"coding":[{"system":"https://icr.healthcampaigns.org/CodeSystem/icr-location-type","code":"facility"}]},
+            "type":[{"coding":[{"system":"https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs","code":"facility"}]},
                     {"coding":[{"system":"https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs","code":"phc"}]},
                     {"coding":[{"system":"https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs","code":"public"}]}],
             "physicalType":{"coding":[{"code":"si"}]},
