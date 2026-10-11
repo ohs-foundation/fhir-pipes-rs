@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::extract::client::Auth;
+
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
 pub const DEFAULT_PARTITION_BY: &str = "country,geom_type,type";
 pub const DEFAULT_CONCURRENCY: usize = 8;
@@ -131,14 +133,54 @@ pub struct InspectArgs {
     pub out: PathBuf,
 }
 
+/// How extract and load authenticate: no header, a fixed bearer token, or an
+/// OAuth client id and secret that kiln trades for tokens itself.
+#[derive(clap::Args, Debug, Clone)]
+pub struct AuthArgs {
+    /// Bearer token; falls back to $KILN_TOKEN
+    #[arg(
+        long,
+        env = "KILN_TOKEN",
+        hide_env_values = true,
+        conflicts_with = "client_id"
+    )]
+    pub token: Option<String>,
+    /// OAuth client id; kiln gets its own token (client-credentials grant) and renews it before it expires. Falls back to $KILN_CLIENT_ID
+    #[arg(long, env = "KILN_CLIENT_ID", requires_all = ["client_secret", "token_url"])]
+    pub client_id: Option<String>,
+    /// OAuth client secret; falls back to $KILN_CLIENT_SECRET
+    #[arg(
+        long,
+        env = "KILN_CLIENT_SECRET",
+        hide_env_values = true,
+        requires = "client_id"
+    )]
+    pub client_secret: Option<String>,
+    /// OAuth token endpoint the client id and secret are sent to; falls back to $KILN_TOKEN_URL
+    #[arg(long, env = "KILN_TOKEN_URL", requires = "client_id")]
+    pub token_url: Option<String>,
+}
+
+impl AuthArgs {
+    pub fn auth(&self) -> Auth {
+        match (&self.client_id, &self.client_secret, &self.token_url) {
+            (Some(id), Some(secret), Some(url)) => Auth::ClientCredentials {
+                token_url: url.clone(),
+                client_id: id.clone(),
+                client_secret: secret.clone(),
+            },
+            _ => self.token.clone().map_or(Auth::None, Auth::Token),
+        }
+    }
+}
+
 #[derive(clap::Args, Debug, Clone)]
 pub struct ExtractArgs {
     /// Base URL of the FHIR server (Location is appended)
     #[arg(long)]
     pub server: String,
-    /// Bearer token; falls back to $KILN_TOKEN
-    #[arg(long, env = "KILN_TOKEN", hide_env_values = true)]
-    pub token: Option<String>,
+    #[command(flatten)]
+    pub auth: AuthArgs,
     /// Snapshot directory to create or update
     #[arg(long)]
     pub snapshot: PathBuf,
@@ -222,9 +264,8 @@ pub struct LoadArgs {
     /// Base URL of the FHIR server
     #[arg(long)]
     pub server: String,
-    /// Bearer token; falls back to $KILN_TOKEN
-    #[arg(long, env = "KILN_TOKEN", hide_env_values = true)]
-    pub token: Option<String>,
+    #[command(flatten)]
+    pub auth: AuthArgs,
     /// NDJSON of FHIR resources to load (normally diff output)
     #[arg(long = "in")]
     pub input: PathBuf,

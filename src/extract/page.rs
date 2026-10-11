@@ -219,7 +219,7 @@ pub fn count_resources(client: &FhirClient, server: &str, resource_type: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::client::FhirClient;
+    use crate::extract::client::{Auth, FhirClient};
 
     #[test]
     fn count_resources_reads_the_bundle_total_or_gives_up() {
@@ -260,7 +260,7 @@ mod tests {
                     status_code(200).body(r#"{"resourceType":"Bundle","type":"searchset"}"#),
                 ),
         );
-        let client = FhirClient::new(None, 1, std::time::Duration::from_secs(5)).unwrap();
+        let client = FhirClient::new(Auth::None, 1, std::time::Duration::from_secs(5)).unwrap();
         let base = server.url("/fhir").to_string();
         assert_eq!(count_resources(&client, &base, "Location"), Some(42));
         assert_eq!(count_resources(&client, &base, "Organization"), Some(7));
@@ -287,7 +287,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let incoming = dir.path().join("inc.ndjson");
-        let client = FhirClient::new(None, 1, std::time::Duration::from_secs(5)).unwrap();
+        let client = FhirClient::new(Auth::None, 1, std::time::Duration::from_secs(5)).unwrap();
         let mut report = Report::default();
         let got = page_resources(
             &client,
@@ -323,7 +323,7 @@ mod tests {
         r
     }
     fn client() -> FhirClient {
-        FhirClient::new(None, 1, std::time::Duration::from_secs(5)).unwrap()
+        FhirClient::new(Auth::None, 1, std::time::Duration::from_secs(5)).unwrap()
     }
 
     #[test]

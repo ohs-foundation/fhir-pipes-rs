@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::error::{KilnError, Result};
 use crate::extract::cache::Cache;
-use crate::extract::client::FhirClient;
+use crate::extract::client::{Auth, FhirClient};
 
 /// Classic and BigTIFF headers, both byte orders.
 const TIFF_MAGIC: [&[u8; 4]; 4] = [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"];
@@ -87,7 +87,7 @@ pub fn load(
         Ok(None) => {}
         Err(e) => cache_errors.push(format!("read: {e}")),
     }
-    let client = FhirClient::new(None, retries, timeout)?;
+    let client = FhirClient::new(Auth::None, retries, timeout)?;
     eprintln!("raster: fetching {label} …");
     let fetched = client
         .get(source)

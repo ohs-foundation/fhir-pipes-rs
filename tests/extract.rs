@@ -52,7 +52,14 @@ fn bundle(entries: Vec<Value>, next: Option<&str>) -> String {
 
 fn kiln() -> Command {
     let mut c = Command::cargo_bin("kiln").unwrap();
-    c.env_remove("KILN_TOKEN");
+    for var in [
+        "KILN_TOKEN",
+        "KILN_CLIENT_ID",
+        "KILN_CLIENT_SECRET",
+        "KILN_TOKEN_URL",
+    ] {
+        c.env_remove(var);
+    }
     c
 }
 
@@ -1290,4 +1297,58 @@ fn a_deletion_on_the_server_is_reported_by_the_count_check() {
         issue["detail"].as_str().unwrap().contains("--full"),
         "{issue}"
     );
+}
+
+#[test]
+fn client_credentials_from_the_environment_authorise_every_request() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let bearer = || request::headers(contains(("authorization", "Bearer tok")));
+    let burl = server.url("/b/b.geojson").to_string();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/token"),
+            request::body(url_decoded(contains(("client_id", "key-x")))),
+            request::body(url_decoded(contains(("client_secret", "shh")))),
+        ])
+        .times(1)
+        .respond_with(json_encoded(
+            json!({"access_token": "tok", "expires_in": 3600}),
+        )),
+    );
+    server.expect(
+        Expectation::matching(all_of![full_search(), bearer()])
+            .times(1)
+            .respond_with(ok(bundle(
+                vec![loc("b", "2026-01-02T00:00:00Z", Some(&burl))],
+                None,
+            ))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/b/b.geojson"),
+            bearer()
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(GEOJSON)),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Organization"),
+            bearer()
+        ])
+        .times(1)
+        .respond_with(ok(bundle(vec![], None))),
+    );
+
+    kiln()
+        .args(["extract", "--server", &server.url("/fhir").to_string()])
+        .arg("--snapshot")
+        .arg(snap.path())
+        .env("KILN_CLIENT_ID", "key-x")
+        .env("KILN_CLIENT_SECRET", "shh")
+        .env("KILN_TOKEN_URL", server.url("/token").to_string())
+        .assert()
+        .success();
+    assert_eq!(lines(snap.path()).len(), 1);
 }
