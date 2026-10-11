@@ -29,7 +29,14 @@ fn write_ndjson(dir: &Path, resources: &[Value]) -> PathBuf {
 
 fn kiln() -> Command {
     let mut c = Command::cargo_bin("kiln").unwrap();
-    c.env_remove("KILN_TOKEN");
+    for var in [
+        "KILN_TOKEN",
+        "KILN_CLIENT_ID",
+        "KILN_CLIENT_SECRET",
+        "KILN_TOKEN_URL",
+    ] {
+        c.env_remove(var);
+    }
     c
 }
 
@@ -348,4 +355,103 @@ fn organizations_are_posted_before_their_locations() {
         .respond_with(ok(transaction_response())),
     );
     load(&server, &input, &[]).success();
+}
+
+#[test]
+fn client_credentials_authorise_the_preflight_and_every_bundle() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("state", Some("3"), None)]);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/token"),
+            request::body(url_decoded(contains(("grant_type", "client_credentials")))),
+            request::body(url_decoded(contains(("client_id", "key-x")))),
+            request::body(url_decoded(contains(("client_secret", "shh")))),
+        ])
+        .times(1)
+        .respond_with(json_encoded(
+            json!({"access_token": "tok", "expires_in": 3600}),
+        )),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/metadata"),
+            request::headers(contains(("authorization", "Bearer tok"))),
+        ])
+        .times(1)
+        .respond_with(ok(capability(true))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            any_bundle(),
+            request::headers(contains(("authorization", "Bearer tok"))),
+        ])
+        .times(1)
+        .respond_with(ok(transaction_response())),
+    );
+    // The secret from the environment, the rest as flags.
+    kiln()
+        .args(["load", "--server", &server.url("/fhir").to_string(), "--in"])
+        .arg(&input)
+        .args(["--client-id", "key-x", "--token-url"])
+        .arg(server.url("/token").to_string())
+        .env("KILN_CLIENT_SECRET", "shh")
+        .assert()
+        .success();
+}
+
+#[test]
+fn rejected_client_credentials_stop_before_the_preflight() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("state", Some("3"), None)]);
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/token"))
+            .times(1)
+            .respond_with(status_code(401).body(r#"{"error":"unauthorized_client"}"#)),
+    );
+    let token_url = server.url("/token").to_string();
+    let a = load(
+        &server,
+        &input,
+        &[
+            "--client-id",
+            "key-x",
+            "--client-secret",
+            "wrong",
+            "--token-url",
+            &token_url,
+        ],
+    )
+    .failure()
+    .code(1);
+    let err = stderr(&a);
+    assert!(err.contains("cannot get a token from"), "{err}");
+    assert!(err.contains("unauthorized_client"), "{err}");
+}
+
+#[test]
+fn incomplete_or_conflicting_auth_flags_are_usage_errors() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("state", Some("3"), None)]);
+    // No expectations: none of these may reach the server.
+    for flags in [
+        &["--client-id", "key-x", "--client-secret", "s"][..],
+        &["--client-id", "key-x", "--token-url", "http://t"][..],
+        &["--client-secret", "s"][..],
+        &[
+            "--token",
+            "t",
+            "--client-id",
+            "key-x",
+            "--client-secret",
+            "s",
+            "--token-url",
+            "http://t",
+        ][..],
+    ] {
+        load(&server, &input, flags).failure().code(2);
+    }
 }

@@ -232,12 +232,12 @@ pub fn fetch_boundaries(
 mod tests {
     use super::*;
     use crate::extract::cache::Cache;
-    use crate::extract::client::FhirClient;
+    use crate::extract::client::{Auth, FhirClient};
     use crate::report::Report;
     use httptest::{matchers::*, responders::*, Expectation, Server};
 
     fn client(retries: usize) -> FhirClient {
-        FhirClient::new(None, retries, std::time::Duration::from_secs(5)).unwrap()
+        FhirClient::new(Auth::None, retries, std::time::Duration::from_secs(5)).unwrap()
     }
 
     #[test]

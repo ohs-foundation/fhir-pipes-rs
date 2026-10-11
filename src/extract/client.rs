@@ -3,12 +3,19 @@
 //! connection errors, 5xx and 429 are retried with exponential backoff
 //! (0.5 s doubling, clamped to [0, 30] s, a numeric Retry-After replacing
 //! the computed delay); any other status is final.
+//!
+//! The bearer token is either fixed (`--token`) or obtained with the OAuth
+//! client-credentials grant (`--client-id`), in which case the client gets
+//! a new token shortly before the current one expires, so a run can outlast
+//! any one token.
 
 use std::io::Read as _;
-use std::time::Duration;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use serde_json::Value;
 
 use crate::error::{KilnError, Result};
 
@@ -18,6 +25,53 @@ const ERROR_BODY_CAP: usize = 500;
 /// Never read more than this much of an error body off the wire; we only
 /// keep the first ERROR_BODY_CAP chars of it anyway.
 const ERROR_BODY_READ_LIMIT: u64 = 8192;
+/// Assumed token lifetime, in seconds, when a token response omits `expires_in`.
+const DEFAULT_TOKEN_LIFETIME: u64 = 300;
+
+/// How requests are authorised.
+#[derive(Clone)]
+pub enum Auth {
+    None,
+    /// A fixed bearer token.
+    Token(String),
+    /// OAuth 2.0 client credentials, traded for bearer tokens at `token_url`.
+    ClientCredentials {
+        token_url: String,
+        client_id: String,
+        client_secret: String,
+    },
+}
+
+/// The current client-credentials token and when to replace it. The lock is
+/// held across a renewal so concurrent boundary workers wait for one new
+/// token instead of each fetching their own.
+struct TokenSource {
+    url: String,
+    form: String,
+    current: Mutex<(HeaderValue, Instant)>,
+}
+
+enum Authorizer {
+    None,
+    Fixed(HeaderValue),
+    Renewing(TokenSource),
+}
+
+/// How long to use a token that lives `expires_in` seconds: until a minute
+/// before it expires, or half its life when that is two minutes or less.
+fn renew_after(expires_in: u64) -> Duration {
+    Duration::from_secs(if expires_in > 120 {
+        expires_in - 60
+    } else {
+        expires_in / 2
+    })
+}
+
+fn bearer(token: &str) -> Option<HeaderValue> {
+    let mut v = HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
+    v.set_sensitive(true);
+    Some(v)
+}
 
 #[derive(Debug)]
 pub enum FetchError {
@@ -50,6 +104,7 @@ impl std::fmt::Debug for Fetched {
 pub struct FhirClient {
     http: Client,
     retries: usize,
+    auth: Authorizer,
 }
 
 pub fn backoff_delay(attempt: usize, retry_after: Option<f64>) -> Duration {
@@ -123,27 +178,49 @@ fn jittered(delay: Duration) -> Duration {
 }
 
 impl FhirClient {
-    pub fn new(token: Option<String>, retries: usize, timeout: Duration) -> Result<Self> {
+    /// With client credentials the first token is fetched here, so a wrong
+    /// secret or token URL fails before any FHIR request is made.
+    pub fn new(auth: Auth, retries: usize, timeout: Duration) -> Result<Self> {
         ensure_crypto_provider();
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/fhir+json"));
-        if let Some(t) = token {
-            let mut v = HeaderValue::from_str(&format!("Bearer {t}")).map_err(|_| {
-                KilnError::Usage("token contains characters that are not valid in a header".into())
-            })?;
-            v.set_sensitive(true);
-            headers.insert(AUTHORIZATION, v);
-        }
         let http = Client::builder()
             .default_headers(headers)
             .timeout(timeout)
             .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| KilnError::Environment(format!("cannot build HTTP client: {e}")))?;
-        Ok(Self {
+        let mut client = Self {
             http,
             retries: retries.max(1),
-        })
+            auth: Authorizer::None,
+        };
+        client.auth = match auth {
+            Auth::None => Authorizer::None,
+            Auth::Token(t) => Authorizer::Fixed(bearer(&t).ok_or_else(|| {
+                KilnError::Usage("token contains characters that are not valid in a header".into())
+            })?),
+            Auth::ClientCredentials {
+                token_url,
+                client_id,
+                client_secret,
+            } => {
+                let form = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("grant_type", "client_credentials")
+                    .append_pair("client_id", &client_id)
+                    .append_pair("client_secret", &client_secret)
+                    .finish();
+                let first = client.request_token(&token_url, &form).map_err(|e| {
+                    KilnError::Environment(format!("cannot get a token from {token_url}: {e}"))
+                })?;
+                Authorizer::Renewing(TokenSource {
+                    url: token_url,
+                    form,
+                    current: Mutex::new(first),
+                })
+            }
+        };
+        Ok(client)
     }
 
     /// GET with the retry policy. Sleeps between attempts.
@@ -162,12 +239,75 @@ impl FhirClient {
         })
     }
 
+    /// One client-credentials token request, with the retry policy. Returns
+    /// the Authorization header and when to replace it, counted from before
+    /// the request so the margin also covers the round trip.
+    fn request_token(
+        &self,
+        url: &str,
+        form: &str,
+    ) -> std::result::Result<(HeaderValue, Instant), FetchError> {
+        let started = Instant::now();
+        let got = self.retrying(|| {
+            self.http
+                .post(url)
+                .header(ACCEPT, "application/json")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(form.to_owned())
+        })?;
+        let body: Value = serde_json::from_slice(&got.body)
+            .map_err(|e| FetchError::Transport(format!("token response is not JSON: {e}")))?;
+        let header = body
+            .get("access_token")
+            .and_then(Value::as_str)
+            .and_then(bearer)
+            .ok_or_else(|| {
+                FetchError::Transport("token response has no usable access_token".into())
+            })?;
+        let expires_in = body
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_TOKEN_LIFETIME);
+        Ok((header, started + renew_after(expires_in)))
+    }
+
+    /// The Authorization header for the next request, renewing a
+    /// client-credentials token that is due.
+    fn authorization(&self) -> std::result::Result<Option<HeaderValue>, FetchError> {
+        match &self.auth {
+            Authorizer::None => Ok(None),
+            Authorizer::Fixed(v) => Ok(Some(v.clone())),
+            Authorizer::Renewing(src) => {
+                let mut current = src.current.lock().unwrap_or_else(PoisonError::into_inner);
+                if Instant::now() >= current.1 {
+                    *current = self.request_token(&src.url, &src.form).map_err(|e| {
+                        FetchError::Transport(format!("renewing the token at {}: {e}", src.url))
+                    })?;
+                }
+                Ok(Some(current.0.clone()))
+            }
+        }
+    }
+
+    /// The retry loop with the Authorization header added. The header is
+    /// chosen once per call, so every attempt carries the same token.
+    fn send(
+        &self,
+        request: impl Fn() -> RequestBuilder,
+    ) -> std::result::Result<Fetched, FetchError> {
+        let auth = self.authorization()?;
+        self.retrying(|| match &auth {
+            Some(v) => request().header(AUTHORIZATION, v.clone()),
+            None => request(),
+        })
+    }
+
     /// The retry loop. Any 2xx is a success; 429 and 5xx retry with backoff
     /// (a numeric Retry-After replaces the computed delay); any other status
     /// is final on the first response.
-    fn send(
+    fn retrying(
         &self,
-        request: impl Fn() -> reqwest::blocking::RequestBuilder,
+        request: impl Fn() -> RequestBuilder,
     ) -> std::result::Result<Fetched, FetchError> {
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
@@ -219,7 +359,7 @@ mod tests {
     use httptest::{matchers::*, responders::*, Expectation, Server};
 
     fn client(retries: usize) -> FhirClient {
-        FhirClient::new(None, retries, std::time::Duration::from_secs(5)).unwrap()
+        FhirClient::new(Auth::None, retries, std::time::Duration::from_secs(5)).unwrap()
     }
 
     #[test]
@@ -316,10 +456,122 @@ mod tests {
             ])
             .respond_with(status_code(200).body("ok")),
         );
-        FhirClient::new(Some("secret".into()), 1, std::time::Duration::from_secs(5))
-            .unwrap()
-            .get(&server.url("/t").to_string())
-            .unwrap();
+        FhirClient::new(
+            Auth::Token("secret".into()),
+            1,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap()
+        .get(&server.url("/t").to_string())
+        .unwrap();
+    }
+
+    fn credentials(server: &Server) -> Auth {
+        Auth::ClientCredentials {
+            token_url: server.url("/token").to_string(),
+            client_id: "key-x".into(),
+            client_secret: "s3cret&=".into(),
+        }
+    }
+
+    fn token(access_token: &str, expires_in: u64) -> ResponseBuilder<String> {
+        json_encoded(serde_json::json!({
+            "access_token": access_token,
+            "expires_in": expires_in,
+            "token_type": "Bearer",
+        }))
+    }
+
+    #[test]
+    fn renewal_is_a_minute_early_or_at_half_life_for_short_tokens() {
+        assert_eq!(renew_after(3600).as_secs(), 3540);
+        assert_eq!(renew_after(121).as_secs(), 61);
+        assert_eq!(renew_after(120).as_secs(), 60);
+        assert_eq!(renew_after(1).as_secs(), 0);
+    }
+
+    #[test]
+    fn client_credentials_are_traded_once_for_a_token_that_is_reused() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::headers(contains((
+                    "content-type",
+                    "application/x-www-form-urlencoded"
+                ))),
+                request::headers(contains(("accept", "application/json"))),
+                request::body(url_decoded(contains(("grant_type", "client_credentials")))),
+                request::body(url_decoded(contains(("client_id", "key-x")))),
+                request::body(url_decoded(contains(("client_secret", "s3cret&=")))),
+            ])
+            .times(1)
+            .respond_with(token("abc", 3600)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/t"),
+                request::headers(contains(("authorization", "Bearer abc"))),
+            ])
+            .times(2)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url("/t").to_string()).unwrap();
+        c.get(&server.url("/t").to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_token_due_for_renewal_is_replaced_before_the_next_request() {
+        let server = Server::run();
+        // The first token lives one second, so it is due at once.
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(2)
+                .respond_with(cycle![token("old", 1), token("new", 3600)]),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/t"),
+                request::headers(contains(("authorization", "Bearer new"))),
+            ])
+            .times(2)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url("/t").to_string()).unwrap();
+        c.get(&server.url("/t").to_string()).unwrap();
+    }
+
+    #[test]
+    fn rejected_credentials_fail_before_any_fhir_request() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(1)
+                .respond_with(status_code(401).body(r#"{"error":"unauthorized_client"}"#)),
+        );
+        let Err(err) = FhirClient::new(credentials(&server), 3, Duration::from_secs(5)) else {
+            panic!("expected the token request to fail");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("cannot get a token from"), "{msg}");
+        assert!(msg.contains("/token"), "{msg}");
+        assert!(msg.contains("401"), "{msg}");
+        assert!(msg.contains("unauthorized_client"), "{msg}");
+    }
+
+    #[test]
+    fn a_token_response_without_an_access_token_is_an_error() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .respond_with(json_encoded(serde_json::json!({"expires_in": 60}))),
+        );
+        let Err(err) = FhirClient::new(credentials(&server), 1, Duration::from_secs(5)) else {
+            panic!("expected a missing access_token to fail");
+        };
+        assert!(err.to_string().contains("access_token"), "{err}");
     }
 
     #[test]

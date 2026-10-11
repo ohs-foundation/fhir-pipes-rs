@@ -127,7 +127,7 @@ fn run_phases(
 ) -> Result<()> {
     let full = since.is_none();
     let client = FhirClient::new(
-        args.token.clone(),
+        args.auth.auth(),
         args.retries,
         Duration::from_secs(args.timeout),
     )?;

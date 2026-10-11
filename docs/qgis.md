@@ -107,8 +107,10 @@ kiln load --server https://fhir.example/fhir --in changes.ndjson --dry-run
 kiln load --server https://fhir.example/fhir --in changes.ndjson
 ```
 
-The bearer token comes from `--token` or the `KILN_TOKEN` environment
-variable. Load sends the resources parents first in transaction bundles, each
+If the server needs authentication, pass `--token` (or set `KILN_TOKEN`), or
+an OAuth client with `--client-id`, `--client-secret` and `--token-url` (or
+`KILN_CLIENT_ID`, `KILN_CLIENT_SECRET`, `KILN_TOKEN_URL`); see "Commands" in
+the README. Load sends the resources parents first in transaction bundles, each
 existing resource with a version check. If someone changed one of them on the
 server since your snapshot was taken, the server refuses that bundle, kiln
 names the conflicting ids, and nothing in that bundle is written. Refresh

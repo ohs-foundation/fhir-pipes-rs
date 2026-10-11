@@ -176,7 +176,7 @@ Steps 5 to 7 happen when someone has something to fix.
 All commands are subcommands of one binary.
 
 ```
-kiln extract   --server URL [--token T] --snapshot DIR
+kiln extract   --server URL [AUTH] --snapshot DIR
                [--full] [--since INSTANT] [--timeout SECS]
                [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
                [--no-cache] [--refresh] [--cache-dir DIR]
@@ -184,8 +184,11 @@ kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--p
 kiln run       <extract flags> <transform flags>
 kiln inspect   --out DIR
 kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
-kiln load      --server URL [--token T] --in CHANGES.ndjson
+kiln load      --server URL [AUTH] --in CHANGES.ndjson
                [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
+
+AUTH:          --token T
+             | --client-id ID --client-secret S --token-url URL
 kiln index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
                --out CHANGES.ndjson [--refresh] [--report FILE]
 kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
@@ -194,10 +197,29 @@ kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
                [--retries 3] [--timeout 3600]
 ```
 
-`--token` falls back to `$KILN_TOKEN` and is sent as a bearer token; getting
-the token is outside kiln. Any FHIR R4 server that supports standard search
+A server that needs authentication gets one of two kinds:
+
+- `--token` (or `$KILN_TOKEN`) is sent as a fixed bearer token. Getting it is
+  up to you, and a run that outlasts it fails with a 401.
+- `--client-id`, `--client-secret` and `--token-url` (or `$KILN_CLIENT_ID`,
+  `$KILN_CLIENT_SECRET`, `$KILN_TOKEN_URL`) are an OAuth client, such as a
+  Keycloak client with service accounts enabled. kiln trades them for a
+  token with the client-credentials grant before the first request, and for
+  a new one a minute before each token expires, so a long run does not
+  outlive its token. A wrong secret or token URL fails before any FHIR
+  request.
+
+The two are mutually exclusive; with neither, requests carry no
+Authorization header. Any FHIR R4 server that supports standard search
 with `_lastUpdated`, `Bundle.link` paging and transaction bundles works; kiln
 does not depend on any vendor's extensions.
+
+```sh
+export KILN_CLIENT_SECRET=...          # keep the secret out of shell history
+kiln run --server https://gateway.example.org/fhir \
+  --client-id key-me --token-url https://auth.example.org/realms/R/protocol/openid-connect/token \
+  --snapshot snap/ --out out/
+```
 
 `--timeout` is the total deadline for one HTTP request, 300 seconds by
 default; a large boundary over a slow link can legitimately take minutes.
@@ -751,7 +773,7 @@ their ids collide, and the second load replaces the first.
 ### load
 
 ```
-kiln load --server URL --token T --in changes.ndjson [--dry-run]
+kiln load --server URL [AUTH] --in changes.ndjson [--dry-run]
 ```
 
 Load reads any NDJSON of FHIR resources with a `resourceType` and an `id`,
