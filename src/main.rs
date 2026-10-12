@@ -1,5 +1,6 @@
 mod cells;
 mod cli;
+mod dhis2;
 mod diff;
 mod error;
 mod export;
@@ -31,6 +32,7 @@ fn main() {
         cli::Command::Load(args) => load::run_load(&args),
         cli::Command::Index(args) => cells::run_index(&args),
         cli::Command::Population(args) => population::run_population(&args),
+        cli::Command::Dhis2(cmd) => dhis2::run(&cmd),
     };
     if let Err(err) = result {
         eprintln!("kiln: {err}");

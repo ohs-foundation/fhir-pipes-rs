@@ -16,6 +16,7 @@ pub const DEFAULT_BATCH_SIZE: usize = 100;
 /// A country raster is 100–200 MB; the FHIR-paging default would cut a slow
 /// download off after five minutes. Total per-request deadline, in seconds.
 pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
+pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -48,6 +49,150 @@ pub enum Command {
     Index(IndexArgs),
     /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `kiln load` (offline once the raster is cached)
     Population(PopulationArgs),
+    /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `kiln load`
+    #[command(subcommand)]
+    Dhis2(Dhis2Command),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Dhis2Command {
+    /// Org units as ICR Locations (facilities with their Organizations), each carrying its DHIS2 UID
+    Locations(Dhis2LocationsArgs),
+    /// Indicators as Measures
+    Measures(Dhis2MeasuresArgs),
+    /// Indicator values from DHIS2 analytics as MeasureReports, one per indicator, org unit and period
+    Reports(Dhis2ReportsArgs),
+}
+
+/// Where the DHIS2 instance is, how to sign in, and the short name kiln
+/// files it under.
+#[derive(clap::Args, Debug, Clone)]
+pub struct Dhis2Conn {
+    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-41-10 (a trailing /api is accepted); falls back to $KILN_DHIS2_URL
+    #[arg(long = "dhis2", env = "KILN_DHIS2_URL")]
+    pub url: String,
+    /// Short name for this instance (letters, digits, hyphens; up to 16), used in identifier systems, ids and the meta tag, e.g. sl-demo
+    #[arg(long)]
+    pub instance: String,
+    /// DHIS2 personal access token (d2pat_…); falls back to $KILN_DHIS2_TOKEN
+    #[arg(
+        long = "dhis2-token",
+        env = "KILN_DHIS2_TOKEN",
+        hide_env_values = true,
+        conflicts_with = "user"
+    )]
+    pub token: Option<String>,
+    /// DHIS2 username for Basic auth; falls back to $KILN_DHIS2_USER
+    #[arg(long = "dhis2-user", env = "KILN_DHIS2_USER", requires = "password")]
+    pub user: Option<String>,
+    /// DHIS2 password; falls back to $KILN_DHIS2_PASSWORD
+    #[arg(
+        long = "dhis2-password",
+        env = "KILN_DHIS2_PASSWORD",
+        hide_env_values = true,
+        requires = "user"
+    )]
+    pub password: Option<String>,
+    /// Attempts per request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct Dhis2LocationsArgs {
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    /// Prefix of the Location ids (PREFIX-<uid>); defaults to the instance name
+    #[arg(long)]
+    pub id_prefix: Option<String>,
+    /// Country code put on the top org unit as its national admin code (e.g. SLE); kiln transform partitions by it
+    #[arg(long)]
+    pub country_code: Option<String>,
+    /// DHIS2 level whose org units are facilities (a Location plus an Organization); defaults to the deepest level
+    #[arg(long)]
+    pub facility_level: Option<u32>,
+    /// Only this org unit and everything below it
+    #[arg(long)]
+    pub root: Option<String>,
+    /// Org unit group set UID, repeatable (e.g. Facility Type): each org unit's group in the set is added to its Location's type (and its Organization's, for facilities), coded like a --breakdown on the same set
+    #[arg(long = "group-set")]
+    pub group_sets: Vec<String>,
+    /// Output NDJSON file of Location and Organization resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+}
+
+/// Which indicators and data elements: by group, one by one, or any mix.
+#[derive(clap::Args, Debug, Clone)]
+#[group(required = true, multiple = true)]
+pub struct IndicatorSelection {
+    /// Indicator group UID, repeatable
+    #[arg(long = "indicator-group")]
+    pub groups: Vec<String>,
+    /// Indicator UID, repeatable
+    #[arg(long = "indicator")]
+    pub indicators: Vec<String>,
+    /// Data element group UID, repeatable: each aggregate data element's total becomes a count
+    #[arg(long = "data-element-group")]
+    pub data_element_groups: Vec<String>,
+    /// Data element UID, repeatable
+    #[arg(long = "data-element")]
+    pub data_elements: Vec<String>,
+    /// Data element group set UID, repeatable: every data element in every group of the set
+    #[arg(long = "data-element-group-set")]
+    pub data_element_group_sets: Vec<String>,
+    /// Data set UID, repeatable: its reporting rate (actual ÷ expected reports)
+    #[arg(long = "data-set")]
+    pub data_sets: Vec<String>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct Dhis2MeasuresArgs {
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    #[command(flatten)]
+    pub select: IndicatorSelection,
+    /// Output NDJSON file of Measure resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct Dhis2ReportsArgs {
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    #[command(flatten)]
+    pub select: IndicatorSelection,
+    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `kiln dhis2 locations`, or a snapshot's locations.ndjson
+    #[arg(long)]
+    pub locations: PathBuf,
+    /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …)
+    #[arg(long = "period", required = true)]
+    pub periods: Vec<String>,
+    /// DHIS2 org unit level to report on, repeatable (1 = the top)
+    #[arg(long = "level", required = true)]
+    pub levels: Vec<u32>,
+    /// Also break every value down by this DHIS2 dimension, repeatable: a category (e.g. Fixed/Outreach), an org unit group set (e.g. Facility Type) or a data element group set. Each becomes a stratifier on the report; DHIS2 leaves out items the dimension does not apply to
+    #[arg(long = "breakdown")]
+    pub breakdowns: Vec<String>,
+    /// Indicators per analytics request (halved automatically when DHIS2 says a result is too large)
+    #[arg(long, default_value_t = DEFAULT_INDICATORS_PER_REQUEST)]
+    pub chunk: usize,
+    /// Output NDJSON file of MeasureReport resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
