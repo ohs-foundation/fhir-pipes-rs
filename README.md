@@ -196,7 +196,8 @@ kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
                [--estimate-date YYYY-MM-DD] [--report FILE] [--cache-dir DIR]
                [--retries 3] [--timeout 3600]
 kiln dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjson
-               [--id-prefix P] [--country-code CC] [--facility-level N] [--root UID] [--report FILE]
+               [--id-prefix P] [--country-code CC] [--facility-level N] [--root UID]
+               [--group-set UID …] [--report FILE]
 kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
 kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
                --period PE [--period PE …] --level N [--level N …] --out REPORTS.ndjson
@@ -819,6 +820,10 @@ the country itself) gets the union of its children's polygons, reported as
 dataset. A closed org unit is `inactive`. `--country-code`
 puts a national admin code on the top org unit, which is what `transform`
 partitions by (`SLE`, `NGA`, …). `--root UID` exports one subtree.
+`--group-set UID` (repeatable) adds each org unit's group in an org unit
+group set, such as Facility Type, to its Location's `type` (and its
+Organization's, for facilities), coded the same way as a `--breakdown` on
+that set, so a facility's type lines up with the Facility Type strata.
 
 **measures** turns indicators into Measures, chosen by
 `--indicator-group` and `--indicator` (both repeatable). Aggregate data

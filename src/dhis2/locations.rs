@@ -6,7 +6,7 @@
 //! Every resource carries the org unit UID as an official identifier, which
 //! is what `kiln dhis2 reports` maps analytics rows through.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::Engine;
 use serde_json::{json, Value};
@@ -87,6 +87,9 @@ pub struct Options<'a> {
     pub prefix: &'a str,
     pub country_code: Option<&'a str>,
     pub facility_level: u32,
+    /// Org unit uid → its groups in the requested group sets, as
+    /// (group set uid, group uid, group name).
+    pub groups: HashMap<String, Vec<(String, String, String)>>,
 }
 
 pub fn location_id(prefix: &str, uid: &str) -> String {
@@ -197,7 +200,18 @@ pub fn resources(
     } else {
         (ADMIN_UNIT_TYPE, "jdn", "Jurisdiction")
     };
-    loc["type"] = json!([{"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]}]);
+    let group_types: Vec<Value> = opts
+        .groups
+        .get(&unit.id)
+        .into_iter()
+        .flatten()
+        .map(|(set, code, name)| {
+            json!({"coding": [{"system": opts.instance.dimension_system(Some(set)), "code": code, "display": name}], "text": name})
+        })
+        .collect();
+    let mut types = vec![json!({"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]})];
+    types.extend(group_types.iter().cloned());
+    loc["type"] = Value::Array(types);
     loc["physicalType"] = json!({"coding": [{"system": PHYSICAL_TYPE_SYSTEM, "code": physical, "display": physical_display}]});
     if let Some(p) = position {
         loc["position"] = p;
@@ -226,7 +240,9 @@ pub fn resources(
             "meta": {"profile": [FACILITY_ORGANIZATION_PROFILE], "tag": [opts.instance.tag()]},
             "identifier": identifiers(unit, opts),
             "active": unit.closed_date.is_none(),
-            "type": [{"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}],
+            "type": std::iter::once(json!({"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}))
+                .chain(group_types)
+                .collect::<Vec<_>>(),
             "name": unit.name,
         }));
     }
@@ -372,11 +388,57 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
     let deepest = units.iter().map(|u| u.level).max().unwrap_or(1);
     let facility_level = args.facility_level.unwrap_or(deepest);
     fill_missing_boundaries(&mut units, facility_level, &mut report);
+    let mut groups: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    for set in &args.group_sets {
+        let v = match api.try_get(
+            &format!("organisationUnitGroupSets/{set}.json"),
+            &[(
+                "fields",
+                "id,name,organisationUnitGroups[id,name,organisationUnits[id]]".into(),
+            )],
+        )? {
+            Ok(v) => v,
+            Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
+                return Err(KilnError::Usage(format!(
+                    "DHIS2 has no org unit group set {set}"
+                )))
+            }
+            Err(e) => return Err(api.error("organisationUnitGroupSets", e)),
+        };
+        for g in v
+            .get("organisationUnitGroups")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let (Some(gid), Some(gname)) = (
+                g.get("id").and_then(Value::as_str),
+                g.get("name").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            for ou in g
+                .get("organisationUnits")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(ou) = ou.get("id").and_then(Value::as_str) {
+                    groups.entry(ou.to_string()).or_default().push((
+                        set.clone(),
+                        gid.to_string(),
+                        gname.to_string(),
+                    ));
+                }
+            }
+        }
+    }
     let opts = Options {
         instance: &instance,
         prefix: &prefix,
         country_code: args.country_code.as_deref(),
         facility_level,
+        groups,
     };
     let resources = build(&units, &opts, &mut report);
     let n = write_ndjson(&args.out, &resources)?;
@@ -437,6 +499,14 @@ mod tests {
             prefix: "sle",
             country_code: Some("SLE"),
             facility_level: 3,
+            groups: HashMap::from([(
+                "f".to_string(),
+                vec![(
+                    "J5jldMd8OHv".to_string(),
+                    "uYxK4wmcPqA".to_string(),
+                    "CHP".to_string(),
+                )],
+            )]),
         }
     }
 
@@ -516,6 +586,12 @@ mod tests {
             "Organization/org-sle-f"
         );
         assert_eq!(facility["position"]["longitude"], -11.7);
+        assert_eq!(facility["type"][1]["text"], "CHP");
+        assert_eq!(
+            facility["type"][1]["coding"][0]["system"],
+            instance.dimension_system(Some("J5jldMd8OHv"))
+        );
+        assert_eq!(org["type"][1]["coding"][0]["code"], "uYxK4wmcPqA");
         assert_eq!(facility["partOf"]["reference"], "Location/sle-d");
     }
 

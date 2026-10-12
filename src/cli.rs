@@ -115,6 +115,9 @@ pub struct Dhis2LocationsArgs {
     /// Only this org unit and everything below it
     #[arg(long)]
     pub root: Option<String>,
+    /// Org unit group set UID, repeatable (e.g. Facility Type): each org unit's group in the set is added to its Location's type (and its Organization's, for facilities), coded like a --breakdown on the same set
+    #[arg(long = "group-set")]
+    pub group_sets: Vec<String>,
     /// Output NDJSON file of Location and Organization resources
     #[arg(long)]
     pub out: PathBuf,
