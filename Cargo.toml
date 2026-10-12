@@ -3,7 +3,7 @@ name = "fhir-warehouse"
 version = "0.1.0"
 edition = "2024"
 description = "Refresh a SQL-on-FHIR parquet warehouse from a FHIR server"
-license = "Apache-2.0"
+license = "MIT"
 
 [[bin]]
 name = "fhir-warehouse"

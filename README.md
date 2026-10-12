@@ -147,3 +147,7 @@ Each run writes its step timings to `raw/<server>/last-refresh.json`.
 cargo test        # unit tests, and end-to-end runs against tests/fixtures with a stub kiln
 cargo clippy --all-targets -- -D warnings
 ```
+
+## License
+
+MIT, copyright Recode Labs. See [LICENSE](LICENSE).
