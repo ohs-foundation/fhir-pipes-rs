@@ -8,13 +8,16 @@
 //! client-credentials grant (`--client-id`), in which case the client gets
 //! a new token shortly before the current one expires, so a run can outlast
 //! any one token.
+//!
+//! `kiln dhis2` uses the same client against the DHIS2 Web API, with a
+//! complete Authorization value (`ApiToken …` or `Basic …`) and plain JSON.
 
 use std::io::Read as _;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use serde_json::Value;
 
 use crate::error::{KilnError, Result};
@@ -34,6 +37,9 @@ pub enum Auth {
     None,
     /// A fixed bearer token.
     Token(String),
+    /// A complete Authorization header value, e.g. `ApiToken d2pat_…` for a
+    /// DHIS2 personal access token or `Basic …`.
+    Header(String),
     /// OAuth 2.0 client credentials, traded for bearer tokens at `token_url`.
     ClientCredentials {
         token_url: String,
@@ -200,6 +206,15 @@ impl FhirClient {
             Auth::Token(t) => Authorizer::Fixed(bearer(&t).ok_or_else(|| {
                 KilnError::Usage("token contains characters that are not valid in a header".into())
             })?),
+            Auth::Header(h) => {
+                let mut v = HeaderValue::from_str(&h).map_err(|_| {
+                    KilnError::Usage(
+                        "credentials contain characters that are not valid in a header".into(),
+                    )
+                })?;
+                v.set_sensitive(true);
+                Authorizer::Fixed(v)
+            }
             Auth::ClientCredentials {
                 token_url,
                 client_id,
@@ -226,6 +241,18 @@ impl FhirClient {
     /// GET with the retry policy. Sleeps between attempts.
     pub fn get(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
         self.send(|| self.http.get(url))
+    }
+
+    /// GET a plain JSON API (DHIS2) with the retry policy. `no-cache` because
+    /// DHIS2 marks analytics responses cacheable for up to two weeks, and a
+    /// proxy could otherwise answer from before the last analytics run.
+    pub fn get_json(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
+        self.send(|| {
+            self.http
+                .get(url)
+                .header(ACCEPT, "application/json")
+                .header(CACHE_CONTROL, "no-cache")
+        })
     }
 
     /// POST a FHIR JSON body with the same retry policy. The body is cloned

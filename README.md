@@ -195,6 +195,16 @@ kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
                --out GROUPS.ndjson [--source worldpop] [--planning-denominator]
                [--estimate-date YYYY-MM-DD] [--report FILE] [--cache-dir DIR]
                [--retries 3] [--timeout 3600]
+kiln dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjson
+               [--id-prefix P] [--country-code CC] [--facility-level N] [--root UID] [--report FILE]
+kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
+kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
+               --period PE [--period PE …] --level N [--level N …] --out REPORTS.ndjson
+               [--breakdown UID …] [--chunk 10] [--report FILE]
+
+DHIS2_AUTH:    --dhis2-token d2pat_…  |  --dhis2-user U --dhis2-password P
+INDICATORS:    any of --indicator-group UID, --indicator UID, --data-element-group UID,
+               --data-element UID, --data-element-group-set UID, --data-set UID (repeatable)
 ```
 
 A server that needs authentication gets one of two kinds:
@@ -227,8 +237,8 @@ Connection errors, 429 and 5xx responses are retried up to `--retries` times
 with exponential backoff and jitter, honouring a numeric `Retry-After`. Any
 other 4xx is final.
 
-`extract` and `load` touch the network. `transform`, `inspect` and `diff`
-never do. That split is deliberate: a slow server or an expired token has
+`extract`, `load` and `dhis2` touch the network. `transform`, `inspect` and
+`diff` never do. That split is deliberate: a slow server or an expired token has
 nothing to do with whether your geometry is valid, and keeping them apart means
 the whole geospatial half is testable from files with no server involved.
 
@@ -770,6 +780,136 @@ the IG gains a characteristic for them), coverage-weighted sums, or two
 competing estimates from different rasters for the same source and year —
 their ids collide, and the second load replaces the first.
 
+### dhis2
+
+```
+kiln dhis2 locations --dhis2 URL --instance NAME --out LOCATIONS.ndjson [--id-prefix P] [--country-code CC]
+kiln dhis2 measures  --dhis2 URL --instance NAME --indicator-group UID --out MEASURES.ndjson
+kiln dhis2 reports   --dhis2 URL --instance NAME --indicator-group UID --locations LOCATIONS.ndjson
+                     --period LAST_12_MONTHS --level 2 --level 3 --out REPORTS.ndjson
+```
+
+Reads a DHIS2 instance (Web API, 2.38 or later) and writes FHIR NDJSON for
+`kiln load`. Nothing is written to DHIS2. Sign in with a personal access
+token (`--dhis2-token`, `$KILN_DHIS2_TOKEN`, sent as `Authorization:
+ApiToken …`) or a username and password (`--dhis2-user` / `--dhis2-password`,
+`$KILN_DHIS2_USER` / `$KILN_DHIS2_PASSWORD`, Basic). `--dhis2` (or
+`$KILN_DHIS2_URL`) is the instance's base URL; a trailing `/api` is fine.
+Use a read-only DHIS2 user: a token can do whatever its user can.
+
+`--instance` is a short name for the DHIS2 instance (letters, digits and
+hyphens, up to 16 characters, e.g. `sl-demo`). It names the identifier
+systems (`https://icr.healthcampaigns.org/identifiers/dhis2/NAME/orgunit`,
+`…/indicator`), prefixes every Measure and MeasureReport id, and is the
+`meta.tag` code (system `icr-project-tag-cs`) on everything written, so one
+instance's resources can be found, or removed, as a set. Keep it the same
+across runs: ids are deterministic, so a re-run replaces the same resources.
+
+**locations** turns the org unit tree into ICR Locations. Levels above the
+facility level (by default the deepest level) become admin units; the
+facility level becomes facility Locations, each paired with an
+`ICRFacilityOrganization` (`managingOrganization` → `org-<location id>`), as
+kiln models facilities everywhere else. Location ids are `PREFIX-<uid>`
+(`--id-prefix`, default the instance name). Each Location carries the org
+unit UID as its `official` identifier, plus the DHIS2 code when there is
+one. Polygon and MultiPolygon geometry becomes the boundary extension, a
+Point becomes `position`. An admin unit DHIS2 has no geometry for (often
+the country itself) gets the union of its children's polygons, reported as
+`boundary_from_children`, so it still has a boundary and a row in the
+dataset. A closed org unit is `inactive`. `--country-code`
+puts a national admin code on the top org unit, which is what `transform`
+partitions by (`SLE`, `NGA`, …). `--root UID` exports one subtree.
+
+**measures** turns indicators into Measures, chosen by
+`--indicator-group` and `--indicator` (both repeatable). Aggregate data
+elements can be added with `--data-element-group` and `--data-element`:
+each becomes a `cohort` Measure whose value is the data element's total
+over all its disaggregations (`#{uid}`), identified under
+`…/dhis2/NAME/data-element`; dashboards often show such counts ("BCG
+doses given") beside the indicators. `--data-element-group-set` takes
+every data element in every group of a group set (the demo's "Diagnosis"
+set holds the morbidity counts). `--data-set` adds a data set's
+reporting rate, DHIS2's `<uid>.REPORTING_RATE`: actual ÷ expected reports
+× 100, a `proportion` Measure whose populations are the actual and
+expected report counts, identified under `…/dhis2/NAME/data-set`. FHIR ids
+cannot hold `_`, so its id is `NAME-<uid>.REPORTING-RATE`.
+
+Each Measure's `topic` lists the item's groups, coded so a reader can
+regroup items the way DHIS2 does: system
+`https://icr.healthcampaigns.org/CodeSystem/dhis2/NAME/indicator-group`,
+`…/data-element-group`, or `…/data-element-group-set/<set uid>` for a
+data element group that belongs to a group set; the code is the group's
+uid. A DHIS2 indicator
+is numerator ÷ denominator × factor. A percent (factor 100) is scored
+`proportion`, another factor `ratio`, and an indicator whose denominator is
+`1` `cohort` with one population. The numerator and denominator
+expressions and descriptions become the populations' criteria (language
+`text/x-dhis2-expression`); the factor, indicator type, annualized flag
+and decimals go in the `dhis2-indicator` extension; indicator groups
+become `topic`. The id is `NAME-<uid>` and the canonical URL
+`https://icr.healthcampaigns.org/Measure/NAME-<uid>`.
+
+**reports** asks `/api/analytics` for the selected indicators at each
+`--level` for each `--period`, and writes one `summary` MeasureReport per
+indicator, org unit and period, id `NAME-<indicator>-<orgunit>-<period>`:
+
+| DHIS2 | MeasureReport |
+|---|---|
+| indicator | `measure`, the Measure's canonical URL |
+| org unit | `subject`, the Location that carries its UID, with its name as `display` |
+| period | `period.start` / `period.end`, from DHIS2's own metadata; the period code is in the `dhis2-period` extension |
+| numerator, denominator | `group.population` counts (`initial-population` for a cohort) |
+| value ÷ factor | `group.measureScore`: 45.18 % is stored as 0.4518 |
+| last analytics run | `date` |
+| system name | `reporter.display` |
+
+DHIS2 computes every value: it adds up the numerator and the denominator
+for that org unit and period, then divides. kiln never sums or averages
+indicator values; ask for each level you want. Requests use
+`includeNumDen` and `skipRounding`, and send `Cache-Control: no-cache` so a
+proxy cannot answer from before the last analytics run. Periods can be
+ISO (`2025`, `2025Q1`, `202501`, `2025W5`, `2025April`, …) or relative
+(`LAST_12_MONTHS`, `THIS_YEAR`, …); a period with no data returns no rows
+and so no reports. Values reflect the last analytics table run, which kiln
+prints at the start.
+
+`--breakdown UID` (repeatable) also asks for every value broken down by a
+DHIS2 dimension: a category such as Fixed/Outreach (`fMZEcRHuamy`), an org
+unit group set such as Facility Type (`J5jldMd8OHv`), or a data element
+group set. Each breakdown becomes a `group.stratifier` on the report
+(code: the dimension, system `…/CodeSystem/dhis2/NAME/dimension`), with
+one `stratum` per option (system `…/dimension/<uid>`) carrying its own
+populations and score. DHIS2 computes each stratum the way it computes the
+total, and leaves out items the dimension does not apply to (an indicator
+whose denominator is a population figure has no Fixed/Outreach split);
+those reports simply have no stratifier for it.
+
+`--locations` is any NDJSON holding the Locations: the output of
+`dhis2 locations`, or a snapshot's `locations.ndjson` once they are on the
+server. A row whose org unit has no Location is skipped and reported once
+as `unmapped_org_unit`. Requests carry `--chunk` indicators (10) at a
+time; when DHIS2 answers that a result is over its row limit (E7128,
+E7151) kiln splits the request in two and tries again.
+
+Report kinds: `stratum_without_total` (a breakdown value whose total DHIS2
+did not return), `fractional_count` (a numerator or denominator that is not a
+whole number, rounded because FHIR counts are integers; common for
+averages and annualised denominators), `bad_number`, `unmapped_org_unit`,
+`period_without_dates`, `invalid_id`; for `locations`, `bad_geometry`,
+`parent_not_exported`, `below_facility_level` and `boundary_from_children`.
+
+The Sierra Leone demo instance is open, so the whole chain can be tried:
+
+```sh
+export KILN_DHIS2_URL=https://play.im.dhis2.org/stable-2-41-10
+export KILN_DHIS2_USER=admin KILN_DHIS2_PASSWORD=district
+kiln dhis2 locations --instance sl-demo --id-prefix sle --country-code SLE --out sl-locations.ndjson
+kiln dhis2 measures --instance sl-demo --indicator-group srxUNt2w5jn --out sl-measures.ndjson
+kiln dhis2 reports --instance sl-demo --indicator-group srxUNt2w5jn --locations sl-locations.ndjson \
+  --period 2025 --period LAST_12_MONTHS --level 2 --level 3 --out sl-reports.ndjson
+for f in sl-locations sl-measures sl-reports; do kiln load --server URL --in $f.ndjson; done
+```
+
 ### load
 
 ```
@@ -1063,10 +1203,11 @@ kiln/
     cells.rs     kiln index: spatial-index backfill
     raster/      GeoTIFF reader (tiff crate), pixel-centroid zonal sum, raster fetch cache
     population.rs  kiln population: measure admin units, roll up, emit ICRTargetPopulation Groups
+    dhis2/       kiln dhis2: DHIS2 Web API client, org units → Locations, indicators → Measures, analytics → MeasureReports
   tests/
     fixtures/snapshot/
     fixtures/raster/   a 40×30 COG with known sums
-    transform.rs, extract.rs, diff.rs, load.rs, index.rs, population.rs
+    transform.rs, extract.rs, diff.rs, load.rs, index.rs, population.rs, dhis2.rs
   python/        the Python package: bake and bake-points (extract and load are superseded by the Rust binary)
   docs/
     superpowers/ design specs, plans, and spikes
