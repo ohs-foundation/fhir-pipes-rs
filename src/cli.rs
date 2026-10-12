@@ -36,6 +36,8 @@ pub enum Command {
     Inspect(InspectArgs),
     /// Fetch Locations from a FHIR server into a snapshot (incremental)
     Extract(ExtractArgs),
+    /// Download every resource of one or more types from a FHIR server as NDJSON, one file per type
+    Export(ExportArgs),
     /// Extract then transform
     Run(RunArgs),
     /// Compare an edited GeoJSON or GeoParquet file to the snapshot; write changed Locations as FHIR NDJSON (offline)
@@ -208,6 +210,30 @@ pub struct ExtractArgs {
     /// Boundary cache directory (default: SNAPSHOT/boundaries)
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExportArgs {
+    /// Base URL of the FHIR server (the resource type is appended)
+    #[arg(long)]
+    pub server: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+    /// Resource type to download, e.g. MeasureReport; repeat for several
+    #[arg(long = "type", value_name = "TYPE", required = true)]
+    pub types: Vec<String>,
+    /// Output directory; each type is written to OUT/<TYPE>.ndjson
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+    /// Attempts per request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
     /// Total timeout per HTTP request, in seconds
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,

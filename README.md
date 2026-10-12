@@ -186,6 +186,8 @@ kiln inspect   --out DIR
 kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
 kiln load      --server URL [AUTH] --in CHANGES.ndjson
                [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
+kiln export    --server URL [AUTH] --type TYPE [--type TYPE ...] --out DIR
+               [--report FILE] [--retries 3] [--timeout SECS]
 
 AUTH:          --token T
              | --client-id ID --client-secret S --token-url URL
@@ -227,7 +229,15 @@ Connection errors, 429 and 5xx responses are retried up to `--retries` times
 with exponential backoff and jitter, honouring a numeric `Retry-After`. Any
 other 4xx is final.
 
-`extract` and `load` touch the network. `transform`, `inspect` and `diff`
+`export` downloads every resource of each `--type` to `DIR/<TYPE>.ndjson`,
+one resource per line, for tools that read FHIR NDJSON (a SQL-on-FHIR runner,
+for example). It pages the same way `extract` does, but keeps no snapshot or
+watermark: each run is a full download. Each file is written beside the
+target and renamed into place, so a failed run leaves the previous download
+intact. When the last page is full and has no next link, the server's count
+is checked, and a difference is reported as `count_mismatch`.
+
+`extract`, `export` and `load` touch the network. `transform`, `inspect` and `diff`
 never do. That split is deliberate: a slow server or an expired token has
 nothing to do with whether your geometry is valid, and keeping them apart means
 the whole geospatial half is testable from files with no server involved.

@@ -2,6 +2,7 @@ mod cells;
 mod cli;
 mod diff;
 mod error;
+mod export;
 mod extract;
 mod fhir;
 mod geometry;
@@ -24,6 +25,7 @@ fn main() {
         cli::Command::Transform(args) => transform::run_transform(&args),
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
         cli::Command::Extract(args) => extract::run_extract(&args),
+        cli::Command::Export(args) => export::run_export(&args),
         cli::Command::Run(args) => run::run(&args),
         cli::Command::Diff(args) => diff::run_diff(&args),
         cli::Command::Load(args) => load::run_load(&args),
