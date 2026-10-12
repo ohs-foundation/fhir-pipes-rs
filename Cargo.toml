@@ -55,6 +55,8 @@ sqlx-postgres = { version = "0.9.0", default-features = false, features = [
 csv = "1.4"
 arrow = { version = "58" }
 parquet = { version = "58", features = ["arrow", "snap", "zstd", "lz4", "flate2"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+bytes = "1"
 
 # Error handling
 thiserror = "2.0"

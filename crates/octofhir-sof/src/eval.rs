@@ -82,6 +82,67 @@ pub fn execute_blocking(view: &ViewDefinition, resources: &[Value]) -> Result<Vi
     })
 }
 
+/// Execute a ViewDefinition against in-memory FHIR resources on up to `threads`
+/// OS threads, for non-async callers.
+///
+/// The view is compiled once and the resources are split into contiguous
+/// chunks, one per thread, each evaluated on its own current-thread Tokio
+/// runtime. Rows come back in input order, the same as [`execute`]. With
+/// `threads <= 1`, or fewer resources than threads, it runs on one thread.
+///
+/// # Errors
+///
+/// Same as [`execute`].
+pub fn execute_parallel(
+    view: &ViewDefinition,
+    resources: &[Value],
+    threads: usize,
+) -> Result<ViewResult> {
+    let threads = threads.clamp(1, resources.len().max(1));
+    let chunk = resources.len().div_ceil(threads).max(1);
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))
+    };
+    let panicked = || Error::FhirPath("evaluation thread panicked".to_string());
+    // Compiled on a thread of its own too, so that calling this from inside an
+    // async runtime never starts a runtime on that runtime's thread.
+    let compiled = std::thread::scope(|s| {
+        s.spawn(|| runtime()?.block_on(CompiledView::compile(view)))
+            .join()
+            .map_err(|_| panicked())?
+    })?;
+    let compiled = &compiled;
+    std::thread::scope(|s| {
+        let workers: Vec<_> = resources
+            .chunks(chunk)
+            .map(|part| {
+                s.spawn(move || -> Result<Vec<Vec<Value>>> {
+                    runtime()?.block_on(async {
+                        let mut rows = Vec::new();
+                        for resource in part {
+                            rows.extend(compiled.execute_resource(resource).await?);
+                        }
+                        Ok(rows)
+                    })
+                })
+            })
+            .collect();
+        let mut data = Vec::new();
+        for worker in workers {
+            data.extend(worker.join().map_err(|_| panicked())??);
+        }
+        let row_count = data.len();
+        Ok(ViewResult {
+            columns: compiled.columns().to_vec(),
+            data,
+            row_count,
+        })
+    })
+}
+
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
 /// Validates the view (columns, name collisions, constants) up front and builds
@@ -127,6 +188,7 @@ impl CompiledView {
             constants,
             engine,
             model,
+            prepared: Default::default(),
         };
 
         let shape = ev.shape(&view.select)?;
@@ -229,6 +291,19 @@ struct Evaluator {
     constants: std::collections::HashMap<String, String>,
     engine: FhirPathEngine,
     model: Arc<dyn ModelProvider + Send + Sync>,
+    /// Column and forEach paths as the engine sees them, keyed on the path in
+    /// the view. A view has a fixed set of paths but each is evaluated once per
+    /// resource, so preparing (and parsing for a boundary call) once saves a
+    /// parse per path per resource.
+    prepared: std::sync::RwLock<std::collections::HashMap<String, Arc<PreparedPath>>>,
+}
+
+/// A view path ready for evaluation: either a plain prepared expression, or a
+/// `lowBoundary()`/`highBoundary()` call whose base (still unprepared) is
+/// evaluated first and the SoF boundary rules applied to each value.
+enum PreparedPath {
+    Plain(String),
+    Boundary(String, bool, BoundaryType),
 }
 
 impl Evaluator {
@@ -245,6 +320,13 @@ impl Evaluator {
     /// `%rowIndex` bound to `rid`, returning the result as a FHIRPath collection
     /// of JSON values.
     async fn eval_prepared(&self, path: &str, focus: &Value, rid: i64) -> Result<Vec<Value>> {
+        self.eval_in(path, &self.context(focus, rid)).await
+    }
+
+    /// An evaluation context with `focus` as its input and `%rowIndex` bound to
+    /// `rid`. Building one copies the focus and sets up the engine's variables,
+    /// so callers evaluating several paths against the same focus build it once.
+    fn context(&self, focus: &Value, rid: i64) -> EvaluationContext {
         let ctx = EvaluationContext::new(
             Collection::from(vec![FhirPathValue::resource(focus.clone())]),
             self.model.clone(),
@@ -255,10 +337,14 @@ impl Evaluator {
         // %rowIndex: the engine resolves `%rowIndex` by stripping `%` and
         // looking up `rowIndex`.
         ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(rid));
+        ctx
+    }
 
+    /// Evaluate a (prepared) FHIRPath expression in an existing context.
+    async fn eval_in(&self, path: &str, ctx: &EvaluationContext) -> Result<Vec<Value>> {
         let result = self
             .engine
-            .evaluate(path, &ctx)
+            .evaluate(path, ctx)
             .await
             .map_err(|e| Error::FhirPath(e.to_string()))?;
 
@@ -272,17 +358,34 @@ impl Evaluator {
     /// engine and the SoF precision-boundary rules are applied to each value.
     /// The temporal flavour (`date`/`dateTime`/`time`) is taken from a leading
     /// `ofType(T)` on the base before the `ofType` rewrite collapses it.
-    async fn eval_path(&self, path: &str, focus: &Value, rid: i64) -> Result<Vec<Value>> {
-        if let Some((base, low, hint)) = boundary_call(path) {
-            let base_vals = Box::pin(self.eval_path(&base, focus, rid)).await?;
-            return Ok(base_vals
-                .iter()
-                .map(|v| boundary(v, low, hint))
-                .filter(|v| !v.is_null())
-                .collect());
+    async fn eval_path(&self, path: &str, ctx: &EvaluationContext) -> Result<Vec<Value>> {
+        match &*self.prepared_path(path)? {
+            PreparedPath::Boundary(base, low, hint) => {
+                let base_vals = Box::pin(self.eval_path(base, ctx)).await?;
+                Ok(base_vals
+                    .iter()
+                    .map(|v| boundary(v, *low, *hint))
+                    .filter(|v| !v.is_null())
+                    .collect())
+            }
+            PreparedPath::Plain(prepared) => self.eval_in(prepared, ctx).await,
         }
-        let prepared = self.prepare(path)?;
-        self.eval_prepared(&prepared, focus, rid).await
+    }
+
+    /// The prepared form of a view path, computed on first use and cached.
+    fn prepared_path(&self, path: &str) -> Result<Arc<PreparedPath>> {
+        if let Some(p) = self.prepared.read().expect("prepared cache").get(path) {
+            return Ok(p.clone());
+        }
+        let p = Arc::new(match boundary_call(path) {
+            Some((base, low, hint)) => PreparedPath::Boundary(base, low, hint),
+            None => PreparedPath::Plain(self.prepare(path)?),
+        });
+        self.prepared
+            .write()
+            .expect("prepared cache")
+            .insert(path.to_string(), p.clone());
+        Ok(p)
     }
 
     /// The ordered column shape of a select list, validating `unionAll` branch
@@ -355,7 +458,7 @@ impl Evaluator {
         }
 
         if let Some(path) = for_each.or(for_each_or_null) {
-            let elements = self.eval_path(path, ctx, rid).await?;
+            let elements = self.eval_path(path, &self.context(ctx, rid)).await?;
             if elements.is_empty() {
                 if for_each_or_null.is_some() {
                     return Ok(vec![self.null_row(select)]);
@@ -382,8 +485,9 @@ impl Evaluator {
     ) -> Result<Vec<Map<String, Value>>> {
         let mut own = Map::new();
         if let Some(columns) = &select.column {
+            let ectx = self.context(ctx, rid);
             for col in columns {
-                own.insert(col.name.clone(), self.column_value(col, ctx, rid).await?);
+                own.insert(col.name.clone(), self.column_value(col, &ectx).await?);
             }
         }
         let mut combos = vec![own];
@@ -463,8 +567,8 @@ impl Evaluator {
         }
     }
 
-    async fn column_value(&self, col: &Column, ctx: &Value, rid: i64) -> Result<Value> {
-        let values = self.eval_path(&col.path, ctx, rid).await?;
+    async fn column_value(&self, col: &Column, ctx: &EvaluationContext) -> Result<Value> {
+        let values = self.eval_path(&col.path, ctx).await?;
         if col.collection.unwrap_or(false) {
             return Ok(Value::Array(values));
         }

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use octofhir_sof::output::get_writer;
+use octofhir_sof::output::{OutputWriter, get_writer};
 use octofhir_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
 use octofhir_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
 use sqlx_postgres::PgPool;
@@ -79,6 +79,18 @@ enum Command {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+
+        /// Parquet only: how date, dateTime, instant and time columns are
+        /// encoded. `text` keeps the FHIR string (spec default); `native`
+        /// writes Arrow Date32 / Timestamp(µs, UTC) / Time64(µs), flooring
+        /// partial dates (`2026`, `2026-03`) to the start of the period.
+        #[arg(long, default_value = "text", value_parser = ["text", "native"])]
+        parquet_temporal: String,
+
+        /// Threads for parsing --input and evaluating views on it (default:
+        /// the number of CPUs). Rows keep the input order whatever the count.
+        #[arg(long)]
+        threads: Option<usize>,
     },
 
     /// Validate a ViewDefinition's structure against the spec, offline (no FHIR
@@ -166,11 +178,14 @@ enum Source {
 }
 
 /// Execute a single view against the resolved source.
-async fn run_view(source: &Source, view: &ViewDefinition) -> Result<ViewResult> {
+async fn run_view(source: &Source, view: &ViewDefinition, threads: usize) -> Result<ViewResult> {
     match source {
-        Source::Files(resources) => octofhir_sof::execute(view, resources)
-            .await
-            .context("executing view"),
+        // Evaluation runs on threads of its own; block_in_place lets this
+        // runtime worker wait for them without stalling other tasks.
+        Source::Files(resources) => {
+            tokio::task::block_in_place(|| octofhir_sof::execute_parallel(view, resources, threads))
+                .context("executing view")
+        }
         Source::Db(pool) => ViewRunner::new(pool.clone())
             .run(view)
             .await
@@ -224,6 +239,23 @@ fn output_extension(format: &str) -> &'static str {
     }
 }
 
+/// Select the output writer for `format`, applying Parquet-only options.
+///
+/// `--parquet-temporal` is accepted (and validated by clap) for every format
+/// so scripts can pass it unconditionally, but it only affects Parquet output.
+fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputWriter>> {
+    #[cfg(feature = "parquet")]
+    if format.eq_ignore_ascii_case("parquet") {
+        use octofhir_sof::output::{ParquetWriter, TemporalEncoding};
+        let temporal =
+            TemporalEncoding::parse(parquet_temporal).context("parsing --parquet-temporal")?;
+        return Ok(Box::new(ParquetWriter::new().with_temporal(temporal)));
+    }
+    #[cfg(not(feature = "parquet"))]
+    let _ = parquet_temporal;
+    get_writer(format).context("selecting output format")
+}
+
 /// The default DDL table name for a view: its `name`, else `<resource>_view`.
 fn default_table_name(view: &ViewDefinition) -> String {
     view.name
@@ -234,7 +266,7 @@ fn default_table_name(view: &ViewDefinition) -> String {
 
 /// Load FHIR resources from a file or a directory of files. Supports NDJSON
 /// (`.ndjson`), single resources, resource arrays, and Bundles.
-fn load_resources(path: &PathBuf) -> Result<Vec<serde_json::Value>> {
+fn load_resources(path: &PathBuf, threads: usize) -> Result<Vec<serde_json::Value>> {
     // `-` reads FHIR resources from stdin (NDJSON or a single JSON value).
     if path.as_os_str() == "-" {
         let mut text = String::new();
@@ -256,10 +288,10 @@ fn load_resources(path: &PathBuf) -> Result<Vec<serde_json::Value>> {
             .collect();
         entries.sort();
         for entry in entries {
-            load_file(&entry, &mut resources)?;
+            load_file(&entry, &mut resources, threads)?;
         }
     } else {
-        load_file(path, &mut resources)?;
+        load_file(path, &mut resources, threads)?;
     }
     if resources.is_empty() {
         anyhow::bail!("no FHIR resources found in {}", path.display());
@@ -267,15 +299,12 @@ fn load_resources(path: &PathBuf) -> Result<Vec<serde_json::Value>> {
     Ok(resources)
 }
 
-fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>) -> Result<()> {
+fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>, threads: usize) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     if path.extension().is_some_and(|x| x == "ndjson") {
-        for (i, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value: serde_json::Value = serde_json::from_str(line)
-                .with_context(|| format!("parsing {} line {}", path.display(), i + 1))?;
+        for value in
+            parse_ndjson(&text, threads).with_context(|| format!("parsing {}", path.display()))?
+        {
             push_resource(value, out);
         }
     } else {
@@ -284,6 +313,40 @@ fn load_file(path: &PathBuf, out: &mut Vec<serde_json::Value>) -> Result<()> {
         push_resource(value, out);
     }
     Ok(())
+}
+
+/// Parse NDJSON text on up to `threads` threads, keeping line order. Blank
+/// lines are skipped; an error names the first bad line.
+fn parse_ndjson(text: &str, threads: usize) -> Result<Vec<serde_json::Value>> {
+    let lines: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .collect();
+    let chunk = lines.len().div_ceil(threads.max(1)).max(1);
+    std::thread::scope(|s| {
+        let workers: Vec<_> = lines
+            .chunks(chunk)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .map(|(i, line)| {
+                            serde_json::from_str(line).with_context(|| format!("line {}", i + 1))
+                        })
+                        .collect::<Result<Vec<serde_json::Value>>>()
+                })
+            })
+            .collect();
+        let mut values = Vec::with_capacity(lines.len());
+        for worker in workers {
+            values.extend(
+                worker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("parsing thread panicked"))??,
+            );
+        }
+        Ok(values)
+    })
 }
 
 /// Stream NDJSON input through a compiled view, writing NDJSON rows as they are
@@ -580,7 +643,11 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
             db,
             output,
             out,
+            parquet_temporal,
+            threads,
         } => {
+            let threads = threads
+                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
             // A directory of ViewDefinitions runs every view in one pass, writing
             // one output file per view into the --out directory.
             let multi = view.is_dir();
@@ -610,7 +677,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
 
             // Acquire the data source once, shared across all views.
             let source = match (input, db) {
-                (Some(path), _) => Source::Files(load_resources(&path)?),
+                (Some(path), _) => Source::Files(load_resources(&path, threads)?),
                 (None, Some(db)) => Source::Db(
                     PgPool::connect(&db)
                         .await
@@ -621,7 +688,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                 }
             };
 
-            let writer = get_writer(&output).context("selecting output format")?;
+            let writer = select_writer(&output, &parquet_temporal)?;
 
             if multi {
                 let out_dir =
@@ -630,7 +697,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                     .with_context(|| format!("creating output directory {}", out_dir.display()))?;
                 let ext = output_extension(&output);
                 for (name, view) in &views {
-                    let result = run_view(&source, view).await?;
+                    let result = run_view(&source, view, threads).await?;
                     let path = out_dir.join(format!("{name}.{ext}"));
                     let mut sink: Box<dyn Write> = Box::new(
                         fs::File::create(&path)
@@ -644,7 +711,7 @@ async fn run(cli: Cli, color: bool) -> Result<()> {
                 }
             } else {
                 let (_, view) = &views[0];
-                let result = run_view(&source, view).await?;
+                let result = run_view(&source, view, threads).await?;
                 let mut sink: Box<dyn Write> = match out {
                     Some(path) => Box::new(
                         fs::File::create(&path)

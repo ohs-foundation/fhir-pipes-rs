@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use octofhir_sof::{ViewDefinition, execute};
+use octofhir_sof::{ViewDefinition, execute, execute_parallel};
 use serde_json::Value;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -132,10 +132,27 @@ async fn run_test(file: &str, title: String, test: &Value, resources: &[Value]) 
         Err(e) => return mk(expect_error, format!("parse error: {e}")),
     };
 
+    // The threaded evaluator must agree with the serial one exactly: the same
+    // rows in the same order, or an error for both. Three threads split even
+    // these small resource sets across several workers.
+    let parallel = tokio::task::block_in_place(|| execute_parallel(&view, resources, 3));
     let result = match execute(&view, resources).await {
         Ok(r) => r,
-        Err(e) => return mk(expect_error, format!("execute error: {e}")),
+        Err(e) => {
+            if parallel.is_ok() {
+                return mk(
+                    false,
+                    format!("execute error {e}, but execute_parallel succeeded"),
+                );
+            }
+            return mk(expect_error, format!("execute error: {e}"));
+        }
     };
+    match &parallel {
+        Ok(p) if p.data == result.data && p.columns.len() == result.columns.len() => {}
+        Ok(_) => return mk(false, "execute_parallel rows differ from execute".into()),
+        Err(e) => return mk(false, format!("execute_parallel failed: {e}")),
+    }
 
     if expect_error {
         return mk(false, "expected error but execution succeeded".into());

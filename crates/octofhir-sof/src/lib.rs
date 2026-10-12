@@ -44,7 +44,7 @@ mod sql_generator;
 mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
-pub use eval::{CompiledView, execute, execute_blocking};
+pub use eval::{CompiledView, execute, execute_blocking, execute_parallel};
 pub use runner::{SqlExecutor, ViewResult, ViewRunner, run_with};
 pub use sql_generator::{Dialect, GeneratedColumn, GeneratedSql, SqlGenerator, create_table};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
