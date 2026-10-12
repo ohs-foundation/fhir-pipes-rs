@@ -82,6 +82,67 @@ pub fn execute_blocking(view: &ViewDefinition, resources: &[Value]) -> Result<Vi
     })
 }
 
+/// Execute a ViewDefinition against in-memory FHIR resources on up to `threads`
+/// OS threads, for non-async callers.
+///
+/// The view is compiled once and the resources are split into contiguous
+/// chunks, one per thread, each evaluated on its own current-thread Tokio
+/// runtime. Rows come back in input order, the same as [`execute`]. With
+/// `threads <= 1`, or fewer resources than threads, it runs on one thread.
+///
+/// # Errors
+///
+/// Same as [`execute`].
+pub fn execute_parallel(
+    view: &ViewDefinition,
+    resources: &[Value],
+    threads: usize,
+) -> Result<ViewResult> {
+    let threads = threads.clamp(1, resources.len().max(1));
+    let chunk = resources.len().div_ceil(threads).max(1);
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))
+    };
+    let panicked = || Error::FhirPath("evaluation thread panicked".to_string());
+    // Compiled on a thread of its own too, so that calling this from inside an
+    // async runtime never starts a runtime on that runtime's thread.
+    let compiled = std::thread::scope(|s| {
+        s.spawn(|| runtime()?.block_on(CompiledView::compile(view)))
+            .join()
+            .map_err(|_| panicked())?
+    })?;
+    let compiled = &compiled;
+    std::thread::scope(|s| {
+        let workers: Vec<_> = resources
+            .chunks(chunk)
+            .map(|part| {
+                s.spawn(move || -> Result<Vec<Vec<Value>>> {
+                    runtime()?.block_on(async {
+                        let mut rows = Vec::new();
+                        for resource in part {
+                            rows.extend(compiled.execute_resource(resource).await?);
+                        }
+                        Ok(rows)
+                    })
+                })
+            })
+            .collect();
+        let mut data = Vec::new();
+        for worker in workers {
+            data.extend(worker.join().map_err(|_| panicked())??);
+        }
+        let row_count = data.len();
+        Ok(ViewResult {
+            columns: compiled.columns().to_vec(),
+            data,
+            row_count,
+        })
+    })
+}
+
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
 /// Validates the view (columns, name collisions, constants) up front and builds
