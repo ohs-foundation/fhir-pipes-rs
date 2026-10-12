@@ -1,0 +1,296 @@
+//! Writing a view's rows as a hive-partitioned table: parquet/<table>/<col>=<value>/part-0.parquet,
+//! with the partition value looked up through another warehouse table.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::DataType;
+use octofhir_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding};
+use octofhir_sof::{ColumnInfo, ColumnType, ViewResult};
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use serde_json::Value;
+
+use crate::config::Lookup;
+
+/// The directory name hive (and DuckDB) give the null partition.
+pub const NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
+
+/// The parquet files of a partitioned table: those under a `<column>=` directory,
+/// which leaves out metadata kept beside the data (e.g. a catalog's items.parquet).
+pub fn table_files(table_dir: &Path, column: &str) -> Vec<PathBuf> {
+    let prefix = format!("{column}=");
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(table_dir) else {
+        return files;
+    };
+    let mut parts: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    parts.sort();
+    for dir in parts {
+        collect_parquet(&dir, &mut files);
+    }
+    files
+}
+
+fn collect_parquet(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for p in paths {
+        if p.is_dir() {
+            collect_parquet(&p, out);
+        } else if p.extension().is_some_and(|x| x == "parquet") {
+            out.push(p);
+        }
+    }
+}
+
+/// key → partition value, read from a warehouse table. Where a key has several
+/// values the first one read wins. A file without the value column takes it
+/// from its `<column>=<value>` directory.
+pub fn read_lookup(table_dir: &Path, key: &str, column: &str) -> Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for file in table_files(table_dir, column) {
+        let from_path = partition_value_in_path(&file, table_dir, column);
+        let f = fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(f)
+            .with_context(|| format!("reading {}", file.display()))?;
+        let has = |c: &str| builder.schema().column_with_name(c).is_some();
+        if !has(key) {
+            continue;
+        }
+        let wanted: Vec<&str> = if has(column) {
+            vec![key, column]
+        } else {
+            vec![key]
+        };
+        let mask = ProjectionMask::columns(builder.parquet_schema(), wanted.iter().copied());
+        for batch in builder.with_projection(mask).build()? {
+            let batch = batch?;
+            let keys = strings(batch.column_by_name(key).expect("projected"))?;
+            let values = match batch.column_by_name(column) {
+                Some(c) => strings(c)?,
+                None => vec![from_path.clone(); keys.len()],
+            };
+            for (k, v) in keys.into_iter().zip(values) {
+                if let (Some(k), Some(v)) = (k, v) {
+                    map.entry(k).or_insert(v);
+                }
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn partition_value_in_path(file: &Path, table_dir: &Path, column: &str) -> Option<String> {
+    let prefix = format!("{column}=");
+    file.strip_prefix(table_dir)
+        .ok()?
+        .components()
+        .find_map(|c| {
+            c.as_os_str()
+                .to_string_lossy()
+                .strip_prefix(&prefix)
+                .map(str::to_string)
+        })
+        .filter(|v| v != NULL_PARTITION)
+}
+
+fn strings(col: &dyn Array) -> Result<Vec<Option<String>>> {
+    let col = arrow::compute::cast(col, &DataType::Utf8)?;
+    let col = col.as_string::<i32>();
+    Ok((0..col.len())
+        .map(|i| col.is_valid(i).then(|| col.value(i).to_string()))
+        .collect())
+}
+
+/// The lookup rule a view's rows use: the first whose key column the view has.
+pub fn rule_for<'a>(result: &ViewResult, lookups: &'a [Lookup]) -> Option<(&'a Lookup, usize)> {
+    lookups.iter().find_map(|l| {
+        result
+            .columns
+            .iter()
+            .position(|c| c.name == l.key)
+            .map(|i| (l, i))
+    })
+}
+
+/// Split `result` by partition value and write it to `table_dir`, replacing
+/// what was there only once every file is written. Returns the row count.
+pub fn write(
+    result: ViewResult,
+    table_dir: &Path,
+    column: &str,
+    partition_of: impl Fn(&[Value]) -> Option<String>,
+) -> Result<usize> {
+    let total = result.data.len();
+    let mut groups: BTreeMap<Option<String>, Vec<Vec<Value>>> = BTreeMap::new();
+    for row in result.data {
+        groups.entry(partition_of(&row)).or_default().push(row);
+    }
+    let parent = table_dir
+        .parent()
+        .context("table directory has no parent")?;
+    fs::create_dir_all(parent)?;
+    let name = table_dir
+        .file_name()
+        .context("table directory has no name")?
+        .to_string_lossy();
+    let staging = parent.join(format!(".{name}.new"));
+    let _ = fs::remove_dir_all(&staging);
+    let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
+    let mut columns = result.columns;
+    columns.push(ColumnInfo::new(column, ColumnType::String));
+    for (value, rows) in groups {
+        let dir = staging.join(format!(
+            "{column}={}",
+            value.as_deref().map_or(NULL_PARTITION.to_string(), escape)
+        ));
+        fs::create_dir_all(&dir)?;
+        let data: Vec<Vec<Value>> = rows
+            .into_iter()
+            .map(|mut r| {
+                r.push(value.clone().map_or(Value::Null, Value::String));
+                r
+            })
+            .collect();
+        let part = ViewResult {
+            columns: columns.clone(),
+            row_count: data.len(),
+            data,
+        };
+        let path = dir.join("part-0.parquet");
+        let mut file =
+            fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+        writer
+            .write(&part, &mut file)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    fs::create_dir_all(&staging)?;
+    let old = parent.join(format!(".{name}.old"));
+    let _ = fs::remove_dir_all(&old);
+    if table_dir.exists() {
+        fs::rename(table_dir, &old)?;
+    }
+    fs::rename(&staging, table_dir)?;
+    let _ = fs::remove_dir_all(&old);
+    Ok(total)
+}
+
+/// A partition value made safe as one path segment, as hive escapes it.
+fn escape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '/' | '\\' | '=' | '%' | ':' | '\n' | '\r' => {
+                out.push_str(&format!("%{:02X}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn result(cols: &[&str], rows: Vec<Vec<Value>>) -> ViewResult {
+        ViewResult {
+            columns: cols
+                .iter()
+                .map(|c| ColumnInfo::new(*c, ColumnType::String))
+                .collect(),
+            row_count: rows.len(),
+            data: rows,
+        }
+    }
+
+    #[test]
+    fn writes_partitions_and_reads_them_back_as_a_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = dir.path().join("places");
+        let r = result(
+            &["id", "where"],
+            vec![
+                vec![json!("a"), json!("SLE")],
+                vec![json!("b"), json!("NGA")],
+                vec![json!("c"), Value::Null],
+            ],
+        );
+        let n = write(r, &table, "country", |row| {
+            row[1].as_str().map(str::to_string)
+        })
+        .unwrap();
+        assert_eq!(n, 3);
+        for p in [
+            "country=SLE",
+            "country=NGA",
+            "country=__HIVE_DEFAULT_PARTITION__",
+        ] {
+            assert!(table.join(p).join("part-0.parquet").exists(), "{p}");
+        }
+        let lookup = read_lookup(&table, "id", "country").unwrap();
+        assert_eq!(lookup.get("a").map(String::as_str), Some("SLE"));
+        assert_eq!(lookup.get("b").map(String::as_str), Some("NGA"));
+        assert!(!lookup.contains_key("c"));
+        assert!(!dir.path().join(".places.new").exists());
+    }
+
+    #[test]
+    fn rewriting_replaces_old_partitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = dir.path().join("t");
+        let r = result(&["id"], vec![vec![json!("a")]]);
+        write(r.clone(), &table, "country", |_| Some("NGA".into())).unwrap();
+        write(r, &table, "country", |_| Some("SLE".into())).unwrap();
+        assert!(!table.join("country=NGA").exists());
+        assert!(table.join("country=SLE").exists());
+    }
+
+    #[test]
+    fn picks_the_first_rule_the_view_has() {
+        let lookups = vec![
+            Lookup {
+                key: "location_id".into(),
+                table: "locations".into(),
+                table_key: Some("id".into()),
+            },
+            Lookup {
+                key: "campaign_id".into(),
+                table: "campaign_calendar".into(),
+                table_key: None,
+            },
+        ];
+        let both = result(&["campaign_id", "location_id"], vec![]);
+        assert_eq!(
+            rule_for(&both, &lookups).map(|(l, i)| (l.key.as_str(), i)),
+            Some(("location_id", 1))
+        );
+        let campaign = result(&["campaign_id"], vec![]);
+        assert_eq!(
+            rule_for(&campaign, &lookups).map(|(l, _)| l.table.as_str()),
+            Some("campaign_calendar")
+        );
+        assert!(rule_for(&result(&["x"], vec![]), &lookups).is_none());
+    }
+
+    #[test]
+    fn values_are_escaped_as_path_segments() {
+        assert_eq!(escape("SLE"), "SLE");
+        assert_eq!(escape("a/b=c"), "a%2Fb%3Dc");
+    }
+}

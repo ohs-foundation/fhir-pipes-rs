@@ -1,0 +1,9 @@
+{
+  "resourceType": "https://sql-on-fhir.org/ig/StructureDefinition/ViewDefinition",
+  "name": "IcrPatient",
+  "status": "active",
+  "resource": "Patient",
+  "select": [
+    { "column": [ { "name": "id", "path": "getResourceKey()", "type": "id" }, { "name": "born", "path": "birthDate", "type": "date" } ] }
+  ]
+}

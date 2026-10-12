@@ -1,0 +1,3 @@
+{"resourceType":"Observation","id":"o1","status":"final","code":{"text":"x"},"subject":{"reference":"Location/loc-bo"},"valueInteger":3,"issued":"2026-01-02T03:04:05Z"}
+{"resourceType":"Observation","id":"o2","status":"final","code":{"text":"x"},"subject":{"reference":"Location/loc-kono"},"valueInteger":5,"issued":"2026-02-03T04:05:06Z"}
+{"resourceType":"Observation","id":"o3","status":"final","code":{"text":"x"},"subject":{"reference":"Location/elsewhere"},"valueInteger":7}
