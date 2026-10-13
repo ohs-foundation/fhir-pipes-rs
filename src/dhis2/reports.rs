@@ -23,6 +23,9 @@
 //! the file is the same at any `--concurrency`. After each unit the file is
 //! synced and a checkpoint saved, so `--resume` can continue an interrupted
 //! run; `--previous` compares with an earlier run (see `rerun`).
+//!
+//! `--source data-values` computes the same tables from raw data values
+//! instead (see `raw`), so everything after the fetch is shared.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
@@ -34,12 +37,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use super::api::{check_analytics_age, Dhis2, ServerInfo};
+use super::calendar::now_utc;
 use super::measures::{fetch_indicators, fhir_key, Indicator, Scoring, MEASURE_POPULATION_SYSTEM};
+use super::raw::{load_parents, prepare, RawSource, Span};
 use super::rerun::{
     file_stamp, plan_differences, write_lines, Change, Checkpoint, Previous, Scope,
 };
 use super::{check_out, Instance, NdjsonWriter};
-use crate::cli::Dhis2ReportsArgs;
+use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::error::{KilnError, Result};
 use crate::extract::client::FetchError;
 use crate::fhir::group::is_valid_id;
@@ -51,6 +56,10 @@ pub const PERIOD_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period";
 pub const CAMPAIGN_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/campaign";
+/// Where a report's figures come from: `analytics` (DHIS2 computed them)
+/// or `data-values` (kiln computed them from raw data values).
+pub const SOURCE_EXTENSION_URL: &str =
+    "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source";
 /// DHIS2 UIDs are 11 characters.
 const UID_LEN: usize = 11;
 /// FHIR `integer` is a signed 32-bit number.
@@ -546,11 +555,13 @@ fn period_groups(periods: &[String]) -> Vec<Vec<String>> {
 }
 
 /// One unit of work: a chunk of indicators for a batch of periods, or for
-/// one date range, at one level. Its totals and every breakdown are fetched
-/// together, so its reports are complete, and written, as soon as it is done.
+/// one date range, at one level (from analytics) or at every requested
+/// level (from data values, where one download serves them all). Its
+/// totals and every breakdown are fetched together, so its reports are
+/// complete, and written, as soon as it is done.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unit {
-    pub level: u32,
+    pub levels: Vec<u32>,
     /// Empty for a date range.
     pub periods: Vec<String>,
     pub range: Option<DateRange>,
@@ -563,6 +574,15 @@ impl Unit {
         match &self.range {
             Some(r) => r.label(),
             None => periods_label(&self.periods),
+        }
+    }
+
+    /// `level 4`, `levels 1, 2, 3`.
+    fn where_(&self) -> String {
+        let list: Vec<String> = self.levels.iter().map(u32::to_string).collect();
+        match list.len() {
+            1 => format!("level {}", list[0]),
+            _ => format!("levels {}", list.join(", ")),
         }
     }
 }
@@ -590,7 +610,7 @@ pub fn plan(
             for group in &groups {
                 for batch in group.chunks(per_batch) {
                     units.push(Unit {
-                        level,
+                        levels: vec![level],
                         periods: batch.to_vec(),
                         range: None,
                         indicators: indicators.to_vec(),
@@ -599,7 +619,7 @@ pub fn plan(
             }
             for range in ranges {
                 units.push(Unit {
-                    level,
+                    levels: vec![level],
                     periods: Vec::new(),
                     range: Some(range.clone()),
                     indicators: indicators.to_vec(),
@@ -608,6 +628,61 @@ pub fn plan(
         }
     }
     units
+}
+
+/// Units for `--source data-values`: every level at once, by indicator
+/// chunk, then period batch, then range. A batch holds as many periods of
+/// one kind as keep data elements × periods × `org_units` (every org unit
+/// data can sit at) within `max_rows`; `elements` counts a chunk's data
+/// elements.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_all_levels(
+    levels: &[u32],
+    org_units: u64,
+    periods: &[String],
+    ranges: &[DateRange],
+    ids: &[String],
+    chunk: usize,
+    max_rows: usize,
+    elements: &dyn Fn(&[String]) -> usize,
+) -> Vec<Unit> {
+    let groups = period_groups(periods);
+    let mut units = Vec::new();
+    for indicators in ids.chunks(chunk) {
+        let per_period = elements(indicators).max(1) as u64 * org_units.max(1);
+        let per_batch = (max_rows as u64 / per_period).max(1) as usize;
+        let unit = |periods: Vec<String>, range: Option<DateRange>| Unit {
+            levels: levels.to_vec(),
+            periods,
+            range,
+            indicators: indicators.to_vec(),
+        };
+        for group in &groups {
+            for batch in group.chunks(per_batch) {
+                units.push(unit(batch.to_vec(), None));
+            }
+        }
+        for range in ranges {
+            units.push(unit(Vec::new(), Some(range.clone())));
+        }
+    }
+    units
+}
+
+/// Every org unit DHIS2 has at `level` (under `root`).
+fn org_unit_ids(api: &Dhis2, level: u32, root: Option<&str>) -> Result<Vec<String>> {
+    let mut query = vec![
+        ("filter", format!("level:eq:{level}")),
+        ("fields", "id".into()),
+    ];
+    if let Some(root) = root {
+        query.push(("filter", format!("path:like:{root}")));
+    }
+    Ok(api
+        .paged("organisationUnits.json", "organisationUnits", &query)?
+        .iter()
+        .filter_map(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect())
 }
 
 /// How many org units DHIS2 has at `level` (under `root`), to size requests.
@@ -670,23 +745,62 @@ impl Ask<'_> {
     }
 }
 
-/// A unit's analytics responses: the totals, then each breakdown's.
+/// A unit's analytics responses (or the same tables computed from data
+/// values): the totals, then each breakdown's.
 #[derive(Debug, Default)]
 struct Fetched {
     totals: Vec<Analytics>,
     breakdowns: Vec<(String, Vec<Analytics>)>,
     requests: usize,
+    /// Issues met while computing, as (kind, key, detail).
+    issues: Vec<(String, String, String)>,
 }
 
-fn fetch_unit(
-    api: &Dhis2,
-    root: Option<&str>,
-    breakdowns: &[String],
-    unit: &Unit,
-) -> Result<Fetched> {
+/// Where the values come from.
+#[derive(Clone, Copy)]
+enum Values<'a> {
+    Analytics {
+        root: Option<&'a str>,
+    },
+    DataValues {
+        raw: &'a RawSource,
+        indicators: &'a BTreeMap<String, Indicator>,
+    },
+}
+
+fn fetch_unit(api: &Dhis2, values: Values, breakdowns: &[String], unit: &Unit) -> Result<Fetched> {
+    let root = match values {
+        Values::Analytics { root } => root,
+        Values::DataValues { raw, indicators } => {
+            let targets: Vec<Span> = match &unit.range {
+                Some(r) => Span::of_range(r).into_iter().collect(),
+                None => unit
+                    .periods
+                    .iter()
+                    .filter_map(|p| Span::of_period(p))
+                    .collect(),
+            };
+            let items: Vec<&Indicator> = unit
+                .indicators
+                .iter()
+                .filter_map(|i| indicators.get(i))
+                .collect();
+            let (totals, by, issues) = raw.compute(api, &items, &targets)?;
+            return Ok(Fetched {
+                totals: vec![totals],
+                breakdowns: breakdowns
+                    .iter()
+                    .cloned()
+                    .zip(by.into_iter().map(|t| vec![t]))
+                    .collect(),
+                requests: 1,
+                issues,
+            });
+        }
+    };
     let mut f = Fetched::default();
     let ask = Ask {
-        level: unit.level,
+        level: unit.levels[0],
         root,
         periods: &unit.periods,
         range: unit.range.as_ref(),
@@ -863,6 +977,8 @@ struct Writer<'a> {
     mapping: &'a HashMap<String, Target>,
     /// `--campaign`, added to every report after the period extension.
     campaign: Option<&'a str>,
+    /// `analytics` or `data-values`, the source extension's code.
+    source: &'static str,
     state: Checkpoint,
     checkpoint: PathBuf,
     tally: Tally,
@@ -922,6 +1038,11 @@ impl<'a> Writer<'a> {
     /// Writes one unit's reports, sorted by id, with its strata attached to
     /// its totals; returns how many values DHIS2 sent for it.
     fn unit(&mut self, f: Fetched) -> Result<usize> {
+        for (kind, key, detail) in &f.issues {
+            if kind != "unmapped_org_unit" || self.state.unmapped.insert(key.clone()) {
+                self.state.report.add(kind, key, detail);
+            }
+        }
         let mut rows = 0usize;
         let mut out: BTreeMap<String, Value> = BTreeMap::new();
         for table in &f.totals {
@@ -948,8 +1069,11 @@ impl<'a> Writer<'a> {
                     self.info,
                     &mut self.state.report,
                 ) {
-                    if let (Some(c), Some(ext)) = (self.campaign, r["extension"].as_array_mut()) {
-                        ext.push(json!({"url": CAMPAIGN_EXTENSION_URL, "valueReference": {"reference": c}}));
+                    if let Some(ext) = r["extension"].as_array_mut() {
+                        if let Some(c) = self.campaign {
+                            ext.push(json!({"url": CAMPAIGN_EXTENSION_URL, "valueReference": {"reference": c}}));
+                        }
+                        ext.push(json!({"url": SOURCE_EXTENSION_URL, "valueCode": self.source}));
                     }
                     out.insert(r["id"].as_str().unwrap_or_default().to_string(), r);
                 }
@@ -1098,8 +1222,8 @@ fn progress(
         String::new()
     };
     format!(
-        "[{done}/{total}] level {} · {} · {} items: {} values · {} elapsed{left}",
-        unit.level,
+        "[{done}/{total}] {} · {} · {} items: {} values · {} elapsed{left}",
+        unit.where_(),
         unit.when(),
         unit.indicators.len(),
         thousands(values),
@@ -1145,6 +1269,21 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
             }
         }
     }
+    let from_values = args.source == ReportSource::DataValues;
+    if let Some(since) = &args.updated_since {
+        if !from_values {
+            return Err(KilnError::Usage(
+                "--updated-since needs --source data-values (analytics has no last-updated filter)"
+                    .into(),
+            ));
+        }
+        let shaped = since.len() == 10 || (since.len() >= 16 && since.as_bytes()[10] == b'T');
+        if !shaped || super::api::epoch_seconds(since).is_none() {
+            return Err(KilnError::Usage(format!(
+                "--updated-since {since:?}: expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+            )));
+        }
+    }
     if let Some(p) = &args.previous {
         if !p.is_file() {
             return Err(KilnError::Usage(format!(
@@ -1178,15 +1317,17 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     }
 
     let api = Dhis2::connect(&args.conn)?;
-    match &api.info.last_analytics {
-        Some(t) => eprintln!("DHIS2 analytics tables last built {t}"),
-        None => eprintln!("DHIS2 does not say when its analytics tables were last built"),
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    if let Some(warning) = check_analytics_age(&api.info, args.max_analytics_age, now)? {
-        eprintln!("{warning}");
+    if !from_values {
+        match &api.info.last_analytics {
+            Some(t) => eprintln!("DHIS2 analytics tables last built {t}"),
+            None => eprintln!("DHIS2 does not say when its analytics tables were last built"),
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        if let Some(warning) = check_analytics_age(&api.info, args.max_analytics_age, now)? {
+            eprintln!("{warning}");
+        }
     }
     let indicators = fetch_indicators(&api, &args.select)?;
     let ids: Vec<String> = indicators.keys().cloned().collect();
@@ -1211,28 +1352,81 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         }
     }
 
-    // Requests are sized from each level's org unit count, so several
-    // periods can share one.
-    let mut levels = Vec::new();
-    for level in unique(&args.levels) {
-        let n = org_unit_count(&api, level, args.root.as_deref())?;
-        eprintln!("level {level}: {n} org units");
-        levels.push((level, n));
-    }
-    let periods = unique(&args.periods);
-    let units = plan(&levels, &periods, &ranges, &ids, args.chunk, args.max_rows);
+    let mut periods = unique(&args.periods);
+    let mut ranges = ranges;
+    let mut raw: Option<RawSource> = None;
+    let mut levels: Vec<(u32, u64)> = Vec::new();
+    let units = if from_values {
+        if let Some(p) = periods.iter().find(|p| Span::of_period(p).is_none()) {
+            return Err(KilnError::Usage(format!(
+                "--period {p}: --source data-values knows the dates of days, ISO weeks, months, bi-months, quarters, six-months and years only (no relative periods); use --range for other spans"
+            )));
+        }
+        let mut src = prepare(&api, &indicators, &args.breakdowns)?;
+        let mut by_level = Vec::new();
+        for level in unique(&args.levels) {
+            let ous = org_unit_ids(&api, level, args.root.as_deref())?;
+            eprintln!("level {level}: {} org units", ous.len());
+            levels.push((level, ous.len() as u64));
+            by_level.push((level, ous));
+        }
+        let parents = load_parents(&args.locations, &system)?;
+        src.place(&parents, &by_level, args.root.as_deref());
+        if let Some(since) = &args.updated_since {
+            let spans: Vec<Span> = periods
+                .iter()
+                .filter_map(|p| Span::of_period(p))
+                .chain(ranges.iter().filter_map(Span::of_range))
+                .collect();
+            let changed = src.changed(&api, &src.elements_of(&ids), &spans, since)?;
+            let before = periods.len() + ranges.len();
+            periods.retain(|p| changed.contains(p));
+            ranges.retain(|r| changed.contains(&r.code()));
+            eprintln!(
+                "{} of {before} periods and ranges have data values updated since {since}",
+                periods.len() + ranges.len()
+            );
+        }
+        let units = plan_all_levels(
+            &unique(&args.levels),
+            parents.len() as u64,
+            &periods,
+            &ranges,
+            &ids,
+            args.chunk,
+            args.max_rows,
+            &|chunk| src.elements_of(chunk).len(),
+        );
+        eprintln!("{} batches, one dataValueSets request each", units.len());
+        raw = Some(src);
+        units
+    } else {
+        // Requests are sized from each level's org unit count, so several
+        // periods can share one.
+        for level in unique(&args.levels) {
+            let n = org_unit_count(&api, level, args.root.as_deref())?;
+            eprintln!("level {level}: {n} org units");
+            levels.push((level, n));
+        }
+        let units = plan(&levels, &periods, &ranges, &ids, args.chunk, args.max_rows);
+        eprintln!(
+            "{} batches, {} analytics requests unless DHIS2 calls some too large",
+            units.len(),
+            units.len() * (1 + args.breakdowns.len())
+        );
+        units
+    };
     let total = units.len();
-    eprintln!(
-        "{total} batches, {} analytics requests unless DHIS2 calls some too large",
-        total * (1 + args.breakdowns.len())
-    );
 
     // Everything that decides the batches and what goes in them. An
     // interrupted run is continued only under the same plan.
     let fingerprint = json!({
         "dhis2": args.conn.url,
         "instance": instance.name,
-        "last_analytics": api.info.last_analytics,
+        "source": args.source.code(),
+        "updated_since": args.updated_since,
+        // Data values do not depend on the analytics build.
+        "last_analytics": if from_values { None } else { api.info.last_analytics.clone() },
         "indicators": ids,
         "levels": levels,
         "periods": periods,
@@ -1308,19 +1502,39 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
                 .transpose()?,
             Checkpoint {
                 plan: fingerprint,
+                as_of: from_values.then(now_utc),
                 ..Checkpoint::default()
             },
         ),
+    };
+    // From data values, a report's `date` is when the run started.
+    let info = match &state.as_of {
+        Some(t) if from_values => ServerInfo {
+            last_analytics: Some(t.clone()),
+            utc: true,
+            ..api.info.clone()
+        },
+        _ => api.info.clone(),
+    };
+    let values = match &raw {
+        Some(src) => Values::DataValues {
+            raw: src,
+            indicators: &indicators,
+        },
+        None => Values::Analytics {
+            root: args.root.as_deref(),
+        },
     };
     let mut w = Writer {
         out: out.keep_partial(),
         changed: changed.map(NdjsonWriter::keep_partial),
         previous,
         instance: &instance,
-        info: &api.info,
+        info: &info,
         indicators: &indicators,
         mapping: &mapping,
         campaign: args.campaign.as_deref(),
+        source: args.source.code(),
         state,
         checkpoint: checkpoint.clone(),
         tally: Tally::default(),
@@ -1362,7 +1576,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                let fetched = fetch_unit(api, args.root.as_deref(), &args.breakdowns, &units[i]);
+                let fetched = fetch_unit(api, values, &args.breakdowns, &units[i]);
                 if tx.send((i, fetched)).is_err() {
                     break;
                 }
@@ -1428,7 +1642,11 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     }
 
     // Previous reports this run would have written but DHIS2 no longer has.
-    // Read before --out is renamed, as it may be the --previous file.
+    // Read before --out is renamed, as it may be the --previous file. With
+    // --updated-since, the previous reports for the periods not recomputed
+    // are kept in --out, so it stays the whole baseline.
+    let mut kept = 0usize;
+    let keep_rest = args.updated_since.is_some();
     let removed = match &w.previous {
         Some(prev) => {
             let mut scope = Scope {
@@ -1449,7 +1667,17 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
                 .periods
                 .extend(periods.iter().filter(|p| period_kind(p).is_some()).cloned());
             scope.periods.extend(ranges.iter().map(DateRange::label));
-            Some(prev.removed(|r| scope.contains(r, PERIOD_EXTENSION_URL))?)
+            let out = &mut w.out;
+            Some(prev.removed(
+                |r| scope.contains(r, PERIOD_EXTENSION_URL),
+                |r| {
+                    if keep_rest {
+                        kept += 1;
+                        out.write(r)?;
+                    }
+                    Ok(())
+                },
+            )?)
         }
         None => None,
     };
@@ -1471,14 +1699,15 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     std::fs::remove_file(&checkpoint).map_err(|e| KilnError::io(&checkpoint, e))?;
 
     println!(
-        "Wrote {} MeasureReports to {} ({} indicators, {} Locations, {} periods; {} values from {} analytics requests)",
+        "Wrote {} MeasureReports to {} ({} indicators, {} Locations, {} periods; {} values from {} {} requests)",
         tally.written,
         args.out.display(),
         indicators.len(),
         tally.locations.len(),
         tally.periods.len(),
         state.values,
-        state.requests
+        state.requests,
+        if from_values { "dataValueSets" } else { "analytics" }
     );
     if !args.breakdowns.is_empty() {
         println!(
@@ -1505,6 +1734,12 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         }
         if let Some(p) = &args.removed {
             println!("Wrote {} removed ids to {}", removed.len(), p.display());
+        }
+        if keep_rest {
+            println!(
+                "Kept {kept} MeasureReports from {} for periods with no updated data values",
+                prev.display()
+            );
         }
     }
     println!("{}", state.report.summary());
@@ -1838,7 +2073,7 @@ mod tests {
             10,
             20_000,
         );
-        let per_level = |l: u32| units.iter().filter(|u| u.level == l).count();
+        let per_level = |l: u32| units.iter().filter(|u| u.levels == [l]).count();
         assert_eq!(
             [per_level(1), per_level(2), per_level(3), per_level(4)],
             [18, 18, 36, 258]
@@ -1849,7 +2084,7 @@ mod tests {
     #[test]
     fn progress_reads_at_a_glance() {
         let unit = Unit {
-            level: 4,
+            levels: vec![4],
             periods: codes(&["20260421", "20260422", "20260427"]),
             range: None,
             indicators: codes(&["a"; 10]),

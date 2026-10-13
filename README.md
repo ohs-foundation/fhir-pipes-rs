@@ -206,6 +206,7 @@ kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locatio
                (--period PE | --range START:END) […] --level N [--level N …] --out REPORTS.ndjson
                [--campaign TYPE/ID] [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
                [--concurrency 4] [--max-analytics-age 7d]
+               [--source analytics|data-values [--updated-since DATE]]
                [--previous PREV.ndjson [--changed CHANGED.ndjson]
                [--removed REMOVED.txt]] [--resume] [--report FILE]
 
@@ -925,6 +926,64 @@ ids would go over FHIR's 64 characters (a reporting rate with an
 range is its own request (split by indicators if DHIS2 calls it too large),
 and breakdowns work the same.
 
+Every report carries where its figures come from, in the
+`https://icr.healthcampaigns.org/StructureDefinition/dhis2-source`
+extension (after `dhis2-period` and the campaign): `valueCode`
+`analytics` or `data-values`. Reports written before this extension
+existed lack it, so a `--previous` comparison against one counts every
+report as changed, once.
+
+`--source data-values` reads raw data values (`/api/dataValueSets`,
+`orgUnit` with `children=true`, `startDate`/`endDate`) instead of
+analytics, and kiln computes each value itself, in the same shape: same
+ids, periods, populations, scores and strata. Each batch's values are
+added up the org unit tree of the `--locations` file (`partOf`) to every
+requested level at once, so the Locations must reach down to where data
+is entered. The rules followed, and where they stop:
+
+- A data element is its total over category option combos and attribute
+  option combos, over the period and every org unit below. Aggregation
+  type SUM adds everything; AVERAGE_SUM_ORG_UNIT averages each org unit's
+  values over the period (per category option combo), then adds the org
+  units. Any other aggregation type is refused.
+- An indicator's numerator and denominator are evaluated from its
+  expressions: `#{de}`, `#{de.coc}`, `#{de.coc.aoc}`, `#{de.*.aoc}`,
+  `C{constant}`, numbers, `+ - * /` and parentheses. A missing item
+  counts as 0 unless every item in the expression is missing, which gives
+  no value (DHIS2's rule for indicators; they have no
+  `missingValueStrategy` setting). The value is numerator × factor ÷
+  denominator, × days in the year ÷ days in the period when the indicator
+  is annualised; no value when the denominator is missing or 0.
+  Expressions using `R{…}` (reporting rates), `I{…}` (program
+  indicators), `D{…}`, `A{…}`, `OUG{…}`, `[days]` or functions such as
+  `if()` are refused, naming the indicator; so is `--data-set` (reporting
+  rates from completeDataSetRegistrations are not computed).
+- A data value counts towards a period when its own period lies wholly
+  inside it; one that runs across the period's edge (a week across two
+  months) counts towards neither and is reported as `straddling_period`.
+  Periods must be days, ISO weeks, months, bi-months, quarters,
+  six-months or years, or a `--range`; relative periods are refused.
+- `--breakdown` must be a category: each category option combo counts
+  towards that category's option it holds. An item whose data elements do
+  not all have the category gets no breakdown, as in analytics. Org unit
+  group set and data element group set breakdowns are not computed.
+- `date` is when the run started (kiln computed the values then), not the
+  analytics build; `--max-analytics-age` does not apply.
+
+`--updated-since DATE` (with `--source data-values` and `--previous`) asks
+DHIS2 which data values changed or were deleted since then
+(`lastUpdated`, `includeDeleted`) and recomputes only the periods and
+ranges holding them, every indicator in them. `--out` then gets those
+reports and keeps the previous ones for every other period, so it stays
+the whole baseline for the next run; `--changed` has what to load. A
+daily run:
+
+```sh
+kiln dhis2 reports … --source data-values --out bgd-reports.ndjson \
+  --previous bgd-reports.ndjson --updated-since 2026-10-12 \
+  --changed bgd-changed.ndjson --removed bgd-removed.txt
+```
+
 `--campaign TYPE/ID` (e.g. `CarePlan/bgd-mr-sia-2026`) adds the ICR
 campaign extension to every report written,
 `{"url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
@@ -1027,6 +1086,11 @@ kiln dhis2 reports … --out bgd-reports.ndjson                # first run: load
 kiln dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndjson \
   --changed bgd-changed.ndjson --removed bgd-removed.txt   # later runs: load the changes
 ```
+
+Report kinds for `--source data-values`: `straddling_period`,
+`unsupported_period` (a data value whose period type has no dates here),
+`non_numeric_value`, and `unmapped_org_unit` for a data value at an org
+unit with no Location.
 
 Report kinds: `stratum_without_total` (a breakdown value whose total DHIS2
 did not return), `fractional_count` (a numerator or denominator that is not a

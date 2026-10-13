@@ -12,8 +12,11 @@
 //! same resources. Nothing is written to DHIS2.
 
 pub mod api;
+pub mod calendar;
+pub mod expression;
 pub mod locations;
 pub mod measures;
+pub mod raw;
 pub mod reports;
 pub mod rerun;
 

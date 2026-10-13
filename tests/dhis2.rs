@@ -1,5 +1,6 @@
 //! Binary-level tests for `kiln dhis2` against a fake DHIS2 Web API.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -1100,7 +1101,9 @@ fn a_range_is_one_value_per_org_unit_with_breakdowns_and_the_campaign() {
                 {"url": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period",
                  "valueString": "2026-04-05/2026-05-20"},
                 {"url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
-                 "valueReference": {"reference": "CarePlan/bgd-mr-sia-2026"}}
+                 "valueReference": {"reference": "CarePlan/bgd-mr-sia-2026"}},
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source",
+                 "valueCode": "analytics"}
             ])
         );
         let st = &rep["group"][0]["stratifier"][0]["stratum"][0];
@@ -1735,4 +1738,562 @@ fn org_unit_groups_are_coded_like_group_sets() {
     let bo = by_id(&all, "sl-demo-O6uvpzGd5pu");
     assert_eq!(bo["type"][1]["text"], "Rural");
     assert_eq!(bo["type"][2]["text"], "Districts");
+}
+
+// ---------------------------------------------------------------------------
+// --source data-values
+
+/// The fixture: a country, two districts, four facilities.
+const C: &str = "ImspTQPwCqd";
+const D1: &str = "O6uvpzGd5pu";
+const D2: &str = "fdc6uOvgoji";
+const F: [&str; 4] = ["DiszpKrYNg8", "YuQRtpLP10I", "vWbkYPRmKyS", "Rp268JB6Ne4"];
+/// Doses (SUM, by Fixed/Outreach), population (SUM, no categories), and
+/// coverage = doses ÷ population × 100.
+const DOSES: &str = "s46m5MS0hxu";
+const POP: &str = "pikOziyCXbM";
+const COVERAGE: &str = "Uvn6LCg7dVU";
+const FIXED: &str = "qkPbeWaFsnU";
+const OUTREACH: &str = "VXJy4z1XYPl";
+const COC_FIXED: &str = "cocFixed001";
+const COC_OUTREACH: &str = "cocOutrch01";
+const COC_DEFAULT: &str = "HllvX50cXC0";
+
+/// Locations with `partOf`: country ← districts ← facilities.
+fn hierarchy(dir: &Path) -> std::path::PathBuf {
+    let p = dir.join("locations.ndjson");
+    let loc = |ou: &str, parent: Option<&str>| {
+        let mut l = json!({"resourceType": "Location", "id": format!("sle-{ou}"), "name": ou,
+                           "identifier": [{"system": ORGUNIT_SYSTEM, "value": ou}]});
+        if let Some(p) = parent {
+            l["partOf"] = json!({"reference": format!("Location/sle-{p}")});
+        }
+        format!("{l}\n")
+    };
+    let mut text = loc(C, None) + &loc(D1, Some(C)) + &loc(D2, Some(C));
+    for (i, f) in F.iter().enumerate() {
+        text += &loc(f, Some(if i < 2 { D1 } else { D2 }));
+    }
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+/// The indicator and data elements, as `fetch_indicators` and the
+/// data-values metadata read them.
+fn expect_fixture_metadata(server: &Server, doses_aggregation: &str) {
+    expect_fixture_metadata_with(
+        server,
+        doses_aggregation,
+        json!({"id": COVERAGE, "name": "Coverage", "indicatorType": {"factor": 100},
+               "numerator": format!("#{{{DOSES}}}"), "denominator": format!("#{{{POP}}}")}),
+    );
+}
+
+fn expect_fixture_metadata_with(server: &Server, doses_aggregation: &str, indicator: Value) {
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/indicators.json"))
+            .respond_with(ok(json!({"indicators": [indicator]}))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/dataElements.json"),
+            request::query(url_decoded(contains((
+                "fields",
+                matches("dataElementGroups")
+            )))),
+        ])
+        .times(0..)
+        .respond_with(ok(json!({"dataElements": [
+            {"id": DOSES, "name": "Doses", "aggregationType": doses_aggregation},
+            {"id": POP, "name": "Population", "aggregationType": "SUM"}]}))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/dataElements.json"),
+            request::query(url_decoded(contains(("fields", matches("categoryCombo"))))),
+        ])
+        .times(0..)
+        .respond_with(ok(json!({"dataElements": [
+            {"id": DOSES, "name": "Doses", "aggregationType": doses_aggregation,
+             "categoryCombo": {"categories": [{"id": "fMZEcRHuamy"}], "categoryOptionCombos": [
+                 {"id": COC_FIXED, "categoryOptions": [{"id": FIXED}]},
+                 {"id": COC_OUTREACH, "categoryOptions": [{"id": OUTREACH}]}]}},
+            {"id": POP, "name": "Population", "aggregationType": "SUM",
+             "categoryCombo": {"categories": [{"id": "GLevLNI9wkl"}], "categoryOptionCombos": [
+                 {"id": COC_DEFAULT, "categoryOptions": [{"id": "xYerKDKCefk"}]}]}}]}))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/dhis/api/categories/fMZEcRHuamy.json",
+        ))
+        .times(0..)
+        .respond_with(ok(json!({"id": "fMZEcRHuamy", "name": "Location Fixed/Outreach",
+            "categoryOptions": [{"id": FIXED, "name": "Fixed"}, {"id": OUTREACH, "name": "Outreach"}]}))),
+    );
+}
+
+/// Each level's org units, listed in full (data values) or counted (analytics).
+fn expect_fixture_levels(server: &Server) {
+    for (level, ous) in [(1u32, vec![C]), (2, vec![D1, D2]), (3, F.to_vec())] {
+        let filter = leak(format!("level:eq:{level}"));
+        let list: Vec<Value> = ous.iter().map(|o| json!({"id": o})).collect();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/organisationUnits.json"),
+                request::query(url_decoded(contains(("filter", filter)))),
+                request::query(url_decoded(contains(("page", "1")))),
+            ])
+            .times(0..)
+            .respond_with(ok(
+                json!({"pager": {"page": 1, "pageCount": 1, "total": ous.len()},
+                                    "organisationUnits": list}),
+            )),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/organisationUnits.json"),
+                request::query(url_decoded(contains(("filter", filter)))),
+                request::query(url_decoded(contains(("pageSize", "1")))),
+            ])
+            .times(0..)
+            .respond_with(ok(
+                json!({"pager": {"page": 1, "pageCount": ous.len(), "total": ous.len()},
+                                    "organisationUnits": [{"id": ous[0]}]}),
+            )),
+        );
+    }
+}
+
+fn dv(de: &str, pe: &str, ou: &str, coc: &str, value: &str) -> Value {
+    json!({"dataElement": de, "period": pe, "orgUnit": ou, "categoryOptionCombo": coc,
+           "attributeOptionCombo": COC_DEFAULT, "value": value})
+}
+
+/// The raw data values behind the fixture.
+fn fixture_values() -> Vec<Value> {
+    let mut v = vec![
+        dv(DOSES, "20250105", F[0], COC_FIXED, "3"),
+        dv(DOSES, "20250120", F[0], COC_OUTREACH, "2"),
+        dv(DOSES, "202501", F[1], COC_FIXED, "4"),
+        dv(DOSES, "20250210", F[2], COC_OUTREACH, "6"),
+        // Outside the periods asked for: left out.
+        dv(DOSES, "20250301", F[0], COC_FIXED, "100"),
+    ];
+    for pe in ["202501", "202502"] {
+        for (i, f) in F.iter().enumerate() {
+            v.push(dv(POP, pe, f, COC_DEFAULT, if i < 2 { "10" } else { "20" }));
+        }
+    }
+    v
+}
+
+/// What DHIS2 analytics answers for the fixture, worked out by hand:
+/// (level, totals rows, Fixed/Outreach rows).
+fn fixture_analytics() -> Vec<(u32, Vec<Value>, Vec<Value>)> {
+    let t = |dx: &str, pe: &str, ou: &str, v: &str, n: &str, d: &str| json!([dx, pe, ou, v, n, d]);
+    let de = |dx: &str, pe: &str, ou: &str, v: &str| t(dx, pe, ou, v, "", "");
+    let s = |pe: &str, ou: &str, o: &str, v: &str| json!([DOSES, o, pe, ou, v, "", ""]);
+    let pops = |ous: &[(&str, &str)]| -> Vec<Value> {
+        ["202501", "202502"]
+            .iter()
+            .flat_map(|pe| ous.iter().map(move |(ou, v)| de(POP, pe, ou, v)))
+            .collect()
+    };
+    let mut l3 = vec![
+        de(DOSES, "202501", F[0], "5.0"),
+        de(DOSES, "202501", F[1], "4.0"),
+        de(DOSES, "202502", F[2], "6.0"),
+        t(COVERAGE, "202501", F[0], "50.0", "5.0", "10.0"),
+        t(COVERAGE, "202501", F[1], "40.0", "4.0", "10.0"),
+        t(COVERAGE, "202502", F[2], "30.0", "6.0", "20.0"),
+    ];
+    l3.extend(pops(&[
+        (F[0], "10.0"),
+        (F[1], "10.0"),
+        (F[2], "20.0"),
+        (F[3], "20.0"),
+    ]));
+    let mut l2 = vec![
+        de(DOSES, "202501", D1, "9.0"),
+        de(DOSES, "202502", D2, "6.0"),
+        t(COVERAGE, "202501", D1, "45.0", "9.0", "20.0"),
+        t(COVERAGE, "202502", D2, "15.0", "6.0", "40.0"),
+    ];
+    l2.extend(pops(&[(D1, "20.0"), (D2, "40.0")]));
+    let mut l1 = vec![
+        de(DOSES, "202501", C, "9.0"),
+        de(DOSES, "202502", C, "6.0"),
+        t(COVERAGE, "202501", C, "15.0", "9.0", "60.0"),
+        t(COVERAGE, "202502", C, "10.0", "6.0", "60.0"),
+    ];
+    l1.extend(pops(&[(C, "60.0")]));
+    vec![
+        (
+            1,
+            l1,
+            vec![
+                s("202501", C, FIXED, "7.0"),
+                s("202501", C, OUTREACH, "2.0"),
+                s("202502", C, OUTREACH, "6.0"),
+            ],
+        ),
+        (
+            2,
+            l2,
+            vec![
+                s("202501", D1, FIXED, "7.0"),
+                s("202501", D1, OUTREACH, "2.0"),
+                s("202502", D2, OUTREACH, "6.0"),
+            ],
+        ),
+        (
+            3,
+            l3,
+            vec![
+                s("202501", F[0], FIXED, "3.0"),
+                s("202501", F[0], OUTREACH, "2.0"),
+                s("202501", F[1], FIXED, "4.0"),
+                s("202502", F[2], OUTREACH, "6.0"),
+            ],
+        ),
+    ]
+}
+
+fn fixture_reports(server: &Server, dir: &Path, out: &Path, extra: &[&str]) -> Assert {
+    kiln()
+        .args([
+            "dhis2",
+            "reports",
+            "--dhis2",
+            &base(server),
+            "--instance",
+            "sl-demo",
+        ])
+        .args([
+            "--indicator",
+            COVERAGE,
+            "--data-element",
+            DOSES,
+            "--data-element",
+            POP,
+        ])
+        .args(["--level", "1", "--level", "2", "--level", "3"])
+        .args([
+            "--period",
+            "202501",
+            "--period",
+            "202502",
+            "--breakdown",
+            "fMZEcRHuamy",
+        ])
+        .arg("--locations")
+        .arg(hierarchy(dir))
+        .arg("--out")
+        .arg(out)
+        .args(extra)
+        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .assert()
+}
+
+/// Reports by id, without what differs by source: `date` (the analytics
+/// build or the run's time) and the source extension.
+fn comparable(p: &Path) -> BTreeMap<String, Value> {
+    read_ndjson(p)
+        .into_iter()
+        .map(|mut r| {
+            r.as_object_mut().unwrap().remove("date");
+            let ext = r["extension"].as_array_mut().unwrap();
+            ext.retain(|e| {
+                e["url"] != "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source"
+            });
+            (r["id"].as_str().unwrap().to_string(), r)
+        })
+        .collect()
+}
+
+#[test]
+fn data_values_give_the_same_reports_as_analytics() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = json!({"items": {
+        "202501": {"startDate": "2025-01-01T00:00:00.000", "endDate": "2025-01-31T00:00:00.000"},
+        "202502": {"startDate": "2025-02-01T00:00:00.000", "endDate": "2025-02-28T00:00:00.000"},
+        "fMZEcRHuamy": {"name": "Location Fixed/Outreach"},
+        FIXED: {"name": "Fixed"}, OUTREACH: {"name": "Outreach"}}});
+
+    // From analytics.
+    let server = Server::run();
+    expect_info(&server);
+    expect_fixture_metadata(&server, "SUM");
+    expect_fixture_levels(&server);
+    for (level, totals, strata) in fixture_analytics() {
+        let ou = leak(format!("ou:LEVEL-{level}"));
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(("dimension", ou)))),
+                request::query(url_decoded(not(contains(("dimension", "fMZEcRHuamy"))))),
+            ])
+            .times(1)
+            .respond_with(ok(json!({
+                "headers": [{"name":"dx"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+                "metaData": meta, "rows": totals}))),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(("dimension", ou)))),
+                request::query(url_decoded(contains(("dimension", "fMZEcRHuamy")))),
+            ])
+            .times(1)
+            .respond_with(ok(json!({
+                "headers": [{"name":"dx"},{"name":"fMZEcRHuamy"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+                "metaData": meta, "rows": strata}))),
+        );
+    }
+    let from_analytics = dir.path().join("analytics.ndjson");
+    fixture_reports(&server, dir.path(), &from_analytics, &[]).success();
+
+    // From data values: one request, every level computed from it.
+    let server = Server::run();
+    expect_info(&server);
+    expect_fixture_metadata(&server, "SUM");
+    expect_fixture_levels(&server);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/dataValueSets.json"),
+            request::query(url_decoded(contains(("dataElement", DOSES)))),
+            request::query(url_decoded(contains(("dataElement", POP)))),
+            request::query(url_decoded(contains(("orgUnit", C)))),
+            request::query(url_decoded(contains(("children", "true")))),
+            request::query(url_decoded(contains(("startDate", "2025-01-01")))),
+            request::query(url_decoded(contains(("endDate", "2025-02-28")))),
+        ])
+        .times(1)
+        .respond_with(ok(json!({"dataValues": fixture_values()}))),
+    );
+    let from_values = dir.path().join("values.ndjson");
+    let a = fixture_reports(
+        &server,
+        dir.path(),
+        &from_values,
+        &["--source", "data-values"],
+    )
+    .success();
+    assert!(
+        stdout(&a).contains("from 1 dataValueSets requests"),
+        "{}",
+        stdout(&a)
+    );
+
+    let (x, y) = (comparable(&from_analytics), comparable(&from_values));
+    assert_eq!(x.len(), 28);
+    for (id, r) in &x {
+        assert_eq!(Some(r), y.get(id), "{id}");
+    }
+    assert_eq!(x.len(), y.len());
+    let r = read_ndjson(&from_values);
+    assert!(r
+        .iter()
+        .all(|r| r["extension"].as_array().unwrap().last().unwrap()["valueCode"] == "data-values"));
+    assert!(r[0]["date"].as_str().unwrap().ends_with('Z'));
+}
+
+/// A data-values stub: metadata, levels, and `values` for any span asked.
+fn values_server(doses_aggregation: &str, indicator: Option<Value>) -> Server {
+    let server = Server::run();
+    expect_info(&server);
+    match indicator {
+        Some(i) => expect_fixture_metadata_with(&server, doses_aggregation, i),
+        None => expect_fixture_metadata(&server, doses_aggregation),
+    }
+    expect_fixture_levels(&server);
+    server
+}
+
+fn expect_values(server: &Server, start: &'static str, end: &'static str, values: Vec<Value>) {
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/dataValueSets.json"),
+            request::query(url_decoded(contains(("startDate", start)))),
+            request::query(url_decoded(contains(("endDate", end)))),
+            request::query(url_decoded(not(contains(("lastUpdated", any()))))),
+        ])
+        .times(1)
+        .respond_with(ok(json!({"dataValues": values}))),
+    );
+}
+
+#[test]
+fn averages_annualising_option_combos_and_constants() {
+    let server = values_server(
+        "AVERAGE_SUM_ORG_UNIT",
+        Some(
+            json!({"id": COVERAGE, "name": "Fixed coverage", "annualized": true,
+                    "indicatorType": {"factor": 100},
+                    "numerator": format!("#{{{DOSES}.{COC_FIXED}}} * C{{k1234567890}}"),
+                    "denominator": format!("#{{{POP}}}")}),
+        ),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/constants.json"))
+            .respond_with(ok(
+                json!({"constants": [{"id": "k1234567890", "value": 2}]}),
+            )),
+    );
+    // Doses average over the month at each facility, then add up: f1 has
+    // 10 and 20 (15); f2 has 30 for the month and 50 for ISO week 2025W2
+    // (6–12 January, inside it), so 40; the district has 55. Outreach is
+    // not in the numerator.
+    let mut values = vec![
+        dv(DOSES, "20250105", F[0], COC_FIXED, "10"),
+        dv(DOSES, "20250106", F[0], COC_FIXED, "20"),
+        dv(DOSES, "20250107", F[0], COC_OUTREACH, "99"),
+        dv(DOSES, "202501", F[1], COC_FIXED, "30"),
+        dv(DOSES, "2025W2", F[1], COC_FIXED, "50"),
+    ];
+    values.extend(F.iter().map(|f| dv(POP, "202501", f, COC_DEFAULT, "10")));
+    expect_values(&server, "2025-01-01", "2025-01-31", values);
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.ndjson");
+    kiln()
+        .args([
+            "dhis2",
+            "reports",
+            "--dhis2",
+            &base(&server),
+            "--instance",
+            "sl-demo",
+        ])
+        .args([
+            "--indicator",
+            COVERAGE,
+            "--level",
+            "2",
+            "--period",
+            "202501",
+        ])
+        .args(["--source", "data-values"])
+        .arg("--locations")
+        .arg(hierarchy(dir.path()))
+        .arg("--out")
+        .arg(&out)
+        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .assert()
+        .success();
+    let r = comparable(&out);
+    let d1 = &r[&format!("sl-demo-{COVERAGE}-{D1}-202501")];
+    // (55 × 2) × 100 ÷ 20, annualised: × 365 ÷ 31 days; the score is ÷ 100.
+    let expected = 55.0 * 2.0 * 100.0 / 20.0 * 365.0 / 31.0 / 100.0;
+    let score = d1["group"][0]["measureScore"]["value"].as_f64().unwrap();
+    assert!((score - expected).abs() < 1e-9, "{score} vs {expected}");
+    assert_eq!(d1["group"][0]["population"][0]["count"], 110);
+    assert_eq!(d1["group"][0]["population"][1]["count"], 20);
+    // No doses at all in d2: every numerator item is missing, so no value.
+    assert!(!r.contains_key(&format!("sl-demo-{COVERAGE}-{D2}-202501")));
+    assert_eq!(r.len(), 1);
+}
+
+#[test]
+fn a_daily_run_recomputes_only_the_periods_with_updated_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("r.ndjson");
+    let server = values_server("SUM", None);
+    expect_values(&server, "2025-01-01", "2025-02-28", fixture_values());
+    fixture_reports(&server, dir.path(), &out, &["--source", "data-values"]).success();
+    let before = comparable(&out);
+    assert_eq!(before.len(), 28);
+
+    // Since then, one February population changed (20 → 25 at f4).
+    let server = values_server("SUM", None);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/dataValueSets.json"),
+            request::query(url_decoded(contains(("lastUpdated", "2026-10-01")))),
+            request::query(url_decoded(contains(("includeDeleted", "true")))),
+        ])
+        .times(1)
+        .respond_with(ok(
+            json!({"dataValues": [dv(POP, "202502", F[3], COC_DEFAULT, "25")]}),
+        )),
+    );
+    let mut february: Vec<Value> = fixture_values()
+        .into_iter()
+        .filter(|v| v["period"].as_str().unwrap().starts_with("202502"))
+        .collect();
+    february.retain(|v| !(v["dataElement"] == POP && v["orgUnit"] == F[3]));
+    february.push(dv(POP, "202502", F[3], COC_DEFAULT, "25"));
+    expect_values(&server, "2025-02-01", "2025-02-28", february);
+    let changed = dir.path().join("changed.ndjson");
+    let a = fixture_reports(
+        &server,
+        dir.path(),
+        &out,
+        &[
+            "--source",
+            "data-values",
+            "--updated-since",
+            "2026-10-01",
+            "--previous",
+            out.to_str().unwrap(),
+            "--changed",
+            changed.to_str().unwrap(),
+        ],
+    )
+    .success();
+    let s = stdout(&a);
+    assert!(
+        s.contains("1 of 2 periods and ranges") || stderr(&a).contains("1 of 2 periods and ranges"),
+        "{}",
+        stderr(&a)
+    );
+    // Population at f4, d2 and the country, and coverage at d2 and the
+    // country, changed; the other eight February reports did not.
+    assert!(
+        s.contains("0 new, 5 changed, 8 unchanged, 0 removed"),
+        "{s}"
+    );
+    assert!(s.contains("Kept 15 MeasureReports"), "{s}");
+    let after = comparable(&out);
+    assert_eq!(after.len(), 28);
+    assert_eq!(read_ndjson(&changed).len(), 5);
+    let jan = format!("sl-demo-{COVERAGE}-{D1}-202501");
+    assert_eq!(after[&jan], before[&jan]);
+    let feb = format!("sl-demo-{COVERAGE}-{D2}-202502");
+    assert_ne!(after[&feb], before[&feb]);
+}
+
+#[test]
+fn what_data_values_cannot_compute_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |server: &Server, extra: &[&str]| {
+        let out = dir.path().join("r.ndjson");
+        let a = fixture_reports(server, dir.path(), &out, extra).code(2);
+        stderr(&a)
+    };
+    let with = |indicator: Value, aggregation: &str| values_server(aggregation, Some(indicator));
+    let coverage = |num: &str| {
+        json!({"id": COVERAGE, "name": "Coverage", "indicatorType": {"factor": 100},
+               "numerator": num, "denominator": format!("#{{{POP}}}")})
+    };
+    let e = run(
+        &with(coverage("R{QX4ZTUbOt3a.REPORTING_RATE}"), "SUM"),
+        &["--source", "data-values"],
+    );
+    assert!(e.contains("its numerator uses a reporting rate"), "{e}");
+    let e = run(
+        &with(coverage(&format!("#{{{DOSES}}}")), "AVERAGE"),
+        &["--source", "data-values"],
+    );
+    assert!(e.contains("aggregates as AVERAGE"), "{e}");
+    let e = run(
+        &with(coverage(&format!("#{{{DOSES}}}")), "SUM"),
+        &["--source", "data-values", "--period", "LAST_12_MONTHS"],
+    );
+    assert!(e.contains("--period LAST_12_MONTHS"), "{e}");
+    let e = run(
+        &Server::run(),
+        &["--updated-since", "2026-10-01", "--previous", "x"],
+    );
+    assert!(e.contains("needs --source data-values"), "{e}");
 }

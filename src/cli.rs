@@ -70,6 +70,25 @@ pub enum Dhis2Command {
     Reports(Box<Dhis2ReportsArgs>),
 }
 
+/// Where `kiln dhis2 reports` takes its values from.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReportSource {
+    /// DHIS2's analytics API: DHIS2 computes every value.
+    #[default]
+    Analytics,
+    /// Raw data values; kiln computes the values.
+    DataValues,
+}
+
+impl ReportSource {
+    pub fn code(self) -> &'static str {
+        match self {
+            ReportSource::Analytics => "analytics",
+            ReportSource::DataValues => "data-values",
+        }
+    }
+}
+
 /// Where the DHIS2 instance is, how to sign in, and the short name kiln
 /// files it under.
 #[derive(clap::Args, Debug, Clone)]
@@ -212,6 +231,12 @@ pub struct Dhis2ReportsArgs {
     /// Rows to aim for per analytics request: periods of the same kind (days, weeks, months, …) are asked for together while indicators × periods × org units at the level stays under this. Breakdown requests return a row per option on top; whatever DHIS2 still calls too large is split, periods first
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_MAX_ROWS)]
     pub max_rows: usize,
+    /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the --locations hierarchy and computed by kiln: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
+    #[arg(long, value_enum, default_value_t = ReportSource::Analytics)]
+    pub source: ReportSource,
+    /// With --source data-values and --previous: recompute only the periods and ranges with data values updated or deleted since this date or time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS); --out keeps the previous reports for the rest
+    #[arg(long, requires = "previous")]
+    pub updated_since: Option<String>,
     /// Refuse to run when DHIS2's analytics tables were last built longer ago than this (e.g. 36h, 7d, 2w): values are only as fresh as that build. Without it, a build over 7 days old is warned about
     #[arg(long, value_parser = crate::dhis2::api::parse_age)]
     pub max_analytics_age: Option<std::time::Duration>,

@@ -162,17 +162,27 @@ impl Previous {
 
     /// The ids of the previous run that this run did not write again, among
     /// the reports `in_scope` says this run would have written, in file order.
+    /// The previous reports outside the scope go to `keep`, in file order.
     /// Reads the previous file a second time rather than keep its ids.
-    pub fn removed(&self, in_scope: impl Fn(&Value) -> bool) -> Result<Vec<String>> {
+    pub fn removed(
+        &self,
+        in_scope: impl Fn(&Value) -> bool,
+        mut keep: impl FnMut(&Value) -> Result<()>,
+    ) -> Result<Vec<String>> {
         let mut out = Vec::new();
         let mut listed = HashSet::new();
         each_report(&self.path, |id, v| {
             let key = id_key(id);
             let again = self.seen.get(&key).is_some_and(|(_, seen)| *seen);
-            if !again && in_scope(v) && listed.insert(key) {
-                out.push(id.to_string());
+            if again || !listed.insert(key) {
+                return Ok(());
             }
-            Ok(())
+            if in_scope(v) {
+                out.push(id.to_string());
+                Ok(())
+            } else {
+                keep(v)
+            }
         })?;
         Ok(out)
     }
@@ -257,6 +267,10 @@ pub struct Checkpoint {
     pub scope_org_units: BTreeSet<String>,
     pub scope_periods: BTreeSet<String>,
     pub report: Report,
+    /// With `--source data-values`: when the run started, the `date` of
+    /// every report it writes.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 impl Checkpoint {
