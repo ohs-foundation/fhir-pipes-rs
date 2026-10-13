@@ -47,6 +47,11 @@ fn ok(v: Value) -> impl httptest::responders::Responder {
 
 /// `system/info`, signed in with the personal access token.
 fn expect_info(server: &Server) {
+    expect_info_built(server, "2026-10-12T02:07:00.052");
+}
+
+/// `system/info` with the analytics tables last built at `built`.
+fn expect_info_built(server: &Server, built: &str) {
     server.expect(
         Expectation::matching(all_of![
             request::method_path("GET", "/dhis/api/system/info.json"),
@@ -57,7 +62,7 @@ fn expect_info(server: &Server) {
             "version": "2.41.10",
             "systemName": "Test Sierra Leone",
             "serverTimeZoneId": "Etc/UTC",
-            "lastAnalyticsTableSuccess": "2026-10-12T02:07:00.052"
+            "lastAnalyticsTableSuccess": built
         }))),
     );
 }
@@ -723,17 +728,30 @@ fn a_too_large_result_is_split_by_period_before_indicators() {
 /// indicator and month. The earliest are the slowest, so with several
 /// workers later units finish first.
 fn stub_for_concurrency() -> Server {
+    stub_units(true, 0, None)
+}
+
+/// The same twelve batches, in planned order: none before `from` may be
+/// asked for, and the one at `fail_at` is refused (those after it may or
+/// may not be asked for before the run stops).
+fn stub_units(slow: bool, from: usize, fail_at: Option<usize>) -> Server {
     let server = Server::run();
-    expect_info(&server);
-    expect_group(&server);
+    expect_units_batches(&server, slow, from, fail_at);
+    server
+}
+
+fn expect_units_batches(server: &Server, slow: bool, from: usize, fail_at: Option<usize>) {
+    expect_info(server);
+    expect_group(server);
     let org_units: [(usize, [&str; 2]); 2] = [
         (2, ["O6uvpzGd5pu", "fdc6uOvgoji"]),
         (3, ["YuQRtpLP10I", "vWbkYPRmKyS"]),
     ];
     for (level, _) in org_units {
-        expect_units(&server, level as u32, 2);
+        expect_units(server, level as u32, 2);
     }
-    let mut slow = 12u64;
+    let mut delay = if slow { 12u64 } else { 0 };
+    let mut idx = 0usize;
     for (level, ous) in org_units {
         for dx in ["FbKK4ofIv5R", "tUIlpyeeX9N"] {
             for (m, pe) in ["202501", "202502", "202503"].into_iter().enumerate() {
@@ -751,33 +769,48 @@ fn stub_for_concurrency() -> Server {
                         ])
                     })
                     .collect();
-                server.expect(
-                    Expectation::matching(all_of![
-                        request::method_path("GET", "/dhis/api/analytics.json"),
-                        request::query(url_decoded(contains((
-                            "dimension",
-                            leak(format!("dx:{dx}"))
-                        )))),
-                        request::query(url_decoded(contains((
-                            "dimension",
-                            leak(format!("pe:{pe}"))
-                        )))),
-                        request::query(url_decoded(contains((
-                            "dimension",
-                            leak(format!("ou:LEVEL-{level}"))
-                        )))),
-                    ])
-                    .times(1)
-                    .respond_with(delay_and_then(
-                        std::time::Duration::from_millis(slow * 15),
-                        ok(analytics_for(rows)),
-                    )),
+                let matcher = all_of![
+                    request::method_path("GET", "/dhis/api/analytics.json"),
+                    request::query(url_decoded(contains((
+                        "dimension",
+                        leak(format!("dx:{dx}"))
+                    )))),
+                    request::query(url_decoded(contains((
+                        "dimension",
+                        leak(format!("pe:{pe}"))
+                    )))),
+                    request::query(url_decoded(contains((
+                        "dimension",
+                        leak(format!("ou:LEVEL-{level}"))
+                    )))),
+                ];
+                let answer = delay_and_then(
+                    std::time::Duration::from_millis(delay * 15),
+                    ok(analytics_for(rows)),
                 );
-                slow -= 1;
+                match fail_at {
+                    _ if idx < from => {}
+                    Some(f) if idx == f => {
+                        server.expect(Expectation::matching(matcher).times(1).respond_with(
+                            status_code(409).body(
+                                r#"{"errorCode":"E7124","message":"Dimension is not valid"}"#,
+                            ),
+                        ))
+                    }
+                    Some(f) if idx > f => server.expect(
+                        Expectation::matching(matcher)
+                            .times(0..=1)
+                            .respond_with(answer),
+                    ),
+                    _ => {
+                        server.expect(Expectation::matching(matcher).times(1).respond_with(answer))
+                    }
+                }
+                idx += 1;
+                delay = delay.saturating_sub(1);
             }
         }
     }
-    server
 }
 
 #[test]
@@ -823,6 +856,7 @@ fn output_is_the_same_at_any_concurrency() {
     assert_eq!(r[2]["id"], "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-202502");
     assert_eq!(r[23]["id"], "sl-demo-tUIlpyeeX9N-vWbkYPRmKyS-202503");
     assert!(!dir.path().join("r4.ndjson.tmp").exists());
+    assert!(!dir.path().join("r4.ndjson.resume").exists());
 }
 
 #[test]
@@ -938,7 +972,7 @@ fn breakdowns_attach_to_their_totals_across_batched_periods() {
 }
 
 #[test]
-fn a_failed_request_stops_the_run_and_leaves_no_file() {
+fn a_failed_request_stops_the_run_and_keeps_what_was_written() {
     let server = Server::run();
     expect_info(&server);
     expect_group(&server);
@@ -977,8 +1011,14 @@ fn a_failed_request_stops_the_run_and_leaves_no_file() {
         "{}",
         stderr(&a)
     );
+    assert!(
+        stderr(&a).contains("run again with --resume"),
+        "{}",
+        stderr(&a)
+    );
     assert!(!out.exists());
-    assert!(!dir.path().join("r.ndjson.tmp").exists());
+    assert!(dir.path().join("r.ndjson.tmp").exists());
+    assert!(dir.path().join("r.ndjson.resume").exists());
 }
 
 /// Analytics asked for by date range: `startDate` and `endDate`, no period.
@@ -1235,5 +1275,208 @@ fn a_range_whose_ids_would_be_too_long_is_refused_before_any_analytics() {
         stderr(&a).contains("over FHIR's 64; use a shorter --instance"),
         "{}",
         stderr(&a)
+    );
+}
+
+/// An analytics response that also lists the org units and periods it
+/// covered, as DHIS2 does in `metaData.dimensions`.
+fn analytics_covering(rows: Vec<Value>, ous: &[&str], pes: &[&str]) -> Value {
+    let mut v = analytics_for(rows);
+    v["metaData"]["dimensions"] = json!({"ou": ous, "pe": pes, "dx": [], "co": []});
+    v
+}
+
+#[test]
+fn a_rerun_writes_only_new_and_changed_reports_and_lists_removed_ids() {
+    let (a, b) = ("O6uvpzGd5pu", "fdc6uOvgoji");
+    let run = |built: &str, rows: Vec<Value>, out: &Path, extra: &[&str]| {
+        let server = Server::run();
+        expect_info_built(&server, built);
+        expect_group(&server);
+        expect_units(&server, 2, 2);
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(("dimension", "pe:202501")))),
+            ])
+            .times(1)
+            .respond_with(ok(analytics_covering(rows, &[a, b], &["202501"]))),
+        );
+        let dir = out.parent().unwrap();
+        let locations = locations_for(dir, &[a, b, "YuQRtpLP10I"]);
+        let assert = reports(&server, &locations, out)
+            .args(["--level", "2", "--period", "202501"])
+            .args(extra)
+            .assert()
+            .success();
+        stdout(&assert)
+    };
+    let row = |dx: &str, ou: &str, num: f64| {
+        json!([
+            dx,
+            "202501",
+            ou,
+            format!("{}", num * 10.0),
+            format!("{num}"),
+            "10.0"
+        ])
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let reports_file = dir.path().join("reports.ndjson");
+    run(
+        "2026-10-12T02:07:00.052",
+        vec![
+            row("tUIlpyeeX9N", a, 5.0),
+            row("tUIlpyeeX9N", b, 3.0),
+            row("FbKK4ofIv5R", a, 1.0),
+        ],
+        &reports_file,
+        &[],
+    );
+    // Reports the next run does not ask for: another period, an org unit at
+    // another level, another instance's Measure. None of them is removed.
+    let first = read_ndjson(&reports_file);
+    let mut other_period = first[2].clone();
+    other_period["id"] = json!("sl-demo-tUIlpyeeX9N-O6uvpzGd5pu-202412");
+    other_period["extension"][0]["valueString"] = json!("202412");
+    let mut other_level = first[2].clone();
+    other_level["id"] = json!("sl-demo-tUIlpyeeX9N-YuQRtpLP10I-202501");
+    other_level["subject"]["reference"] = json!("Location/sle-YuQRtpLP10I");
+    let mut other_instance = first[2].clone();
+    other_instance["id"] = json!("other-tUIlpyeeX9N-O6uvpzGd5pu-202501");
+    other_instance["measure"] = json!("https://icr.healthcampaigns.org/Measure/other-tUIlpyeeX9N");
+    let mut text = std::fs::read_to_string(&reports_file).unwrap();
+    for r in [&other_period, &other_level, &other_instance] {
+        text.push_str(&format!("{r}\n"));
+    }
+    std::fs::write(&reports_file, text).unwrap();
+
+    // A day later, after another analytics build: one value the same, one
+    // changed, one new and one gone. The baseline is rolled in place.
+    let changed = dir.path().join("changed.ndjson");
+    let removed = dir.path().join("removed.txt");
+    let out = run(
+        "2026-10-13T02:07:00.052",
+        vec![
+            row("tUIlpyeeX9N", a, 5.0),
+            row("tUIlpyeeX9N", b, 4.0),
+            row("FbKK4ofIv5R", b, 2.0),
+        ],
+        &reports_file,
+        &[
+            "--previous",
+            reports_file.to_str().unwrap(),
+            "--changed",
+            changed.to_str().unwrap(),
+            "--removed",
+            removed.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.contains("1 new, 1 changed, 1 unchanged, 1 removed"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Wrote 2 new or changed MeasureReports"),
+        "{out}"
+    );
+    let ids = |p: &Path| -> Vec<String> {
+        read_ndjson(p)
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        ids(&changed),
+        [
+            "sl-demo-FbKK4ofIv5R-fdc6uOvgoji-202501",
+            "sl-demo-tUIlpyeeX9N-fdc6uOvgoji-202501"
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(&removed).unwrap(),
+        "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-202501\n"
+    );
+    // --out has every report of this run, the baseline for the next.
+    let all = read_ndjson(&reports_file);
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[2]["date"], "2026-10-13T02:07:00.052Z");
+}
+
+#[test]
+fn an_interrupted_run_resumes_to_the_same_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(
+        dir.path(),
+        &["O6uvpzGd5pu", "fdc6uOvgoji", "YuQRtpLP10I", "vWbkYPRmKyS"],
+    );
+    let run = |server: &Server, out: &Path, extra: &[&str]| {
+        let mut c = reports(server, &locations, out);
+        c.args(["--level", "2", "--level", "3", "--chunk", "1"])
+            .args([
+                "--period", "202501", "--period", "202502", "--period", "202503",
+            ])
+            .args(extra);
+        c.assert()
+    };
+    let full = dir.path().join("full.ndjson");
+    let whole = run(&stub_units(false, 0, None), &full, &["--max-rows", "1"]).success();
+
+    // The seventh batch is refused: six are written and checkpointed. The
+    // DHIS2 URL is part of the plan, so every later run uses this server.
+    let mut server = Server::run();
+    expect_units_batches(&server, false, 0, Some(6));
+    let out = dir.path().join("r.ndjson");
+    let (tmp, checkpoint) = (
+        dir.path().join("r.ndjson.tmp"),
+        dir.path().join("r.ndjson.resume"),
+    );
+    let failed = run(&server, &out, &["--max-rows", "1", "--concurrency", "1"]).code(2);
+    assert!(
+        stderr(&failed).contains("6 of 12 batches written"),
+        "{}",
+        stderr(&failed)
+    );
+    assert!(!out.exists() && tmp.exists() && checkpoint.exists());
+    // A crash halfway through writing the next batch.
+    let mut partial = std::fs::read(&tmp).unwrap();
+    partial.extend_from_slice(br#"{"resourceType":"MeasureRep"#);
+    std::fs::write(&tmp, partial).unwrap();
+
+    // Planned differently: refused, and nothing is lost.
+    server.verify_and_clear();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 2);
+    expect_units(&server, 3, 2);
+    let refused = run(&server, &out, &["--max-rows", "2", "--resume"]).code(2);
+    assert!(
+        stderr(&refused).contains("was planned differently (max_rows changed)"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(tmp.exists() && checkpoint.exists());
+
+    // Resumed: only the last six batches are asked for.
+    server.verify_and_clear();
+    expect_units_batches(&server, false, 6, None);
+    let resumed = run(&server, &out, &["--max-rows", "1", "--resume"]).success();
+    assert!(
+        stderr(&resumed).contains("resuming after batch 6 of 12"),
+        "{}",
+        stderr(&resumed)
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&full).unwrap());
+    assert!(!tmp.exists() && !checkpoint.exists());
+    let summary = |a: &Assert| {
+        stdout(a)
+            .replace(full.to_str().unwrap(), "OUT")
+            .replace(out.to_str().unwrap(), "OUT")
+    };
+    assert_eq!(summary(&resumed), summary(&whole));
+    assert!(
+        summary(&whole).contains("Wrote 24 MeasureReports to OUT (2 indicators, 4 Locations, 3 periods; 24 values from 12 analytics requests)"),
+        "{}",
+        summary(&whole)
     );
 }

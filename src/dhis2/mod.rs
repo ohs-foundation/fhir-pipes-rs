@@ -15,9 +15,10 @@ pub mod api;
 pub mod locations;
 pub mod measures;
 pub mod reports;
+pub mod rerun;
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -153,12 +154,15 @@ pub fn write_ndjson<'a>(
 
 /// NDJSON written as it is produced: lines go to `<out>.ndjson.tmp`, which
 /// `finish` renames into place. Dropped unfinished (a failed run), the
-/// temporary file is removed.
+/// temporary file is removed, unless `keep_partial` asked to keep it for a
+/// later run to continue.
 pub struct NdjsonWriter {
     out: PathBuf,
     tmp: PathBuf,
     w: Option<BufWriter<File>>,
     n: usize,
+    bytes: u64,
+    keep: bool,
 }
 
 impl NdjsonWriter {
@@ -170,18 +174,72 @@ impl NdjsonWriter {
             tmp,
             w: Some(BufWriter::new(file)),
             n: 0,
+            bytes: 0,
+            keep: false,
         })
+    }
+
+    /// Carries on with the temporary file of an interrupted run: cut back
+    /// to `bytes`, the length last synced, dropping anything half-written
+    /// after it, then appended to.
+    pub fn resume(out: &Path, bytes: u64) -> Result<Self> {
+        let tmp = out.with_extension("ndjson.tmp");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| KilnError::io(&tmp, e))?;
+        let len = file.metadata().map_err(|e| KilnError::io(&tmp, e))?.len();
+        if len < bytes {
+            return Err(KilnError::Usage(format!(
+                "{}: {len} bytes, shorter than the {bytes} recorded; run without --resume to start over",
+                tmp.display()
+            )));
+        }
+        file.set_len(bytes).map_err(|e| KilnError::io(&tmp, e))?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|e| KilnError::io(&tmp, e))?;
+        Ok(Self {
+            out: out.to_path_buf(),
+            tmp,
+            w: Some(BufWriter::new(file)),
+            n: 0,
+            bytes,
+            keep: false,
+        })
+    }
+
+    /// Keep the temporary file if the run fails.
+    pub fn keep_partial(mut self) -> Self {
+        self.keep = true;
+        self
+    }
+
+    pub fn tmp(&self) -> &Path {
+        &self.tmp
     }
 
     pub fn write(&mut self, r: &Value) -> Result<()> {
         let w = self.w.as_mut().expect("written after finish");
-        serde_json::to_writer(&mut *w, r)?;
-        w.write_all(b"\n")
+        let mut line = serde_json::to_vec(r)?;
+        line.push(b'\n');
+        w.write_all(&line)
             .map_err(|e| KilnError::io(&self.tmp, e))?;
         self.n += 1;
+        self.bytes += line.len() as u64;
         Ok(())
     }
 
+    /// Flushes everything written to disk; returns the file's length.
+    pub fn sync(&mut self) -> Result<u64> {
+        let w = self.w.as_mut().expect("synced after finish");
+        w.flush().map_err(|e| KilnError::io(&self.tmp, e))?;
+        w.get_ref()
+            .sync_data()
+            .map_err(|e| KilnError::io(&self.tmp, e))?;
+        Ok(self.bytes)
+    }
+
+    /// Renames the file into place; returns the lines this writer wrote.
     pub fn finish(mut self) -> Result<usize> {
         let mut w = self.w.take().expect("finished once");
         w.flush().map_err(|e| KilnError::io(&self.tmp, e))?;
@@ -195,7 +253,9 @@ impl Drop for NdjsonWriter {
     fn drop(&mut self) {
         if let Some(w) = self.w.take() {
             drop(w);
-            let _ = std::fs::remove_file(&self.tmp);
+            if !self.keep {
+                let _ = std::fs::remove_file(&self.tmp);
+            }
         }
     }
 }

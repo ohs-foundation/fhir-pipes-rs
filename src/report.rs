@@ -2,20 +2,22 @@
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One kind can fire once per row; at 100k rows that is a report larger than
 /// the dataset. Keep this many per kind; counts stay exact regardless.
 pub const MAX_RETAINED_ISSUES_PER_KIND: usize = 1000;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Issue {
     pub kind: String,
     pub location_id: String,
     pub detail: String,
 }
 
-#[derive(Debug, Default)]
+/// Serializable so a run can save it and carry on later (`kiln dhis2
+/// reports --resume`).
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
     pub issues: Vec<Issue>,
     counts: BTreeMap<String, usize>,

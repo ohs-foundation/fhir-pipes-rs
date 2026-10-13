@@ -204,7 +204,8 @@ kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEA
 kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
                (--period PE | --range START:END) […] --level N [--level N …] --out REPORTS.ndjson
                [--campaign TYPE/ID] [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
-               [--concurrency 4] [--report FILE]
+               [--concurrency 4] [--previous PREV.ndjson [--changed CHANGED.ndjson]
+               [--removed REMOVED.txt]] [--resume] [--report FILE]
 
 DHIS2_AUTH:    --dhis2-token d2pat_…  |  --dhis2-user U --dhis2-password P
 INDICATORS:    any of --indicator-group UID, --indicator UID, --data-element-group UID,
@@ -951,10 +952,57 @@ Reports are written as each batch arrives, so memory holds a few batches
 at a time rather than the whole export. `--concurrency` (4) batches are
 fetched at once; the output is written in planned order (level, then
 indicator chunk, then periods, sorted by id within each batch), so it is
-the same file whatever the setting. The file is written as
-`OUT.ndjson.tmp` and renamed when the run succeeds; a failed run removes
-it. After each batch kiln prints a line like
+the same file whatever the setting. After each batch kiln prints a line
+like
 `[37/412] level 4 · 20260421…20260427 (7 periods) · 10 items: 33,656 values · 4m12s elapsed, ~38m left`.
+
+The file is written as `OUT.ndjson.tmp` and renamed when the run succeeds.
+After each batch kiln syncs it to disk and records in `OUT.ndjson.resume`
+how many batches it holds and how long it is. A run that fails, or is
+stopped, keeps both files; `--resume` carries on after the last batch
+recorded, cutting off anything written after it (a batch half-written
+when the run stopped is fetched again), and the output is the same file
+an uninterrupted run writes, with the same summary. kiln refuses to resume
+if anything that decides the batches or their content has changed since:
+the arguments (other than `--concurrency`), the DHIS2 URL, an org unit
+count, when DHIS2 last built its analytics tables, or the `--locations` or
+`--previous` file (size and modification time). Run without `--resume` to
+start over. `OUT.ndjson.resume` is removed when the run succeeds.
+
+`--previous PREV.ndjson` compares this run with an earlier one, so a rerun
+need only send what changed to the FHIR server. `--out` still gets every
+report the run returns: it is the baseline for the next run, and may be
+the same file as `--previous` (the previous file is read before the new
+one replaces it). The comparison counts each report as new (its id is not
+in PREV), changed or unchanged, and prints
+`Compared with PREV: 12 new, 340 changed, 822,580 unchanged, 3 removed`.
+
+- `--changed CHANGED.ndjson` gets the new and changed reports, in the same
+  order as `--out`: load this one.
+- `--removed REMOVED.txt` gets, one per line, the ids of reports in PREV
+  that this run asked for again but DHIS2 no longer returns (a value
+  deleted in DHIS2), so they can be deleted from the FHIR server
+  (`DELETE MeasureReport/<id>`). A report counts as asked for again when
+  its Measure is one of this run's indicators, its Location is one of the
+  org units DHIS2 lists for this run's levels, and its period is one of
+  this run's periods (relative periods expanded the way DHIS2 lists them)
+  or ranges. Reports for other indicators, levels or periods are left
+  alone, so a run that covers part of an export never lists the rest as
+  removed.
+
+Content is compared through a hash of each report. `date` is left out: it
+is when DHIS2 last built its analytics tables, which changes every night
+whether or not a value did, so a report whose value is the same keeps the
+`date` of the run that last sent it. `meta.lastUpdated` and
+`meta.versionId` (set by a FHIR server) are left out too. Memory holds a
+hash per id, not the previous reports, and the previous file is read a
+second time at the end to find the removed ids.
+
+```sh
+kiln dhis2 reports … --out bgd-reports.ndjson                # first run: load all of it
+kiln dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndjson \
+  --changed bgd-changed.ndjson --removed bgd-removed.txt   # later runs: load the changes
+```
 
 Report kinds: `stratum_without_total` (a breakdown value whose total DHIS2
 did not return), `fractional_count` (a numerator or denominator that is not a

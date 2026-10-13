@@ -20,11 +20,13 @@
 //! `--max-rows`). Workers fetch units in parallel; each unit's totals and
 //! breakdowns come back together, and its reports are written as soon as
 //! every unit before it has been, so memory holds a few units at a time and
-//! the file is the same at any `--concurrency`.
+//! the file is the same at any `--concurrency`. After each unit the file is
+//! synced and a checkpoint saved, so `--resume` can continue an interrupted
+//! run; `--previous` compares with an earlier run (see `rerun`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -33,6 +35,9 @@ use serde_json::{json, Value};
 
 use super::api::{Dhis2, ServerInfo};
 use super::measures::{fetch_indicators, fhir_key, Indicator, Scoring, MEASURE_POPULATION_SYSTEM};
+use super::rerun::{
+    file_stamp, plan_differences, write_lines, Change, Checkpoint, Previous, Scope,
+};
 use super::{check_out, Instance, NdjsonWriter};
 use crate::cli::Dhis2ReportsArgs;
 use crate::error::{KilnError, Result};
@@ -105,6 +110,10 @@ pub struct Analytics {
     pub periods: HashMap<String, (String, String)>,
     /// Display name of every item in the response (dimensions and their options).
     pub names: HashMap<String, String>,
+    /// Every org unit and period the request covered, data or not, as
+    /// DHIS2 lists them in `metaData.dimensions` (relative periods expanded).
+    pub org_units: Vec<String>,
+    pub period_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -182,10 +191,21 @@ pub fn parse_analytics(v: &Value, breakdown: Option<&str>) -> Result<Analytics> 
             }
         }
     }
+    let dimension = |d: &str| -> Vec<String> {
+        v.pointer(&format!("/metaData/dimensions/{d}"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
     Ok(Analytics {
         rows,
         periods,
         names,
+        org_units: dimension("ou"),
+        period_codes: dimension("pe"),
     })
 }
 
@@ -263,10 +283,7 @@ pub fn measure_report(
         group["population"] = Value::Array(populations);
     }
     group["measureScore"] = json!({"value": score});
-    let pe = match DateRange::from_code(&row.pe) {
-        Some(range) => range.label(),
-        None => row.pe.clone(),
-    };
+    let pe = period_value(&row.pe);
     let mut r = json!({
         "resourceType": "MeasureReport",
         "id": id,
@@ -424,6 +441,15 @@ impl DateRange {
             start: date(a)?,
             end: date(b)?,
         })
+    }
+}
+
+/// The `dhis2-period` extension's value for a row's period code: the code,
+/// or a range's label.
+pub fn period_value(pe: &str) -> String {
+    match DateRange::from_code(pe) {
+        Some(range) => range.label(),
+        None => pe.to_string(),
     }
 }
 
@@ -778,24 +804,70 @@ fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) 
     Ok(())
 }
 
+/// Totals that can be counted from the reports themselves, so a resumed run
+/// recounts them from what the interrupted run wrote.
+#[derive(Debug, Default)]
+struct Tally {
+    written: usize,
+    locations: HashSet<String>,
+    periods: HashSet<String>,
+    stratified: usize,
+    new: usize,
+    changed: usize,
+    unchanged: usize,
+}
+
+impl Tally {
+    /// Counts one written report, comparing it with the previous run's.
+    fn add(&mut self, r: &Value, previous: Option<&mut Previous>) -> Option<Change> {
+        self.written += 1;
+        if let Some(s) = r.pointer("/subject/reference").and_then(Value::as_str) {
+            if !self.locations.contains(s) {
+                self.locations.insert(s.to_string());
+            }
+        }
+        if let Some(pe) = r
+            .pointer("/extension/0/valueString")
+            .and_then(Value::as_str)
+        {
+            if !self.periods.contains(pe) {
+                self.periods.insert(pe.to_string());
+            }
+        }
+        self.stratified += r
+            .pointer("/group/0/stratifier")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let change = previous.map(|p| p.classify(r));
+        match change {
+            Some(Change::New) => self.new += 1,
+            Some(Change::Changed) => self.changed += 1,
+            Some(Change::Unchanged) => self.unchanged += 1,
+            None => {}
+        }
+        change
+    }
+}
+
 /// Turns fetched units into written reports. It runs on one thread and
 /// takes units in planned order, so the output and the run report are the
 /// same at any `--concurrency`; it keeps running totals, not reports.
+/// After each unit the output is synced and the checkpoint saved, so an
+/// interrupted run can carry on from there.
 struct Writer<'a> {
     out: NdjsonWriter,
+    /// `--changed`: the new and changed reports.
+    changed: Option<NdjsonWriter>,
+    previous: Option<Previous>,
     instance: &'a Instance,
     info: &'a ServerInfo,
     indicators: &'a BTreeMap<String, Indicator>,
     mapping: &'a HashMap<String, Target>,
     /// `--campaign`, added to every report after the period extension.
     campaign: Option<&'a str>,
-    report: Report,
-    unmapped: HashSet<String>,
-    locations: HashSet<String>,
-    periods: HashSet<String>,
-    values: usize,
-    requests: usize,
-    stratified: usize,
+    state: Checkpoint,
+    checkpoint: PathBuf,
+    tally: Tally,
 }
 
 impl<'a> Writer<'a> {
@@ -805,7 +877,7 @@ impl<'a> Writer<'a> {
         let indicators = self.indicators;
         let mapping = self.mapping;
         let Some(ind) = indicators.get(&row.dx) else {
-            self.report.add(
+            self.state.report.add(
                 "unexpected_indicator",
                 &row.dx,
                 "DHIS2 returned an indicator that was not asked for; skipped",
@@ -813,8 +885,8 @@ impl<'a> Writer<'a> {
             return None;
         };
         let Some(location) = mapping.get(&row.ou) else {
-            if self.unmapped.insert(row.ou.clone()) {
-                self.report.add(
+            if self.state.unmapped.insert(row.ou.clone()) {
+                self.state.report.add(
                     "unmapped_org_unit",
                     &row.ou,
                     "no Location carries this org unit; its values are skipped",
@@ -825,6 +897,30 @@ impl<'a> Writer<'a> {
         Some((ind, location))
     }
 
+    /// With `--previous`, notes the org units and periods a response
+    /// covered: where removed values are looked for.
+    fn scope(&mut self, table: &Analytics) {
+        if self.previous.is_none() {
+            return;
+        }
+        let s = &mut self.state;
+        for ou in table
+            .org_units
+            .iter()
+            .chain(table.rows.iter().map(|r| &r.ou))
+        {
+            if !s.scope_org_units.contains(ou) {
+                s.scope_org_units.insert(ou.clone());
+            }
+        }
+        for pe in &table.period_codes {
+            s.scope_periods.insert(period_value(pe));
+        }
+        for row in &table.rows {
+            s.scope_periods.insert(period_value(&row.pe));
+        }
+    }
+
     /// Writes one unit's reports, sorted by id, with its strata attached to
     /// its totals; returns how many values DHIS2 sent for it.
     fn unit(&mut self, f: Fetched) -> Result<usize> {
@@ -832,28 +928,28 @@ impl<'a> Writer<'a> {
         let mut out: BTreeMap<String, Value> = BTreeMap::new();
         for table in &f.totals {
             rows += table.rows.len();
+            self.scope(table);
             for row in &table.rows {
                 let Some((ind, location)) = self.target(row) else {
                     continue;
                 };
                 let Some(period) = table.periods.get(&row.pe) else {
-                    self.report.add(
+                    self.state.report.add(
                         "period_without_dates",
                         &row.pe,
                         "DHIS2 gave no start and end date for this period; row skipped",
                     );
                     continue;
                 };
-                if let Some(r) = measure_report(
+                if let Some(mut r) = measure_report(
                     row,
                     ind,
                     location,
                     period,
                     self.instance,
                     self.info,
-                    &mut self.report,
+                    &mut self.state.report,
                 ) {
-                    let mut r = r;
                     if let (Some(c), Some(ext)) = (self.campaign, r["extension"].as_array_mut()) {
                         ext.push(json!({"url": CAMPAIGN_EXTENSION_URL, "valueReference": {"reference": c}}));
                     }
@@ -871,9 +967,14 @@ impl<'a> Writer<'a> {
                     let Some((ind, _)) = self.target(row) else {
                         continue;
                     };
-                    if let Some(st) =
-                        stratum(row, ind, b, &table.names, self.instance, &mut self.report)
-                    {
+                    if let Some(st) = stratum(
+                        row,
+                        ind,
+                        b,
+                        &table.names,
+                        self.instance,
+                        &mut self.state.report,
+                    ) {
                         let name = table.names.get(b).cloned().unwrap_or_else(|| b.clone());
                         strata
                             .entry((report_id(self.instance, row), b.clone()))
@@ -886,7 +987,7 @@ impl<'a> Writer<'a> {
         }
         for ((rid, b), (name, mut list)) in strata {
             let Some(r) = out.get_mut(&rid) else {
-                self.report.add(
+                self.state.report.add(
                     "stratum_without_total",
                     &rid,
                     &format!("DHIS2 broke a value down by {name} but gave no total for it; breakdown left out"),
@@ -909,28 +1010,52 @@ impl<'a> Writer<'a> {
                 Some(existing) => existing.push(stratifier),
                 None => r["group"][0]["stratifier"] = json!([stratifier]),
             }
-            self.stratified += 1;
         }
 
         for r in out.values() {
-            if let Some(s) = r.pointer("/subject/reference").and_then(Value::as_str) {
-                if !self.locations.contains(s) {
-                    self.locations.insert(s.to_string());
-                }
-            }
-            if let Some(pe) = r
-                .pointer("/extension/0/valueString")
-                .and_then(Value::as_str)
-            {
-                if !self.periods.contains(pe) {
-                    self.periods.insert(pe.to_string());
-                }
-            }
+            let change = self.tally.add(r, self.previous.as_mut());
             self.out.write(r)?;
+            if let (Some(w), Some(Change::New | Change::Changed)) = (self.changed.as_mut(), change)
+            {
+                w.write(r)?;
+            }
         }
-        self.values += rows;
-        self.requests += f.requests;
+        self.state.values += rows;
+        self.state.requests += f.requests;
         Ok(rows)
+    }
+
+    /// Syncs everything written and records that `units_done` units are in
+    /// the files. A crash before this leaves the last checkpoint, and a
+    /// resumed run cuts the files back to it.
+    fn save(&mut self, units_done: usize) -> Result<()> {
+        self.state.out_bytes = self.out.sync()?;
+        if let Some(w) = &mut self.changed {
+            self.state.changed_bytes = Some(w.sync()?);
+        }
+        self.state.units_done = units_done;
+        self.state.write(&self.checkpoint)
+    }
+
+    /// After a resume: counts the reports the interrupted run wrote, and
+    /// marks their ids as written again for `--removed`.
+    fn recount(&mut self) -> Result<()> {
+        let path = self.out.tmp().to_path_buf();
+        let file = std::fs::File::open(&path).map_err(|e| KilnError::io(&path, e))?;
+        let mut reader = BufReader::new(file).take(self.state.out_bytes);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader
+                .read_line(&mut line)
+                .map_err(|e| KilnError::io(&path, e))?
+                == 0
+            {
+                return Ok(());
+            }
+            let r: Value = serde_json::from_str(&line)?;
+            self.tally.add(&r, self.previous.as_mut());
+        }
     }
 }
 
@@ -960,10 +1085,17 @@ fn clock(d: Duration, rough: bool) -> String {
 
 /// `[37/412] level 4 · 20260421…20260427 (7 periods) · 10 items: 33,656
 /// values · 4m12s elapsed, ~38m left`. The estimate assumes the units left
-/// take as long as the ones done.
-fn progress(done: usize, total: usize, unit: &Unit, values: usize, elapsed: Duration) -> String {
-    let left = if done < total {
-        let rest = elapsed.mul_f64((total - done) as f64 / done as f64);
+/// take as long as the ones done since `start` (where a resumed run began).
+fn progress(
+    done: usize,
+    start: usize,
+    total: usize,
+    unit: &Unit,
+    values: usize,
+    elapsed: Duration,
+) -> String {
+    let left = if done < total && done > start {
+        let rest = elapsed.mul_f64((total - done) as f64 / (done - start) as f64);
         format!(", ~{} left", clock(rest, true))
     } else {
         String::new()
@@ -1004,6 +1136,25 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         return Err(KilnError::Usage(
             "--level counts from 1, the top of the DHIS2 tree".into(),
         ));
+    }
+    for (flag, path) in [("--changed", &args.changed), ("--removed", &args.removed)] {
+        if let Some(p) = path {
+            check_out(p)?;
+            if p == &args.out || Some(p) == args.previous.as_ref() {
+                return Err(KilnError::Usage(format!(
+                    "{flag} {}: must be a file of its own, not --out or --previous",
+                    p.display()
+                )));
+            }
+        }
+    }
+    if let Some(p) = &args.previous {
+        if !p.is_file() {
+            return Err(KilnError::Usage(format!(
+                "--previous {}: no such file",
+                p.display()
+            )));
+        }
     }
     let instance = Instance::new(&args.conn.instance)?;
     let ranges = unique(&args.ranges)
@@ -1065,48 +1216,130 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         eprintln!("level {level}: {n} org units");
         levels.push((level, n));
     }
-    let units = plan(
-        &levels,
-        &unique(&args.periods),
-        &ranges,
-        &ids,
-        args.chunk,
-        args.max_rows,
-    );
+    let periods = unique(&args.periods);
+    let units = plan(&levels, &periods, &ranges, &ids, args.chunk, args.max_rows);
     let total = units.len();
     eprintln!(
         "{total} batches, {} analytics requests unless DHIS2 calls some too large",
         total * (1 + args.breakdowns.len())
     );
 
+    // Everything that decides the batches and what goes in them. An
+    // interrupted run is continued only under the same plan.
+    let fingerprint = json!({
+        "dhis2": args.conn.url,
+        "instance": instance.name,
+        "last_analytics": api.info.last_analytics,
+        "indicators": ids,
+        "levels": levels,
+        "periods": periods,
+        "ranges": ranges.iter().map(DateRange::label).collect::<Vec<_>>(),
+        "root": args.root,
+        "breakdowns": args.breakdowns,
+        "chunk": args.chunk,
+        "max_rows": args.max_rows,
+        "campaign": args.campaign,
+        "locations": file_stamp(&args.locations),
+        "previous": args.previous.as_deref().map(file_stamp),
+        "changed": args.changed.as_ref().map(|p| p.display().to_string()),
+    });
+    let checkpoint = Checkpoint::path(&args.out);
+    let saved = if args.resume {
+        let saved = Checkpoint::read(&checkpoint)?
+            .filter(|_| args.out.with_extension("ndjson.tmp").is_file());
+        if saved.is_none() {
+            eprintln!(
+                "no interrupted run to resume at {}; starting from the beginning",
+                args.out.display()
+            );
+        }
+        saved
+    } else {
+        if checkpoint.is_file() {
+            eprintln!(
+                "starting over; the interrupted run at {} is discarded (--resume continues it)",
+                args.out.display()
+            );
+        }
+        None
+    };
+    if let Some(s) = &saved {
+        let differ = plan_differences(&s.plan, &fingerprint);
+        if !differ.is_empty() {
+            return Err(KilnError::Usage(format!(
+                "--resume: the interrupted run at {} was planned differently ({} changed); run without --resume to start over",
+                args.out.display(),
+                differ.join(", ")
+            )));
+        }
+    }
+
+    let previous = match &args.previous {
+        Some(p) => {
+            let prev = Previous::load(p)?;
+            eprintln!("{}: {} previous reports", p.display(), prev.len());
+            Some(prev)
+        }
+        None => None,
+    };
+    let start = saved.as_ref().map_or(0, |s| s.units_done);
+    let (out, changed, state) = match saved {
+        Some(s) => {
+            let out = NdjsonWriter::resume(&args.out, s.out_bytes)?;
+            let changed = match (&args.changed, s.changed_bytes) {
+                (Some(p), Some(bytes)) => Some(NdjsonWriter::resume(p, bytes)?),
+                (Some(p), None) => Some(NdjsonWriter::create(p)?),
+                (None, _) => None,
+            };
+            eprintln!(
+                "resuming after batch {start} of {total} ({})",
+                args.out.with_extension("ndjson.tmp").display()
+            );
+            (out, changed, s)
+        }
+        None => (
+            NdjsonWriter::create(&args.out)?,
+            args.changed
+                .as_deref()
+                .map(NdjsonWriter::create)
+                .transpose()?,
+            Checkpoint {
+                plan: fingerprint,
+                ..Checkpoint::default()
+            },
+        ),
+    };
     let mut w = Writer {
-        out: NdjsonWriter::create(&args.out)?,
+        out: out.keep_partial(),
+        changed: changed.map(NdjsonWriter::keep_partial),
+        previous,
         instance: &instance,
         info: &api.info,
         indicators: &indicators,
         mapping: &mapping,
         campaign: args.campaign.as_deref(),
-        report: Report::default(),
-        unmapped: HashSet::new(),
-        locations: HashSet::new(),
-        periods: HashSet::new(),
-        values: 0,
-        requests: 0,
-        stratified: 0,
+        state,
+        checkpoint: checkpoint.clone(),
+        tally: Tally::default(),
     };
+    if start > 0 {
+        w.recount()?;
+    }
+    w.save(start)?;
 
     // Workers fetch units from a shared counter; this thread writes them in
     // planned order, holding back any that finish early. A worker does not
     // start a unit more than `window` ahead of the last one written, so
     // memory stays at a few units, not the whole export.
-    let workers = args.concurrency.min(total).max(1);
+    let workers = args.concurrency.min(total - start).max(1);
     let window = workers * 2;
-    let next = AtomicUsize::new(0);
+    let next = AtomicUsize::new(start);
     let stop = AtomicBool::new(false);
-    let written = (Mutex::new(0usize), Condvar::new());
+    let written = (Mutex::new(start), Condvar::new());
     let (tx, rx) = mpsc::sync_channel::<(usize, Result<Fetched>)>(window);
     let started = Instant::now();
     let mut failure: Option<KilnError> = None;
+    let mut cursor = start;
     std::thread::scope(|s| {
         for _ in 0..workers {
             let tx = tx.clone();
@@ -1134,7 +1367,6 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         }
         drop(tx);
         let mut pending: HashMap<usize, Fetched> = HashMap::new();
-        let mut cursor = 0usize;
         for (i, fetched) in rx.iter() {
             match fetched {
                 Ok(f) => {
@@ -1146,10 +1378,20 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
                 }
             }
             while let Some(f) = pending.remove(&cursor) {
-                match w.unit(f) {
+                match w
+                    .unit(f)
+                    .and_then(|values| w.save(cursor + 1).map(|_| values))
+                {
                     Ok(values) => eprintln!(
                         "{}",
-                        progress(cursor + 1, total, &units[cursor], values, started.elapsed())
+                        progress(
+                            cursor + 1,
+                            start,
+                            total,
+                            &units[cursor],
+                            values,
+                            started.elapsed()
+                        )
                     ),
                     Err(e) => {
                         failure = Some(e);
@@ -1175,36 +1417,96 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         }
     });
     if let Some(e) = failure {
+        eprintln!(
+            "{cursor} of {total} batches written to {}; run again with --resume to continue from there",
+            w.out.tmp().display()
+        );
         return Err(e);
     }
 
+    // Previous reports this run would have written but DHIS2 no longer has.
+    // Read before --out is renamed, as it may be the --previous file.
+    let removed = match &w.previous {
+        Some(prev) => {
+            let mut scope = Scope {
+                measures: ids
+                    .iter()
+                    .map(|dx| instance.measure_url(&fhir_key(dx)))
+                    .collect(),
+                subjects: w
+                    .state
+                    .scope_org_units
+                    .iter()
+                    .filter_map(|ou| mapping.get(ou))
+                    .map(|t| format!("Location/{}", t.id))
+                    .collect(),
+                periods: w.state.scope_periods.iter().cloned().collect(),
+            };
+            scope
+                .periods
+                .extend(periods.iter().filter(|p| period_kind(p).is_some()).cloned());
+            scope.periods.extend(ranges.iter().map(DateRange::label));
+            Some(prev.removed(|r| scope.contains(r, PERIOD_EXTENSION_URL))?)
+        }
+        None => None,
+    };
+
     let Writer {
         out,
-        report,
-        locations,
-        periods,
-        values,
-        requests,
-        stratified,
+        changed,
+        state,
+        tally,
         ..
     } = w;
-    let n = out.finish()?;
+    if let Some(c) = changed {
+        c.finish()?;
+    }
+    if let (Some(path), Some(ids)) = (&args.removed, &removed) {
+        write_lines(path, ids)?;
+    }
+    out.finish()?;
+    std::fs::remove_file(&checkpoint).map_err(|e| KilnError::io(&checkpoint, e))?;
+
     println!(
-        "Wrote {n} MeasureReports to {} ({} indicators, {} Locations, {} periods; {values} values from {requests} analytics requests)",
+        "Wrote {} MeasureReports to {} ({} indicators, {} Locations, {} periods; {} values from {} analytics requests)",
+        tally.written,
         args.out.display(),
         indicators.len(),
-        locations.len(),
-        periods.len()
+        tally.locations.len(),
+        tally.periods.len(),
+        state.values,
+        state.requests
     );
     if !args.breakdowns.is_empty() {
         println!(
-            "{stratified} breakdowns attached ({} dimensions)",
+            "{} breakdowns attached ({} dimensions)",
+            tally.stratified,
             args.breakdowns.len()
         );
     }
-    println!("{}", report.summary());
+    if let (Some(prev), Some(removed)) = (&args.previous, &removed) {
+        println!(
+            "Compared with {}: {} new, {} changed, {} unchanged, {} removed",
+            prev.display(),
+            tally.new,
+            tally.changed,
+            tally.unchanged,
+            removed.len()
+        );
+        if let Some(p) = &args.changed {
+            println!(
+                "Wrote {} new or changed MeasureReports to {}",
+                tally.new + tally.changed,
+                p.display()
+            );
+        }
+        if let Some(p) = &args.removed {
+            println!("Wrote {} removed ids to {}", removed.len(), p.display());
+        }
+    }
+    println!("{}", state.report.summary());
     if let Some(path) = &args.report {
-        write_report(path, &report)?;
+        write_report(path, &state.report)?;
     }
     Ok(())
 }
@@ -1550,7 +1852,7 @@ mod tests {
             indicators: codes(&["a"; 10]),
         };
         assert_eq!(
-            progress(37, 412, &unit, 33_656, Duration::from_secs(252)),
+            progress(37, 0, 412, &unit, 33_656, Duration::from_secs(252)),
             "[37/412] level 4 · 20260421…20260427 (3 periods) · 10 items: 33,656 values · 4m12s elapsed, ~42m left"
         );
         let one = Unit {
@@ -1558,7 +1860,7 @@ mod tests {
             ..unit
         };
         assert_eq!(
-            progress(2, 2, &one, 5, Duration::from_secs(3725)),
+            progress(2, 0, 2, &one, 5, Duration::from_secs(3725)),
             "[2/2] level 4 · 2025 · 10 items: 5 values · 1h02m elapsed"
         );
         assert_eq!(thousands(999), "999");

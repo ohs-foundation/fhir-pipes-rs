@@ -67,7 +67,7 @@ pub enum Dhis2Command {
     /// Indicators as Measures
     Measures(Dhis2MeasuresArgs),
     /// Indicator values from DHIS2 analytics as MeasureReports, one per indicator, org unit and period
-    Reports(Dhis2ReportsArgs),
+    Reports(Box<Dhis2ReportsArgs>),
 }
 
 /// Where the DHIS2 instance is, how to sign in, and the short name kiln
@@ -209,9 +209,21 @@ pub struct Dhis2ReportsArgs {
     /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
     pub concurrency: usize,
-    /// Output NDJSON file of MeasureReport resources
+    /// Output NDJSON file of MeasureReport resources: every report this run returns, with or without --previous, so it is the baseline for the next run
     #[arg(long)]
     pub out: PathBuf,
+    /// A previous run's --out (it may be the same file as --out): reports with the same content there count as unchanged. `date`, when DHIS2 last built its analytics tables, is not compared
+    #[arg(long)]
+    pub previous: Option<PathBuf>,
+    /// With --previous: also write the new and changed reports here, the ones to load
+    #[arg(long, requires = "previous")]
+    pub changed: Option<PathBuf>,
+    /// With --previous: write here, one per line, the ids of previous reports this run asked for again (same indicators, levels' org units and periods) that DHIS2 no longer returns, to delete from the FHIR server
+    #[arg(long, requires = "previous")]
+    pub removed: Option<PathBuf>,
+    /// Continue an interrupted run after its last fully written batch instead of starting over. Refused if anything that shapes the batches has changed since (arguments, org unit counts, the analytics build, the --locations or --previous file)
+    #[arg(long)]
+    pub resume: bool,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,
