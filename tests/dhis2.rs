@@ -1620,3 +1620,119 @@ fn an_old_analytics_build_is_refused_or_warned_about() {
         stderr(&bad)
     );
 }
+
+#[test]
+fn org_unit_groups_are_coded_like_group_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    let run =
+        |args: &[&str], groups: &dyn Fn(&Server)| {
+            let server = Server::run();
+            expect_info(&server);
+            server.expect(
+                Expectation::matching(request::method_path(
+                    "GET",
+                    "/dhis/api/organisationUnitLevels.json",
+                ))
+                .respond_with(ok(json!({"organisationUnitLevels": [
+                {"level": 1, "name": "National"}, {"level": 2, "name": "District"}]}))),
+            );
+            server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/dhis/api/organisationUnits.json",
+            ))
+            .respond_with(ok(json!({"pager": {"page": 1, "pageCount": 1}, "organisationUnits": [
+                {"id": "ImspTQPwCqd", "name": "Sierra Leone", "level": 1},
+                {"id": "O6uvpzGd5pu", "name": "Bo", "level": 2, "parent": {"id": "ImspTQPwCqd"}}
+            ]}))),
+        );
+            groups(&server);
+            let out = dir.path().join("l.ndjson");
+            kiln()
+                .args([
+                    "dhis2",
+                    "locations",
+                    "--dhis2",
+                    &base(&server),
+                    "--instance",
+                    "sl-demo",
+                ])
+                .args(["--out", out.to_str().unwrap()])
+                .args(args)
+                .env("KILN_DHIS2_TOKEN", "d2pat_test")
+                .assert()
+                .success();
+            read_ndjson(&out)
+        };
+    let districts = json!({"id": "hSgatV6qHFI", "name": "Districts", "groupSets": [],
+                           "organisationUnits": [{"id": "O6uvpzGd5pu"}]});
+    let rural = json!({"id": "GGghZsfu7qV", "name": "Rural", "groupSets": [{"id": "Bpx0589u8y0"}],
+                       "organisationUnits": [{"id": "O6uvpzGd5pu"}, {"id": "notExported"}]});
+    let one = |v: &Value| {
+        let v = v.clone();
+        move |server: &Server| {
+            let uid = v["id"].as_str().unwrap().to_string();
+            server.expect(
+                Expectation::matching(request::method_path(
+                    "GET",
+                    leak(format!("/dhis/api/organisationUnitGroups/{uid}.json")),
+                ))
+                .respond_with(ok(v.clone())),
+            );
+        }
+    };
+    let (d, r) = (one(&districts), one(&rural));
+    let locs = run(
+        &[
+            "--org-unit-group",
+            "hSgatV6qHFI",
+            "--org-unit-group",
+            "GGghZsfu7qV",
+        ],
+        &|s: &Server| {
+            d(s);
+            r(s);
+        },
+    );
+    let by_id = |list: &[Value], id: &str| list.iter().find(|r| r["id"] == id).unwrap().clone();
+    let bo = &by_id(&locs, "sl-demo-O6uvpzGd5pu");
+    assert_eq!(
+        bo["type"][1]["coding"][0]["system"],
+        "https://icr.healthcampaigns.org/CodeSystem/dhis2/sl-demo/org-unit-group"
+    );
+    assert_eq!(bo["type"][1]["coding"][0]["code"], "hSgatV6qHFI");
+    // In a group set: the same coding --group-set gives.
+    assert_eq!(
+        bo["type"][2]["coding"][0]["system"],
+        "https://icr.healthcampaigns.org/CodeSystem/dhis2/sl-demo/dimension/Bpx0589u8y0"
+    );
+    assert_eq!(bo["type"][2]["text"], "Rural");
+    assert_eq!(
+        by_id(&locs, "sl-demo-ImspTQPwCqd")["type"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // The facility's Organization carries the same types.
+    assert_eq!(
+        by_id(&locs, "org-sl-demo-O6uvpzGd5pu")["type"][1]["coding"][0]["code"],
+        "hSgatV6qHFI"
+    );
+
+    let all = run(&["--all-org-unit-groups"], &|s: &Server| {
+        let list = json!({"pager": {"page": 1, "pageCount": 1},
+                          "organisationUnitGroups": [rural.clone(), districts.clone()]});
+        s.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                "/dhis/api/organisationUnitGroups.json",
+            ))
+            .respond_with(ok(list)),
+        );
+    });
+    // Sorted by group uid: GGghZsfu7qV before hSgatV6qHFI.
+    let bo = by_id(&all, "sl-demo-O6uvpzGd5pu");
+    assert_eq!(bo["type"][1]["text"], "Rural");
+    assert_eq!(bo["type"][2]["text"], "Districts");
+}

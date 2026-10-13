@@ -126,6 +126,12 @@ pub struct Dhis2LocationsArgs {
     /// Org unit group set UID, repeatable (e.g. Facility Type): each org unit's group in the set is added to its Location's type (and its Organization's, for facilities), coded like a --breakdown on the same set
     #[arg(long = "group-set")]
     pub group_sets: Vec<String>,
+    /// Org unit group UID, repeatable (e.g. the group of all districts): each member's Location (and Organization) gets the group in its type. A group in a group set is coded as --group-set codes it; a group in no set under …/CodeSystem/dhis2/INSTANCE/org-unit-group
+    #[arg(long = "org-unit-group")]
+    pub org_unit_groups: Vec<String>,
+    /// Every org unit group, as --org-unit-group
+    #[arg(long, conflicts_with = "org_unit_groups")]
+    pub all_org_unit_groups: bool,
     /// Output NDJSON file of Location and Organization resources
     #[arg(long)]
     pub out: PathBuf,

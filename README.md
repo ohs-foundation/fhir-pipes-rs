@@ -199,7 +199,8 @@ kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
                [--retries 3] [--timeout 3600]
 kiln dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjson
                [--id-prefix P] [--country-code CC] [--facility-level N] [--root UID]
-               [--group-set UID …] [--report FILE]
+               [--group-set UID …] [--org-unit-group UID … | --all-org-unit-groups]
+               [--report FILE]
 kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
 kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
                (--period PE | --range START:END) […] --level N [--level N …] --out REPORTS.ndjson
@@ -844,6 +845,14 @@ partitions by (`SLE`, `NGA`, …). `--root UID` exports one subtree.
 group set, such as Facility Type, to its Location's `type` (and its
 Organization's, for facilities), coded the same way as a `--breakdown` on
 that set, so a facility's type lines up with the Facility Type strata.
+`--org-unit-group UID` (repeatable) does the same for single org unit
+groups, such as the group of all districts DHIS2 dashboards list places
+by (`OU_GROUP-<uid>`); `--all-org-unit-groups` takes every group. A group
+that belongs to group sets is coded exactly as `--group-set` codes it (a
+coding per set, system `…/dimension/<set uid>`), so the same group looks
+the same however it was asked for, and is added once. A group in no set
+is coded under `…/CodeSystem/dhis2/NAME/org-unit-group`, code the group
+uid.
 
 **measures** turns indicators into Measures, chosen by
 `--indicator-group` and `--indicator` (both repeatable). Aggregate data
