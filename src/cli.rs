@@ -489,6 +489,9 @@ pub struct LoadArgs {
     /// Resources per transaction bundle
     #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
     pub batch_size: usize,
+    /// Bundles posted at once. A bundle waits for the earlier bundles holding resources it references (partOf parents, managing Organizations), so parents still land first; otherwise bundles commit in any order
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: usize,
     /// Attempts per request
     #[arg(long, default_value_t = DEFAULT_RETRIES)]
     pub retries: usize,

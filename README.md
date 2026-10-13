@@ -1050,7 +1050,8 @@ for f in sl-locations sl-measures sl-reports; do kiln load --server URL --in $f.
 ### load
 
 ```
-kiln load --server URL [AUTH] --in changes.ndjson [--dry-run]
+kiln load --server URL [AUTH] --in changes.ndjson [--dry-run] [--batch-size 100]
+          [--concurrency 1]
 ```
 
 Load reads any NDJSON of FHIR resources with a `resourceType` and an `id`,
@@ -1079,6 +1080,17 @@ copy that might be a day old.
 
 Organizations are posted before Locations, so a new pair resolves within
 the run.
+
+`--concurrency N` (default 1) posts N bundles at a time, which suits large
+sets of independent resources such as MeasureReports. No two bundles write
+the same resource, as the input may not repeat an id. A bundle starts only
+once every earlier bundle holding a resource it references (a `partOf`
+parent, a `managingOrganization`, any other `reference` into the file) is
+committed, so parents still land first on a server that checks
+references; beyond that, bundles commit in any order, and the progress
+lines come in the order they commit. The first failure stops new bundles
+from starting; bundles already in flight finish, and those committed stay
+committed.
 
 `--dry-run` runs the preflight and prints one line per bundle, naming each
 entry as `create` or `update@<version>`, without posting anything.

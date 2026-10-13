@@ -486,3 +486,68 @@ fn a_gzip_input_is_read_like_a_plain_one() {
         stdout(&a)
     );
 }
+
+#[test]
+fn parallel_bundles_still_put_parents_first() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    // One resource per bundle: a three-level chain and two on their own.
+    let input = write_ndjson(
+        dir.path(),
+        &[
+            loc("state", Some("3"), None),
+            loc("ward", Some("1"), Some("state")),
+            loc("clinic", Some("2"), Some("ward")),
+            loc("lone1", Some("1"), None),
+            loc("lone2", Some("1"), None),
+        ],
+    );
+    expect_metadata(&server, true);
+    let slow = |ms| {
+        delay_and_then(
+            std::time::Duration::from_millis(ms),
+            ok(transaction_response()),
+        )
+    };
+    // The chain is slow to commit; the lone ones are quick.
+    server.expect(
+        Expectation::matching(posted_bundle(|b| {
+            b["entry"][0]["request"]["url"] == "Location/state"
+        }))
+        .times(1)
+        .respond_with(slow(300)),
+    );
+    server.expect(
+        Expectation::matching(posted_bundle(|b| {
+            b["entry"][0]["request"]["url"] == "Location/ward"
+        }))
+        .times(1)
+        .respond_with(slow(100)),
+    );
+    server.expect(
+        Expectation::matching(posted_bundle(|b| {
+            let url = &b["entry"][0]["request"]["url"];
+            url == "Location/clinic" || url == "Location/lone1" || url == "Location/lone2"
+        }))
+        .times(3)
+        .respond_with(ok(transaction_response())),
+    );
+    let a = load(
+        &server,
+        &input,
+        &["--batch-size", "1", "--concurrency", "4"],
+    )
+    .success();
+    let err = stderr(&a);
+    let at = |n: usize| err.find(&format!("bundle {n}/5 committed")).unwrap();
+    // Roots first by depth: state, lone1, lone2 (depth 0), then ward, clinic.
+    // The lone ones do not wait for the slow state bundle...
+    assert!(at(2) < at(1) && at(3) < at(1), "{err}");
+    // ...but ward waits for state, and clinic for ward.
+    assert!(at(1) < at(4) && at(4) < at(5), "{err}");
+    assert!(
+        stdout(&a).contains("Loaded 5 resources in 5 bundle(s)"),
+        "{}",
+        stdout(&a)
+    );
+}
