@@ -204,7 +204,8 @@ kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEA
 kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
                (--period PE | --range START:END) […] --level N [--level N …] --out REPORTS.ndjson
                [--campaign TYPE/ID] [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
-               [--concurrency 4] [--previous PREV.ndjson [--changed CHANGED.ndjson]
+               [--concurrency 4] [--max-analytics-age 7d]
+               [--previous PREV.ndjson [--changed CHANGED.ndjson]
                [--removed REMOVED.txt]] [--resume] [--report FILE]
 
 DHIS2_AUTH:    --dhis2-token d2pat_…  |  --dhis2-user U --dhis2-password P
@@ -888,7 +889,11 @@ proxy cannot answer from before the last analytics run. Periods can be
 ISO (`2025`, `2025Q1`, `202501`, `2025W5`, `2025April`, …) or relative
 (`LAST_12_MONTHS`, `THIS_YEAR`, …); a period with no data returns no rows
 and so no reports. Values reflect the last analytics table run, which kiln
-prints at the start.
+prints at the start, with a warning when it is more than 7 days old.
+`--max-analytics-age 7d` (also `36h`, `2w`) refuses the run instead when
+the build is older than that, naming the build time and its age. DHIS2
+gives the build time in its own time zone; kiln reads it as UTC, which is
+a few hours either way at most.
 
 `--range START:END` (repeatable, ISO dates, both included, e.g.
 `2026-04-05:2026-05-20`) asks for one value per indicator and org unit

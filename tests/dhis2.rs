@@ -1480,3 +1480,64 @@ fn an_interrupted_run_resumes_to_the_same_file() {
         summary(&whole)
     );
 }
+
+#[test]
+fn an_old_analytics_build_is_refused_or_warned_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let out = dir.path().join("r.ndjson");
+    let server = Server::run();
+    expect_info_built(&server, "2020-01-01T00:00:00.000");
+    let a = reports(&server, &locations, &out)
+        .args([
+            "--level",
+            "2",
+            "--period",
+            "2025",
+            "--max-analytics-age",
+            "7d",
+        ])
+        .assert()
+        .code(2);
+    assert!(
+        stderr(&a).contains("last built 2020-01-01T00:00:00.000")
+            && stderr(&a).contains("older than --max-analytics-age 7 days"),
+        "{}",
+        stderr(&a)
+    );
+    assert!(!out.exists());
+
+    let server = Server::run();
+    expect_info_built(&server, "2020-01-01T00:00:00.000");
+    expect_group(&server);
+    expect_units(&server, 2, 1);
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/analytics.json"))
+            .respond_with(ok(analytics_for(vec![]))),
+    );
+    let a = reports(&server, &locations, &out)
+        .args(["--level", "2", "--period", "2025"])
+        .assert()
+        .success();
+    assert!(
+        stderr(&a).contains("warning: DHIS2 analytics tables were last built"),
+        "{}",
+        stderr(&a)
+    );
+    let bad = reports(&server, &locations, &out)
+        .args([
+            "--level",
+            "2",
+            "--period",
+            "2025",
+            "--max-analytics-age",
+            "7",
+        ])
+        .assert()
+        .code(2);
+    assert!(
+        stderr(&bad).contains("e.g. 36h, 7d, 2w"),
+        "{}",
+        stderr(&bad)
+    );
+}

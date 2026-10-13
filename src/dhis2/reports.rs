@@ -29,11 +29,11 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use super::api::{Dhis2, ServerInfo};
+use super::api::{check_analytics_age, Dhis2, ServerInfo};
 use super::measures::{fetch_indicators, fhir_key, Indicator, Scoring, MEASURE_POPULATION_SYSTEM};
 use super::rerun::{
     file_stamp, plan_differences, write_lines, Change, Checkpoint, Previous, Scope,
@@ -1184,6 +1184,12 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     match &api.info.last_analytics {
         Some(t) => eprintln!("DHIS2 analytics tables last built {t}"),
         None => eprintln!("DHIS2 does not say when its analytics tables were last built"),
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    if let Some(warning) = check_analytics_age(&api.info, args.max_analytics_age, now)? {
+        eprintln!("{warning}");
     }
     let indicators = fetch_indicators(&api, &args.select)?;
     let ids: Vec<String> = indicators.keys().cloned().collect();

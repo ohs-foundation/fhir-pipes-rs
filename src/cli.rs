@@ -206,6 +206,9 @@ pub struct Dhis2ReportsArgs {
     /// Rows to aim for per analytics request: periods of the same kind (days, weeks, months, …) are asked for together while indicators × periods × org units at the level stays under this. Breakdown requests return a row per option on top; whatever DHIS2 still calls too large is split, periods first
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_MAX_ROWS)]
     pub max_rows: usize,
+    /// Refuse to run when DHIS2's analytics tables were last built longer ago than this (e.g. 36h, 7d, 2w): values are only as fresh as that build. Without it, a build over 7 days old is warned about
+    #[arg(long, value_parser = crate::dhis2::api::parse_age)]
+    pub max_analytics_age: Option<std::time::Duration>,
     /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
     pub concurrency: usize,
