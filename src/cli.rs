@@ -181,6 +181,10 @@ pub struct Dhis2ReportsArgs {
     /// DHIS2 org unit level to report on, repeatable (1 = the top)
     #[arg(long = "level", required = true)]
     pub levels: Vec<u32>,
+    /// Only org units at or below this one: each level is asked for as LEVEL-n;ROOT. Needed when
+    /// the user can see top-level org units outside the tree being reported on
+    #[arg(long)]
+    pub root: Option<String>,
     /// Also break every value down by this DHIS2 dimension, repeatable: a category (e.g. Fixed/Outreach), an org unit group set (e.g. Facility Type) or a data element group set. Each becomes a stratifier on the report; DHIS2 leaves out items the dimension does not apply to
     #[arg(long = "breakdown")]
     pub breakdowns: Vec<String>,

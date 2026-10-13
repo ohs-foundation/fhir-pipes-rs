@@ -423,7 +423,10 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         let mut query = vec![
             ("dimension", format!("dx:{}", req.indicators.join(";"))),
             ("dimension", format!("pe:{}", req.period)),
-            ("dimension", format!("ou:LEVEL-{}", req.level)),
+            ("dimension", match &args.root {
+                Some(root) => format!("ou:LEVEL-{};{root}", req.level),
+                None => format!("ou:LEVEL-{}", req.level),
+            }),
             ("includeNumDen", "true".into()),
             ("skipRounding", "true".into()),
             ("includeMetadataDetails", "true".into()),
