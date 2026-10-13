@@ -7,7 +7,8 @@
 //! the numerator and denominator beside the value; `skipRounding` returns
 //! the value unrounded. Period start and end dates come from the response's
 //! own metadata, so every DHIS2 period type works without kiln knowing its
-//! calendar rules.
+//! calendar rules. A `--range` of dates is asked for with `startDate` and
+//! `endDate` instead, and gives one value for the whole range.
 //!
 //! Org units are mapped to Locations through the identifier that
 //! `kiln dhis2 locations` writes. A row whose org unit has no Location is
@@ -42,6 +43,10 @@ use crate::transform::write_report;
 
 pub const PERIOD_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period";
+pub const CAMPAIGN_EXTENSION_URL: &str =
+    "https://icr.healthcampaigns.org/StructureDefinition/campaign";
+/// DHIS2 UIDs are 11 characters.
+const UID_LEN: usize = 11;
 /// FHIR `integer` is a signed 32-bit number.
 const MAX_COUNT: f64 = i32::MAX as f64;
 
@@ -115,6 +120,8 @@ pub struct AnalyticsRow {
     pub option: Option<String>,
 }
 
+/// A request by date range has no `pe` column; its rows get the range's code
+/// from the caller.
 pub fn parse_analytics(v: &Value, breakdown: Option<&str>) -> Result<Analytics> {
     let headers: Vec<&str> = v
         .get("headers")
@@ -129,7 +136,7 @@ pub fn parse_analytics(v: &Value, breakdown: Option<&str>) -> Result<Analytics> 
             KilnError::Environment(format!("analytics response has no {name} column"))
         })
     };
-    let (dx, pe, ou, value) = (need("dx")?, need("pe")?, need("ou")?, need("value")?);
+    let (dx, pe, ou, value) = (need("dx")?, col("pe"), need("ou")?, need("value")?);
     let (num, den) = (col("numerator"), col("denominator"));
     let opt = match breakdown {
         Some(b) => Some(need(b)?),
@@ -149,7 +156,7 @@ pub fn parse_analytics(v: &Value, breakdown: Option<&str>) -> Result<Analytics> 
         .filter_map(Value::as_array)
         .map(|r| AnalyticsRow {
             dx: cell(r, Some(dx)),
-            pe: cell(r, Some(pe)),
+            pe: cell(r, pe),
             ou: cell(r, Some(ou)),
             value: cell(r, Some(value)),
             numerator: cell(r, num),
@@ -256,11 +263,15 @@ pub fn measure_report(
         group["population"] = Value::Array(populations);
     }
     group["measureScore"] = json!({"value": score});
+    let pe = match DateRange::from_code(&row.pe) {
+        Some(range) => range.label(),
+        None => row.pe.clone(),
+    };
     let mut r = json!({
         "resourceType": "MeasureReport",
         "id": id,
         "meta": {"tag": [instance.tag()]},
-        "extension": [{"url": PERIOD_EXTENSION_URL, "valueString": row.pe}],
+        "extension": [{"url": PERIOD_EXTENSION_URL, "valueString": pe}],
         "status": "complete",
         "type": "summary",
         "measure": instance.measure_url(&ind.fhir_key()),
@@ -357,6 +368,109 @@ pub fn stratum(
     Some(s)
 }
 
+/// A `--range`: two ISO dates, both included. DHIS2 is asked for it with
+/// `startDate` and `endDate` and answers one value per indicator and org
+/// unit. Its code, `20260405-20260520`, takes the place of a period code in
+/// report ids; the `dhis2-period` extension reads `2026-04-05/2026-05-20`
+/// (an ISO 8601 interval). No DHIS2 period code has that shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DateRange {
+    pub start: String,
+    pub end: String,
+}
+
+impl DateRange {
+    pub fn parse(s: &str) -> Result<Self> {
+        let bad = |why: &str| {
+            KilnError::Usage(format!(
+                "--range {s:?}: {why}; expected START:END as ISO dates, e.g. 2026-04-05:2026-05-20"
+            ))
+        };
+        let (start, end) = s.split_once(':').ok_or_else(|| bad("no colon"))?;
+        for d in [start, end] {
+            if !is_date(d) {
+                return Err(bad(&format!("{d:?} is not a date")));
+            }
+        }
+        if start > end {
+            return Err(bad("START is after END"));
+        }
+        Ok(Self {
+            start: start.into(),
+            end: end.into(),
+        })
+    }
+
+    pub fn code(&self) -> String {
+        format!(
+            "{}-{}",
+            self.start.replace('-', ""),
+            self.end.replace('-', "")
+        )
+    }
+
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.start, self.end)
+    }
+
+    /// The range a report id's period code stands for, if it is one.
+    pub fn from_code(code: &str) -> Option<Self> {
+        let (a, b) = code.split_once('-')?;
+        let date = |d: &str| {
+            (d.len() == 8 && d.bytes().all(|c| c.is_ascii_digit()))
+                .then(|| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..]))
+        };
+        Some(Self {
+            start: date(a)?,
+            end: date(b)?,
+        })
+    }
+}
+
+/// A real calendar date written `YYYY-MM-DD`.
+fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    let shaped = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
+    if !shaped {
+        return false;
+    }
+    let n = |r: std::ops::Range<usize>| s[r].parse::<u32>().unwrap_or(0);
+    let (y, m, d) = (n(0..4), n(5..7), n(8..10));
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&d)
+}
+
+/// A `--campaign` reference, `ResourceType/id`.
+fn check_campaign(reference: &str) -> Result<()> {
+    let ok = match reference.split_once('/') {
+        Some((kind, id)) => {
+            kind.starts_with(|c: char| c.is_ascii_uppercase())
+                && kind.chars().all(|c| c.is_ascii_alphanumeric())
+                && is_valid_id(id)
+        }
+        None => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(KilnError::Usage(format!(
+            "--campaign {reference:?}: expected a reference ResourceType/id, e.g. CarePlan/bgd-mr-sia-2026"
+        )))
+    }
+}
+
 /// DHIS2 refuses analytics queries whose result is over its row limit
 /// (E7128) or over the table-layout limit (E7151).
 fn too_large(e: &FetchError) -> bool {
@@ -407,24 +521,38 @@ fn period_groups(periods: &[String]) -> Vec<Vec<String>> {
     groups.into_iter().map(|(_, list)| list).collect()
 }
 
-/// One unit of work: a chunk of indicators for a batch of periods at one
-/// level. Its totals and every breakdown are fetched together, so its
-/// reports are complete, and written, as soon as it is done.
+/// One unit of work: a chunk of indicators for a batch of periods, or for
+/// one date range, at one level. Its totals and every breakdown are fetched
+/// together, so its reports are complete, and written, as soon as it is done.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unit {
     pub level: u32,
+    /// Empty for a date range.
     pub periods: Vec<String>,
+    pub range: Option<DateRange>,
     pub indicators: Vec<String>,
 }
 
+impl Unit {
+    /// `2025`, `20250421…20250427 (7 periods)`, or `2026-04-05/2026-05-20`.
+    fn when(&self) -> String {
+        match &self.range {
+            Some(r) => r.label(),
+            None => periods_label(&self.periods),
+        }
+    }
+}
+
 /// Every unit of work, in the order its reports are written: level by
-/// level, then indicator chunk, then period batch. `levels` pairs each level
-/// with its org unit count. A batch holds as many periods of one kind as
-/// keep indicators × periods × org units within `max_rows`, and at least
-/// one. Breakdowns are not counted: they come back as separate requests.
+/// level, then indicator chunk, then period batch, then each date range.
+/// `levels` pairs each level with its org unit count. A batch holds as many
+/// periods of one kind as keep indicators × periods × org units within
+/// `max_rows`, and at least one. Breakdowns are not counted: they come back
+/// as separate requests.
 pub fn plan(
     levels: &[(u32, u64)],
     periods: &[String],
+    ranges: &[DateRange],
     ids: &[String],
     chunk: usize,
     max_rows: usize,
@@ -440,9 +568,18 @@ pub fn plan(
                     units.push(Unit {
                         level,
                         periods: batch.to_vec(),
+                        range: None,
                         indicators: indicators.to_vec(),
                     });
                 }
+            }
+            for range in ranges {
+                units.push(Unit {
+                    level,
+                    periods: Vec::new(),
+                    range: Some(range.clone()),
+                    indicators: indicators.to_vec(),
+                });
             }
         }
     }
@@ -484,16 +621,24 @@ struct Ask<'a> {
     level: u32,
     root: Option<&'a str>,
     periods: &'a [String],
+    range: Option<&'a DateRange>,
     indicators: &'a [String],
     breakdown: Option<&'a str>,
 }
 
 impl Ask<'_> {
+    fn when(&self) -> String {
+        match self.range {
+            Some(r) => r.label(),
+            None => periods_label(self.periods),
+        }
+    }
+
     fn label(&self) -> String {
         format!(
             "level {} {}{}",
             self.level,
-            periods_label(self.periods),
+            self.when(),
             self.breakdown
                 .map(|b| format!(" by {b}"))
                 .unwrap_or_default()
@@ -520,6 +665,7 @@ fn fetch_unit(
         level: unit.level,
         root,
         periods: &unit.periods,
+        range: unit.range.as_ref(),
         indicators: &unit.indicators,
         breakdown: None,
     };
@@ -538,10 +684,16 @@ fn fetch_unit(
 
 /// Asks DHIS2, splitting the request in two and asking again while DHIS2
 /// says the result is too large: the periods first, then the indicators.
+/// A date range is sent as `startDate` and `endDate` (DHIS2 takes them
+/// instead of a period dimension, never with one).
 fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) -> Result<()> {
-    let mut query = vec![
-        ("dimension", format!("dx:{}", ask.indicators.join(";"))),
-        ("dimension", format!("pe:{}", ask.periods.join(";"))),
+    let when = match ask.range {
+        Some(r) => [("startDate", r.start.clone()), ("endDate", r.end.clone())].to_vec(),
+        None => vec![("dimension", format!("pe:{}", ask.periods.join(";")))],
+    };
+    let mut query = vec![("dimension", format!("dx:{}", ask.indicators.join(";")))];
+    query.extend(when);
+    query.extend([
         (
             "dimension",
             match ask.root {
@@ -553,7 +705,7 @@ fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) 
         ("skipRounding", "true".into()),
         ("includeMetadataDetails", "true".into()),
         ("displayProperty", "NAME".into()),
-    ];
+    ]);
     if let Some(b) = ask.breakdown {
         query.push(("dimension", b.to_string()));
     }
@@ -599,19 +751,30 @@ fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) 
         Err(e) if too_large(&e) => {
             return Err(KilnError::Usage(format!(
                 "indicator {} at level {} for {} is over DHIS2's analytics row limit on its own; ask for shorter periods ({e})",
-                ask.indicators[0], ask.level, ask.periods[0]
+                ask.indicators[0], ask.level, ask.when()
             )));
         }
         Err(FetchError::Status { status: 409, body }) => {
             return Err(KilnError::Usage(format!(
                 "DHIS2 rejected the analytics query for level {} and period {}: {body}",
                 ask.level,
-                ask.periods.join(";")
+                match ask.range {
+                    Some(r) => r.label(),
+                    None => ask.periods.join(";"),
+                }
             )));
         }
         Err(e) => return Err(api.error("analytics.json", e)),
     };
-    out.push(parse_analytics(&body, ask.breakdown)?);
+    let mut table = parse_analytics(&body, ask.breakdown)?;
+    if let Some(r) = ask.range {
+        let code = r.code();
+        for row in &mut table.rows {
+            row.pe.clone_from(&code);
+        }
+        table.periods.insert(code, (r.start.clone(), r.end.clone()));
+    }
+    out.push(table);
     Ok(())
 }
 
@@ -624,6 +787,8 @@ struct Writer<'a> {
     info: &'a ServerInfo,
     indicators: &'a BTreeMap<String, Indicator>,
     mapping: &'a HashMap<String, Target>,
+    /// `--campaign`, added to every report after the period extension.
+    campaign: Option<&'a str>,
     report: Report,
     unmapped: HashSet<String>,
     locations: HashSet<String>,
@@ -688,6 +853,10 @@ impl<'a> Writer<'a> {
                     self.info,
                     &mut self.report,
                 ) {
+                    let mut r = r;
+                    if let (Some(c), Some(ext)) = (self.campaign, r["extension"].as_array_mut()) {
+                        ext.push(json!({"url": CAMPAIGN_EXTENSION_URL, "valueReference": {"reference": c}}));
+                    }
                     out.insert(r["id"].as_str().unwrap_or_default().to_string(), r);
                 }
             }
@@ -802,7 +971,7 @@ fn progress(done: usize, total: usize, unit: &Unit, values: usize, elapsed: Dura
     format!(
         "[{done}/{total}] level {} · {} · {} items: {} values · {} elapsed{left}",
         unit.level,
-        periods_label(&unit.periods),
+        unit.when(),
         unit.indicators.len(),
         thousands(values),
         clock(elapsed, false)
@@ -837,6 +1006,13 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         ));
     }
     let instance = Instance::new(&args.conn.instance)?;
+    let ranges = unique(&args.ranges)
+        .iter()
+        .map(|r| DateRange::parse(r))
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(c) = &args.campaign {
+        check_campaign(c)?;
+    }
     if !args.locations.is_file() {
         return Err(KilnError::Usage(format!(
             "--locations {}: no such file",
@@ -860,6 +1036,26 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     }
     let indicators = fetch_indicators(&api, &args.select)?;
     let ids: Vec<String> = indicators.keys().cloned().collect();
+    // A range's code is longer than a period's: check now that every
+    // report id still fits, rather than skip every row as invalid_id.
+    for range in &ranges {
+        for dx in &ids {
+            let id = format!(
+                "{}-{}-{}-{}",
+                instance.name,
+                fhir_key(dx),
+                "x".repeat(UID_LEN),
+                range.code()
+            );
+            if !is_valid_id(&id) {
+                return Err(KilnError::Usage(format!(
+                    "--range {}: report ids for {dx} would be {} characters, over FHIR's 64; use a shorter --instance",
+                    range.label(),
+                    id.len()
+                )));
+            }
+        }
+    }
 
     // Requests are sized from each level's org unit count, so several
     // periods can share one.
@@ -872,6 +1068,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     let units = plan(
         &levels,
         &unique(&args.periods),
+        &ranges,
         &ids,
         args.chunk,
         args.max_rows,
@@ -888,6 +1085,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         info: &api.info,
         indicators: &indicators,
         mapping: &mapping,
+        campaign: args.campaign.as_deref(),
         report: Report::default(),
         unmapped: HashSet::new(),
         locations: HashSet::new(),
@@ -1291,7 +1489,7 @@ mod tests {
         ]);
         let ids = codes(&["a", "b", "c"]);
         // 2 items × 3 org units = 6 rows a period: 2 periods fit in 12.
-        let units = plan(&[(2, 3)], &periods, &ids, 2, 12);
+        let units = plan(&[(2, 3)], &periods, &[], &ids, 2, 12);
         let batches: Vec<(Vec<String>, usize)> = units
             .iter()
             .map(|u| (u.periods.clone(), u.indicators.len()))
@@ -1315,7 +1513,7 @@ mod tests {
             ]
         );
         // A level too large for one period still gets one per request.
-        let units = plan(&[(4, 100_000)], &periods[..2], &ids, 10, 20_000);
+        let units = plan(&[(4, 100_000)], &periods[..2], &[], &ids, 10, 20_000);
         assert_eq!(units.len(), 2);
     }
 
@@ -1330,6 +1528,7 @@ mod tests {
         let units = plan(
             &[(1, 1), (2, 9), (3, 112), (4, 912)],
             &periods,
+            &[],
             &ids,
             10,
             20_000,
@@ -1347,6 +1546,7 @@ mod tests {
         let unit = Unit {
             level: 4,
             periods: codes(&["20260421", "20260422", "20260427"]),
+            range: None,
             indicators: codes(&["a"; 10]),
         };
         assert_eq!(
@@ -1363,6 +1563,127 @@ mod tests {
         );
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn a_range_is_two_real_dates_in_order() {
+        let r = DateRange::parse("2026-04-05:2026-05-20").unwrap();
+        assert_eq!(r.code(), "20260405-20260520");
+        assert_eq!(r.label(), "2026-04-05/2026-05-20");
+        assert_eq!(DateRange::from_code(&r.code()), Some(r));
+        assert!(DateRange::parse("2026-04-05:2026-04-05").is_ok());
+        assert!(DateRange::parse("2024-02-29:2024-03-01").is_ok());
+        for bad in [
+            "2026-05-20:2026-04-05",
+            "2026-04-05",
+            "2026-04-05/2026-05-20",
+            "2025-02-29:2025-03-01",
+            "2026-04-31:2026-05-01",
+            "2026-13-01:2026-12-01",
+            "2026-4-5:2026-5-20",
+            "20260405:20260520",
+        ] {
+            assert!(DateRange::parse(bad).is_err(), "{bad}");
+        }
+        // Period codes are never read as ranges.
+        for pe in [
+            "2025",
+            "20250101",
+            "2025W5",
+            "LAST_12_MONTHS",
+            "2025AprilS1",
+        ] {
+            assert_eq!(DateRange::from_code(pe), None, "{pe}");
+        }
+    }
+
+    #[test]
+    fn a_range_report_carries_the_range_as_its_period() {
+        let instance = Instance::new("bgd-epi-2026").unwrap();
+        let row = AnalyticsRow {
+            dx: "tUIlpyeeX9N".into(),
+            pe: "20260405-20260520".into(),
+            ou: "O6uvpzGd5pu".into(),
+            value: "50.0".into(),
+            numerator: "5.0".into(),
+            denominator: "10.0".into(),
+            option: None,
+        };
+        let mut report = Report::default();
+        let r = measure_report(
+            &row,
+            &penta3(),
+            &loc(),
+            &("2026-04-05".into(), "2026-05-20".into()),
+            &instance,
+            &ServerInfo::default(),
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(
+            r["id"],
+            "bgd-epi-2026-tUIlpyeeX9N-O6uvpzGd5pu-20260405-20260520"
+        );
+        assert!(r["id"].as_str().unwrap().len() <= 64);
+        assert_eq!(r["extension"][0]["valueString"], "2026-04-05/2026-05-20");
+        assert_eq!(r["period"]["start"], "2026-04-05");
+        assert_eq!(r["period"]["end"], "2026-05-20");
+    }
+
+    #[test]
+    fn a_response_by_date_range_has_no_period_column() {
+        let v = json!({
+            "headers": [{"name":"dx"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+            "metaData": {"items": {}},
+            "rows": [["tUIlpyeeX9N","O6uvpzGd5pu","50.0","5.0","10.0"]]
+        });
+        let t = parse_analytics(&v, None).unwrap();
+        assert_eq!(t.rows[0].pe, "");
+        assert_eq!(t.rows[0].numerator, "5.0");
+    }
+
+    #[test]
+    fn ranges_come_after_period_batches_one_unit_each() {
+        let ranges = [
+            DateRange::parse("2026-04-05:2026-05-20").unwrap(),
+            DateRange::parse("2026-06-01:2026-06-30").unwrap(),
+        ];
+        let units = plan(
+            &[(2, 3)],
+            &codes(&["202601", "202602"]),
+            &ranges,
+            &codes(&["a", "b", "c"]),
+            2,
+            20_000,
+        );
+        let when: Vec<String> = units.iter().map(Unit::when).collect();
+        assert_eq!(
+            when,
+            [
+                "202601…202602 (2 periods)",
+                "2026-04-05/2026-05-20",
+                "2026-06-01/2026-06-30",
+                "202601…202602 (2 periods)",
+                "2026-04-05/2026-05-20",
+                "2026-06-01/2026-06-30",
+            ]
+        );
+        assert!(units[1].periods.is_empty());
+    }
+
+    #[test]
+    fn a_campaign_is_a_reference() {
+        assert!(check_campaign("CarePlan/bgd-mr-sia-2026").is_ok());
+        for bad in [
+            "bgd-mr-sia-2026",
+            "careplan/x",
+            "CarePlan/",
+            "CarePlan/a_b",
+            "Care Plan/x",
+            "CarePlan/x/y",
+        ] {
+            assert!(check_campaign(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

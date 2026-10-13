@@ -980,3 +980,260 @@ fn a_failed_request_stops_the_run_and_leaves_no_file() {
     assert!(!out.exists());
     assert!(!dir.path().join("r.ndjson.tmp").exists());
 }
+
+/// Analytics asked for by date range: `startDate` and `endDate`, no period.
+fn by_range(
+    start: &'static str,
+    end: &'static str,
+) -> impl httptest::matchers::Matcher<httptest::http::Request<httptest::bytes::Bytes>> {
+    all_of![
+        request::method_path("GET", "/dhis/api/analytics.json"),
+        request::query(url_decoded(contains(("startDate", start)))),
+        request::query(url_decoded(contains(("endDate", end)))),
+        request::query(url_decoded(not(contains(("dimension", matches("^pe:")))))),
+    ]
+}
+
+#[test]
+fn a_range_is_one_value_per_org_unit_with_breakdowns_and_the_campaign() {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 2);
+    let ous = ["O6uvpzGd5pu", "fdc6uOvgoji"];
+    // Without a period dimension DHIS2 sends no pe column and no period items.
+    server.expect(
+        Expectation::matching(all_of![
+            by_range("2026-04-05", "2026-05-20"),
+            request::query(url_decoded(not(contains(("dimension", "fMZEcRHuamy"))))),
+        ])
+        .times(1)
+        .respond_with(ok(json!({
+            "headers": [{"name":"dx"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+            "metaData": {"items": {}},
+            "rows": [["tUIlpyeeX9N", ous[0], "50.0", "5.0", "10.0"],
+                     ["tUIlpyeeX9N", ous[1], "25.0", "5.0", "20.0"]]
+        }))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            by_range("2026-04-05", "2026-05-20"),
+            request::query(url_decoded(contains(("dimension", "fMZEcRHuamy")))),
+        ])
+        .times(1)
+        .respond_with(ok(json!({
+            "headers": [{"name":"dx"},{"name":"fMZEcRHuamy"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+            "metaData": {"items": {"fMZEcRHuamy": {"name": "Location Fixed/Outreach"}, "qkPbeWaFsnU": {"name": "Fixed"}}},
+            "rows": [["tUIlpyeeX9N", "qkPbeWaFsnU", ous[0], "40.0", "4.0", "10.0"],
+                     ["tUIlpyeeX9N", "qkPbeWaFsnU", ous[1], "20.0", "4.0", "20.0"]]
+        }))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &ous);
+    let out = dir.path().join("r.ndjson");
+    let a = reports(&server, &locations, &out)
+        .args(["--level", "2", "--range", "2026-04-05:2026-05-20"])
+        .args(["--breakdown", "fMZEcRHuamy"])
+        .args(["--campaign", "CarePlan/bgd-mr-sia-2026"])
+        .assert()
+        .success();
+    let s = stdout(&a);
+    assert!(s.contains("2 breakdowns attached"), "{s}");
+    assert!(s.contains("1 periods"), "{s}");
+    assert!(
+        stderr(&a).contains("[1/1] level 2 · 2026-04-05/2026-05-20 · 2 items: 4 values"),
+        "{}",
+        stderr(&a)
+    );
+    let r = read_ndjson(&out);
+    assert_eq!(r.len(), 2);
+    for (rep, ou) in r.iter().zip(ous) {
+        assert_eq!(
+            rep["id"],
+            format!("sl-demo-tUIlpyeeX9N-{ou}-20260405-20260520")
+        );
+        assert_eq!(rep["period"]["start"], "2026-04-05");
+        assert_eq!(rep["period"]["end"], "2026-05-20");
+        assert_eq!(
+            rep["extension"],
+            json!([
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period",
+                 "valueString": "2026-04-05/2026-05-20"},
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
+                 "valueReference": {"reference": "CarePlan/bgd-mr-sia-2026"}}
+            ])
+        );
+        let st = &rep["group"][0]["stratifier"][0]["stratum"][0];
+        assert_eq!(st["value"]["text"], "Fixed");
+        assert_eq!(st["population"][0]["count"], 4);
+    }
+    assert_eq!(r[1]["group"][0]["measureScore"]["value"], 0.25);
+}
+
+#[test]
+fn periods_and_ranges_together_each_get_the_campaign() {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 1);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(contains(("dimension", "pe:202601")))),
+            request::query(url_decoded(not(contains(("startDate", any()))))),
+        ])
+        .times(1)
+        .respond_with(ok(analytics_for(vec![json!([
+            "tUIlpyeeX9N",
+            "202601",
+            "O6uvpzGd5pu",
+            "50.0",
+            "5.0",
+            "10.0"
+        ])]))),
+    );
+    server.expect(
+        Expectation::matching(by_range("2026-01-01", "2026-03-31"))
+            .times(1)
+            .respond_with(ok(json!({
+                "headers": [{"name":"dx"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+                "rows": [["FbKK4ofIv5R", "O6uvpzGd5pu", "30.0", "3.0", "10.0"]]
+            }))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let out = dir.path().join("r.ndjson");
+    reports(&server, &locations, &out)
+        .args(["--level", "2", "--period", "202601"])
+        .args(["--range", "2026-01-01:2026-03-31"])
+        .args(["--campaign", "CarePlan/bgd-mr-sia-2026"])
+        .assert()
+        .success();
+    let r = read_ndjson(&out);
+    let ids: Vec<&str> = r.iter().map(|v| v["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        [
+            "sl-demo-tUIlpyeeX9N-O6uvpzGd5pu-202601",
+            "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-20260101-20260331"
+        ]
+    );
+    for rep in &r {
+        assert_eq!(
+            rep["extension"][1]["valueReference"]["reference"],
+            "CarePlan/bgd-mr-sia-2026"
+        );
+    }
+    assert_eq!(r[0]["extension"][0]["valueString"], "202601");
+}
+
+#[test]
+fn bad_ranges_and_campaigns_are_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let cases: [(&[&str], &str); 5] = [
+        (&["--range", "2026-05-20:2026-04-05"], "START is after END"),
+        (
+            &["--range", "2026-02-30:2026-03-05"],
+            "\"2026-02-30\" is not a date",
+        ),
+        (&["--range", "2026-04-05"], "expected START:END"),
+        (
+            &["--period", "2025", "--campaign", "bgd-mr-sia-2026"],
+            "expected a reference ResourceType/id",
+        ),
+        (
+            &["--period", "2025", "--campaign", "CarePlan/bgd_mr"],
+            "expected a reference ResourceType/id",
+        ),
+    ];
+    for (args, want) in cases {
+        let a = kiln()
+            .args([
+                "dhis2",
+                "reports",
+                "--dhis2",
+                "https://dhis2.invalid",
+                "--instance",
+                "sl-demo",
+            ])
+            .args(["--indicator", "tUIlpyeeX9N", "--level", "2"])
+            .args(args)
+            .arg("--locations")
+            .arg(&locations)
+            .arg("--out")
+            .arg(dir.path().join("r.ndjson"))
+            .assert()
+            .code(2);
+        assert!(stderr(&a).contains(want), "{args:?}: {}", stderr(&a));
+    }
+    // Neither a period nor a range.
+    let a = kiln()
+        .args([
+            "dhis2",
+            "reports",
+            "--dhis2",
+            "https://dhis2.invalid",
+            "--instance",
+            "sl-demo",
+        ])
+        .args(["--indicator", "tUIlpyeeX9N", "--level", "2"])
+        .arg("--locations")
+        .arg(&locations)
+        .arg("--out")
+        .arg(dir.path().join("r.ndjson"))
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("--period"), "{}", stderr(&a));
+}
+
+#[test]
+fn a_range_whose_ids_would_be_too_long_is_refused_before_any_analytics() {
+    let server = Server::run();
+    expect_info(&server);
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/dataSets.json")).respond_with(
+            ok(json!({"dataSets": [{"id": "QX4ZTUbOt3a", "name": "Reproductive Health"}]})),
+        ),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let locations = dir.path().join("locations.ndjson");
+    std::fs::write(
+        &locations,
+        format!(
+            "{}\n",
+            json!({"resourceType": "Location", "id": "x",
+                   "identifier": [{"system": "https://icr.healthcampaigns.org/identifiers/dhis2/bangladesh-epi26/orgunit", "value": "O6uvpzGd5pu"}]})
+        ),
+    )
+    .unwrap();
+    let a = kiln()
+        .args([
+            "dhis2",
+            "reports",
+            "--dhis2",
+            &base(&server),
+            "--instance",
+            "bangladesh-epi26",
+        ])
+        .args([
+            "--data-set",
+            "QX4ZTUbOt3a",
+            "--level",
+            "2",
+            "--range",
+            "2026-04-05:2026-05-20",
+        ])
+        .arg("--locations")
+        .arg(&locations)
+        .arg("--out")
+        .arg(dir.path().join("r.ndjson"))
+        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .assert()
+        .code(2);
+    assert!(
+        stderr(&a).contains("over FHIR's 64; use a shorter --instance"),
+        "{}",
+        stderr(&a)
+    );
+}

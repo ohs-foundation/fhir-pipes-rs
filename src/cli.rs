@@ -57,7 +57,7 @@ pub enum Command {
     Population(PopulationArgs),
     /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `kiln load`
     #[command(subcommand)]
-    Dhis2(Dhis2Command),
+    Dhis2(Box<Dhis2Command>),
 }
 
 #[derive(Subcommand, Debug)]
@@ -181,9 +181,15 @@ pub struct Dhis2ReportsArgs {
     /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `kiln dhis2 locations`, or a snapshot's locations.ndjson
     #[arg(long)]
     pub locations: PathBuf,
-    /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …)
-    #[arg(long = "period", required = true)]
+    /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …). Needed unless --range is given
+    #[arg(long = "period", required_unless_present = "ranges")]
     pub periods: Vec<String>,
+    /// Date range START:END, repeatable (ISO dates, both included, e.g. 2026-04-05:2026-05-20): one value per indicator and org unit for the whole range, asked for with DHIS2's startDate and endDate instead of a period. Report ids end in 20260405-20260520
+    #[arg(long = "range")]
+    pub ranges: Vec<String>,
+    /// Campaign every report belongs to, as a reference (e.g. CarePlan/bgd-mr-sia-2026), added as the ICR campaign extension. Report ids do not include it, so one run should cover one campaign's periods
+    #[arg(long)]
+    pub campaign: Option<String>,
     /// DHIS2 org unit level to report on, repeatable (1 = the top)
     #[arg(long = "level", required = true)]
     pub levels: Vec<u32>,

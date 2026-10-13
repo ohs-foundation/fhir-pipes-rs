@@ -202,8 +202,8 @@ kiln dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjs
                [--group-set UID …] [--report FILE]
 kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
 kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
-               --period PE [--period PE …] --level N [--level N …] --out REPORTS.ndjson
-               [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
+               (--period PE | --range START:END) […] --level N [--level N …] --out REPORTS.ndjson
+               [--campaign TYPE/ID] [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
                [--concurrency 4] [--report FILE]
 
 DHIS2_AUTH:    --dhis2-token d2pat_…  |  --dhis2-user U --dhis2-password P
@@ -888,6 +888,29 @@ ISO (`2025`, `2025Q1`, `202501`, `2025W5`, `2025April`, …) or relative
 (`LAST_12_MONTHS`, `THIS_YEAR`, …); a period with no data returns no rows
 and so no reports. Values reflect the last analytics table run, which kiln
 prints at the start.
+
+`--range START:END` (repeatable, ISO dates, both included, e.g.
+`2026-04-05:2026-05-20`) asks for one value per indicator and org unit
+over the whole range, such as a campaign's days, using DHIS2's `startDate`
+and `endDate` parameters instead of a period. It can be used with or
+instead of `--period`. DHIS2 computes the value over the range the way it
+does for a period. The report's `period.start` and `period.end` are the
+two dates, the `dhis2-period` extension reads `2026-04-05/2026-05-20` (an
+ISO 8601 interval), and the id ends in `20260405-20260520`. That makes ids
+17 characters longer than a monthly report's; kiln refuses a range whose
+ids would go over FHIR's 64 characters (a reporting rate with an
+`--instance` longer than 7 characters) before asking for any values. Each
+range is its own request (split by indicators if DHIS2 calls it too large),
+and breakdowns work the same.
+
+`--campaign TYPE/ID` (e.g. `CarePlan/bgd-mr-sia-2026`) adds the ICR
+campaign extension to every report written,
+`{"url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
+"valueReference": {"reference": "CarePlan/bgd-mr-sia-2026"}}`, after the
+`dhis2-period` extension. Report ids do not include the campaign, so a
+report for the same indicator, org unit and period from another run
+replaces it whatever campaign that run named: one run should cover one
+campaign's periods and ranges.
 
 `--root UID` asks for each level as `LEVEL-n;UID`, only the org units in
 that one's tree. Use it when the DHIS2 user can see top-level org units
