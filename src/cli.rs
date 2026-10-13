@@ -17,6 +17,12 @@ pub const DEFAULT_BATCH_SIZE: usize = 100;
 /// download off after five minutes. Total per-request deadline, in seconds.
 pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
 pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
+/// Rows kiln aims to keep one analytics request under; DHIS2's own default
+/// limit is 50,000.
+pub const DEFAULT_ANALYTICS_MAX_ROWS: usize = 20_000;
+/// Analytics requests in flight at once. Each one is a database query on
+/// the DHIS2 server, so this stays low.
+pub const DEFAULT_ANALYTICS_CONCURRENCY: usize = 4;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -191,6 +197,12 @@ pub struct Dhis2ReportsArgs {
     /// Indicators per analytics request (halved automatically when DHIS2 says a result is too large)
     #[arg(long, default_value_t = DEFAULT_INDICATORS_PER_REQUEST)]
     pub chunk: usize,
+    /// Rows to aim for per analytics request: periods of the same kind (days, weeks, months, …) are asked for together while indicators × periods × org units at the level stays under this. Breakdown requests return a row per option on top; whatever DHIS2 still calls too large is split, periods first
+    #[arg(long, default_value_t = DEFAULT_ANALYTICS_MAX_ROWS)]
+    pub max_rows: usize,
+    /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
+    #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
+    pub concurrency: usize,
     /// Output NDJSON file of MeasureReport resources
     #[arg(long)]
     pub out: PathBuf,

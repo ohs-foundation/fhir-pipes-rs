@@ -18,7 +18,7 @@ pub mod reports;
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -144,19 +144,60 @@ pub fn write_ndjson<'a>(
     out: &Path,
     resources: impl IntoIterator<Item = &'a Value>,
 ) -> Result<usize> {
-    let tmp = out.with_extension("ndjson.tmp");
-    let file = File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
-    let mut w = BufWriter::new(file);
-    let mut n = 0;
+    let mut w = NdjsonWriter::create(out)?;
     for r in resources {
-        serde_json::to_writer(&mut w, r)?;
-        w.write_all(b"\n").map_err(|e| KilnError::io(&tmp, e))?;
-        n += 1;
+        w.write(r)?;
     }
-    w.flush().map_err(|e| KilnError::io(&tmp, e))?;
-    drop(w);
-    std::fs::rename(&tmp, out).map_err(|e| KilnError::io(out, e))?;
-    Ok(n)
+    w.finish()
+}
+
+/// NDJSON written as it is produced: lines go to `<out>.ndjson.tmp`, which
+/// `finish` renames into place. Dropped unfinished (a failed run), the
+/// temporary file is removed.
+pub struct NdjsonWriter {
+    out: PathBuf,
+    tmp: PathBuf,
+    w: Option<BufWriter<File>>,
+    n: usize,
+}
+
+impl NdjsonWriter {
+    pub fn create(out: &Path) -> Result<Self> {
+        let tmp = out.with_extension("ndjson.tmp");
+        let file = File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
+        Ok(Self {
+            out: out.to_path_buf(),
+            tmp,
+            w: Some(BufWriter::new(file)),
+            n: 0,
+        })
+    }
+
+    pub fn write(&mut self, r: &Value) -> Result<()> {
+        let w = self.w.as_mut().expect("written after finish");
+        serde_json::to_writer(&mut *w, r)?;
+        w.write_all(b"\n")
+            .map_err(|e| KilnError::io(&self.tmp, e))?;
+        self.n += 1;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<usize> {
+        let mut w = self.w.take().expect("finished once");
+        w.flush().map_err(|e| KilnError::io(&self.tmp, e))?;
+        drop(w);
+        std::fs::rename(&self.tmp, &self.out).map_err(|e| KilnError::io(&self.out, e))?;
+        Ok(self.n)
+    }
+}
+
+impl Drop for NdjsonWriter {
+    fn drop(&mut self) {
+        if let Some(w) = self.w.take() {
+            drop(w);
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
 }
 
 #[cfg(test)]

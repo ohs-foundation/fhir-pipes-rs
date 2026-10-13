@@ -203,7 +203,8 @@ kiln dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjs
 kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
 kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
                --period PE [--period PE …] --level N [--level N …] --out REPORTS.ndjson
-               [--breakdown UID …] [--chunk 10] [--report FILE]
+               [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
+               [--concurrency 4] [--report FILE]
 
 DHIS2_AUTH:    --dhis2-token d2pat_…  |  --dhis2-user U --dhis2-password P
 INDICATORS:    any of --indicator-group UID, --indicator UID, --data-element-group UID,
@@ -888,6 +889,11 @@ ISO (`2025`, `2025Q1`, `202501`, `2025W5`, `2025April`, …) or relative
 and so no reports. Values reflect the last analytics table run, which kiln
 prints at the start.
 
+`--root UID` asks for each level as `LEVEL-n;UID`, only the org units in
+that one's tree. Use it when the DHIS2 user can see top-level org units
+outside the tree being reported on; DHIS2 otherwise refuses the whole
+request (E7120).
+
 `--breakdown UID` (repeatable) also asks for every value broken down by a
 DHIS2 dimension: a category such as Fixed/Outreach (`fMZEcRHuamy`), an org
 unit group set such as Facility Type (`J5jldMd8OHv`), or a data element
@@ -902,9 +908,30 @@ those reports simply have no stratifier for it.
 `--locations` is any NDJSON holding the Locations: the output of
 `dhis2 locations`, or a snapshot's `locations.ndjson` once they are on the
 server. A row whose org unit has no Location is skipped and reported once
-as `unmapped_org_unit`. Requests carry `--chunk` indicators (10) at a
-time; when DHIS2 answers that a result is over its row limit (E7128,
-E7151) kiln splits the request in two and tries again.
+as `unmapped_org_unit`.
+
+Large exports (hundreds of periods, thousands of org units) are split into
+batches. Before asking for values, kiln asks DHIS2 how many org units each
+`--level` has (under `--root` when given). Each analytics request carries
+up to `--chunk` indicators (10) and as many periods as keep indicators ×
+periods × org units under `--max-rows` (20,000 rows; DHIS2's own limit is
+50,000 by default). Only periods of the same kind share a request: days
+with days (`20250101`), weeks with weeks (`2025W5`), months with months,
+and so on. A relative period (`LAST_12_MONTHS`) always goes alone, since
+DHIS2 expands it into several periods. A batch's breakdowns are asked for
+with the same periods; they return one row per option, so they are not
+counted in the estimate. When DHIS2 answers that a result is over its row
+limit (E7128, E7151), kiln splits the request in two and tries again: the
+periods first, then the indicators.
+
+Reports are written as each batch arrives, so memory holds a few batches
+at a time rather than the whole export. `--concurrency` (4) batches are
+fetched at once; the output is written in planned order (level, then
+indicator chunk, then periods, sorted by id within each batch), so it is
+the same file whatever the setting. The file is written as
+`OUT.ndjson.tmp` and renamed when the run succeeds; a failed run removes
+it. After each batch kiln prints a line like
+`[37/412] level 4 · 20260421…20260427 (7 periods) · 10 items: 33,656 values · 4m12s elapsed, ~38m left`.
 
 Report kinds: `stratum_without_total` (a breakdown value whose total DHIS2
 did not return), `fractional_count` (a numerator or denominator that is not a

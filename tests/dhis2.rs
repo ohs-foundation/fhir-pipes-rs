@@ -269,11 +269,30 @@ fn analytics(rows: Value) -> Value {
     })
 }
 
+/// The org unit count kiln sizes analytics requests from.
+fn expect_units(server: &Server, level: u32, total: u64) {
+    let filter: &'static str = Box::leak(format!("level:eq:{level}").into_boxed_str());
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/organisationUnits.json"),
+            request::query(url_decoded(contains(("filter", filter)))),
+            request::query(url_decoded(contains(("fields", "id")))),
+            request::query(url_decoded(contains(("pageSize", "1")))),
+        ])
+        .times(1..)
+        .respond_with(ok(json!({
+            "pager": {"page": 1, "pageCount": total, "total": total, "pageSize": 1},
+            "organisationUnits": [{"id": "ImspTQPwCqd"}]
+        }))),
+    );
+}
+
 #[test]
 fn reports_split_a_too_large_request_and_skip_unmapped_org_units() {
     let server = Server::run();
     expect_info(&server);
     expect_group(&server);
+    expect_units(&server, 2, 14);
     // Both indicators in one request is over the row limit; one at a time is not.
     server.expect(
         Expectation::matching(all_of![
@@ -404,6 +423,7 @@ fn reporting_rates_and_breakdowns_come_out_as_valid_ids_and_stratifiers() {
             ok(json!({"dataSets": [{"id": "QX4ZTUbOt3a", "name": "Reproductive Health"}]})),
         ),
     );
+    expect_units(&server, 2, 14);
     let headers = json!([{"name":"dx"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}]);
     server.expect(
         Expectation::matching(all_of![
@@ -528,4 +548,435 @@ fn reports_need_locations_carrying_this_instances_identifier() {
         "{}",
         stderr(&a)
     );
+}
+
+/// A Locations file mapping each org unit to `sle-<uid>`.
+fn locations_for(dir: &Path, org_units: &[&str]) -> std::path::PathBuf {
+    let p = dir.join("locations.ndjson");
+    let lines: String = org_units
+        .iter()
+        .map(|ou| {
+            format!(
+                "{}\n",
+                json!({"resourceType": "Location", "id": format!("sle-{ou}"), "name": ou,
+                       "identifier": [{"system": ORGUNIT_SYSTEM, "value": ou}]})
+            )
+        })
+        .collect();
+    std::fs::write(&p, lines).unwrap();
+    p
+}
+
+/// `kiln dhis2 reports` for the Immunization group against the stub.
+fn reports(server: &Server, locations: &Path, out: &Path) -> Command {
+    let mut c = kiln();
+    c.args([
+        "dhis2",
+        "reports",
+        "--dhis2",
+        &base(server),
+        "--instance",
+        "sl-demo",
+        "--indicator-group",
+        "srxUNt2w5jn",
+    ])
+    .arg("--locations")
+    .arg(locations)
+    .arg("--out")
+    .arg(out)
+    .env("KILN_DHIS2_TOKEN", "d2pat_test");
+    c
+}
+
+/// An analytics response with dates for every period in `rows`.
+fn analytics_for(rows: Vec<Value>) -> Value {
+    let mut items = serde_json::Map::new();
+    for r in &rows {
+        let pe = r[1].as_str().unwrap();
+        let (y, m) = (&pe[..4], &pe[4..6]);
+        items.insert(
+            pe.to_string(),
+            json!({"startDate": format!("{y}-{m}-01T00:00:00.000"), "endDate": format!("{y}-{m}-28T00:00:00.000")}),
+        );
+    }
+    json!({
+        "headers": [{"name":"dx"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+        "metaData": {"items": items},
+        "rows": rows
+    })
+}
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+#[test]
+fn periods_of_one_kind_share_a_request_within_the_row_budget() {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 3);
+    // 2 indicators × 3 org units = 6 rows a period, so 2 periods fit in 12.
+    for pe in ["20250101;20250102", "20250103", "2025W1;2025W2", "202501"] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains((
+                    "dimension",
+                    leak(format!("pe:{pe}"))
+                )))),
+                request::query(url_decoded(contains((
+                    "dimension",
+                    "dx:FbKK4ofIv5R;tUIlpyeeX9N"
+                )))),
+            ])
+            .times(1)
+            .respond_with(ok(analytics_for(vec![]))),
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let a = reports(&server, &locations, &dir.path().join("r.ndjson"))
+        .args(["--level", "2", "--max-rows", "12"])
+        .args([
+            "--period", "20250101", "--period", "2025W1", "--period", "20250102",
+        ])
+        .args([
+            "--period", "20250103", "--period", "2025W2", "--period", "202501",
+        ])
+        .assert()
+        .success();
+    assert!(
+        stdout(&a).contains("from 4 analytics requests"),
+        "{}",
+        stdout(&a)
+    );
+    assert!(
+        stderr(&a).contains("[1/4] level 2 · 20250101…20250102 (2 periods) · 2 items: 0 values"),
+        "{}",
+        stderr(&a)
+    );
+}
+
+#[test]
+fn a_too_large_result_is_split_by_period_before_indicators() {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 1);
+    let dx = ("dimension", "dx:FbKK4ofIv5R;tUIlpyeeX9N");
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(contains(dx))),
+            request::query(url_decoded(contains(("dimension", "pe:202501;202502")))),
+        ])
+        .times(1)
+        .respond_with(status_code(409).body(
+            r#"{"httpStatusCode":409,"errorCode":"E7128","message":"Query result set exceeded max limit"}"#,
+        )),
+    );
+    for pe in ["202501", "202502"] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(dx))),
+                request::query(url_decoded(contains((
+                    "dimension",
+                    leak(format!("pe:{pe}"))
+                )))),
+            ])
+            .times(1)
+            .respond_with(ok(analytics_for(vec![
+                json!(["tUIlpyeeX9N", pe, "O6uvpzGd5pu", "50.0", "5.0", "10.0"]),
+                json!(["FbKK4ofIv5R", pe, "O6uvpzGd5pu", "40.0", "4.0", "10.0"]),
+            ]))),
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let out = dir.path().join("r.ndjson");
+    let a = reports(&server, &locations, &out)
+        .args(["--level", "2", "--period", "202501", "--period", "202502"])
+        .assert()
+        .success();
+    let err = stderr(&a);
+    assert!(err.contains("splitting 2 periods in two"), "{err}");
+    assert!(!err.contains("splitting 2 indicators"), "{err}");
+    assert!(stdout(&a).contains("from 3 analytics requests"));
+    let ids: Vec<String> = read_ndjson(&out)
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-202501",
+            "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-202502",
+            "sl-demo-tUIlpyeeX9N-O6uvpzGd5pu-202501",
+            "sl-demo-tUIlpyeeX9N-O6uvpzGd5pu-202502",
+        ]
+    );
+}
+
+/// A stub with 2 org units at levels 2 and 3 and one answer per level,
+/// indicator and month. The earliest are the slowest, so with several
+/// workers later units finish first.
+fn stub_for_concurrency() -> Server {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    let org_units: [(usize, [&str; 2]); 2] = [
+        (2, ["O6uvpzGd5pu", "fdc6uOvgoji"]),
+        (3, ["YuQRtpLP10I", "vWbkYPRmKyS"]),
+    ];
+    for (level, _) in org_units {
+        expect_units(&server, level as u32, 2);
+    }
+    let mut slow = 12u64;
+    for (level, ous) in org_units {
+        for dx in ["FbKK4ofIv5R", "tUIlpyeeX9N"] {
+            for (m, pe) in ["202501", "202502", "202503"].into_iter().enumerate() {
+                let rows = ous
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ou)| {
+                        json!([
+                            dx,
+                            pe,
+                            ou,
+                            format!("{}.5", level * 10 + m + i),
+                            "1.0",
+                            "2.0"
+                        ])
+                    })
+                    .collect();
+                server.expect(
+                    Expectation::matching(all_of![
+                        request::method_path("GET", "/dhis/api/analytics.json"),
+                        request::query(url_decoded(contains((
+                            "dimension",
+                            leak(format!("dx:{dx}"))
+                        )))),
+                        request::query(url_decoded(contains((
+                            "dimension",
+                            leak(format!("pe:{pe}"))
+                        )))),
+                        request::query(url_decoded(contains((
+                            "dimension",
+                            leak(format!("ou:LEVEL-{level}"))
+                        )))),
+                    ])
+                    .times(1)
+                    .respond_with(delay_and_then(
+                        std::time::Duration::from_millis(slow * 15),
+                        ok(analytics_for(rows)),
+                    )),
+                );
+                slow -= 1;
+            }
+        }
+    }
+    server
+}
+
+#[test]
+fn output_is_the_same_at_any_concurrency() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(
+        dir.path(),
+        &["O6uvpzGd5pu", "fdc6uOvgoji", "YuQRtpLP10I", "vWbkYPRmKyS"],
+    );
+    let run = |concurrency: &str| {
+        let server = stub_for_concurrency();
+        let out = dir.path().join(format!("r{concurrency}.ndjson"));
+        reports(&server, &locations, &out)
+            .args([
+                "--level",
+                "2",
+                "--level",
+                "3",
+                "--chunk",
+                "1",
+                "--max-rows",
+                "1",
+            ])
+            .args([
+                "--period", "202501", "--period", "202502", "--period", "202503",
+            ])
+            .args(["--concurrency", concurrency])
+            .assert()
+            .success();
+        std::fs::read_to_string(out).unwrap()
+    };
+    let one = run("1");
+    let four = run("4");
+    assert_eq!(one, four);
+    let r: Vec<Value> = one
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(r.len(), 24);
+    // Level, then indicator, then period; by id within each.
+    assert_eq!(r[0]["id"], "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-202501");
+    assert_eq!(r[1]["id"], "sl-demo-FbKK4ofIv5R-fdc6uOvgoji-202501");
+    assert_eq!(r[2]["id"], "sl-demo-FbKK4ofIv5R-O6uvpzGd5pu-202502");
+    assert_eq!(r[23]["id"], "sl-demo-tUIlpyeeX9N-vWbkYPRmKyS-202503");
+    assert!(!dir.path().join("r4.ndjson.tmp").exists());
+}
+
+#[test]
+fn breakdowns_attach_to_their_totals_across_batched_periods() {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 2);
+    let ous = ["O6uvpzGd5pu", "fdc6uOvgoji"];
+    let pes = ["202501", "202502"];
+    let mut totals = Vec::new();
+    let mut strata = Vec::new();
+    for (i, ou) in ous.iter().enumerate() {
+        for (j, pe) in pes.iter().enumerate() {
+            let n = 10 * (i + 1) + j;
+            totals.push(json!([
+                "tUIlpyeeX9N",
+                pe,
+                ou,
+                "50.0",
+                format!("{}.0", 2 * n),
+                "100.0"
+            ]));
+            strata.push(json!([
+                "tUIlpyeeX9N",
+                "qkPbeWaFsnU",
+                pe,
+                ou,
+                "50.0",
+                format!("{n}.0"),
+                "50.0"
+            ]));
+            strata.push(json!([
+                "tUIlpyeeX9N",
+                "VXJy4z1XYPl",
+                pe,
+                ou,
+                "50.0",
+                format!("{n}.0"),
+                "50.0"
+            ]));
+        }
+    }
+    // A breakdown with no total to go with it.
+    strata.push(json!([
+        "FbKK4ofIv5R",
+        "qkPbeWaFsnU",
+        "202501",
+        "O6uvpzGd5pu",
+        "1.0",
+        "1.0",
+        "1.0"
+    ]));
+    let both = ("dimension", "pe:202501;202502");
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(contains(both))),
+            request::query(url_decoded(not(contains(("dimension", "fMZEcRHuamy"))))),
+        ])
+        .times(1)
+        .respond_with(ok(analytics_for(totals))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(contains(both))),
+            request::query(url_decoded(contains(("dimension", "fMZEcRHuamy")))),
+        ])
+        .times(1)
+        .respond_with(ok(json!({
+            "headers": [{"name":"dx"},{"name":"fMZEcRHuamy"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+            "metaData": {"items": {"fMZEcRHuamy": {"name": "Location Fixed/Outreach"},
+                                   "qkPbeWaFsnU": {"name": "Fixed"}, "VXJy4z1XYPl": {"name": "Outreach"}}},
+            "rows": strata
+        }))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &ous);
+    let out = dir.path().join("r.ndjson");
+    let report = dir.path().join("report.json");
+    let a = reports(&server, &locations, &out)
+        .args(["--level", "2", "--period", "202501", "--period", "202502"])
+        .args(["--breakdown", "fMZEcRHuamy"])
+        .arg("--report")
+        .arg(&report)
+        .assert()
+        .success();
+    assert!(
+        stdout(&a).contains("4 breakdowns attached"),
+        "{}",
+        stdout(&a)
+    );
+    let r = read_ndjson(&out);
+    assert_eq!(r.len(), 4);
+    for (k, rep) in r.iter().enumerate() {
+        let (i, j) = (k / 2, k % 2);
+        let n = 10 * (i + 1) + j;
+        assert_eq!(
+            rep["id"],
+            format!("sl-demo-tUIlpyeeX9N-{}-{}", ous[i], pes[j])
+        );
+        let g = &rep["group"][0];
+        assert_eq!(g["population"][0]["count"], 2 * n);
+        let s = &g["stratifier"][0]["stratum"];
+        assert_eq!(s.as_array().unwrap().len(), 2);
+        assert_eq!(s[0]["value"]["text"], "Fixed");
+        assert_eq!(s[1]["value"]["text"], "Outreach");
+        assert_eq!(s[0]["population"][0]["count"], n);
+    }
+    let rep: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(rep["counts"]["stratum_without_total"], 1);
+}
+
+#[test]
+fn a_failed_request_stops_the_run_and_leaves_no_file() {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 1);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(contains(("dimension", "pe:2025")))),
+        ])
+        // Both indicator chunks may be in flight when the first fails.
+        .times(1..=2)
+        .respond_with(status_code(409).body(
+            r#"{"httpStatusCode":409,"errorCode":"E7124","message":"Dimension is not valid"}"#,
+        )),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(not(contains(("dimension", "pe:2025"))))),
+        ])
+        .times(0..)
+        .respond_with(ok(analytics_for(vec![]))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let out = dir.path().join("r.ndjson");
+    let a = reports(&server, &locations, &out)
+        .args(["--level", "2", "--chunk", "1", "--concurrency", "4"])
+        .args([
+            "--period", "202501", "--period", "2025", "--period", "202502",
+        ])
+        .assert()
+        .code(2);
+    assert!(
+        stderr(&a).contains("DHIS2 rejected the analytics query for level 2 and period 2025"),
+        "{}",
+        stderr(&a)
+    );
+    assert!(!out.exists());
+    assert!(!dir.path().join("r.ndjson.tmp").exists());
 }
