@@ -455,3 +455,34 @@ fn incomplete_or_conflicting_auth_flags_are_usage_errors() {
         load(&server, &input, flags).failure().code(2);
     }
 }
+
+#[test]
+fn a_gzip_input_is_read_like_a_plain_one() {
+    use std::io::Write;
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("changes.ndjson.gz");
+    let mut gz = flate2::write::GzEncoder::new(
+        std::fs::File::create(&input).unwrap(),
+        flate2::Compression::default(),
+    );
+    for r in [
+        loc("state", Some("3"), None),
+        loc("ward", Some("1"), Some("state")),
+    ] {
+        writeln!(gz, "{r}").unwrap();
+    }
+    gz.finish().unwrap();
+    expect_metadata(&server, true);
+    server.expect(
+        Expectation::matching(any_bundle())
+            .times(1)
+            .respond_with(ok(transaction_response())),
+    );
+    let a = load(&server, &input, &[]).success();
+    assert!(
+        stdout(&a).contains("Loaded 2 resources in 1 bundle(s)"),
+        "{}",
+        stdout(&a)
+    );
+}

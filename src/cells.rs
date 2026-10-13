@@ -7,14 +7,13 @@
 //! version-checked PUT a `diff` edit would be. Re-running is idempotent:
 //! once loaded and re-extracted, nothing is missing and nothing is written.
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 
 use serde_json::Value;
 
 use crate::cli::IndexArgs;
 use crate::error::{KilnError, Result};
-use crate::fhir::ndjson::NdjsonReader;
+use crate::fhir::ndjson::{is_gz, with_suffix, NdjsonReader, Output};
 use crate::fhir::spatial::{cells_of, compute_cell, parse_scheme_level, upsert_cell};
 use crate::report::Report;
 use crate::snapshot::LOCATIONS_FILE;
@@ -40,9 +39,8 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
         .collect::<Result<_>>()?;
 
     let mut report = Report::default();
-    let tmp = args.out.with_extension("ndjson.tmp");
-    let file = File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
-    let mut out = BufWriter::new(file);
+    let tmp = with_suffix(&args.out, ".tmp");
+    let mut out = Output::create(&tmp, is_gz(&args.out))?;
     let (mut seen, mut written) = (0usize, 0usize);
 
     for line in NdjsonReader::open(&ndjson)? {
@@ -101,8 +99,7 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
             report.add("already_indexed", &id, "every requested cell present");
         }
     }
-    out.flush().map_err(|e| KilnError::io(&tmp, e))?;
-    drop(out);
+    out.finish().map_err(|e| KilnError::io(&tmp, e))?;
     std::fs::rename(&tmp, &args.out).map_err(|e| KilnError::io(&args.out, e))?;
 
     println!(

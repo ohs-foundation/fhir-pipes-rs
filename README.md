@@ -213,6 +213,13 @@ INDICATORS:    any of --indicator-group UID, --indicator UID, --data-element-gro
                --data-element UID, --data-element-group-set UID, --data-set UID (repeatable)
 ```
 
+NDJSON files given by path may be gzip: a path ending in `.gz` is read
+through a decoder (`load --in`, `dhis2 reports --locations` and
+`--previous`) and written compressed (`--out` of `dhis2`, `index`,
+`population` and `diff`, and `dhis2 reports --changed` and `--removed`).
+The snapshot's own files stay plain, as `transform` and `diff` read them
+by offset, which gzip does not allow.
+
 A server that needs authentication gets one of two kinds:
 
 - `--token` (or `$KILN_TOKEN`) is sent as a fixed bearer token. Getting it is
@@ -972,7 +979,10 @@ if anything that decides the batches or their content has changed since:
 the arguments (other than `--concurrency`), the DHIS2 URL, an org unit
 count, when DHIS2 last built its analytics tables, or the `--locations` or
 `--previous` file (size and modification time). Run without `--resume` to
-start over. `OUT.ndjson.resume` is removed when the run succeeds.
+start over. `OUT.ndjson.resume` is removed when the run succeeds. A gzip
+`--out` (`OUT.ndjson.gz`) is written as one gzip member per batch: members
+one after another make one valid gzip file, and the end of a member is a
+place the file can be cut back to, so resuming works the same.
 
 `--previous PREV.ndjson` compares this run with an earlier one, so a rerun
 need only send what changed to the FHIR server. `--out` still gets every

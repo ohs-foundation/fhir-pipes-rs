@@ -8,9 +8,8 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -18,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{KilnError, Result};
+use crate::fhir::ndjson::{is_gz, with_suffix, NdjsonReader, Output};
 use crate::report::Report;
 
 /// A report's content, as a 64-bit hash. Left out: `date`, which is when
@@ -109,16 +109,13 @@ pub struct Previous {
     seen: HashMap<u128, (u64, bool)>,
 }
 
-/// Every MeasureReport in an NDJSON file, with its line number.
+/// Every MeasureReport in an NDJSON file (gzip when it ends in `.gz`).
 fn each_report(path: &Path, mut f: impl FnMut(&str, &Value) -> Result<()>) -> Result<()> {
-    let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
-    for (n, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| KilnError::io(path, e))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let v: Value = serde_json::from_str(&line)
-            .map_err(|e| KilnError::Usage(format!("{}: line {}: {e}", path.display(), n + 1)))?;
+    for line in NdjsonReader::open(path)? {
+        let line = line?;
+        let v: Value = serde_json::from_str(&line.text).map_err(|e| {
+            KilnError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+        })?;
         if v.get("resourceType").and_then(Value::as_str) != Some("MeasureReport") {
             continue;
         }
@@ -211,16 +208,15 @@ impl Scope {
     }
 }
 
-/// One id per line, written to a temporary file and renamed into place.
+/// One id per line (gzip when `out` ends in `.gz`), written to a temporary
+/// file and renamed into place.
 pub fn write_lines(out: &Path, lines: &[String]) -> Result<()> {
-    let tmp = out.with_extension("txt.tmp");
-    let file = File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
-    let mut w = BufWriter::new(file);
+    let tmp = with_suffix(out, ".tmp");
+    let mut w = Output::create(&tmp, is_gz(out))?;
     for l in lines {
         writeln!(w, "{l}").map_err(|e| KilnError::io(&tmp, e))?;
     }
-    w.flush().map_err(|e| KilnError::io(&tmp, e))?;
-    drop(w);
+    w.finish().map_err(|e| KilnError::io(&tmp, e))?;
     std::fs::rename(&tmp, out).map_err(|e| KilnError::io(out, e))
 }
 
@@ -265,7 +261,7 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     pub fn path(out: &Path) -> PathBuf {
-        out.with_extension("ndjson.resume")
+        with_suffix(out, ".resume")
     }
 
     pub fn read(path: &Path) -> Result<Option<Self>> {
@@ -284,7 +280,7 @@ impl Checkpoint {
     /// Written whole to a temporary file and renamed, so a crash leaves the
     /// previous checkpoint, never half of one.
     pub fn write(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("resume.tmp");
+        let tmp = with_suffix(path, ".tmp");
         let bytes = serde_json::to_vec(self)?;
         std::fs::write(&tmp, bytes).map_err(|e| KilnError::io(&tmp, e))?;
         std::fs::rename(&tmp, path).map_err(|e| KilnError::io(path, e))

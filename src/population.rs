@@ -9,8 +9,7 @@
 //! so re-running replaces the same resources. Locations are never touched.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::time::Duration;
 
 use geo::Geometry;
@@ -21,7 +20,7 @@ use crate::fhir::group::{
     group_id, is_valid_id, target_population_group, TargetPopulation, KNOWN_SOURCE_CODES,
     MAX_ID_LEN, MAX_QUANTITY,
 };
-use crate::fhir::ndjson::LineAccess;
+use crate::fhir::ndjson::{is_gz, with_suffix, LineAccess, Output};
 use crate::fhir::{Boundary, Location};
 use crate::geometry::parse_boundary;
 use crate::index::hierarchy::Hierarchy;
@@ -319,9 +318,8 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
         "{}; pixel-centroid zonal sum over admin level {}",
         loaded.label, args.level
     );
-    let tmp = args.out.with_extension("ndjson.tmp");
-    let file = File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
-    let mut out = BufWriter::new(file);
+    let tmp = with_suffix(&args.out, ".tmp");
+    let mut out = Output::create(&tmp, is_gz(&args.out))?;
     let (mut measured_n, mut rolled_n) = (0usize, 0usize);
     for (&i, t) in &totals {
         let rec = &index.records[i];
@@ -378,8 +376,7 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             measured_n += 1;
         }
     }
-    out.flush().map_err(|e| KilnError::io(&tmp, e))?;
-    drop(out);
+    out.finish().map_err(|e| KilnError::io(&tmp, e))?;
     std::fs::rename(&tmp, &args.out).map_err(|e| KilnError::io(&args.out, e))?;
 
     let assigned: f64 = totals

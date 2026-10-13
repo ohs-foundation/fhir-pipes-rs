@@ -10,8 +10,7 @@ pub mod parquet;
 pub mod rebuild;
 
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -24,7 +23,7 @@ use crate::diff::parquet::read_geoparquet;
 use crate::diff::rebuild::{new_organization, rebuild, rebuild_organization};
 use crate::error::{KilnError, Result};
 use crate::fhir::location::strip_reference;
-use crate::fhir::ndjson::LineAccess;
+use crate::fhir::ndjson::{is_gz, LineAccess, Output};
 use crate::fhir::Location;
 use crate::report::Report;
 use crate::snapshot::index::index_by_id;
@@ -75,7 +74,7 @@ struct Diff<'a> {
     access: LineAccess,
     /// The Organization side of the facility pairing, when the snapshot has it.
     organizations: Option<(LineIndex, LineAccess)>,
-    out: BufWriter<File>,
+    out: Output,
     out_path: &'a Path,
     seen: HashSet<String>,
     stats: DiffStats,
@@ -219,12 +218,8 @@ fn tmp_path(out: &Path) -> PathBuf {
 }
 
 /// Flush, fsync and rename the finished changes file into place.
-fn finish(out: BufWriter<File>, tmp: &Path, dest: &Path) -> Result<()> {
-    let mut out = out;
-    out.flush().map_err(|e| KilnError::io(tmp, e))?;
-    let file = out
-        .into_inner()
-        .map_err(|e| KilnError::io(tmp, e.into_error()))?;
+fn finish(out: Output, tmp: &Path, dest: &Path) -> Result<()> {
+    let file = out.finish().map_err(|e| KilnError::io(tmp, e))?;
     file.sync_all().map_err(|e| KilnError::io(tmp, e))?;
     std::fs::rename(tmp, dest).map_err(|e| KilnError::io(dest, e))
 }
@@ -267,13 +262,13 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
     };
 
     let tmp = tmp_path(&args.out);
-    let file = File::create(&tmp)
+    let out = Output::create(&tmp, is_gz(&args.out))
         .map_err(|e| KilnError::Usage(format!("--out {}: {e}", tmp.display())))?;
     let mut diff = Diff {
         index,
         access: LineAccess::open(&ndjson)?,
         organizations,
-        out: BufWriter::new(file),
+        out,
         out_path: &tmp,
         seen: HashSet::new(),
         stats: DiffStats::default(),

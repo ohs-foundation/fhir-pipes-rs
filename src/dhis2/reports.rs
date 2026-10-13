@@ -25,7 +25,7 @@
 //! run; `--previous` compares with an earlier run (see `rerun`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Condvar, Mutex};
@@ -43,6 +43,7 @@ use crate::cli::Dhis2ReportsArgs;
 use crate::error::{KilnError, Result};
 use crate::extract::client::FetchError;
 use crate::fhir::group::is_valid_id;
+use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::transform::write_report;
 
@@ -65,15 +66,12 @@ pub struct Target {
 /// Org unit UID → Location, from every Location in `path` that carries an
 /// identifier under `system`.
 pub fn load_mapping(path: &Path, system: &str) -> Result<HashMap<String, Target>> {
-    let file = std::fs::File::open(path).map_err(|e| KilnError::io(path, e))?;
     let mut out = HashMap::new();
-    for (n, line) in BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| KilnError::io(path, e))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let v: Value = serde_json::from_str(&line)
-            .map_err(|e| KilnError::Usage(format!("{}: line {}: {e}", path.display(), n + 1)))?;
+    for line in NdjsonReader::open(path)? {
+        let line = line?;
+        let v: Value = serde_json::from_str(&line.text).map_err(|e| {
+            KilnError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+        })?;
         if v.get("resourceType").and_then(Value::as_str) != Some("Location") {
             continue;
         }
@@ -1041,8 +1039,7 @@ impl<'a> Writer<'a> {
     /// marks their ids as written again for `--removed`.
     fn recount(&mut self) -> Result<()> {
         let path = self.out.tmp().to_path_buf();
-        let file = std::fs::File::open(&path).map_err(|e| KilnError::io(&path, e))?;
-        let mut reader = BufReader::new(file).take(self.state.out_bytes);
+        let mut reader = self.out.read_back()?;
         let mut line = String::new();
         loop {
             line.clear();
@@ -1251,8 +1248,8 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     });
     let checkpoint = Checkpoint::path(&args.out);
     let saved = if args.resume {
-        let saved = Checkpoint::read(&checkpoint)?
-            .filter(|_| args.out.with_extension("ndjson.tmp").is_file());
+        let saved =
+            Checkpoint::read(&checkpoint)?.filter(|_| NdjsonWriter::tmp_path(&args.out).is_file());
         if saved.is_none() {
             eprintln!(
                 "no interrupted run to resume at {}; starting from the beginning",
@@ -1299,7 +1296,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
             };
             eprintln!(
                 "resuming after batch {start} of {total} ({})",
-                args.out.with_extension("ndjson.tmp").display()
+                NdjsonWriter::tmp_path(&args.out).display()
             );
             (out, changed, s)
         }

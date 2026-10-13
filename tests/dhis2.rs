@@ -1405,6 +1405,29 @@ fn a_rerun_writes_only_new_and_changed_reports_and_lists_removed_ids() {
 
 #[test]
 fn an_interrupted_run_resumes_to_the_same_file() {
+    resumes_to_the_same_file("r.ndjson");
+}
+
+#[test]
+fn an_interrupted_gzip_run_resumes_to_the_same_file() {
+    let bytes = resumes_to_the_same_file("r.ndjson.gz");
+    assert_eq!(gunzip(&bytes).lines().count(), 24);
+}
+
+/// The text of gzip bytes (any number of members).
+fn gunzip(bytes: &[u8]) -> String {
+    use std::io::Read;
+    let mut text = String::new();
+    flate2::read::MultiGzDecoder::new(bytes)
+        .read_to_string(&mut text)
+        .unwrap();
+    text
+}
+
+/// Fails a run at the seventh of twelve batches, cuts its temporary file
+/// mid-line, then resumes it. The output must be the same bytes as an
+/// uninterrupted run's, which are returned.
+fn resumes_to_the_same_file(name: &str) -> Vec<u8> {
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(
         dir.path(),
@@ -1419,17 +1442,17 @@ fn an_interrupted_run_resumes_to_the_same_file() {
             .args(extra);
         c.assert()
     };
-    let full = dir.path().join("full.ndjson");
+    let full = dir.path().join(format!("full-{name}"));
     let whole = run(&stub_units(false, 0, None), &full, &["--max-rows", "1"]).success();
 
     // The seventh batch is refused: six are written and checkpointed. The
     // DHIS2 URL is part of the plan, so every later run uses this server.
     let mut server = Server::run();
     expect_units_batches(&server, false, 0, Some(6));
-    let out = dir.path().join("r.ndjson");
+    let out = dir.path().join(name);
     let (tmp, checkpoint) = (
-        dir.path().join("r.ndjson.tmp"),
-        dir.path().join("r.ndjson.resume"),
+        dir.path().join(format!("{name}.tmp")),
+        dir.path().join(format!("{name}.resume")),
     );
     let failed = run(&server, &out, &["--max-rows", "1", "--concurrency", "1"]).code(2);
     assert!(
@@ -1479,6 +1502,62 @@ fn an_interrupted_run_resumes_to_the_same_file() {
         "{}",
         summary(&whole)
     );
+    std::fs::read(&out).unwrap()
+}
+
+#[test]
+fn gzip_locations_previous_and_changed_files() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let plain = locations_for(dir.path(), &["O6uvpzGd5pu"]);
+    let locations = dir.path().join("locations.ndjson.gz");
+    let mut gz = flate2::write::GzEncoder::new(
+        std::fs::File::create(&locations).unwrap(),
+        flate2::Compression::default(),
+    );
+    gz.write_all(&std::fs::read(plain).unwrap()).unwrap();
+    gz.finish().unwrap();
+    let out = dir.path().join("r.ndjson.gz");
+    let changed = dir.path().join("c.ndjson.gz");
+    let run = |extra: &[&str]| {
+        let server = Server::run();
+        expect_info(&server);
+        expect_group(&server);
+        expect_units(&server, 2, 1);
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/dhis/api/analytics.json"))
+                .respond_with(ok(analytics_for(vec![json!([
+                    "tUIlpyeeX9N",
+                    "202501",
+                    "O6uvpzGd5pu",
+                    "50.0",
+                    "5.0",
+                    "10.0"
+                ])]))),
+        );
+        let a = reports(&server, &locations, &out)
+            .args(["--level", "2", "--period", "202501"])
+            .args(extra)
+            .assert()
+            .success();
+        stdout(&a)
+    };
+    run(&[]);
+    let first = gunzip(&std::fs::read(&out).unwrap());
+    assert!(first.contains("sl-demo-tUIlpyeeX9N-O6uvpzGd5pu-202501"));
+    let s = run(&[
+        "--previous",
+        out.to_str().unwrap(),
+        "--changed",
+        changed.to_str().unwrap(),
+    ]);
+    assert!(
+        s.contains("0 new, 0 changed, 1 unchanged, 0 removed"),
+        "{s}"
+    );
+    // Nothing changed: still a valid, empty gzip file.
+    assert_eq!(gunzip(&std::fs::read(&changed).unwrap()), "");
+    assert_eq!(gunzip(&std::fs::read(&out).unwrap()), first);
 }
 
 #[test]
