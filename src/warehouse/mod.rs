@@ -1,16 +1,18 @@
-//! fhir-warehouse: refresh a SQL-on-FHIR parquet warehouse from a FHIR server.
+//! `fhir-pipes refresh`: refresh a SQL-on-FHIR Parquet warehouse from a FHIR
+//! server. This was fhir-warehouse, which ran kiln as a separate program; the
+//! FHIR side now runs in process.
 //!
 //! Steps, in order:
-//!   locations  kiln run: the location registry → parquet/locations
-//!   views      kiln export each resource type the views read, run the views in
-//!              memory (octofhir-sof), partition each table by a looked-up column
+//!   locations  extract and transform the Location registry → parquet/locations
+//!   views      export each resource type the views read, run the views in
+//!              memory (fhir-pipes-sof), partition each table by a looked-up column
 //!   tiles      the registry → PMTiles (duckdb + tippecanoe); runs beside views
-//!   manifest   manifest.json: row counts, views, kiln state
+//!   manifest   manifest.json: row counts, views, the extract state
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 
 mod config;
-mod kiln;
+mod fhir;
 mod manifest;
 mod partition;
 mod push;
@@ -23,53 +25,35 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::ValueEnum;
 use serde_json::json;
 
 use config::Settings;
 
-#[derive(Parser)]
-#[command(
-    name = "fhir-warehouse",
-    version,
-    about = "Refresh a SQL-on-FHIR parquet warehouse from a FHIR server"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Cmd,
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Run the refresh: locations, views, tiles, manifest, hooks (and push with --push).
-    Refresh(Args),
-    /// Show the resolved settings and which tools are found, then exit.
-    Check(Args),
-}
-
-#[derive(clap::Args)]
-struct Args {
-    /// Config file (default: ./fhir-warehouse.toml when present).
-    #[arg(long, env = "FHIR_WAREHOUSE_CONFIG")]
+#[derive(clap::Args, Debug, Clone)]
+pub struct RefreshArgs {
+    /// Config file (default: ./fhir-pipes.toml, else ./fhir-warehouse.toml).
+    #[arg(long, env = "FHIR_PIPES_CONFIG")]
     config: Option<PathBuf>,
     /// Warehouse directory.
-    #[arg(long, env = "DATA")]
+    #[arg(long, env = "FHIR_PIPES_DATA")]
     data: Option<PathBuf>,
     /// Directory of ViewDefinition JSON files (e.g. an IG's fsh-generated/resources).
-    #[arg(long, env = "VIEWS")]
+    #[arg(long, env = "FHIR_PIPES_VIEWS")]
     views: Option<PathBuf>,
     /// FHIR server base URL.
-    #[arg(long, env = "FHIR_BASE")]
+    #[arg(long, env = "FHIR_PIPES_SERVER")]
     server: Option<String>,
     /// Name for the server's raw downloads: raw/<name>/.
-    #[arg(long, env = "SERVER_NAME")]
+    #[arg(long, env = "FHIR_PIPES_SERVER_NAME")]
     server_name: Option<String>,
-    /// OAuth token endpoint, used with FHIR_CLIENT_ID and FHIR_CLIENT_SECRET.
-    #[arg(long, env = "FHIR_TOKEN_URL")]
+    /// Fixed bearer token for the FHIR server.
+    #[arg(long, env = "FHIR_PIPES_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+    /// OAuth token endpoint, used with FHIR_PIPES_CLIENT_ID and
+    /// FHIR_PIPES_CLIENT_SECRET, which are read only from the environment.
+    #[arg(long, env = "FHIR_PIPES_TOKEN_URL")]
     token_url: Option<String>,
-    /// kiln binary.
-    #[arg(long, env = "KILN")]
-    kiln: Option<String>,
     /// Run only these steps (comma-separated). The manifest is added when a
     /// data step is among them.
     #[arg(long, value_delimiter = ',')]
@@ -86,9 +70,8 @@ struct Args {
     /// Threads for reading and evaluating (default: the number of CPUs).
     #[arg(long)]
     threads: Option<usize>,
-    /// Reuse downloaded NDJSON where present instead of downloading again
-    /// (also REFRESH_RAW=0).
-    #[arg(long)]
+    /// Reuse downloaded NDJSON where present instead of downloading again.
+    #[arg(long, env = "FHIR_PIPES_REUSE_RAW")]
     reuse_raw: bool,
     /// Re-extract every Location instead of only the changed ones.
     #[arg(long)]
@@ -96,10 +79,13 @@ struct Args {
     /// Push: show what would change without changing it.
     #[arg(long)]
     dry_run: bool,
+    /// Show the resolved settings and which tools are found, then exit.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum Step {
+pub enum Step {
     Locations,
     Views,
     Tiles,
@@ -121,15 +107,11 @@ impl Step {
     }
 }
 
-fn main() {
-    if let Err(e) = run(Cli::parse()) {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
-    }
+fn env_secret(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn run(cli: Cli) -> Result<()> {
-    let (Cmd::Refresh(args) | Cmd::Check(args)) = &cli.command;
+pub fn run(args: &RefreshArgs) -> Result<()> {
     let steps = steps(args);
     let (file, base) = config::load(args.config.as_deref())?;
     let s = config::settings(
@@ -140,23 +122,19 @@ fn run(cli: Cli) -> Result<()> {
             views: args.views.clone(),
             server: args.server.clone(),
             server_name: args.server_name.clone(),
-            client_id: std::env::var("FHIR_CLIENT_ID")
-                .ok()
-                .filter(|v| !v.is_empty()),
-            client_secret: std::env::var("FHIR_CLIENT_SECRET")
-                .ok()
-                .filter(|v| !v.is_empty()),
+            token: args.token.clone(),
+            client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
+            client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
             token_url: args.token_url.clone(),
-            kiln: args.kiln.clone(),
             countries: args.countries.clone(),
             threads: args.threads,
-            reuse_raw: args.reuse_raw || std::env::var("REFRESH_RAW").is_ok_and(|v| v == "0"),
+            reuse_raw: args.reuse_raw,
             full: args.full,
             dry_run: args.dry_run,
         },
     )?;
     let needed = required_tools(&s, &steps)?;
-    if matches!(cli.command, Cmd::Check(_)) {
+    if args.check {
         check(&s, &steps, &needed);
         return Ok(());
     }
@@ -169,7 +147,7 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 /// The steps a run takes, from --only, --skip and --push.
-fn steps(args: &Args) -> BTreeSet<Step> {
+fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
     let mut steps: BTreeSet<Step> = if args.only.is_empty() {
         [
             Step::Locations,
@@ -210,9 +188,6 @@ fn hook_program(s: &Settings, program: &str) -> String {
 /// The external tools the chosen steps need, with what each is for.
 fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Vec<(String, String)>> {
     let mut t = Vec::new();
-    if steps.contains(&Step::Locations) || (steps.contains(&Step::Views) && !s.reuse_raw) {
-        t.push((s.kiln.clone(), "locations and downloads".into()));
-    }
     if steps.contains(&Step::Views) && s.views.is_none() {
         bail!("no views directory: pass --views, set VIEWS, or set `views` in the config");
     }
@@ -249,14 +224,7 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
         names(steps.iter().map(|s| s.name().to_string()).collect())
     );
     println!("server:     {} (raw/{})", s.server, s.server_name);
-    println!(
-        "auth:       {}",
-        if s.auth.is_some() {
-            "client credentials"
-        } else {
-            "none"
-        }
-    );
+    println!("auth:       {}", s.auth_kind());
     println!("data:       {}", s.data.display());
     println!(
         "views:      {}",
@@ -290,7 +258,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
 
     if steps.contains(&Step::Locations) {
         let t = Instant::now();
-        kiln::locations(s)?;
+        fhir::locations(s)?;
         timings.push(("locations", t.elapsed().as_secs_f64()));
         ran.insert(Step::Locations);
     }
@@ -401,9 +369,9 @@ fn views_step(s: &Settings) -> Result<()> {
                 || !ndjson(t).exists()
         })
         .collect();
-    kiln::export(s, &download)?;
+    fhir::export(s, &download)?;
 
-    let mut results: Vec<Option<octofhir_sof::ViewResult>> = all.iter().map(|_| None).collect();
+    let mut results: Vec<Option<fhir_pipes_sof::ViewResult>> = all.iter().map(|_| None).collect();
     for (rtype, idx) in &by_type {
         let t = Instant::now();
         let resources = views::read_ndjson(&ndjson(rtype), s.threads)?;

@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
-use octofhir_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding};
-use octofhir_sof::{ColumnInfo, ColumnType, ViewResult};
+use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding};
+use fhir_pipes_sof::{ColumnInfo, ColumnType, ViewResult};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
 
-use crate::config::Lookup;
+use super::config::Lookup;
 
 /// The directory name hive (and DuckDB) give the null partition.
 pub const NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";

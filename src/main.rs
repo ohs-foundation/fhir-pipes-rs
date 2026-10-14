@@ -16,12 +16,21 @@ mod report;
 mod run;
 mod snapshot;
 mod transform;
+mod warehouse;
 mod write;
 
 use clap::Parser;
 
 fn main() {
     let cli = cli::Cli::parse();
+    // refresh reports anyhow errors with their context chain.
+    if let cli::Command::Refresh(args) = &cli.command {
+        if let Err(err) = warehouse::run(args) {
+            eprintln!("fhir-pipes: {err:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let result: error::Result<()> = match cli.command {
         cli::Command::Transform(args) => transform::run_transform(&args),
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
@@ -33,6 +42,7 @@ fn main() {
         cli::Command::Index(args) => cells::run_index(&args),
         cli::Command::Population(args) => population::run_population(&args),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd),
+        cli::Command::Refresh(_) => unreachable!("handled above"),
     };
     if let Err(err) = result {
         eprintln!("fhir-pipes: {err}");

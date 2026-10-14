@@ -1,4 +1,4 @@
-//! Running the external tools: kiln, duckdb, tippecanoe, rclone and hooks.
+//! Running the external tools: duckdb, tippecanoe, rclone and hooks.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

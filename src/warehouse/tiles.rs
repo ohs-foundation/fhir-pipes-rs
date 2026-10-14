@@ -14,8 +14,8 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
-use crate::config::Settings;
-use crate::tools::{self, sql_str};
+use super::config::Settings;
+use super::tools::{self, sql_str};
 
 const POINT_COLS: &str = "id, name, type, status, admin1_name, admin2_name, admin3_name, pcode, gers_id, nhfr_code, nhfr_uid,
     replace(facility_level_text, chr(160), ' ') AS facility_level, ownership_text AS ownership, settlement_type,

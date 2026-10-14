@@ -30,9 +30,16 @@ uuid = { version = "1", features = ["v4"] }
 geo-traits = "0.3"
 tiff = { version = "0.11", default-features = false, features = ["deflate"] }
 flate2 = "1.1"
+# refresh (formerly fhir-warehouse)
+anyhow = "1"
+toml = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tempfile = "3"
+arrow = { workspace = true }
+fhir-pipes-sof = { workspace = true, features = ["parquet"] }
+fhir-pipes-sof-lint = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 httptest = "0.16"

@@ -1,40 +1,35 @@
-# fhir-warehouse
+# fhir-pipes refresh
 
-Refreshes a parquet warehouse from a FHIR server: one binary that downloads the
-data, runs [SQL-on-FHIR](https://sql-on-fhir.org) ViewDefinitions over it, and
-writes the result as hive-partitioned parquet tables with a manifest. It can
-also build map tiles of the location registry, run your own commands
-afterwards, and mirror the warehouse to object storage.
+`fhir-pipes refresh` refreshes a Parquet warehouse from a FHIR server. It
+downloads the data, runs [SQL-on-FHIR](https://sql-on-fhir.org)
+ViewDefinitions over it, and writes the result as Hive-partitioned Parquet
+tables with a manifest. It can also build map tiles of the Location registry,
+run your own commands afterwards, and mirror the warehouse to object storage.
 
-The ViewDefinitions run in process with
-[octofhir-sof](https://github.com/recodelabs/sof) on every CPU, each resource
-type read once however many views use it. The FHIR side goes through
-[kiln](https://github.com/recodelabs/kiln); tiles use duckdb and tippecanoe;
-pushing uses rclone. Only the tools the chosen steps need must be installed.
-
-## Install
-
-```bash
-cargo install --git https://github.com/recodelabs/fhir-warehouse
-```
+This command was fhir-warehouse, which ran kiln as a separate program. The
+ViewDefinitions run in process with fhir-pipes-sof (`crates/sof`) on every
+CPU, each resource type read once however many views use it. The FHIR side is
+the same code as `fhir-pipes run` and `fhir-pipes export`. Tiles use duckdb
+and tippecanoe; pushing uses rclone. Only the tools the chosen steps need must
+be installed.
 
 ## Run
 
 ```bash
-fhir-warehouse refresh --config fhir-warehouse.toml
-fhir-warehouse refresh --only views --reuse-raw          # views from the last download
-fhir-warehouse refresh --server https://example.org/fhir --server-name prod --push
-fhir-warehouse check                                      # settings, steps, tools found
+fhir-pipes refresh --config fhir-pipes.toml
+fhir-pipes refresh --only views --reuse-raw          # views from the last download
+fhir-pipes refresh --server https://example.org/fhir --server-name prod --push
+fhir-pipes refresh --check                           # settings, steps, tools found
 ```
 
 ### Steps
 
 | Step | What it does | Needs |
 |---|---|---|
-| `locations` | `kiln run`: the Location registry, incrementally, into `raw/<server>/locations` and `parquet/locations` | kiln |
-| `views` | `kiln export` every resource type the views read (one call), run each type's views on one read of it, write each view's table | kiln (none with `--reuse-raw`) |
+| `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations` | |
+| `views` | download every resource type the views read, as `fhir-pipes export` does, run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
-| `manifest` | `manifest.json`: time, server, each table's row count, the views, kiln's extract state | |
+| `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
 | `hooks` | the config's commands, in order | the commands |
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
@@ -69,26 +64,28 @@ anything runs, and a plain copy is saved to `views/<name>.json`.
 ## Settings
 
 Command-line flags win over their environment variables, which win over the
-config file (`--config`, else `./fhir-warehouse.toml` when present). Paths in
+config file (`--config`, else `./fhir-pipes.toml` or `./fhir-warehouse.toml`
+when present). Paths in
 the file are relative to the file.
 
 | Flag | Environment | Config | Default |
 |---|---|---|---|
-| `--data` | `DATA` | `data` | (required) |
-| `--views` | `VIEWS` | `views` | (required for `views`) |
-| `--server` | `FHIR_BASE` | `server.base` | `http://localhost:3447/fhir` |
-| `--server-name` | `SERVER_NAME` | `server.name` | `hapi-local` |
-| `--token-url` | `FHIR_TOKEN_URL` | `server.token_url` | |
-| | `FHIR_CLIENT_ID`, `FHIR_CLIENT_SECRET` | | no token |
-| `--kiln` | `KILN` | `tools.kiln` | `kiln` on the PATH |
+| `--data` | `FHIR_PIPES_DATA` | `data` | (required) |
+| `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
+| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir` |
+| `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local` |
+| `--token` | `FHIR_PIPES_TOKEN` | | no token |
+| `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
+| | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
 | `--countries` | | `tiles.countries` | every country |
 | `--threads` | | | number of CPUs |
-| `--reuse-raw` | `REFRESH_RAW=0` | | download again |
+| `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
 | `--full` | | | incremental |
 | `--dry-run` | | | (push only) |
 
 The client ID and secret are read only from the environment, never from flags
-or the file. kiln uses them to get and renew its own tokens.
+or the file. They are traded for a token with the client-credentials grant,
+and the token is renewed before it expires, as for the other commands.
 
 ```toml
 data = "../data"
@@ -100,7 +97,6 @@ name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
 
 [tools]            # paths or names on the PATH
-kiln = "kiln"
 duckdb = "duckdb"
 tippecanoe = "tippecanoe"
 rclone = "rclone"
@@ -144,10 +140,6 @@ Each run writes its step timings to `raw/<server>/last-refresh.json`.
 ## Development
 
 ```bash
-cargo test        # unit tests, and end-to-end runs against tests/fixtures with a stub kiln
+cargo test --test refresh   # end-to-end runs against tests/fixtures/refresh and a fake FHIR server
 cargo clippy --all-targets -- -D warnings
 ```
-
-## License
-
-MIT, copyright Recode Labs. See [LICENSE](LICENSE).

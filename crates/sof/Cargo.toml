@@ -5,7 +5,7 @@ edition = "2024"
 # From octofhir/sof (https://github.com/octofhir/sof), by the OctoFHIR Team.
 license = "MIT OR Apache-2.0"
 authors = ["OctoFHIR Team <funyloony@gmail.com>", "Recode Labs"]
-repository = "https://github.com/recodelabs/fhir-pipes-rs"
+repository = "https://github.com/ohs-foundation/fhir-pipes-rs"
 publish = false
 description = "SQL on FHIR v2: ViewDefinition parser, PostgreSQL generator and database-free in-memory evaluator"
 keywords = ["fhir", "sql-on-fhir", "healthcare", "viewdefinition", "fhirpath"]

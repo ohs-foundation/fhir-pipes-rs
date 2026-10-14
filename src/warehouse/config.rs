@@ -1,4 +1,4 @@
-//! Settings: the config file, overridden by command-line flags and their
+//! Settings for `refresh`: the config file, overridden by command-line flags and their
 //! environment variables, with defaults for anything neither sets.
 //!
 //! Relative paths in the config file are resolved against the file's own
@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-/// The config file (`fhir-warehouse.toml`). Every field is optional.
+use crate::cli::AuthArgs;
+
+/// The config file (`fhir-pipes.toml`). Every field is optional.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct File {
@@ -44,7 +46,6 @@ pub struct ServerFile {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsFile {
-    pub kiln: Option<String>,
     pub duckdb: Option<String>,
     pub tippecanoe: Option<String>,
     pub rclone: Option<String>,
@@ -139,8 +140,8 @@ pub struct Settings {
     pub views: Option<PathBuf>,
     pub server: String,
     pub server_name: String,
-    pub auth: Option<Auth>,
-    pub kiln: String,
+    /// How to authenticate to the FHIR server, as the other commands take it.
+    pub auth: AuthArgs,
     pub duckdb: String,
     pub tippecanoe: String,
     pub rclone: String,
@@ -158,15 +159,18 @@ pub struct Settings {
     pub dry_run: bool,
 }
 
-/// Client credentials for a server behind an OAuth gateway, passed on to kiln.
-#[derive(Debug, Clone)]
-pub struct Auth {
-    pub client_id: String,
-    pub client_secret: String,
-    pub token_url: String,
-}
-
 impl Settings {
+    /// How the run authenticates, for `--check`.
+    pub fn auth_kind(&self) -> &'static str {
+        if self.auth.token.is_some() {
+            "bearer token"
+        } else if self.auth.client_id.is_some() {
+            "client credentials"
+        } else {
+            "none"
+        }
+    }
+
     pub fn raw_dir(&self) -> PathBuf {
         self.data.join("raw").join(&self.server_name)
     }
@@ -184,10 +188,11 @@ impl Settings {
 pub fn load(path: Option<&Path>) -> Result<(File, PathBuf)> {
     let found = match path {
         Some(p) => Some(p.to_path_buf()),
-        None => {
-            let default = PathBuf::from("fhir-warehouse.toml");
-            default.exists().then_some(default)
-        }
+        // fhir-warehouse.toml is the name the file had before fhir-pipes.
+        None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists()),
     };
     let Some(path) = found else {
         return Ok((File::default(), std::env::current_dir()?));
@@ -221,10 +226,10 @@ pub struct Overrides {
     pub views: Option<PathBuf>,
     pub server: Option<String>,
     pub server_name: Option<String>,
+    pub token: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub token_url: Option<String>,
-    pub kiln: Option<String>,
     pub countries: Vec<String>,
     pub threads: Option<usize>,
     pub reuse_raw: bool,
@@ -237,20 +242,31 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         (Some(p), _) => p,
         (None, Some(p)) => resolve(&base, &p),
         (None, None) => {
-            bail!("no warehouse directory: pass --data, set DATA, or set `data` in the config")
+            bail!(
+                "no warehouse directory: pass --data, set FHIR_PIPES_DATA, or set `data` in the config"
+            )
         }
     };
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
     let auth = match (o.client_id, o.client_secret) {
-        (Some(id), Some(secret)) => Some(Auth {
-            client_id: id,
-            client_secret: secret,
-            token_url: o.token_url.or(file.server.token_url).context(
-                "FHIR_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
-            )?,
-        }),
-        (Some(_), None) => bail!("set FHIR_CLIENT_SECRET with FHIR_CLIENT_ID"),
-        _ => None,
+        (Some(_), _) if o.token.is_some() => {
+            bail!("FHIR_PIPES_TOKEN and FHIR_PIPES_CLIENT_ID are mutually exclusive")
+        }
+        (Some(id), Some(secret)) => AuthArgs {
+            token: None,
+            client_id: Some(id),
+            client_secret: Some(secret),
+            token_url: Some(o.token_url.or(file.server.token_url).context(
+                "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
+            )?),
+        },
+        (Some(_), None) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
+        _ => AuthArgs {
+            token: o.token,
+            client_id: None,
+            client_secret: None,
+            token_url: None,
+        },
     };
     let threads = o
         .threads
@@ -272,7 +288,6 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             .or(file.server.name)
             .unwrap_or_else(|| "hapi-local".into()),
         auth,
-        kiln: o.kiln.or(file.tools.kiln).unwrap_or_else(|| "kiln".into()),
         duckdb: file.tools.duckdb.unwrap_or_else(|| "duckdb".into()),
         tippecanoe: file.tools.tippecanoe.unwrap_or_else(|| "tippecanoe".into()),
         rclone: file.tools.rclone.unwrap_or_else(|| "rclone".into()),

@@ -1,12 +1,12 @@
-//! Finding the ViewDefinitions and running them in memory with octofhir-sof.
+//! Finding the ViewDefinitions and running them in memory with fhir-pipes-sof.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use octofhir_sof::{ViewDefinition, ViewResult, execute_parallel};
-use octofhir_sof_lint::{Severity, validate_structure};
+use fhir_pipes_sof::{ViewDefinition, ViewResult, execute_parallel};
+use fhir_pipes_sof_lint::{Severity, validate_structure};
 use serde_json::Value;
 
 /// A ViewDefinition found in the views directory.

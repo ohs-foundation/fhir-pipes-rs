@@ -37,6 +37,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Refresh a SQL-on-FHIR Parquet warehouse: locations, views, tiles,
+    /// manifest and hooks, and push with --push
+    Refresh(crate::warehouse::RefreshArgs),
     /// Convert a snapshot into a partitioned GeoParquet dataset (offline)
     Transform(TransformArgs),
     /// Summarise a written dataset

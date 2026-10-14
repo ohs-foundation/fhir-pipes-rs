@@ -1,5 +1,5 @@
 //! manifest.json: when and from where the warehouse was refreshed, each table's
-//! row count, the views, and kiln's extract state.
+//! row count, the views, and the Location extract's state.
 
 use std::fs;
 use std::path::Path;
@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde_json::{Map, Value, json};
 
-use crate::config::Settings;
-use crate::partition::table_files;
+use super::config::Settings;
+use super::partition::table_files;
 
 /// Write data/manifest.json and return its `refreshed_at`.
 pub fn write(s: &Settings) -> Result<String> {
@@ -57,16 +57,18 @@ pub fn write(s: &Settings) -> Result<String> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(Value::Null);
-    let kiln: Map<String, Value> = [
-        "kiln_version",
-        "watermark",
-        "count",
-        "organization_count",
-        "completed_at",
-    ]
-    .iter()
-    .map(|k| (k.to_string(), state.get(k).cloned().unwrap_or(Value::Null)))
-    .collect();
+    // A state.json written by kiln has kiln_version instead.
+    let version = state
+        .get("fhir_pipes_version")
+        .or_else(|| state.get("kiln_version"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut extract: Map<String, Value> =
+        ["watermark", "count", "organization_count", "completed_at"]
+            .iter()
+            .map(|k| (k.to_string(), state.get(k).cloned().unwrap_or(Value::Null)))
+            .collect();
+    extract.insert("fhir_pipes_version".into(), version);
 
     let manifest = json!({
         "refreshed_at": refreshed_at,
@@ -74,7 +76,7 @@ pub fn write(s: &Settings) -> Result<String> {
         "server_name": s.server_name,
         "tables": tables,
         "views": views,
-        "kiln": kiln,
+        "extract": extract,
     });
     let path = s.data.join("manifest.json");
     fs::write(&path, serde_json::to_string_pretty(&manifest)?)

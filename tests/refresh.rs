@@ -1,21 +1,53 @@
-//! End-to-end runs of the binary against fixtures, with a stub kiln that logs
-//! its arguments and copies fixture NDJSON in place of a FHIR server.
+//! End-to-end runs of `fhir-pipes refresh` against fixtures, with a fake FHIR
+//! server serving the fixture NDJSON.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use httptest::{Expectation, Server, all_of, matchers::*, responders::*};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::Field;
-use predicates::str::contains;
+use predicates::str::contains as has;
+use serde_json::{Value, json};
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/refresh")
 }
 
-/// A warehouse directory with the fixture locations table, a stub kiln and a
-/// config file using them. Returns (tempdir, config path).
-fn setup(extra_config: &str) -> (tempfile::TempDir, PathBuf) {
+fn read_ndjson(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn bundle(resources: Vec<Value>) -> String {
+    json!({
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": resources.into_iter().map(|r| json!({"resource": r})).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Serve each fixture type, once, as a single search page.
+fn serve_types(server: &Server, types: &[&str]) {
+    for t in types {
+        let resources = read_ndjson(&fixtures().join(format!("raw/{t}.ndjson")));
+        server.expect(
+            Expectation::matching(request::method_path("GET", format!("/fhir/{t}")))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(resources))),
+        );
+    }
+}
+
+/// A warehouse directory with the fixture locations table and a config file
+/// pointing at `base`. Returns (tempdir, config path).
+fn setup(base: &str, extra_config: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let loc = root.join("data/parquet/locations/country=SLE");
@@ -25,34 +57,7 @@ fn setup(extra_config: &str) -> (tempfile::TempDir, PathBuf) {
         loc.join("part-0.parquet"),
     )
     .unwrap();
-    let kiln = root.join("kiln");
-    fs::write(
-        &kiln,
-        format!(
-            r#"#!/bin/sh
-echo "$@" >> "{log}"
-env | grep '^KILN_' | sort >> "{log}"
-if [ "$1" = export ]; then
-  out=""; types=""
-  while [ $# -gt 0 ]; do
-    case "$1" in --out) out="$2"; shift ;; --type) types="$types $2"; shift ;; esac
-    shift
-  done
-  mkdir -p "$out"
-  for t in $types; do cp "{raw}/$t.ndjson" "$out/$t.ndjson"; done
-fi
-"#,
-            log = root.join("kiln.log").display(),
-            raw = fixtures().join("raw").display()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&kiln, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let config = root.join("fhir-warehouse.toml");
+    let config = root.join("fhir-pipes.toml");
     fs::write(
         &config,
         format!(
@@ -60,11 +65,8 @@ fi
 views = "{views}"
 
 [server]
-base = "http://fhir.test/fhir"
+base = "{base}"
 name = "test"
-
-[tools]
-kiln = "./kiln"
 
 [tables]
 strip_prefix = ["icr_"]
@@ -81,22 +83,27 @@ table_key = "id"
     (dir, config)
 }
 
+/// A server address nothing listens on, for runs that must not reach a server.
+const NOWHERE: &str = "http://127.0.0.1:9/fhir";
+
 fn cmd(config: &Path) -> Command {
-    let mut c = Command::cargo_bin("fhir-warehouse").unwrap();
-    c.current_dir(config.parent().unwrap())
-        .env_remove("DATA")
-        .env_remove("VIEWS")
-        .env_remove("FHIR_BASE")
-        .env_remove("SERVER_NAME")
-        .env_remove("KILN")
-        .env_remove("REFRESH_RAW")
-        .env_remove("FHIR_CLIENT_ID")
-        .env_remove("FHIR_CLIENT_SECRET")
-        .env_remove("FHIR_TOKEN_URL")
-        .env_remove("FHIR_WAREHOUSE_CONFIG")
-        .arg("refresh")
-        .arg("--config")
-        .arg(config);
+    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
+    c.current_dir(config.parent().unwrap());
+    for var in [
+        "FHIR_PIPES_CONFIG",
+        "FHIR_PIPES_DATA",
+        "FHIR_PIPES_VIEWS",
+        "FHIR_PIPES_SERVER",
+        "FHIR_PIPES_SERVER_NAME",
+        "FHIR_PIPES_REUSE_RAW",
+        "FHIR_PIPES_TOKEN",
+        "FHIR_PIPES_CLIENT_ID",
+        "FHIR_PIPES_CLIENT_SECRET",
+        "FHIR_PIPES_TOKEN_URL",
+    ] {
+        c.env_remove(var);
+    }
+    c.arg("refresh").arg("--config").arg(config);
     c
 }
 
@@ -128,22 +135,20 @@ fn get<'a>(row: &'a [(String, String)], col: &str) -> &'a str {
 
 #[test]
 fn views_are_downloaded_run_and_partitioned() {
-    let (dir, config) = setup("");
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
     cmd(&config)
         .args(["--only", "views"])
         .assert()
         .success()
-        .stdout(contains("IcrObs (Observation) → parquet/obs (3 rows)"))
-        .stdout(contains("IcrPatient (Patient) → parquet/patient (2 rows)"));
+        .stdout(has("export Observation, Patient"))
+        .stdout(has("IcrObs (Observation) → parquet/obs (3 rows)"))
+        .stdout(has("IcrPatient (Patient) → parquet/patient (2 rows)"));
     let root = dir.path();
-
-    // One kiln export for both types.
-    let log = fs::read_to_string(root.join("kiln.log")).unwrap();
-    assert!(
-        log.contains(
-            "export --server http://fhir.test/fhir --type Observation --type Patient --out"
-        ),
-        "{log}"
+    assert_eq!(
+        read_ndjson(&root.join("data/raw/test/Observation.ndjson")).len(),
+        3
     );
 
     // Observations partitioned through the locations table; the unknown location
@@ -164,11 +169,11 @@ fn views_are_downloaded_run_and_partitioned() {
     assert_eq!(born, ["2020-05-01", "2021-01-01"]);
 
     // The views are saved as plain ViewDefinitions; the manifest counts the tables.
-    let saved: serde_json::Value =
+    let saved: Value =
         serde_json::from_str(&fs::read_to_string(root.join("data/views/IcrObs.json")).unwrap())
             .unwrap();
     assert_eq!(saved["resourceType"], "ViewDefinition");
-    let manifest: serde_json::Value =
+    let manifest: Value =
         serde_json::from_str(&fs::read_to_string(root.join("data/manifest.json")).unwrap())
             .unwrap();
     assert_eq!(manifest["tables"]["obs"]["rows"], 3);
@@ -181,7 +186,7 @@ fn views_are_downloaded_run_and_partitioned() {
 
 #[test]
 fn reuse_raw_skips_the_download() {
-    let (dir, config) = setup("");
+    let (dir, config) = setup(NOWHERE, "");
     let raw = dir.path().join("data/raw/test");
     fs::create_dir_all(&raw).unwrap();
     for t in ["Observation", "Patient"] {
@@ -194,64 +199,91 @@ fn reuse_raw_skips_the_download() {
     cmd(&config)
         .args(["--only", "views", "--reuse-raw"])
         .assert()
-        .success();
-    assert!(!dir.path().join("kiln.log").exists());
+        .success()
+        .stdout(has("parquet/obs (3 rows)"));
 }
 
 #[test]
-fn locations_runs_kiln_with_credentials() {
-    let (dir, config) = setup("");
-    cmd(&config)
-        .args([
-            "--only",
-            "locations",
-            "--full",
-            "--token-url",
-            "https://auth.test/token",
+fn locations_are_extracted_with_client_credentials() {
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/token"))
+            .times(1)
+            .respond_with(json_encoded(
+                json!({"access_token": "tok", "expires_in": 3600}),
+            )),
+    );
+    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot");
+    let locations: Vec<Value> = read_ndjson(&snapshot.join("locations.ndjson"))
+        .into_iter()
+        .map(|mut l| {
+            l["meta"] = json!({"lastUpdated": "2026-01-01T00:00:00Z"});
+            l
+        })
+        .collect();
+    let n = locations.len();
+    let bearer = || request::headers(contains(("authorization", "Bearer tok")));
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Location"),
+            bearer()
         ])
-        .env("FHIR_CLIENT_ID", "warehouse")
-        .env("FHIR_CLIENT_SECRET", "s3cret")
+        .times(1)
+        .respond_with(status_code(200).body(bundle(locations))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Organization"),
+            bearer()
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(vec![]))),
+    );
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    let token_url = server.url_str("/token");
+    cmd(&config)
+        .args(["--only", "locations", "--full", "--token-url", &token_url])
+        .env("FHIR_PIPES_CLIENT_ID", "warehouse")
+        .env("FHIR_PIPES_CLIENT_SECRET", "s3cret")
         .assert()
         .success();
-    let log = fs::read_to_string(dir.path().join("kiln.log")).unwrap();
-    assert!(
-        log.contains("run --server http://fhir.test/fhir --snapshot"),
-        "{log}"
+    let root = dir.path();
+    let snap = read_ndjson(&root.join("data/raw/test/locations/locations.ndjson"));
+    assert_eq!(snap.len(), n);
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["extract"]["count"], n);
+    assert_eq!(
+        manifest["extract"]["fhir_pipes_version"],
+        env!("CARGO_PKG_VERSION")
     );
-    assert!(log.contains("data/raw/test/locations --out"), "{log}");
-    assert!(log.contains("--full"), "{log}");
-    assert!(log.contains("KILN_CLIENT_ID=warehouse"), "{log}");
-    assert!(
-        log.contains("KILN_TOKEN_URL=https://auth.test/token"),
-        "{log}"
-    );
+    assert!(manifest["tables"]["locations"]["rows"].as_i64().unwrap() > 0);
 }
 
 #[test]
 fn flags_override_the_config() {
-    let (dir, config) = setup("");
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(NOWHERE, "");
     cmd(&config)
-        .args([
-            "--only",
-            "views",
-            "--server",
-            "http://other.test/fhir",
-            "--server-name",
-            "other",
-        ])
+        .args(["--only", "views", "--server-name", "other", "--server"])
+        .arg(server.url_str("/fhir"))
         .assert()
         .success();
-    let log = fs::read_to_string(dir.path().join("kiln.log")).unwrap();
-    assert!(log.contains("--server http://other.test/fhir"), "{log}");
-    assert!(dir
-        .path()
-        .join("data/raw/other/Observation.ndjson")
-        .exists());
+    assert!(
+        dir.path()
+            .join("data/raw/other/Observation.ndjson")
+            .exists()
+    );
 }
 
 #[test]
 fn hooks_run_after_their_step_only() {
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
     let (dir, config) = setup(
+        &server.url_str("/fhir"),
         r#"
 [[hooks]]
 name = "always"
@@ -274,30 +306,28 @@ run = ["sh", "-c", "touch after-locations.txt"]
 
 #[test]
 fn missing_tools_fail_before_anything_runs() {
-    let (dir, config) = setup("");
+    let (dir, config) = setup(NOWHERE, "\n[tools]\nduckdb = \"/no/such/duckdb\"\n");
     cmd(&config)
-        .args(["--only", "views", "--kiln", "/no/such/kiln"])
+        .args(["--only", "views,tiles"])
         .assert()
         .failure()
-        .stderr(contains(
-            "not found: /no/such/kiln (for locations and downloads)",
-        ));
+        .stderr(has("not found: /no/such/duckdb (for tiles)"));
     assert!(!dir.path().join("data/parquet/obs").exists());
 }
 
 #[test]
 fn push_needs_a_push_section() {
-    let (_dir, config) = setup("");
+    let (_dir, config) = setup(NOWHERE, "");
     cmd(&config)
         .args(["--only", "manifest", "--push"])
         .assert()
         .failure()
-        .stderr(contains("[push]"));
+        .stderr(has("[push]"));
 }
 
 #[test]
 fn a_broken_view_stops_the_run() {
-    let (dir, config) = setup("");
+    let (dir, config) = setup(NOWHERE, "");
     let views = dir.path().join("views");
     fs::create_dir_all(&views).unwrap();
     fs::write(
@@ -311,5 +341,5 @@ fn a_broken_view_stops_the_run() {
         .arg(&views)
         .assert()
         .failure()
-        .stderr(contains("bad.json"));
+        .stderr(has("bad.json"));
 }

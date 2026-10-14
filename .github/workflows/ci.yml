@@ -21,10 +21,10 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --locked
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
   release-build:
     needs: test
     runs-on: ${{ matrix.os }}

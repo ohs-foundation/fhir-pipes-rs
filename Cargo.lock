@@ -1329,11 +1329,16 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "fhir-pipes"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
+ "arrow",
  "arrow-array",
  "arrow-schema",
  "assert_cmd",
  "base64 0.22.1",
+ "chrono",
  "clap",
+ "fhir-pipes-sof",
+ "fhir-pipes-sof-lint",
  "flate2",
  "geo",
  "geo-traits",
@@ -1350,6 +1355,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tiff",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "uuid",
  "wkb",

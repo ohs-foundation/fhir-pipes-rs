@@ -60,7 +60,7 @@ pub fn read_text(r: impl Read + Send + 'static, gz: bool) -> Box<dyn BufRead + S
 /// which is what a temporary file of a failed run is.
 pub enum Output {
     Plain(BufWriter<File>),
-    Gz(GzEncoder<BufWriter<File>>),
+    Gz(Box<GzEncoder<BufWriter<File>>>),
 }
 
 impl Output {
@@ -68,7 +68,7 @@ impl Output {
         let file = File::create(path).map_err(|e| PipesError::io(path, e))?;
         let w = BufWriter::with_capacity(1 << 20, file);
         Ok(if gz {
-            Output::Gz(GzEncoder::new(w, Compression::default()))
+            Output::Gz(Box::new(GzEncoder::new(w, Compression::default())))
         } else {
             Output::Plain(w)
         })

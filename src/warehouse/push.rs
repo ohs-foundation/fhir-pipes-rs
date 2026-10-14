@@ -5,8 +5,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{Hook, Settings};
-use crate::tools;
+use super::config::{Hook, Settings};
+use super::tools;
 
 pub fn push(s: &Settings) -> Result<()> {
     let p = s
