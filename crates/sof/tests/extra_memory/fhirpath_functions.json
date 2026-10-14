@@ -1,0 +1,89 @@
+{
+  "title": "full_fhirpath_function_set_in_memory",
+  "description": "The in-memory path delegates per-expression FHIRPath evaluation to the real octofhir-fhirpath engine, so it supports the FULL FHIRPath function set (string manipulation, math, etc.) that the hand-lowered SQL subset rejects. These cases exercise functions the old subset evaluator did not implement. NOTE: these are in-memory only — they do NOT round-trip through the SQL generator and must not be added to a SQL-run harness.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "name": [
+        { "given": ["Alexander"], "family": "Smith" }
+      ]
+    },
+    {
+      "resourceType": "Observation",
+      "id": "o1",
+      "status": "final",
+      "code": { "text": "c" },
+      "valueInteger": 41
+    }
+  ],
+  "tests": [
+    {
+      "title": "substring on a navigated string",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id", "type": "string" },
+              { "name": "abbr", "path": "name.given.first().substring(0, 3)", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "p1", "abbr": "Ale" }
+      ]
+    },
+    {
+      "title": "upper and lower",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "up", "path": "name.family.first().upper()", "type": "string" },
+              { "name": "low", "path": "name.family.first().lower()", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "up": "SMITH", "low": "smith" }
+      ]
+    },
+    {
+      "title": "string length",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "len", "path": "name.given.first().length()", "type": "integer" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "len": 9 }
+      ]
+    },
+    {
+      "title": "math on an integer choice value",
+      "view": {
+        "resource": "Observation",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "id", "type": "string" },
+              { "name": "next", "path": "(value.ofType(integer) + 1)", "type": "integer" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "o1", "next": 42 }
+      ]
+    }
+  ]
+}

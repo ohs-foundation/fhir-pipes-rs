@@ -1,0 +1,20 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "PatientDemographics",
+  "resource": "Patient",
+  "status": "active",
+  "select": [
+    {
+      "column": [
+        { "name": "id", "path": "id", "type": "id" },
+        { "name": "gender", "path": "gender", "type": "code" },
+        { "name": "birth_date", "path": "birthDate", "type": "date" },
+        { "name": "last_name", "path": "name.where(use = 'official').family.first()", "type": "string" },
+        { "name": "given_names", "path": "name.where(use = 'official').given", "type": "string", "collection": true }
+      ]
+    }
+  ],
+  "where": [
+    { "path": "active = true" }
+  ]
+}

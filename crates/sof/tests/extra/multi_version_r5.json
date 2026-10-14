@@ -1,0 +1,40 @@
+{
+  "title": "multi_version_r5",
+  "description": "Execution is FHIR-version-agnostic: it navigates the resource JSON and is not coupled to any StructureDefinition. This uses R5-only shapes — MedicationRequest.medication as a CodeableReference (R5 changed it from R4's medication[x] choice) — to show the same engine runs R5 resources unchanged. See https://hl7.org/fhir/R5/medicationrequest.html (medication: CodeableReference) and https://hl7.org/fhir/R5/references.html#CodeableReference.",
+  "resources": [
+    {
+      "resourceType": "MedicationRequest",
+      "id": "mr1",
+      "status": "active",
+      "intent": "order",
+      "medication": {
+        "concept": {
+          "coding": [
+            { "system": "http://snomed.info/sct", "code": "323509004", "display": "Amoxicillin" }
+          ]
+        }
+      },
+      "subject": { "reference": "Patient/p1" }
+    }
+  ],
+  "tests": [
+    {
+      "title": "navigates R5 CodeableReference shapes and keys without version coupling",
+      "view": {
+        "resource": "MedicationRequest",
+        "select": [
+          {
+            "column": [
+              { "name": "id", "path": "getResourceKey()", "type": "string" },
+              { "name": "med_code", "path": "medication.concept.coding.code.first()", "type": "string" },
+              { "name": "patient", "path": "subject.getReferenceKey(Patient)", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "id": "mr1", "med_code": "323509004", "patient": "p1" }
+      ]
+    }
+  ]
+}

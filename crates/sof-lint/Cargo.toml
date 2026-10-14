@@ -1,0 +1,26 @@
+[package]
+name = "octofhir-sof-lint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Static lint and validation for SQL-on-FHIR ViewDefinitions"
+readme = "../../README.md"
+keywords = ["fhir", "sql-on-fhir", "lint", "viewdefinition", "fhirpath"]
+categories = ["development-tools", "parser-implementations"]
+
+[dependencies]
+octofhir-sof = { workspace = true }
+octofhir-fhirpath = { workspace = true }
+octofhir-fhirschema = { workspace = true }
+octofhir-canonical-manager = { workspace = true }
+banshee_hir = { workspace = true }
+banshee_parser = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

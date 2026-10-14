@@ -1,0 +1,15 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "SchemaViolationsDemo",
+  "resource": "Patient",
+  "select": [
+    {
+      "column": [
+        { "name": "gender", "path": "gender", "type": "code" },
+        { "name": "typo",   "path": "gendr", "type": "code" },
+        { "name": "family", "path": "name.family", "type": "string" },
+        { "name": "org",    "path": "managingOrganization", "type": "string" }
+      ]
+    }
+  ]
+}

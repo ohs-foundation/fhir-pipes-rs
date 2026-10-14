@@ -1,0 +1,15 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "ShareableViolationsDemo",
+  "resource": "Patient",
+  "select": [
+    {
+      "column": [
+        { "name": "family",  "path": "name.where(use = 'official').family.first()", "type": "string" },
+        { "name": "initial", "path": "name.first().given.first().substring(0, 1)", "type": "string" },
+        { "name": "joined",  "path": "name.first().given.join(' ')", "type": "string" },
+        { "name": "old",     "path": "birthDate < @1980-01-01", "type": "boolean" }
+      ]
+    }
+  ]
+}

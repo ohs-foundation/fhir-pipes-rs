@@ -1,0 +1,81 @@
+{
+  "title": "contained_resource_keys",
+  "description": "getReferenceKey/getResourceKey over contained resources. Contained resources are keyed as independent resources, so a fragment (#id) reference resolves into the resource's contained[] and its key matches getResourceKey() on that contained resource. See https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/functional-model.html (getResourceKey/getReferenceKey; contained resources are extracted into independent resources).",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        { "resourceType": "Organization", "id": "org1", "name": "Acme" }
+      ],
+      "managingOrganization": { "reference": "#org1" }
+    }
+  ],
+  "tests": [
+    {
+      "title": "fragment reference key matches contained resource key",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "org_ref", "path": "managingOrganization.getReferenceKey()", "type": "string" },
+              { "name": "org_key", "path": "contained.getResourceKey()", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "org_ref": "org1", "org_key": "org1" }
+      ]
+    },
+    {
+      "title": "getReferenceKey with matching type specifier resolves the contained type",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "k", "path": "managingOrganization.getReferenceKey(Organization)", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "k": "org1" }
+      ]
+    },
+    {
+      "title": "getReferenceKey with wrong type specifier returns empty",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "k", "path": "managingOrganization.getReferenceKey(Patient)", "type": "string" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "k": null }
+      ]
+    },
+    {
+      "title": "contained resource key equals fragment reference key",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              { "name": "eq", "path": "contained.getResourceKey() = managingOrganization.getReferenceKey()", "type": "boolean" }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        { "eq": true }
+      ]
+    }
+  ]
+}

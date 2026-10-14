@@ -1,0 +1,20 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "PatientContacts",
+  "resource": "Patient",
+  "status": "active",
+  "select": [
+    {
+      "column": [
+        { "name": "id", "path": "id", "type": "id" }
+      ]
+    },
+    {
+      "forEach": "telecom",
+      "column": [
+        { "name": "system", "path": "system", "type": "code" },
+        { "name": "value", "path": "value", "type": "string" }
+      ]
+    }
+  ]
+}

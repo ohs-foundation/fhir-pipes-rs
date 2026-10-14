@@ -1,0 +1,4 @@
+{"resourceType":"Patient","id":"pt1","active":true,"gender":"male","birthDate":"1974-12-25","name":[{"use":"official","family":"Smith","given":["John","Q"]},{"use":"nickname","family":"Public","given":["Johnny"]}],"telecom":[{"system":"phone","value":"555-1234"},{"system":"email","value":"john@example.org"}]}
+{"resourceType":"Patient","id":"pt2","active":true,"gender":"female","birthDate":"1982-03-08","name":[{"use":"official","family":"Lee","given":["Ann"]}],"telecom":[{"system":"email","value":"ann@example.org"}]}
+{"resourceType":"Patient","id":"pt3","active":false,"gender":"other","name":[{"use":"official","family":"Doe"}]}
+{"resourceType":"Observation","id":"o1","status":"final","valueQuantity":{"value":9.5,"unit":"mg"}}

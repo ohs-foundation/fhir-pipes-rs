@@ -1,0 +1,14 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "InvalidExample",
+  "resource": "Patient",
+  "status": "active",
+  "select": [
+    {
+      "column": [
+        { "name": "id", "path": "id", "type": "id" },
+        { "name": "id", "path": "gender", "type": "code" }
+      ]
+    }
+  ]
+}
