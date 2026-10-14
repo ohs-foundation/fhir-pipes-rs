@@ -22,13 +22,24 @@ pub fn validate_structure(view: &ViewDefinition) -> Vec<Finding> {
             "ViewDefinition is missing the required `resource`",
         ));
     }
-    if let Some(name) = &view.name
-        && !is_resource_name(name)
-    {
-        out.push(err(
-            "FH06",
-            format!("view name `{name}` must match ^[A-Z][A-Za-z0-9_]{{1,254}}$"),
-        ));
+    // SQL-on-FHIR's sql-name rule is the requirement. FHIR's cnl-0 (a capital
+    // first letter) is a warning in FHIR itself, and views such as
+    // fhir-data-pipes' `patient_flat` are valid without it.
+    if let Some(name) = &view.name {
+        if !is_sql_name(name) {
+            out.push(err(
+                "FH06",
+                format!("view name `{name}` is not a valid SQL name"),
+            ));
+        } else if !is_resource_name(name) {
+            out.push(Finding::fhir(
+                "FH06",
+                Severity::Warning,
+                format!(
+                    "view name `{name}` should match ^[A-Z][A-Za-z0-9_]{{1,254}}$ (FHIR cnl-0)"
+                ),
+            ));
+        }
     }
     for c in &view.constant {
         if !is_sql_name(&c.name) {
@@ -190,6 +201,23 @@ mod tests {
             "select": [{ "column": [{ "name": "1bad", "path": "id" }] }]
         })));
         assert_eq!(codes(&f), vec!["FH06"]);
+    }
+
+    #[test]
+    fn lowercase_view_name_is_a_warning() {
+        let f = validate_structure(&view(json!({
+            "name": "patient_flat",
+            "resource": "Patient",
+            "select": [{ "column": [{ "name": "id", "path": "id" }] }]
+        })));
+        assert_eq!(codes(&f), vec!["FH06"]);
+        assert_eq!(f[0].severity, Severity::Warning);
+        let f = validate_structure(&view(json!({
+            "name": "patient-flat",
+            "resource": "Patient",
+            "select": [{ "column": [{ "name": "id", "path": "id" }] }]
+        })));
+        assert_eq!(f[0].severity, Severity::Error);
     }
 
     #[test]
