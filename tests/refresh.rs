@@ -61,8 +61,9 @@ fn setup(base: &str, extra_config: &str) -> (tempfile::TempDir, PathBuf) {
     fs::write(
         &config,
         format!(
-            r#"data = "data"
-views = "{views}"
+            r#"# Literal strings: a Windows path has backslashes.
+data = "data"
+views = '{views}'
 
 [server]
 base = "{base}"
