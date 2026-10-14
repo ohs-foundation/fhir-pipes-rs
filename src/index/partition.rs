@@ -56,8 +56,8 @@ pub fn parse_keys(spec: &str) -> Result<Vec<PartitionKey>> {
             "type" => PartitionKey::Type,
             other => {
                 return Err(PipesError::Usage(format!(
-                "--partition-by: unknown key {other:?}; available: country, geom_type, tier, type"
-            )))
+                    "--partition-by: unknown key {other:?}; available: country, geom_type, tier, type"
+                )));
             }
         };
         if !seen.insert(trimmed) {
@@ -199,27 +199,35 @@ mod tests {
             parse_keys("country,geom_type").unwrap(),
             vec![PartitionKey::Country, PartitionKey::GeomType]
         );
-        assert!(parse_keys("country,nope")
-            .unwrap_err()
-            .to_string()
-            .contains("nope"));
+        assert!(
+            parse_keys("country,nope")
+                .unwrap_err()
+                .to_string()
+                .contains("nope")
+        );
     }
 
     #[test]
     fn parse_keys_rejects_repeats_and_empty() {
-        assert!(parse_keys("")
-            .unwrap_err()
-            .to_string()
-            .contains("no keys given"));
-        assert!(parse_keys(",")
-            .unwrap_err()
-            .to_string()
-            .contains("no keys given"));
+        assert!(
+            parse_keys("")
+                .unwrap_err()
+                .to_string()
+                .contains("no keys given")
+        );
+        assert!(
+            parse_keys(",")
+                .unwrap_err()
+                .to_string()
+                .contains("no keys given")
+        );
         assert_eq!(parse_keys("country,").unwrap(), vec![PartitionKey::Country]);
-        assert!(parse_keys("country,country")
-            .unwrap_err()
-            .to_string()
-            .contains("country repeated"));
+        assert!(
+            parse_keys("country,country")
+                .unwrap_err()
+                .to_string()
+                .contains("country repeated")
+        );
     }
 
     #[test]

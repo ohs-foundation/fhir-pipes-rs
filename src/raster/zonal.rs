@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use geo::{BoundingRect, Coord, Geometry, LineString, Polygon};
 
-use super::{is_data, GeoTransform, Raster, Tile};
+use super::{GeoTransform, Raster, Tile, is_data};
 use crate::error::{PipesError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -170,7 +170,7 @@ pub fn raster_total(raster: &mut impl Raster) -> Result<ZonalSum> {
 mod tests {
     use super::*;
     use crate::raster::MemRaster;
-    use geo::{polygon, MultiPolygon};
+    use geo::{MultiPolygon, polygon};
 
     fn boxed(x0: f64, y0: f64, x1: f64, y1: f64) -> Geometry<f64> {
         Geometry::Polygon(
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn the_real_cog_agrees_with_the_in_memory_grid() {
-        use crate::raster::geotiff::{GeoTiff, FIXTURE};
+        use crate::raster::geotiff::{FIXTURE, GeoTiff};
         let mut g = GeoTiff::open(FIXTURE.to_vec(), "fixture").unwrap();
         let z = zonal_sum(&mut g, &boxed(3.0, 4.0, 5.0, 7.0)).unwrap();
         assert_eq!((z.sum, z.pixels), (875_793.0, 598));

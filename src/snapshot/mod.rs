@@ -121,10 +121,10 @@ impl State {
         // after this returns. Not every platform/filesystem supports
         // fsync on a directory; that is a best-effort improvement, not
         // something worth failing an otherwise-successful write over.
-        if let Some(parent) = path.parent() {
-            if let Ok(d) = std::fs::File::open(parent) {
-                let _ = d.sync_all();
-            }
+        if let Some(parent) = path.parent()
+            && let Ok(d) = std::fs::File::open(parent)
+        {
+            let _ = d.sync_all();
         }
         Ok(())
     }

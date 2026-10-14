@@ -9,10 +9,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::api::Dhis2;
-use super::{check_out, valid_name, write_ndjson, Instance};
+use super::{Instance, check_out, valid_name, write_ndjson};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
@@ -205,10 +205,8 @@ pub fn resources(
         ),
     }
     let mut ids = identifiers(unit, opts);
-    if is_top {
-        if let Some(cc) = opts.country_code {
-            ids.push(json!({"system": NATIONAL_ADMIN_CODE_SYSTEM, "value": cc}));
-        }
+    if is_top && let Some(cc) = opts.country_code {
+        ids.push(json!({"system": NATIONAL_ADMIN_CODE_SYSTEM, "value": cc}));
     }
     loc["identifier"] = Value::Array(ids);
     loc["status"] = json!(if unit.closed_date.is_some() {
@@ -385,7 +383,7 @@ fn add_org_unit_groups(
                 Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
                     return Err(PipesError::Usage(format!(
                         "DHIS2 has no org unit group {uid}"
-                    )))
+                    )));
                 }
                 Err(e) => return Err(api.error("organisationUnitGroups", e)),
             }
@@ -494,7 +492,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
             Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
                 return Err(PipesError::Usage(format!(
                     "DHIS2 has no org unit group set {set}"
-                )))
+                )));
             }
             Err(e) => return Err(api.error("organisationUnitGroupSets", e)),
         };

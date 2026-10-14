@@ -24,5 +24,5 @@ pub struct IndexRecord {
     pub hilbert: u64,
 }
 
-pub use build::{build_index, Index};
+pub use build::{Index, build_index};
 pub use hierarchy::ADMIN_COLUMNS;

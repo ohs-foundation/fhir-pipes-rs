@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use assert_cmd::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const EXT: &str = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
 

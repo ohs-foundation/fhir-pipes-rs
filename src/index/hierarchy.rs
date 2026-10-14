@@ -381,14 +381,14 @@ pub fn resolve_hierarchy(records: &[IndexRecord], report: &mut Report) -> Hierar
 
     // Pre-walk: report every dangling parent exactly once.
     for r in records {
-        if let Some(p) = &r.part_of {
-            if !by_id.contains_key(p.as_str()) {
-                report.add(
-                    "orphan",
-                    &r.id,
-                    &format!("partOf references missing id {p}"),
-                );
-            }
+        if let Some(p) = &r.part_of
+            && !by_id.contains_key(p.as_str())
+        {
+            report.add(
+                "orphan",
+                &r.id,
+                &format!("partOf references missing id {p}"),
+            );
         }
     }
 

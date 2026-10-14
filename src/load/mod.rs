@@ -17,7 +17,7 @@ pub mod order;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Condvar, Mutex};
+use std::sync::{Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -26,7 +26,7 @@ use crate::cli::LoadArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::ndjson::NdjsonReader;
-use crate::load::bundle::{dependencies, plan, Bundle};
+use crate::load::bundle::{Bundle, dependencies, plan};
 use crate::load::capability::check_update_create;
 use crate::load::order::order_parents_first;
 
@@ -47,10 +47,10 @@ pub fn read_resources(path: &Path) -> Result<Vec<Value>> {
             (Some(t), Some(i)) if !t.is_empty() && !i.is_empty() => format!("{t}/{i}"),
             _ => {
                 return Err(PipesError::Usage(format!(
-                "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
-                path.display(),
-                line.number
-            )))
+                    "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
+                    path.display(),
+                    line.number
+                )));
             }
         };
         if !seen.insert(key.clone()) {
@@ -167,34 +167,36 @@ fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: us
         for _ in 0..concurrency.clamp(1, count.max(1)) {
             let tx = tx.clone();
             let (next, state, deps) = (&next, &state, &deps);
-            s.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= count {
-                    break;
-                }
-                {
-                    let (lock, changed) = state;
-                    let mut st = lock.lock().unwrap();
-                    while !st.1 && deps[i].iter().any(|&j| !st.0[j]) {
-                        st = changed.wait(st).unwrap();
-                    }
-                    if st.1 {
+            s.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= count {
                         break;
                     }
-                }
-                let r = post(client, base, &bundles[i], i + 1, count);
-                // Recorded before the next bundle is taken, so one worker
-                // stops right after a failure, as a sequential load does.
-                {
-                    let mut st = state.0.lock().unwrap();
-                    match r {
-                        Ok(()) => st.0[i] = true,
-                        Err(_) => st.1 = true,
+                    {
+                        let (lock, changed) = state;
+                        let mut st = lock.lock().unwrap();
+                        while !st.1 && deps[i].iter().any(|&j| !st.0[j]) {
+                            st = changed.wait(st).unwrap();
+                        }
+                        if st.1 {
+                            break;
+                        }
                     }
-                }
-                state.1.notify_all();
-                if tx.send((i, r)).is_err() {
-                    break;
+                    let r = post(client, base, &bundles[i], i + 1, count);
+                    // Recorded before the next bundle is taken, so one worker
+                    // stops right after a failure, as a sequential load does.
+                    {
+                        let mut st = state.0.lock().unwrap();
+                        match r {
+                            Ok(()) => st.0[i] = true,
+                            Err(_) => st.1 = true,
+                        }
+                    }
+                    state.1.notify_all();
+                    if tx.send((i, r)).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -262,8 +264,8 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
         })?,
         Err(e) => {
             return Err(PipesError::Environment(format!(
-            "capability preflight failed: {e} for {metadata_url}; check the server URL and token"
-        )))
+                "capability preflight failed: {e} for {metadata_url}; check the server URL and token"
+            )));
         }
     };
     let unstated = check_update_create(&capability, &creates)?;

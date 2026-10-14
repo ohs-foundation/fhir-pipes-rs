@@ -5,8 +5,8 @@ use std::process::Command;
 
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
-use httptest::{all_of, cycle, matchers::*, responders::*, Expectation, Server};
-use serde_json::{json, Value};
+use httptest::{Expectation, Server, all_of, cycle, matchers::*, responders::*};
+use serde_json::{Value, json};
 
 const BOUNDARY_EXT: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
@@ -138,7 +138,7 @@ fn expect_counts(server: &Server, locations: usize, organizations: usize) {
 }
 
 /// `GET <base>/Location?_lastUpdated=ge<since>`: an incremental extract.
-fn since_search(since: &str) -> impl Matcher<Req> {
+fn since_search(since: &str) -> impl Matcher<Req> + use<> {
     all_of![
         request::method_path("GET", "/fhir/Location"),
         request::query(url_decoded(contains((
@@ -149,7 +149,7 @@ fn since_search(since: &str) -> impl Matcher<Req> {
 }
 
 /// `GET <base>/Organization?_lastUpdated=ge<since>`.
-fn org_since_search(since: &str) -> impl Matcher<Req> {
+fn org_since_search(since: &str) -> impl Matcher<Req> + use<> {
     all_of![
         request::method_path("GET", "/fhir/Organization"),
         request::query(url_decoded(contains((

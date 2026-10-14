@@ -10,9 +10,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 
 use crate::error::{PipesError, Result};
 
@@ -204,7 +204,7 @@ impl Iterator for NdjsonReader {
                         "{}: line {}: {e}",
                         self.path.display(),
                         self.number
-                    ))))
+                    ))));
                 }
             };
             return Some(Ok(Line {

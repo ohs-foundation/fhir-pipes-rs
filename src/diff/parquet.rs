@@ -15,7 +15,7 @@ use parquet::file::metadata::KeyValue;
 use serde_json::Value;
 use wkb::reader::read_wkb;
 
-use crate::diff::input::{column_from_json, is_writable, InputRow, ID_COLUMN};
+use crate::diff::input::{ID_COLUMN, InputRow, column_from_json, is_writable};
 use crate::error::{PipesError, Result};
 use crate::report::Report;
 use crate::write::schema::GEOMETRY_COLUMN;

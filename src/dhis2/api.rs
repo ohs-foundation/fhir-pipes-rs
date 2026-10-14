@@ -105,7 +105,7 @@ pub fn parse_age(s: &str) -> std::result::Result<Duration, String> {
         _ => {
             return Err(format!(
                 "{s:?}: expected a number of hours, days or weeks, e.g. 36h, 7d, 2w"
-            ))
+            ));
         }
     };
     match n.parse::<u64>() {
@@ -267,7 +267,7 @@ impl Dhis2 {
                     return Err(PipesError::Environment(format!(
                         "{}/{path}: response has no {key:?} list",
                         self.base
-                    )))
+                    )));
                 }
             }
             let page_count = v
@@ -356,14 +356,18 @@ mod tests {
             e.to_string().contains("last built 2026-09-15T03:00:00.000, 28 days ago, older than --max-analytics-age 7 days"),
             "{e}"
         );
-        assert!(check_analytics_age(&info, parse_age("5w").ok(), now)
-            .unwrap()
-            .is_none());
+        assert!(
+            check_analytics_age(&info, parse_age("5w").ok(), now)
+                .unwrap()
+                .is_none()
+        );
         let fresh = epoch_seconds("2026-09-16T03:00:00").unwrap();
         assert!(check_analytics_age(&info, None, fresh).unwrap().is_none());
-        assert!(check_analytics_age(&ServerInfo::default(), None, now)
-            .unwrap()
-            .is_none());
+        assert!(
+            check_analytics_age(&ServerInfo::default(), None, now)
+                .unwrap()
+                .is_none()
+        );
         assert!(check_analytics_age(&ServerInfo::default(), parse_age("7d").ok(), now).is_err());
     }
 

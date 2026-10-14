@@ -5,7 +5,7 @@
 use serde_json::Value;
 
 use crate::fhir::location::{
-    coding_code_by_system, str_field, Identifier, FACILITY_TYPE_SYSTEM, OWNERSHIP_SYSTEM,
+    FACILITY_TYPE_SYSTEM, Identifier, OWNERSHIP_SYSTEM, coding_code_by_system, str_field,
 };
 use crate::report::Report;
 
@@ -72,15 +72,15 @@ impl Organization {
                 return None;
             }
         };
-        if let Some(rt) = obj.get("resourceType").and_then(Value::as_str) {
-            if rt != "Organization" {
-                report.add(
-                    "malformed_field",
-                    &id,
-                    &format!("resourceType is {rt}, not Organization"),
-                );
-                return None;
-            }
+        if let Some(rt) = obj.get("resourceType").and_then(Value::as_str)
+            && rt != "Organization"
+        {
+            report.add(
+                "malformed_field",
+                &id,
+                &format!("resourceType is {rt}, not Organization"),
+            );
+            return None;
         }
         let mut org = Organization {
             id: id.clone(),
@@ -146,26 +146,31 @@ mod tests {
         assert_eq!(org.ownership.as_deref(), Some("public"));
         assert_eq!(org.facility_level_text.as_deref(), Some("Health Post"));
         assert_eq!(org.ownership_text.as_deref(), Some("Local Government"));
-        assert!(org
-            .fhir_json
-            .starts_with("{\"resourceType\":\"Organization\""));
+        assert!(
+            org.fhir_json
+                .starts_with("{\"resourceType\":\"Organization\"")
+        );
         assert!(report.counts().is_empty());
     }
 
     #[test]
     fn missing_id_and_wrong_type_are_rejected() {
         let mut report = Report::default();
-        assert!(Organization::parse(
-            &serde_json::json!({"resourceType":"Organization"}),
-            &mut report
-        )
-        .is_none());
+        assert!(
+            Organization::parse(
+                &serde_json::json!({"resourceType":"Organization"}),
+                &mut report
+            )
+            .is_none()
+        );
         assert_eq!(report.count("missing_id"), 1);
-        assert!(Organization::parse(
-            &serde_json::json!({"resourceType":"Location","id":"x"}),
-            &mut report
-        )
-        .is_none());
+        assert!(
+            Organization::parse(
+                &serde_json::json!({"resourceType":"Location","id":"x"}),
+                &mut report
+            )
+            .is_none()
+        );
         assert_eq!(report.count("malformed_field"), 1);
     }
 

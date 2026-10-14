@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cli::DiffArgs;
 use crate::diff::compare::canonical;
@@ -22,13 +22,13 @@ use crate::diff::input::{ColumnValue, InputRow};
 use crate::diff::parquet::read_geoparquet;
 use crate::diff::rebuild::{new_organization, rebuild, rebuild_organization};
 use crate::error::{PipesError, Result};
-use crate::fhir::location::strip_reference;
-use crate::fhir::ndjson::{is_gz, LineAccess, Output};
 use crate::fhir::Location;
+use crate::fhir::location::strip_reference;
+use crate::fhir::ndjson::{LineAccess, Output, is_gz};
 use crate::report::Report;
-use crate::snapshot::index::index_by_id;
 use crate::snapshot::ORGANIZATIONS_FILE;
-use crate::transform::{write_report, SNAPSHOT_FILE};
+use crate::snapshot::index::index_by_id;
+use crate::transform::{SNAPSHOT_FILE, write_report};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {

@@ -16,8 +16,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow_array::Array;
-use parquet::arrow::arrow_writer::ArrowWriterOptions;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_writer::ArrowWriterOptions;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
@@ -25,7 +25,7 @@ use parquet::file::properties::WriterProperties;
 use crate::error::{PipesError, Result};
 use arrow_schema::SchemaRef;
 
-use crate::write::schema::{RowBatch, BBOX_COLUMN, GEOMETRY_COLUMN};
+use crate::write::schema::{BBOX_COLUMN, GEOMETRY_COLUMN, RowBatch};
 
 pub struct PartitionStats {
     pub rows: usize,

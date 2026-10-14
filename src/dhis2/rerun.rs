@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::error::{PipesError, Result};
-use crate::fhir::ndjson::{is_gz, with_suffix, NdjsonReader, Output};
+use crate::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
 use crate::report::Report;
 
 /// A report's content, as a 64-bit hash. Left out: `date`, which is when

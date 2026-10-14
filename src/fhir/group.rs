@@ -11,7 +11,7 @@
 //! raster only tells us its reference year, so fhir-pipes stamps `YEAR-01-01`
 //! unless the operator supplies the real date.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub const TARGET_POPULATION_PROFILE: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/ICRTargetPopulation";
@@ -137,8 +137,7 @@ mod tests {
             count: 512_345,
             year: 2026,
             source_code: "worldpop",
-            source_text:
-                "nga_pop_2026_CN_100m_cog.tif; pixel-centroid zonal sum over admin level 2",
+            source_text: "nga_pop_2026_CN_100m_cog.tif; pixel-centroid zonal sum over admin level 2",
             estimate_date: "2026-01-01",
             calculated: false,
             planning_denominator: planning,
@@ -185,18 +184,22 @@ mod tests {
             src["valueCodeableConcept"]["coding"][0]["display"],
             "WorldPop modelled estimate"
         );
-        assert!(src["valueCodeableConcept"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("nga_pop_2026"));
+        assert!(
+            src["valueCodeableConcept"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("nga_pop_2026")
+        );
         assert_eq!(
             ext(&g, DENOMINATOR_TYPE_EXTENSION_URL).unwrap()["valueCode"],
             "total-population"
         );
-        assert!(ext(&g, DENOMINATOR_TYPE_EXTENSION_URL)
-            .unwrap()
-            .get("valueCodeableConcept")
-            .is_none());
+        assert!(
+            ext(&g, DENOMINATOR_TYPE_EXTENSION_URL)
+                .unwrap()
+                .get("valueCodeableConcept")
+                .is_none()
+        );
         assert_eq!(
             ext(&g, ESTIMATE_DATE_EXTENSION_URL).unwrap()["valueDate"],
             "2026-01-01"
@@ -232,8 +235,8 @@ mod tests {
         });
         assert_eq!(g["id"], "pop-made-up-2027-x");
         assert_eq!(g["name"], "Total population, x, 2027 (made-up)");
-        let coding = &ext(&g, DENOMINATOR_SOURCE_EXTENSION_URL).unwrap()["valueCodeableConcept"]
-            ["coding"][0];
+        let coding = &ext(&g, DENOMINATOR_SOURCE_EXTENSION_URL).unwrap()["valueCodeableConcept"]["coding"]
+            [0];
         assert!(coding.get("display").is_none());
         assert_eq!(
             ext(&g, IS_CALCULATED_EXTENSION_URL).unwrap()["valueBoolean"],

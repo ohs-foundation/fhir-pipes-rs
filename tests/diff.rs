@@ -6,7 +6,7 @@ use std::process::Command;
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const BOUNDARY_EXT: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
@@ -670,8 +670,8 @@ fn wkb_polygon(ring: &[(f64, f64)]) -> Vec<u8> {
 /// as a GIS edit of the transform output would.
 fn set_geometry(from: &Path, to: &Path, set: &[(&str, Vec<u8>)]) {
     use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch, StringArray};
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::sync::Arc;
 
     let builder =

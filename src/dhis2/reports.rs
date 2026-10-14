@@ -31,19 +31,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Condvar, Mutex};
+use std::sync::{Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::api::{check_analytics_age, Dhis2, ServerInfo};
+use super::api::{Dhis2, ServerInfo, check_analytics_age};
 use super::calendar::now_utc;
-use super::measures::{fetch_indicators, fhir_key, Indicator, Scoring, MEASURE_POPULATION_SYSTEM};
-use super::raw::{load_parents, prepare, RawSource, Span};
+use super::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fetch_indicators, fhir_key};
+use super::raw::{RawSource, Span, load_parents, prepare};
 use super::rerun::{
-    file_stamp, plan_differences, write_lines, Change, Checkpoint, Previous, Scope,
+    Change, Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines,
 };
-use super::{check_out, Instance, NdjsonWriter};
+use super::{Instance, NdjsonWriter, check_out};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::error::{PipesError, Result};
 use crate::extract::client::FetchError;
@@ -93,16 +93,16 @@ pub fn load_mapping(path: &Path, system: &str) -> Result<HashMap<String, Target>
             .into_iter()
             .flatten()
         {
-            if ident.get("system").and_then(Value::as_str) == Some(system) {
-                if let Some(uid) = ident.get("value").and_then(Value::as_str) {
-                    out.insert(
-                        uid.to_string(),
-                        Target {
-                            id: id.to_string(),
-                            name: v.get("name").and_then(Value::as_str).map(str::to_string),
-                        },
-                    );
-                }
+            if ident.get("system").and_then(Value::as_str) == Some(system)
+                && let Some(uid) = ident.get("value").and_then(Value::as_str)
+            {
+                out.insert(
+                    uid.to_string(),
+                    Target {
+                        id: id.to_string(),
+                        name: v.get("name").and_then(Value::as_str).map(str::to_string),
+                    },
+                );
             }
         }
     }
@@ -889,7 +889,9 @@ fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) 
         Err(e) if too_large(&e) => {
             return Err(PipesError::Usage(format!(
                 "indicator {} at level {} for {} is over DHIS2's analytics row limit on its own; ask for shorter periods ({e})",
-                ask.indicators[0], ask.level, ask.when()
+                ask.indicators[0],
+                ask.level,
+                ask.when()
             )));
         }
         Err(FetchError::Status { status: 409, body }) => {
@@ -933,18 +935,17 @@ impl Tally {
     /// Counts one written report, comparing it with the previous run's.
     fn add(&mut self, r: &Value, previous: Option<&mut Previous>) -> Option<Change> {
         self.written += 1;
-        if let Some(s) = r.pointer("/subject/reference").and_then(Value::as_str) {
-            if !self.locations.contains(s) {
-                self.locations.insert(s.to_string());
-            }
+        if let Some(s) = r.pointer("/subject/reference").and_then(Value::as_str)
+            && !self.locations.contains(s)
+        {
+            self.locations.insert(s.to_string());
         }
         if let Some(pe) = r
             .pointer("/extension/0/valueString")
             .and_then(Value::as_str)
+            && !self.periods.contains(pe)
         {
-            if !self.periods.contains(pe) {
-                self.periods.insert(pe.to_string());
-            }
+            self.periods.insert(pe.to_string());
         }
         self.stratified += r
             .pointer("/group/0/stratifier")
@@ -1284,13 +1285,13 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
             )));
         }
     }
-    if let Some(p) = &args.previous {
-        if !p.is_file() {
-            return Err(PipesError::Usage(format!(
-                "--previous {}: no such file",
-                p.display()
-            )));
-        }
+    if let Some(p) = &args.previous
+        && !p.is_file()
+    {
+        return Err(PipesError::Usage(format!(
+            "--previous {}: no such file",
+            p.display()
+        )));
     }
     let instance = Instance::new(&args.conn.instance)?;
     let ranges = unique(&args.ranges)
@@ -1561,24 +1562,26 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         for _ in 0..workers {
             let tx = tx.clone();
             let (api, units, next, stop, written) = (&api, &units, &next, &stop, &written);
-            s.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= total {
-                    break;
-                }
-                {
-                    let (lock, ready) = written;
-                    let mut done = lock.lock().unwrap();
-                    while i >= *done + window && !stop.load(Ordering::Relaxed) {
-                        done = ready.wait(done).unwrap();
+            s.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= total {
+                        break;
                     }
-                }
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let fetched = fetch_unit(api, values, &args.breakdowns, &units[i]);
-                if tx.send((i, fetched)).is_err() {
-                    break;
+                    {
+                        let (lock, ready) = written;
+                        let mut done = lock.lock().unwrap();
+                        while i >= *done + window && !stop.load(Ordering::Relaxed) {
+                            done = ready.wait(done).unwrap();
+                        }
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let fetched = fetch_unit(api, values, &args.breakdowns, &units[i]);
+                    if tx.send((i, fetched)).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -1707,7 +1710,11 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         tally.periods.len(),
         state.values,
         state.requests,
-        if from_values { "dataValueSets" } else { "analytics" }
+        if from_values {
+            "dataValueSets"
+        } else {
+            "analytics"
+        }
     );
     if !args.breakdowns.is_empty() {
         println!(
@@ -1869,16 +1876,18 @@ mod tests {
             value: "n/a".into(),
             ..row
         };
-        assert!(measure_report(
-            &bad,
-            &penta3(),
-            &loc(),
-            &("a".into(), "b".into()),
-            &instance,
-            &ServerInfo::default(),
-            &mut report
-        )
-        .is_none());
+        assert!(
+            measure_report(
+                &bad,
+                &penta3(),
+                &loc(),
+                &("a".into(), "b".into()),
+                &instance,
+                &ServerInfo::default(),
+                &mut report
+            )
+            .is_none()
+        );
         assert_eq!(report.count("bad_number"), 1);
     }
 

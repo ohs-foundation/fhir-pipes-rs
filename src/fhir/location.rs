@@ -233,15 +233,15 @@ impl Location {
             }
         };
 
-        if let Some(rt) = obj.get("resourceType").and_then(Value::as_str) {
-            if rt != "Location" {
-                report.add(
-                    "malformed_field",
-                    &id,
-                    &format!("resourceType is {rt}, not Location"),
-                );
-                return None;
-            }
+        if let Some(rt) = obj.get("resourceType").and_then(Value::as_str)
+            && rt != "Location"
+        {
+            report.add(
+                "malformed_field",
+                &id,
+                &format!("resourceType is {rt}, not Location"),
+            );
+            return None;
         }
 
         let mut loc = Location {
@@ -396,12 +396,12 @@ impl Location {
         // captured above. Everything else, including any unusable or
         // not-yet-resolved boundary extension, is preserved verbatim.
         let mut stripped = resource.clone();
-        if let Some(index) = captured_boundary_index {
-            if let Some(Value::Array(exts)) = stripped.get_mut("extension") {
-                exts.remove(index);
-                if exts.is_empty() {
-                    stripped.as_object_mut().unwrap().remove("extension");
-                }
+        if let Some(index) = captured_boundary_index
+            && let Some(Value::Array(exts)) = stripped.get_mut("extension")
+        {
+            exts.remove(index);
+            if exts.is_empty() {
+                stripped.as_object_mut().unwrap().remove("extension");
             }
         }
         loc.fhir_json = stripped.to_string();

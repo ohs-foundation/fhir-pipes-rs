@@ -10,7 +10,7 @@
 //! library and is left for a later round (its cells are still parsed and
 //! carried).
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::error::{PipesError, Result};
 
@@ -44,24 +44,24 @@ pub fn parse_scheme_level(arg: &str) -> Result<(String, u32)> {
         "quadkey" => {
             return Err(PipesError::Usage(format!(
                 "quadkey zoom must be 1-23, got {level}"
-            )))
+            )));
         }
         "geohash" if (1..=12).contains(&level) => {}
         "geohash" => {
             return Err(PipesError::Usage(format!(
                 "geohash precision must be 1-12, got {level}"
-            )))
+            )));
         }
         "h3" => {
             return Err(PipesError::Usage(
                 "h3 cells are not computed yet; use quadkey or geohash".to_string(),
-            ))
+            ));
         }
         _ => {
             return Err(PipesError::Usage(format!(
                 "--spatial-index scheme must be one of {}, got {scheme:?}",
                 SCHEMES.join(", ")
-            )))
+            )));
         }
     }
     Ok((scheme.to_string(), level))

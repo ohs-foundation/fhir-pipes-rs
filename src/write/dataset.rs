@@ -11,12 +11,12 @@ use crate::fhir::ndjson::LineAccess;
 use crate::fhir::{Location, Organization};
 use crate::geometry::{self, GeomKind};
 use crate::index::hierarchy::Hierarchy;
-use crate::index::partition::{segment, Claims, PartitionKey};
+use crate::index::partition::{Claims, PartitionKey, segment};
 use crate::index::{Index, IndexRecord};
 use crate::report::Report;
 use crate::snapshot::index::index_by_id;
 use crate::write::parquet::PartitionWriter;
-use crate::write::schema::{output_schema, output_schema_optional_geometry, OutputRow, RowBatch};
+use crate::write::schema::{OutputRow, RowBatch, output_schema, output_schema_optional_geometry};
 
 pub const DATASET_DIR: &str = "locations";
 const STAGING_DIR: &str = ".locations.tmp";
@@ -303,36 +303,36 @@ fn write_partitions(
                 },
                 _ => None,
             };
-            if let Some(o) = &org {
-                if o.name.is_some() && o.name != loc.name {
-                    report.add(
-                        "organization_name_mismatch",
-                        &rec.id,
-                        &format!(
-                            "Location is named {:?} but Organization {} is named {:?}",
-                            loc.name.as_deref().unwrap_or(""),
-                            o.id,
-                            o.name.as_deref().unwrap_or("")
-                        ),
-                    );
-                }
+            if let Some(o) = &org
+                && o.name.is_some()
+                && o.name != loc.name
+            {
+                report.add(
+                    "organization_name_mismatch",
+                    &rec.id,
+                    &format!(
+                        "Location is named {:?} but Organization {} is named {:?}",
+                        loc.name.as_deref().unwrap_or(""),
+                        o.id,
+                        o.name.as_deref().unwrap_or("")
+                    ),
+                );
             }
 
             if let (Some(geom), Some(parent_idx)) =
                 (&geom, nearest_polygon_ancestor(hierarchy, records, i))
+                && let Some(parent) = parent_cache.get(parent_idx, records, &mut lines)?
             {
-                if let Some(parent) = parent_cache.get(parent_idx, records, &mut lines)? {
-                    let pt = geo::Point::new(geom.lon, geom.lat);
-                    if !parent.intersects(&pt) {
-                        report.add(
-                            "point_outside_parent",
-                            &rec.id,
-                            &format!(
-                                "({}, {}) falls outside its nearest admin ancestor",
-                                geom.lon, geom.lat
-                            ),
-                        );
-                    }
+                let pt = geo::Point::new(geom.lon, geom.lat);
+                if !parent.intersects(&pt) {
+                    report.add(
+                        "point_outside_parent",
+                        &rec.id,
+                        &format!(
+                            "({}, {}) falls outside its nearest admin ancestor",
+                            geom.lon, geom.lat
+                        ),
+                    );
                 }
             }
 
@@ -509,10 +509,11 @@ mod tests {
         let mut index = build_index(&fixture(), None, false).unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
         assert!(!out.path().join(".locations.bak").exists());
-        assert!(out
-            .path()
-            .join("locations/country=NG/geom_type=polygon/part-0.parquet")
-            .exists());
+        assert!(
+            out.path()
+                .join("locations/country=NG/geom_type=polygon/part-0.parquet")
+                .exists()
+        );
     }
 
     #[test]
@@ -618,10 +619,11 @@ mod tests {
             !out.path().join("locations/country=NG/marker").exists(),
             "the recovered old dataset was then replaced by the new one"
         );
-        assert!(out
-            .path()
-            .join("locations/country=NG/geom_type=polygon/part-0.parquet")
-            .exists());
+        assert!(
+            out.path()
+                .join("locations/country=NG/geom_type=polygon/part-0.parquet")
+                .exists()
+        );
     }
 
     #[test]
@@ -721,8 +723,10 @@ mod tests {
 
         assert!(!backup.exists());
         assert!(!dataset.join("country=OLD").exists());
-        assert!(dataset
-            .join("country=NG/geom_type=polygon/part-0.parquet")
-            .exists());
+        assert!(
+            dataset
+                .join("country=NG/geom_type=polygon/part-0.parquet")
+                .exists()
+        );
     }
 }

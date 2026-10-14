@@ -131,7 +131,7 @@ pub fn prepare(
                 return Err(usage(format!(
                     "{}: --source data-values does not compute reporting rates; leave out --data-set or use --source analytics",
                     ind.id
-                )))
+                )));
             }
             Kind::DataElement => (
                 Expr::Item(Item {
@@ -193,7 +193,7 @@ pub fn prepare(
                     return Err(usage(format!(
                         "data element {id} ({name}) aggregates as {}; --source data-values computes SUM and AVERAGE_SUM_ORG_UNIT only",
                         other.unwrap_or("nothing")
-                    )))
+                    )));
                 }
             };
             let ids = |v: Option<&Value>| -> Vec<String> {
@@ -285,7 +285,7 @@ pub fn prepare(
             Err(FetchError::Status { status: 404, .. }) => {
                 return Err(usage(format!(
                     "--breakdown {b}: with --source data-values a breakdown must be a category, and DHIS2 has no category {b}"
-                )))
+                )));
             }
             Err(e) => return Err(api.error("categories", e)),
         };

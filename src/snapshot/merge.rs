@@ -13,8 +13,8 @@ use crate::extract::page::PageNote;
 use crate::fhir::location::{BOUNDARY_EXTENSION_URLS, GEOJSON_CONTENT_TYPE};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
-use crate::snapshot::instant::later;
 use crate::snapshot::Snapshot;
+use crate::snapshot::instant::later;
 
 #[derive(Debug)]
 pub struct MergeStats {
@@ -290,10 +290,10 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
     // Best-effort, as in `State::write`: not every platform/filesystem
     // supports fsync on a directory, and that's not worth failing an
     // otherwise-successful merge over.
-    if let Some(dir) = files.existing.parent() {
-        if let Ok(d) = std::fs::File::open(dir) {
-            let _ = d.sync_all();
-        }
+    if let Some(dir) = files.existing.parent()
+        && let Ok(d) = std::fs::File::open(dir)
+    {
+        let _ = d.sync_all();
     }
     let _ = std::fs::remove_file(&files.incoming);
     Ok(stats)

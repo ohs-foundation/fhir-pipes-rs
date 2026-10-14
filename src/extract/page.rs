@@ -136,12 +136,12 @@ pub fn page_resources(
         let bundle: Value = serde_json::from_slice(&fetched.body).map_err(|e| {
             PipesError::Environment(format!("{current}: response is not JSON: {e}"))
         })?;
-        if let Some(rt) = bundle.get("resourceType").and_then(Value::as_str) {
-            if rt != "Bundle" {
-                return Err(PipesError::Environment(format!(
-                    "{current}: expected a Bundle, got resourceType {rt}"
-                )));
-            }
+        if let Some(rt) = bundle.get("resourceType").and_then(Value::as_str)
+            && rt != "Bundle"
+        {
+            return Err(PipesError::Environment(format!(
+                "{current}: expected a Bundle, got resourceType {rt}"
+            )));
         }
         let entries = bundle.get("entry").and_then(Value::as_array);
         last_page_len = entries.map_or(0, Vec::len);
@@ -273,7 +273,7 @@ mod tests {
     }
 
     use crate::report::Report;
-    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use httptest::{Expectation, Server, matchers::*, responders::*};
 
     #[test]
     fn page_resources_walks_the_named_type() {
@@ -302,9 +302,11 @@ mod tests {
         assert_eq!(got.notes.len(), 1);
         assert_eq!(got.notes[0].id, "org-1");
         assert_eq!(got.notes[0].boundary_url, None);
-        assert!(std::fs::read_to_string(&incoming)
-            .unwrap()
-            .contains("\"id\":\"org-1\""));
+        assert!(
+            std::fs::read_to_string(&incoming)
+                .unwrap()
+                .contains("\"id\":\"org-1\"")
+        );
     }
 
     fn bundle(entries: &[serde_json::Value], next: Option<&str>) -> String {
@@ -385,11 +387,12 @@ mod tests {
         );
         let text = std::fs::read_to_string(&out).unwrap();
         assert_eq!(text.lines().count(), 2);
-        assert!(text
-            .lines()
-            .next()
-            .unwrap()
-            .starts_with("{\"resourceType\":\"Location\",\"id\":\"a\""));
+        assert!(
+            text.lines()
+                .next()
+                .unwrap()
+                .starts_with("{\"resourceType\":\"Location\",\"id\":\"a\"")
+        );
     }
 
     #[test]

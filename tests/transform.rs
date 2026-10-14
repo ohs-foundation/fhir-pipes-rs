@@ -31,10 +31,11 @@ fn transform_writes_dataset_and_report() {
     assert_eq!(report["counts"]["orphan"], 1);
     assert_eq!(report["counts"]["point_outside_parent"], 1);
     assert_eq!(report["counts"]["duplicate_pcode"], 1);
-    assert!(out
-        .path()
-        .join("locations/country=NG/geom_type=polygon/type=admin-unit/part-0.parquet")
-        .exists());
+    assert!(
+        out.path()
+            .join("locations/country=NG/geom_type=polygon/type=admin-unit/part-0.parquet")
+            .exists()
+    );
 }
 
 #[test]
@@ -322,8 +323,8 @@ fn organization(id: &str, name: &str) -> String {
 
 /// Reads one string column of the facility partition into `id -> value`.
 fn column(out: &Path, name: &str) -> std::collections::HashMap<String, Option<String>> {
-    use arrow_array::cast::AsArray;
     use arrow_array::Array;
+    use arrow_array::cast::AsArray;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let file = std::fs::File::open(
         out.join("locations/country=NG/geom_type=point/type=facility/part-0.parquet"),
@@ -404,10 +405,12 @@ fn facility_rows_carry_their_organization() {
         column(&out, "ownership_text")["paired"].as_deref(),
         Some("Local Government")
     );
-    assert!(column(&out, "organization_json")["paired"]
-        .as_deref()
-        .unwrap()
-        .contains("\"id\":\"org-paired\""));
+    assert!(
+        column(&out, "organization_json")["paired"]
+            .as_deref()
+            .unwrap()
+            .contains("\"id\":\"org-paired\"")
+    );
     let counts = report_counts(&out);
     assert_eq!(counts["organization_missing"], 1);
     assert!(counts.get("organization_name_mismatch").is_none());

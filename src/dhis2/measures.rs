@@ -13,10 +13,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::api::{Dhis2, ServerInfo};
-use super::{check_out, write_ndjson, Instance};
+use super::{Instance, check_out, write_ndjson};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
 use crate::error::{PipesError, Result};
 use crate::report::Report;
@@ -711,7 +711,9 @@ mod tests {
         );
         let ext = m["extension"][0]["extension"].as_array().unwrap();
         assert!(ext.contains(&json!({"url": "factor", "valueDecimal": 1.0})));
-        assert!(ext.contains(&json!({"url": "indicatorType", "valueString": "Data element (SUM)"})));
+        assert!(
+            ext.contains(&json!({"url": "indicatorType", "valueString": "Data element (SUM)"}))
+        );
     }
 
     #[test]

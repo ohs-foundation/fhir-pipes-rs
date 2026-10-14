@@ -4,10 +4,10 @@
 
 use base64::Engine;
 use geo::Geometry;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
-use crate::diff::input::{ColumnValue, Identifier, InputRow, IDENTIFIER_COLUMN};
+use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow};
 use crate::fhir::location::{
     BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS, DELIVERY_STRATEGY_EXTENSION_URL,
     FACILITY_TYPE_SYSTEM, GEOJSON_CONTENT_TYPE, GERS_SYSTEM, OWNERSHIP_SYSTEM, PCODE_SYSTEM,
@@ -341,10 +341,11 @@ fn write_position(obj: &mut Object, lon: f64, lat: f64) {
 /// so a float round trip leaves the original numbers untouched.
 fn set_position(obj: &mut Object, lon: f64, lat: f64) {
     let (lon, lat) = (round_coord(lon), round_coord(lat));
-    if let Some((cx, cy)) = position_of(obj) {
-        if round_coord(cx) == lon && round_coord(cy) == lat {
-            return;
-        }
+    if let Some((cx, cy)) = position_of(obj)
+        && round_coord(cx) == lon
+        && round_coord(cy) == lat
+    {
+        return;
     }
     write_position(obj, lon, lat);
 }
@@ -470,16 +471,15 @@ fn apply_geometry(
     let original = snapshot.and_then(|l| l.position);
     let after_columns = position_of(obj);
     let rounded = |p: Option<(f64, f64)>| p.map(|(a, b)| (round_coord(a), round_coord(b)));
-    if rounded(after_columns) != rounded(original) {
-        if let Some((cx, cy)) = after_columns {
-            if round_coord(cx) != x || round_coord(cy) != y {
-                report.add(
-                    "position_geometry_disagree",
-                    id,
-                    "position columns and the geometry both changed and differ; the geometry was used",
-                );
-            }
-        }
+    if rounded(after_columns) != rounded(original)
+        && let Some((cx, cy)) = after_columns
+        && (round_coord(cx) != x || round_coord(cy) != y)
+    {
+        report.add(
+            "position_geometry_disagree",
+            id,
+            "position columns and the geometry both changed and differ; the geometry was used",
+        );
     }
     match original {
         // Equal to the snapshot after rounding: restore its exact numbers.

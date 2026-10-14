@@ -8,9 +8,9 @@ use std::path::Path;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::fhir::{Boundary, Location};
 use crate::geometry::{self, GeometrySummary};
-use crate::index::hierarchy::{resolve_hierarchy, Hierarchy};
-use crate::index::hilbert::hilbert_key;
 use crate::index::IndexRecord;
+use crate::index::hierarchy::{Hierarchy, resolve_hierarchy};
+use crate::index::hilbert::hilbert_key;
 use crate::report::Report;
 
 pub const UNKNOWN_COUNTRY: &str = "unknown";
@@ -301,19 +301,23 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);
-        assert!(index
-            .order
-            .iter()
-            .all(|&i| index.records[i as usize].len > 0));
+        assert!(
+            index
+                .order
+                .iter()
+                .all(|&i| index.records[i as usize].len > 0)
+        );
     }
 
     #[test]
     fn country_override_wins() {
         let index = build_index(&fixture(), Some("XX"), false).unwrap();
-        assert!(index
-            .order
-            .iter()
-            .all(|&i| index.records[i as usize].country == "XX"));
+        assert!(
+            index
+                .order
+                .iter()
+                .all(|&i| index.records[i as usize].country == "XX")
+        );
         assert_eq!(index.report.count("no_country"), 0);
     }
 
@@ -391,23 +395,27 @@ mod tests {
             );
         }
         // Issues for other rows are left as they were.
-        assert!(index
-            .report
-            .issues
-            .iter()
-            .filter(|i| i.location_id != "ghost" && i.location_id != "remote")
-            .all(|i| !i.detail.contains(WRITTEN_WITHOUT_GEOMETRY)));
+        assert!(
+            index
+                .report
+                .issues
+                .iter()
+                .filter(|i| i.location_id != "ghost" && i.location_id != "remote")
+                .all(|i| !i.detail.contains(WRITTEN_WITHOUT_GEOMETRY))
+        );
     }
 
     #[test]
     fn without_the_flag_no_issue_mentions_written_rows() {
         let index = build_index(&fixture(), None, false).unwrap();
         assert!(!index.keep_without_geometry);
-        assert!(index
-            .report
-            .issues
-            .iter()
-            .all(|i| !i.detail.contains(WRITTEN_WITHOUT_GEOMETRY)));
+        assert!(
+            index
+                .report
+                .issues
+                .iter()
+                .all(|i| !i.detail.contains(WRITTEN_WITHOUT_GEOMETRY))
+        );
     }
 
     #[test]

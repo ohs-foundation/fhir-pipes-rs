@@ -94,7 +94,7 @@ fn ring_self_intersects(ls: &LineString<f64>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geo::{polygon, Geometry};
+    use geo::{Geometry, polygon};
 
     #[test]
     fn a_clean_triangle_is_valid() {

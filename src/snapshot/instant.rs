@@ -90,11 +90,7 @@ pub fn parse_instant(s: &str) -> Option<(i64, u32)> {
                 return None;
             }
             let secs = oh * 3600 + om * 60;
-            if *sign == b'+' {
-                secs
-            } else {
-                -secs
-            }
+            if *sign == b'+' { secs } else { -secs }
         }
         _ => return None,
     };

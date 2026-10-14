@@ -82,7 +82,7 @@ pub fn load(
                 label,
                 cached: true,
                 cache_errors,
-            })
+            });
         }
         Ok(None) => {}
         Err(e) => cache_errors.push(format!("read: {e}")),
@@ -113,7 +113,7 @@ pub fn load(
 mod tests {
     use super::*;
     use crate::raster::geotiff::FIXTURE;
-    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use httptest::{Expectation, Server, matchers::*, responders::*};
 
     #[test]
     fn labels_are_the_last_path_segment() {

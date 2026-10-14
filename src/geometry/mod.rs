@@ -112,14 +112,14 @@ fn classify(loc: &Location, report: &mut Report) -> Option<(Geometry<f64>, GeomK
 pub fn summarize(loc: &Location, report: &mut Report) -> Option<GeometrySummary> {
     let (geom, kind, bbox) = classify(loc, report)?;
 
-    if kind == GeomKind::Polygon {
-        if let Err(reason) = validity::check(&geom) {
-            report.add(
-                "geometry_invalid",
-                &loc.id,
-                &format!("{reason}; written as is"),
-            );
-        }
+    if kind == GeomKind::Polygon
+        && let Err(reason) = validity::check(&geom)
+    {
+        report.add(
+            "geometry_invalid",
+            &loc.id,
+            &format!("{reason}; written as is"),
+        );
     }
 
     // Checked for both kinds: a Point boundary can also disagree with the
@@ -128,14 +128,14 @@ pub fn summarize(loc: &Location, report: &mut Report) -> Option<GeometrySummary>
     // `Intersects` is exact coordinate equality. The position-only path in
     // `classify` synthesises the geometry from the position itself, so it
     // can never false-positive here.
-    if let Some((lon, lat)) = loc.position {
-        if !geom.intersects(&geo::Point::new(lon, lat)) {
-            report.add(
-                "position_outside_boundary",
-                &loc.id,
-                &format!("position ({lon}, {lat}) falls outside the Location's own boundary"),
-            );
-        }
+    if let Some((lon, lat)) = loc.position
+        && !geom.intersects(&geo::Point::new(lon, lat))
+    {
+        report.add(
+            "position_outside_boundary",
+            &loc.id,
+            &format!("position ({lon}, {lat}) falls outside the Location's own boundary"),
+        );
     }
 
     Some(GeometrySummary { kind, bbox })
@@ -251,25 +251,29 @@ mod tests {
         assert!(build(&loc(None, None), &mut r).is_none());
         assert_eq!(r.count("no_geometry"), 1);
         let mut r = Report::default();
-        assert!(build(
-            &loc(
-                None,
-                Some(r#"{"type":"LineString","coordinates":[[0,0],[1,1]]}"#)
-            ),
-            &mut r
-        )
-        .is_none());
+        assert!(
+            build(
+                &loc(
+                    None,
+                    Some(r#"{"type":"LineString","coordinates":[[0,0],[1,1]]}"#)
+                ),
+                &mut r
+            )
+            .is_none()
+        );
         assert_eq!(r.count("geometry_unexpected_type"), 1);
     }
 
     #[test]
     fn empty_polygon_is_reported_not_written() {
         let mut r = Report::default();
-        assert!(build(
-            &loc(None, Some(r#"{"type":"Polygon","coordinates":[]}"#)),
-            &mut r
-        )
-        .is_none());
+        assert!(
+            build(
+                &loc(None, Some(r#"{"type":"Polygon","coordinates":[]}"#)),
+                &mut r
+            )
+            .is_none()
+        );
         assert_eq!(r.count("geometry_empty"), 1);
     }
 

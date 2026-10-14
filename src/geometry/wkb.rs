@@ -1,7 +1,7 @@
 //! geo geometry -> little-endian WKB, the encoding Parquet GEOMETRY expects.
 
-use wkb::writer::{write_geometry, WriteOptions};
 use wkb::Endianness;
+use wkb::writer::{WriteOptions, write_geometry};
 
 /// Encodes a `geo` geometry to little-endian WKB.
 ///

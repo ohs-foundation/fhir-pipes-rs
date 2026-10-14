@@ -6,8 +6,8 @@ use std::process::Command;
 
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
-use httptest::{all_of, cycle, matchers::*, responders::*, Expectation, Server};
-use serde_json::{json, Value};
+use httptest::{Expectation, Server, all_of, cycle, matchers::*, responders::*};
+use serde_json::{Value, json};
 
 const ORGUNIT_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit";
 
@@ -2093,9 +2093,11 @@ fn data_values_give_the_same_reports_as_analytics() {
     }
     assert_eq!(x.len(), y.len());
     let r = read_ndjson(&from_values);
-    assert!(r
-        .iter()
-        .all(|r| r["extension"].as_array().unwrap().last().unwrap()["valueCode"] == "data-values"));
+    assert!(
+        r.iter().all(
+            |r| r["extension"].as_array().unwrap().last().unwrap()["valueCode"] == "data-values"
+        )
+    );
     assert!(r[0]["date"].as_str().unwrap().ends_with('Z'));
 }
 

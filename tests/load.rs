@@ -6,8 +6,8 @@ use std::process::Command;
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
 use httptest::matchers::ExecutionContext;
-use httptest::{all_of, cycle, matchers::*, responders::*, Expectation, Server};
-use serde_json::{json, Value};
+use httptest::{Expectation, Server, all_of, cycle, matchers::*, responders::*};
+use serde_json::{Value, json};
 
 fn loc(id: &str, version: Option<&str>, parent: Option<&str>) -> Value {
     let mut r = json!({"resourceType": "Location", "id": id, "name": id, "status": "active"});

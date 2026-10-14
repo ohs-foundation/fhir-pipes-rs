@@ -6,9 +6,9 @@ use std::process::Command;
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
 use base64::Engine;
-use httptest::{matchers::*, responders::*, Expectation, Server};
-use serde_json::{json, Value};
-use tiff::encoder::{colortype::Gray32Float, TiffEncoder};
+use httptest::{Expectation, Server, matchers::*, responders::*};
+use serde_json::{Value, json};
+use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
 use tiff::tags::Tag;
 
 const FIXTURE: &str = concat!(
@@ -215,10 +215,12 @@ fn measures_the_requested_level_and_rolls_up_to_the_country() {
     assert_eq!(ext(west, "estimate-date")["valueDate"], "2026-01-01");
     let src = ext(west, "denominator-source");
     assert_eq!(src["valueCodeableConcept"]["coding"][0]["code"], "worldpop");
-    assert!(src["valueCodeableConcept"]["text"]
-        .as_str()
-        .unwrap()
-        .contains("pop_small_cog.tif"));
+    assert!(
+        src["valueCodeableConcept"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pop_small_cog.tif")
+    );
     assert_eq!(
         ext(west, "denominator-type")["valueCode"],
         "total-population"
@@ -408,9 +410,10 @@ fn estimate_date_and_source_overrides_are_applied() {
     )
     .success();
     let gs = groups(dir.path());
-    assert!(gs
-        .iter()
-        .all(|g| g["id"].as_str().unwrap().starts_with("pop-grid3-2026-")));
+    assert!(
+        gs.iter()
+            .all(|g| g["id"].as_str().unwrap().starts_with("pop-grid3-2026-"))
+    );
     for g in &gs {
         assert_eq!(ext(g, "estimate-date")["valueDate"], "2024-06-30");
         let src = ext(g, "denominator-source");

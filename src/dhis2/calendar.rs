@@ -44,11 +44,7 @@ fn month_days(y: i64, m: i64) -> i64 {
 }
 
 pub fn days_in_year(y: i64) -> i64 {
-    if leap(y) {
-        366
-    } else {
-        365
-    }
+    if leap(y) { 366 } else { 365 }
 }
 
 /// A day count as `YYYY-MM-DD`.

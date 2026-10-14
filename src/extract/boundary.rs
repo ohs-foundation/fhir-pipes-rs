@@ -69,20 +69,19 @@ fn looks_like_binary_json(body: &[u8]) -> bool {
 /// xs:base64Binary permits line wrapping, so whitespace is stripped from
 /// `data` before decoding.
 pub fn extract_payload(body: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    if looks_like_binary_json(body) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-            if v.get("resourceType").and_then(|t| t.as_str()) == Some("Binary") {
-                let data = v
-                    .get("data")
-                    .and_then(|d| d.as_str())
-                    .filter(|d| !d.is_empty())
-                    .ok_or("Binary has no data")?;
-                let cleaned: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-                return base64::engine::general_purpose::STANDARD
-                    .decode(&cleaned)
-                    .map_err(|e| format!("Binary data is not valid base64: {e}"));
-            }
-        }
+    if looks_like_binary_json(body)
+        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(body)
+        && v.get("resourceType").and_then(|t| t.as_str()) == Some("Binary")
+    {
+        let data = v
+            .get("data")
+            .and_then(|d| d.as_str())
+            .filter(|d| !d.is_empty())
+            .ok_or("Binary has no data")?;
+        let cleaned: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        return base64::engine::general_purpose::STANDARD
+            .decode(&cleaned)
+            .map_err(|e| format!("Binary data is not valid base64: {e}"));
     }
     Ok(body.to_vec())
 }
@@ -145,18 +144,20 @@ pub fn fetch_boundaries(
             let tx = tx.clone();
             let next = &next;
             let stop = &stop;
-            s.spawn(move || loop {
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= total {
-                    break;
-                }
-                let mut errs = Vec::new();
-                let outcome = resolve_one(client, &urls[i], opts, &mut errs);
-                if tx.send((i, outcome, errs)).is_err() {
-                    break;
+            s.spawn(move || {
+                loop {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= total {
+                        break;
+                    }
+                    let mut errs = Vec::new();
+                    let outcome = resolve_one(client, &urls[i], opts, &mut errs);
+                    if tx.send((i, outcome, errs)).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -234,7 +235,7 @@ mod tests {
     use crate::extract::cache::Cache;
     use crate::extract::client::{Auth, FhirClient};
     use crate::report::Report;
-    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use httptest::{Expectation, Server, matchers::*, responders::*};
 
     fn client(retries: usize) -> FhirClient {
         FhirClient::new(Auth::None, retries, std::time::Duration::from_secs(5)).unwrap()
@@ -261,12 +262,16 @@ mod tests {
             extract_payload(b"not json at all").unwrap(),
             b"not json at all"
         );
-        assert!(extract_payload(br#"{"resourceType":"Binary"}"#)
-            .unwrap_err()
-            .contains("no data"));
-        assert!(extract_payload(br#"{"resourceType":"Binary","data":"!!"}"#)
-            .unwrap_err()
-            .contains("base64"));
+        assert!(
+            extract_payload(br#"{"resourceType":"Binary"}"#)
+                .unwrap_err()
+                .contains("no data")
+        );
+        assert!(
+            extract_payload(br#"{"resourceType":"Binary","data":"!!"}"#)
+                .unwrap_err()
+                .contains("base64")
+        );
     }
 
     #[test]

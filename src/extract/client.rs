@@ -17,7 +17,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use crate::error::{PipesError, Result};
@@ -383,7 +383,7 @@ impl FhirClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use httptest::{Expectation, Server, matchers::*, responders::*};
 
     fn client(retries: usize) -> FhirClient {
         FhirClient::new(Auth::None, retries, std::time::Duration::from_secs(5)).unwrap()

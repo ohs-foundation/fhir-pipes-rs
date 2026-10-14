@@ -6,12 +6,12 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-use geojson::feature::Id;
 use geojson::Feature;
+use geojson::feature::Id;
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-use crate::diff::input::{column_from_json, is_writable, InputRow, ID_COLUMN};
+use crate::diff::input::{ID_COLUMN, InputRow, column_from_json, is_writable};
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::geometry::convert;
@@ -333,7 +333,9 @@ mod tests {
 
     #[test]
     fn feature_lines_are_read_one_per_line() {
-        let f = tmp("{\"type\":\"Feature\",\"properties\":{\"id\":\"a\"},\"geometry\":null}\n\n{\"type\":\"Feature\",\"properties\":{\"id\":\"b\"},\"geometry\":null}\n");
+        let f = tmp(
+            "{\"type\":\"Feature\",\"properties\":{\"id\":\"a\"},\"geometry\":null}\n\n{\"type\":\"Feature\",\"properties\":{\"id\":\"b\"},\"geometry\":null}\n",
+        );
         let mut seen = Vec::new();
         read_feature_lines(f.path(), |feature, index| {
             seen.push((

@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::cli::IndexArgs;
 use crate::error::{PipesError, Result};
-use crate::fhir::ndjson::{is_gz, with_suffix, NdjsonReader, Output};
+use crate::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
 use crate::fhir::spatial::{cells_of, compute_cell, parse_scheme_level, upsert_cell};
 use crate::report::Report;
 use crate::snapshot::LOCATIONS_FILE;

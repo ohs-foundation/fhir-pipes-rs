@@ -226,12 +226,14 @@ mod tests {
     fn garbage_is_reported_as_unparseable() {
         let mut r = Report::default();
         assert!(parse_boundary(b"not json", "a", &mut r).is_none());
-        assert!(parse_boundary(
-            br#"{"type":"FeatureCollection","features":[]}"#,
-            "a",
-            &mut r
-        )
-        .is_none());
+        assert!(
+            parse_boundary(
+                br#"{"type":"FeatureCollection","features":[]}"#,
+                "a",
+                &mut r
+            )
+            .is_none()
+        );
         assert_eq!(r.count("boundary_unparseable"), 2);
     }
 

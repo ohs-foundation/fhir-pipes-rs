@@ -240,7 +240,7 @@ pub const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/raster/pop_small
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::{is_data, MemRaster};
+    use crate::raster::{MemRaster, is_data};
 
     fn fixture() -> GeoTiff {
         GeoTiff::open(FIXTURE.to_vec(), "pop_small_cog.tif").unwrap()
@@ -306,7 +306,7 @@ mod tests {
     /// tiff encoder: `rows_per_strip` rows per chunk, the given tiepoint
     /// (i, j, x, y) and GeoKey directory shorts.
     fn encoded(rows_per_strip: u32, tiepoint: [f64; 4], geokeys: &[u16]) -> Vec<u8> {
-        use tiff::encoder::{colortype::Gray32Float, TiffEncoder};
+        use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
 
         let m = MemRaster::fixture();
         let mut buf = Cursor::new(Vec::new());
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn multi_band_rasters_are_refused() {
-        use tiff::encoder::{colortype::RGB32Float, TiffEncoder};
+        use tiff::encoder::{TiffEncoder, colortype::RGB32Float};
 
         let (w, h) = (4u32, 4u32);
         let mut buf = Cursor::new(Vec::new());

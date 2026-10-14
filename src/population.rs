@@ -17,18 +17,18 @@ use geo::Geometry;
 use crate::cli::PopulationArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::{
-    group_id, is_valid_id, target_population_group, TargetPopulation, KNOWN_SOURCE_CODES,
-    MAX_ID_LEN, MAX_QUANTITY,
+    KNOWN_SOURCE_CODES, MAX_ID_LEN, MAX_QUANTITY, TargetPopulation, group_id, is_valid_id,
+    target_population_group,
 };
-use crate::fhir::ndjson::{is_gz, with_suffix, LineAccess, Output};
+use crate::fhir::ndjson::{LineAccess, Output, is_gz, with_suffix};
 use crate::fhir::{Boundary, Location};
 use crate::geometry::parse_boundary;
 use crate::index::hierarchy::Hierarchy;
-use crate::index::{build_index, IndexRecord};
+use crate::index::{IndexRecord, build_index};
+use crate::raster::Raster;
 use crate::raster::fetch;
 use crate::raster::geotiff::GeoTiff;
-use crate::raster::zonal::{raster_total, zonal_sum, ZonalSum};
-use crate::raster::Raster;
+use crate::raster::zonal::{ZonalSum, raster_total, zonal_sum};
 use crate::report::Report;
 use crate::snapshot::Snapshot;
 use crate::transform::write_report;
@@ -220,12 +220,12 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             args.year
         )));
     }
-    if let Some(d) = &args.estimate_date {
-        if !valid_iso_date(d) {
-            return Err(PipesError::Usage(format!(
-                "--estimate-date must be YYYY-MM-DD, got {d:?}"
-            )));
-        }
+    if let Some(d) = &args.estimate_date
+        && !valid_iso_date(d)
+    {
+        return Err(PipesError::Usage(format!(
+            "--estimate-date must be YYYY-MM-DD, got {d:?}"
+        )));
     }
     let estimate_date = args
         .estimate_date
@@ -424,7 +424,7 @@ mod tests {
     use super::*;
     use crate::index::hierarchy::resolve_hierarchy;
     use base64::Engine;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     /// Writes each resource to its own line of a temp `locations.ndjson`,
     /// re-reads it with the same `NdjsonReader` pass two uses to get every

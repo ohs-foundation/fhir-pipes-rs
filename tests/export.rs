@@ -5,8 +5,8 @@ use std::process::Command;
 
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
-use httptest::{all_of, matchers::*, responders::*, Expectation, Server};
-use serde_json::{json, Value};
+use httptest::{Expectation, Server, all_of, matchers::*, responders::*};
+use serde_json::{Value, json};
 
 fn fhir_pipes() -> Command {
     let mut c = Command::cargo_bin("fhir-pipes").unwrap();

@@ -10,14 +10,14 @@ use std::time::Duration;
 
 use crate::cli::ExtractArgs;
 use crate::error::{PipesError, Result};
-use crate::extract::boundary::{fetch_boundaries, FetchOptions};
+use crate::extract::boundary::{FetchOptions, fetch_boundaries};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
 use crate::extract::page::{count_resources, page_locations, page_resources};
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
-use crate::snapshot::merge::{merge, merge_file, MergeFiles};
-use crate::snapshot::{same_server, Snapshot, State};
+use crate::snapshot::merge::{MergeFiles, merge, merge_file};
+use crate::snapshot::{Snapshot, State, same_server};
 use crate::transform::write_report;
 
 /// Fetch Locations into the snapshot, incrementally unless `--full`.
@@ -38,12 +38,12 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
             "--since has no effect with --full; drop one".into(),
         ));
     }
-    if let Some(s) = &args.since {
-        if parse_instant(s).is_none() {
-            return Err(PipesError::Usage(format!(
-                "--since {s}: not a FHIR instant (e.g. 2026-01-02T03:04:05Z)"
-            )));
-        }
+    if let Some(s) = &args.since
+        && parse_instant(s).is_none()
+    {
+        return Err(PipesError::Usage(format!(
+            "--since {s}: not a FHIR instant (e.g. 2026-01-02T03:04:05Z)"
+        )));
     }
     let snap = Snapshot::new(&args.snapshot);
     std::fs::create_dir_all(&snap.dir)
@@ -67,15 +67,14 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     // different one -- including one pinned with --since -- would silently
     // mix two registries, so it is a usage error. --full repoints.
     let state = State::read(&snap.state_path())?;
-    if !args.full {
-        if let Some(st) = &state {
-            if !same_server(&st.server, &args.server) {
-                return Err(PipesError::Usage(format!(
-                    "snapshot was extracted from {} but --server is {}; pass --full to repoint it",
-                    st.server, args.server
-                )));
-            }
-        }
+    if !args.full
+        && let Some(st) = &state
+        && !same_server(&st.server, &args.server)
+    {
+        return Err(PipesError::Usage(format!(
+            "snapshot was extracted from {} but --server is {}; pass --full to repoint it",
+            st.server, args.server
+        )));
     }
     let since: Option<String> = if args.full {
         None
