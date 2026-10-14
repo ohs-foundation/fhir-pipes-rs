@@ -7,7 +7,7 @@
 //! branch shapes. They need no FHIR package, so they back the offline `validate`
 //! command and also run as part of `lint`.
 
-use octofhir_sof::{Column, SelectColumn, ViewDefinition};
+use fhir_pipes_sof::{Column, SelectColumn, ViewDefinition};
 
 use crate::finding::{Finding, Severity};
 

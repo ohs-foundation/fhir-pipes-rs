@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use octofhir_sof::{ViewDefinition, SqlGenerator, ViewRunner};
+//! use fhir_pipes_sof::{ViewDefinition, SqlGenerator, ViewRunner};
 //!
 //! // Parse a ViewDefinition
 //! let view_def = ViewDefinition::from_json(&json)?;

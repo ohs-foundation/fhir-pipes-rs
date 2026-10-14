@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use octofhir_sof::{SqlGenerator, ViewDefinition};
+use fhir_pipes_sof::{SqlGenerator, ViewDefinition};
 use serde_json::Value;
 use sqlx_core::connection::Connection;
 use sqlx_core::error::Error as SqlxError;

@@ -1,3 +1,10 @@
+> **In fhir-pipes.** This crate is `octofhir-sof` from
+> [octofhir/sof](https://github.com/octofhir/sof) by the OctoFHIR Team
+> (MIT OR Apache-2.0), by way of the Recode Labs fork, brought into
+> fhir-pipes-rs with its history and renamed `fhir-pipes-sof`. The upstream
+> CLI is not included; views run through the `fhir-pipes` binary. The rest of
+> this README is the upstream text and still uses the upstream names.
+
 # octofhir/sof
 
 A Rust toolkit for [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/):

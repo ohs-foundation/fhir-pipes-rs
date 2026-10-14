@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use octofhir_sof::{Dialect, SqlGenerator, ViewDefinition};
+use fhir_pipes_sof::{Dialect, SqlGenerator, ViewDefinition};
 use serde_json::Value;
 
 struct Outcome {

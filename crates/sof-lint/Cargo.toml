@@ -1,18 +1,18 @@
 [package]
-name = "octofhir-sof-lint"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-authors.workspace = true
+name = "fhir-pipes-sof-lint"
+version = "0.1.2"
+edition = "2024"
+# From octofhir/sof (https://github.com/octofhir/sof), by the OctoFHIR Team.
+license = "MIT OR Apache-2.0"
+authors = ["OctoFHIR Team <funyloony@gmail.com>", "Recode Labs"]
+repository = "https://github.com/recodelabs/fhir-pipes-rs"
+publish = false
 description = "Static lint and validation for SQL-on-FHIR ViewDefinitions"
-readme = "../../README.md"
 keywords = ["fhir", "sql-on-fhir", "lint", "viewdefinition", "fhirpath"]
 categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
-octofhir-sof = { workspace = true }
+fhir-pipes-sof = { workspace = true }
 octofhir-fhirpath = { workspace = true }
 octofhir-fhirschema = { workspace = true }
 octofhir-canonical-manager = { workspace = true }

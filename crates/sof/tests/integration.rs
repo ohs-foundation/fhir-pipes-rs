@@ -6,15 +6,15 @@
 //! conformance harness (`tests/conformance.rs`), which is the source of truth;
 //! these tests deliberately avoid asserting on the internal SQL string shape.
 
-use octofhir_sof::{ColumnType, SqlGenerator, ViewDefinition};
+use fhir_pipes_sof::{ColumnType, SqlGenerator, ViewDefinition};
 use serde_json::json;
 
-fn generate(view_json: serde_json::Value) -> octofhir_sof::GeneratedSql {
+fn generate(view_json: serde_json::Value) -> fhir_pipes_sof::GeneratedSql {
     let view = ViewDefinition::from_json(&view_json).expect("parse ViewDefinition");
     SqlGenerator::new().generate(&view).expect("generate SQL")
 }
 
-fn col_names(g: &octofhir_sof::GeneratedSql) -> Vec<&str> {
+fn col_names(g: &fhir_pipes_sof::GeneratedSql) -> Vec<&str> {
     g.columns.iter().map(|c| c.name.as_str()).collect()
 }
 

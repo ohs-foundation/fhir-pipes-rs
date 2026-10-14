@@ -1,7 +1,7 @@
 //! In-memory SQL-on-FHIR v2 conformance harness.
 //!
 //! Runs the official `sql-on-fhir-v2` content tests through the database-free
-//! [`octofhir_sof::execute`] evaluator and compares the produced rows against
+//! [`fhir_pipes_sof::execute`] evaluator and compares the produced rows against
 //! each test's expectation. Unlike `tests/conformance.rs` this needs no
 //! PostgreSQL — it runs whenever the test-case checkout is present (the sibling
 //! `../fhir-test-cases/sql-on-fhir`, overridable with `SOF_TEST_CASES_DIR`).
@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use octofhir_sof::{ViewDefinition, execute, execute_parallel};
+use fhir_pipes_sof::{ViewDefinition, execute, execute_parallel};
 use serde_json::Value;
 
 #[tokio::test(flavor = "multi_thread")]

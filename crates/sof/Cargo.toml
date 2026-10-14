@@ -1,16 +1,15 @@
 [package]
-name = "octofhir-sof"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-authors.workspace = true
+name = "fhir-pipes-sof"
+version = "0.1.2"
+edition = "2024"
+# From octofhir/sof (https://github.com/octofhir/sof), by the OctoFHIR Team.
+license = "MIT OR Apache-2.0"
+authors = ["OctoFHIR Team <funyloony@gmail.com>", "Recode Labs"]
+repository = "https://github.com/recodelabs/fhir-pipes-rs"
+publish = false
 description = "SQL on FHIR v2: ViewDefinition parser, PostgreSQL generator and database-free in-memory evaluator"
-readme = "../../README.md"
 keywords = ["fhir", "sql-on-fhir", "healthcare", "viewdefinition", "fhirpath"]
 categories = ["database", "parser-implementations"]
-documentation = "https://docs.rs/octofhir-sof"
 # The vendored conformance suite and fixtures are large and test-only; keep them
 # out of the published package.
 exclude = ["tests/spec/**", "tests/extra/**"]

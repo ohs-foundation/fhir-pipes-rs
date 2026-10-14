@@ -243,11 +243,10 @@ fn flags_override_the_config() {
         .success();
     let log = fs::read_to_string(dir.path().join("kiln.log")).unwrap();
     assert!(log.contains("--server http://other.test/fhir"), "{log}");
-    assert!(
-        dir.path()
-            .join("data/raw/other/Observation.ndjson")
-            .exists()
-    );
+    assert!(dir
+        .path()
+        .join("data/raw/other/Observation.ndjson")
+        .exists());
 }
 
 #[test]

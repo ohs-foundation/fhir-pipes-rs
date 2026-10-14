@@ -22,8 +22,8 @@
 //! custom functions can be exempted via the `allowed_custom` list so the strict
 //! pass does not hard-fail them.
 
+use fhir_pipes_sof::{SelectColumn, ViewDefinition};
 use octofhir_fhirpath::{BinaryOperator, ExpressionNode, LiteralValue, parse_ast};
-use octofhir_sof::{SelectColumn, ViewDefinition};
 
 use crate::finding::{Finding, Severity};
 

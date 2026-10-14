@@ -7,8 +7,8 @@
 //! reported before any SQL runs.
 
 use banshee_hir::{AnalysisOptions, BuiltinLintPack, SchemaProvider, analyze_query_with_options};
+use fhir_pipes_sof::{Column, SelectColumn, ViewDefinition};
 use octofhir_fhirpath::{ExpressionNode, parse_ast};
-use octofhir_sof::{Column, SelectColumn, ViewDefinition};
 
 use crate::finding::{Finding, Severity};
 use crate::provider::{ElementKind, FhirSchemaProvider};
