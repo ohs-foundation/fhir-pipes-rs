@@ -1,10 +1,10 @@
-//! `kiln dhis2 locations`: the org unit tree as ICR Locations.
+//! `fhir-pipes dhis2 locations`: the org unit tree as ICR Locations.
 //!
 //! Levels above the facility level become admin units; the facility level
 //! becomes facility Locations, each paired with an Organization the way the
 //! ICR models facilities (`managingOrganization` → `org-<location id>`).
 //! Every resource carries the org unit UID as an official identifier, which
-//! is what `kiln dhis2 reports` maps analytics rows through.
+//! is what `fhir-pipes dhis2 reports` maps analytics rows through.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use super::api::Dhis2;
 use super::{check_out, valid_name, write_ndjson, Instance};
 use crate::cli::Dhis2LocationsArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::fhir::location::{
     ADMIN_UNIT_TYPE, BOUNDARY_EXTENSION_URL, GEOJSON_CONTENT_TYPE, NATIONAL_ADMIN_CODE_SYSTEM,
@@ -383,7 +383,7 @@ fn add_org_unit_groups(
             )? {
                 Ok(v) => list.push(v),
                 Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
-                    return Err(KilnError::Usage(format!(
+                    return Err(PipesError::Usage(format!(
                         "DHIS2 has no org unit group {uid}"
                     )))
                 }
@@ -434,7 +434,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| instance.name.clone());
     if !valid_name(&prefix, MAX_PREFIX_LEN) {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--id-prefix must be letters, digits and hyphens, at most {MAX_PREFIX_LEN} characters, got {prefix:?}"
         )));
     }
@@ -473,7 +473,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
         .filter_map(|v| OrgUnit::parse(v, &mut report))
         .collect();
     if units.is_empty() {
-        return Err(KilnError::Usage(match &args.root {
+        return Err(PipesError::Usage(match &args.root {
             Some(r) => format!("DHIS2 returned no org units at or below {r}"),
             None => "DHIS2 returned no org units; does this user have any assigned?".into(),
         }));
@@ -492,7 +492,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
         )? {
             Ok(v) => v,
             Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
-                return Err(KilnError::Usage(format!(
+                return Err(PipesError::Usage(format!(
                     "DHIS2 has no org unit group set {set}"
                 )))
             }

@@ -11,7 +11,7 @@
 //! Whether a hole actually lies inside its exterior, whether holes overlap
 //! each other, and whether the parts of a MultiPolygon overlap (a
 //! multi-feature fold can produce this) is deliberately NOT checked here --
-//! that would need a second, more expensive geometric pass, and kiln's job
+//! that would need a second, more expensive geometric pass, and fhir-pipes' job
 //! is to report registry problems, not to silently decide which ones
 //! matter. This is stricter than `geo`'s own `Validation` in one respect:
 //! an empty interior ring is reported as having fewer than 3 distinct

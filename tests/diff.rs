@@ -1,4 +1,4 @@
-//! Binary-level tests for `kiln diff` against a small hand-made snapshot.
+//! Binary-level tests for `fhir-pipes diff` against a small hand-made snapshot.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -125,7 +125,7 @@ fn write_input(dir: &Path, name: &str, text: &str) -> PathBuf {
 }
 
 fn diff(snap: &Path, input: &Path, out: &Path) -> Assert {
-    Command::cargo_bin("kiln")
+    Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["diff", "--snapshot"])
         .arg(snap)
@@ -495,7 +495,7 @@ fn geoparquet_written_by_transform_round_trips_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let snap = snapshot(dir.path());
     let dataset = dir.path().join("out");
-    Command::cargo_bin("kiln")
+    Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["transform", "--snapshot"])
         .arg(&snap)
@@ -746,7 +746,7 @@ fn geometry_added_to_a_row_written_without_geometry_is_a_geometry_addition() {
     )
     .unwrap();
     let dataset = dir.path().join("out");
-    Command::cargo_bin("kiln")
+    Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["transform", "--keep-without-geometry", "--snapshot"])
         .arg(&snap)

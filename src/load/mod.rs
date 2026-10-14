@@ -1,4 +1,4 @@
-//! `kiln load`: FHIR NDJSON -> transaction bundles with `If-Match`. Parents
+//! `fhir-pipes load`: FHIR NDJSON -> transaction bundles with `If-Match`. Parents
 //! first, a capability preflight, retry through the shared client, and a
 //! precise conflict list on 412 or 409. The first failed bundle aborts;
 //! committed bundles stay committed, and because every entry is a PUT by
@@ -23,7 +23,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::cli::LoadArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::load::bundle::{dependencies, plan, Bundle};
@@ -39,14 +39,14 @@ pub fn read_resources(path: &Path) -> Result<Vec<Value>> {
     for line in NdjsonReader::open(path)? {
         let line = line?;
         let value: Value = serde_json::from_str(&line.text).map_err(|e| {
-            KilnError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+            PipesError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
         })?;
         let resource_type = value.get("resourceType").and_then(Value::as_str);
         let id = value.get("id").and_then(Value::as_str);
         let key = match (resource_type, id) {
             (Some(t), Some(i)) if !t.is_empty() && !i.is_empty() => format!("{t}/{i}"),
             _ => {
-                return Err(KilnError::Usage(format!(
+                return Err(PipesError::Usage(format!(
                 "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
                 path.display(),
                 line.number
@@ -54,7 +54,7 @@ pub fn read_resources(path: &Path) -> Result<Vec<Value>> {
             }
         };
         if !seen.insert(key.clone()) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{}: line {}: duplicate resource {key}",
                 path.display(),
                 line.number
@@ -139,13 +139,13 @@ fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> 
                     conflicts.join("\n  ")
                 )
             };
-            Err(KilnError::Environment(format!(
+            Err(PipesError::Environment(format!(
                 "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
                  These resources changed on the server after the snapshot was taken: \
                  run extract, re-apply the edit, and diff again."
             )))
         }
-        Err(e) => Err(KilnError::Environment(format!(
+        Err(e) => Err(PipesError::Environment(format!(
             "bundle {n}/{count} failed: {e}; bundles committed before it stay committed, re-running is safe"
         ))),
     }
@@ -162,7 +162,7 @@ fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: us
     // Which bundles are committed, and whether to stop.
     let state = (Mutex::new((vec![false; count], false)), Condvar::new());
     let (tx, rx) = mpsc::channel::<(usize, Result<()>)>();
-    let mut failure: Option<KilnError> = None;
+    let mut failure: Option<PipesError> = None;
     std::thread::scope(|s| {
         for _ in 0..concurrency.clamp(1, count.max(1)) {
             let tx = tx.clone();
@@ -222,13 +222,13 @@ fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: us
 
 pub fn run_load(args: &LoadArgs) -> Result<()> {
     if args.batch_size == 0 {
-        return Err(KilnError::Usage("--batch-size must be at least 1".into()));
+        return Err(PipesError::Usage("--batch-size must be at least 1".into()));
     }
     if args.concurrency == 0 {
-        return Err(KilnError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
     }
     if !args.input.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--in {}: not a file",
             args.input.display()
         )));
@@ -256,12 +256,12 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
     let metadata_url = format!("{base}/metadata");
     let capability: Value = match client.get(&metadata_url) {
         Ok(f) => serde_json::from_slice(&f.body).map_err(|e| {
-            KilnError::Environment(format!(
+            PipesError::Environment(format!(
                 "capability preflight: {metadata_url} returned non-JSON: {e}"
             ))
         })?,
         Err(e) => {
-            return Err(KilnError::Environment(format!(
+            return Err(PipesError::Environment(format!(
             "capability preflight failed: {e} for {metadata_url}; check the server URL and token"
         )))
         }
@@ -269,7 +269,7 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
     let unstated = check_update_create(&capability, &creates)?;
     if !unstated.is_empty() {
         eprintln!(
-            "kiln: warning: the server's CapabilityStatement does not state updateCreate for {}; \
+            "fhir-pipes: warning: the server's CapabilityStatement does not state updateCreate for {}; \
              proceeding on the assumption that PUT to a new id creates (HAPI FHIR supports it but omits the flag). \
              If the server does not, the first bundle that creates will fail with the server's own error.",
             unstated.join(", ")

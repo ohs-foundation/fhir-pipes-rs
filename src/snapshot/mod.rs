@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 pub const LOCATIONS_FILE: &str = "locations.ndjson";
 pub const ORGANIZATIONS_FILE: &str = "organizations.ndjson";
@@ -59,7 +59,7 @@ impl Snapshot {
     pub fn report_path(&self) -> PathBuf {
         self.dir.join(EXTRACT_REPORT_FILE)
     }
-    /// Content-addressed cache of fetched rasters (`kiln population --raster URL`).
+    /// Content-addressed cache of fetched rasters (`fhir-pipes population --raster URL`).
     pub fn rasters(&self) -> PathBuf {
         self.dir.join(RASTERS_DIR)
     }
@@ -75,7 +75,9 @@ pub struct State {
     pub organization_watermark: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_count: Option<usize>,
-    pub kiln_version: String,
+    /// Snapshots written by kiln, before the rename, call this `kiln_version`.
+    #[serde(alias = "kiln_version")]
+    pub fhir_pipes_version: String,
     pub completed_at: String,
 }
 
@@ -83,16 +85,16 @@ impl State {
     pub fn read(path: &Path) -> Result<Option<State>> {
         match std::fs::read_to_string(path) {
             Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| {
-                KilnError::Usage(format!("{}: not a valid state file: {e}", path.display()))
+                PipesError::Usage(format!("{}: not a valid state file: {e}", path.display()))
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(KilnError::Usage(
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(PipesError::Usage(
                 format!("{}: not a valid state file: {e}", path.display()),
             )),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(KilnError::Usage(
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(PipesError::Usage(
                 format!("{}: not readable: {e}", path.display()),
             )),
-            Err(e) => Err(KilnError::io(path, e)),
+            Err(e) => Err(PipesError::io(path, e)),
         }
     }
 
@@ -101,10 +103,10 @@ impl State {
         let tmp = path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(self)? + "\n";
         let result: Result<()> = (|| {
-            let mut file = std::fs::File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
+            let mut file = std::fs::File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
             file.write_all(text.as_bytes())
-                .map_err(|e| KilnError::io(&tmp, e))?;
-            file.sync_all().map_err(|e| KilnError::io(&tmp, e))
+                .map_err(|e| PipesError::io(&tmp, e))?;
+            file.sync_all().map_err(|e| PipesError::io(&tmp, e))
         })();
         if let Err(e) = result {
             let _ = std::fs::remove_file(&tmp);
@@ -112,7 +114,7 @@ impl State {
         }
         if let Err(e) = std::fs::rename(&tmp, path) {
             let _ = std::fs::remove_file(&tmp);
-            return Err(KilnError::io(path, e));
+            return Err(PipesError::io(path, e));
         }
         // Durability: fsync the directory whose entry (the state.json
         // rename) just changed, so that change survives a crash right
@@ -195,7 +197,7 @@ mod tests {
             count: 3,
             organization_watermark: None,
             organization_count: None,
-            kiln_version: "0.2.0".into(),
+            fhir_pipes_version: "0.2.0".into(),
             completed_at: "2026-01-01T00:00:01Z".into(),
         };
         state.write(&s.state_path()).unwrap();
@@ -216,7 +218,7 @@ mod tests {
             count: 0,
             organization_watermark: None,
             organization_count: None,
-            kiln_version: "v".into(),
+            fhir_pipes_version: "v".into(),
             completed_at: "t".into(),
         }
         .write(&p)

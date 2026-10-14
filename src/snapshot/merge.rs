@@ -8,7 +8,7 @@ use std::path::Path;
 use base64::Engine;
 use serde_json::Value;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
 use crate::fhir::location::{BOUNDARY_EXTENSION_URLS, GEOJSON_CONTENT_TYPE};
 use crate::fhir::ndjson::NdjsonReader;
@@ -180,7 +180,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
         last_index.insert(&n.id, i);
     }
 
-    let file = std::fs::File::create(tmp).map_err(|e| KilnError::io(tmp, e))?;
+    let file = std::fs::File::create(tmp).map_err(|e| PipesError::io(tmp, e))?;
     let mut out = std::io::BufWriter::new(file);
     let mut stats = MergeStats {
         total: 0,
@@ -213,7 +213,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
                     "not a JSON object with an id; copied unchanged",
                 ),
             }
-            writeln!(out, "{}", line.text).map_err(|e| KilnError::io(tmp, e))?;
+            writeln!(out, "{}", line.text).map_err(|e| PipesError::io(tmp, e))?;
             stats.total += 1;
         }
     }
@@ -223,7 +223,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
         let line = line?;
         seen += 1;
         let Some(note) = input.notes.get(i) else {
-            return Err(KilnError::Environment(
+            return Err(PipesError::Environment(
                 "incoming file and page notes disagree; rerun extract".into(),
             ));
         };
@@ -236,7 +236,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
             // pager wrote compact JSON), so copy it through unparsed
             // instead of paying for a parse + re-serialize.
             None => {
-                writeln!(out, "{}", line.text).map_err(|e| KilnError::io(tmp, e))?;
+                writeln!(out, "{}", line.text).map_err(|e| PipesError::io(tmp, e))?;
             }
             Some(url) => {
                 let mut resource: Value = serde_json::from_str(&line.text)?;
@@ -259,11 +259,11 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
                 }
                 serde_json::to_writer(&mut out, &resource).map_err(|e| {
                     match e.io_error_kind() {
-                        Some(kind) => KilnError::io(tmp, std::io::Error::from(kind)),
-                        None => KilnError::Json(e),
+                        Some(kind) => PipesError::io(tmp, std::io::Error::from(kind)),
+                        None => PipesError::Json(e),
                     }
                 })?;
-                out.write_all(b"\n").map_err(|e| KilnError::io(tmp, e))?;
+                out.write_all(b"\n").map_err(|e| PipesError::io(tmp, e))?;
             }
         }
         if let Some(u) = &note.last_updated {
@@ -277,16 +277,16 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
         }
     }
     if seen != input.notes.len() {
-        return Err(KilnError::Environment(
+        return Err(PipesError::Environment(
             "incoming file and page notes disagree; rerun extract".into(),
         ));
     }
-    out.flush().map_err(|e| KilnError::io(tmp, e))?;
+    out.flush().map_err(|e| PipesError::io(tmp, e))?;
     let file = out
         .into_inner()
-        .map_err(|e| KilnError::io(tmp, e.into_error()))?;
-    file.sync_all().map_err(|e| KilnError::io(tmp, e))?;
-    std::fs::rename(tmp, &files.existing).map_err(|e| KilnError::io(tmp, e))?;
+        .map_err(|e| PipesError::io(tmp, e.into_error()))?;
+    file.sync_all().map_err(|e| PipesError::io(tmp, e))?;
+    std::fs::rename(tmp, &files.existing).map_err(|e| PipesError::io(tmp, e))?;
     // Best-effort, as in `State::write`: not every platform/filesystem
     // supports fsync on a directory, and that's not worth failing an
     // otherwise-successful merge over.

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use geo::Intersects;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::LineAccess;
 use crate::fhir::{Location, Organization};
 use crate::geometry::{self, GeomKind};
@@ -101,23 +101,23 @@ fn nearest_polygon_ancestor(
 
 fn recover_incomplete_swap(dataset: &Path, backup: &Path, staging: &Path) -> Result<()> {
     if backup.exists() && !dataset.exists() {
-        std::fs::rename(backup, dataset).map_err(|e| KilnError::io(backup, e))?;
+        std::fs::rename(backup, dataset).map_err(|e| PipesError::io(backup, e))?;
     } else if backup.exists() {
-        std::fs::remove_dir_all(backup).map_err(|e| KilnError::io(backup, e))?;
+        std::fs::remove_dir_all(backup).map_err(|e| PipesError::io(backup, e))?;
     }
     if staging.exists() {
-        std::fs::remove_dir_all(staging).map_err(|e| KilnError::io(staging, e))?;
+        std::fs::remove_dir_all(staging).map_err(|e| PipesError::io(staging, e))?;
     }
     Ok(())
 }
 
 fn swap_in(dataset: &Path, backup: &Path, staging: &Path) -> Result<()> {
     if dataset.exists() {
-        std::fs::rename(dataset, backup).map_err(|e| KilnError::io(dataset, e))?;
+        std::fs::rename(dataset, backup).map_err(|e| PipesError::io(dataset, e))?;
     }
-    std::fs::rename(staging, dataset).map_err(|e| KilnError::io(staging, e))?;
+    std::fs::rename(staging, dataset).map_err(|e| PipesError::io(staging, e))?;
     if backup.exists() {
-        std::fs::remove_dir_all(backup).map_err(|e| KilnError::io(backup, e))?;
+        std::fs::remove_dir_all(backup).map_err(|e| PipesError::io(backup, e))?;
     }
     Ok(())
 }
@@ -130,18 +130,18 @@ pub fn write_dataset(
     row_group_size: usize,
     organizations: Option<&Path>,
 ) -> Result<Vec<WrittenPartition>> {
-    std::fs::create_dir_all(out_dir).map_err(|e| KilnError::io(out_dir, e))?;
+    std::fs::create_dir_all(out_dir).map_err(|e| PipesError::io(out_dir, e))?;
     let dataset = out_dir.join(DATASET_DIR);
     let backup = out_dir.join(BACKUP_DIR);
     let staging = out_dir.join(STAGING_DIR);
     if dataset.is_symlink() {
-        return Err(KilnError::Usage(format!(
-            "{} is a symlink; kiln will not replace it",
+        return Err(PipesError::Usage(format!(
+            "{} is a symlink; fhir-pipes will not replace it",
             dataset.display()
         )));
     }
     recover_incomplete_swap(&dataset, &backup, &staging)?;
-    std::fs::create_dir(&staging).map_err(|e| KilnError::io(&staging, e))?;
+    std::fs::create_dir(&staging).map_err(|e| PipesError::io(&staging, e))?;
 
     let written =
         match write_partitions(ndjson, index, &staging, keys, row_group_size, organizations) {

@@ -1,4 +1,4 @@
-//! `kiln dhis2 reports`: indicator values from DHIS2 analytics as
+//! `fhir-pipes dhis2 reports`: indicator values from DHIS2 analytics as
 //! MeasureReports, one per indicator, org unit and period.
 //!
 //! DHIS2 computes every value itself: it adds up the numerator and the
@@ -6,12 +6,12 @@
 //! requested at each level and never summed here. `includeNumDen` returns
 //! the numerator and denominator beside the value; `skipRounding` returns
 //! the value unrounded. Period start and end dates come from the response's
-//! own metadata, so every DHIS2 period type works without kiln knowing its
+//! own metadata, so every DHIS2 period type works without fhir-pipes knowing its
 //! calendar rules. A `--range` of dates is asked for with `startDate` and
 //! `endDate` instead, and gives one value for the whole range.
 //!
 //! Org units are mapped to Locations through the identifier that
-//! `kiln dhis2 locations` writes. A row whose org unit has no Location is
+//! `fhir-pipes dhis2 locations` writes. A row whose org unit has no Location is
 //! reported and skipped.
 //!
 //! An export can run to millions of values, so the work is planned in
@@ -45,7 +45,7 @@ use super::rerun::{
 };
 use super::{check_out, Instance, NdjsonWriter};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::client::FetchError;
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
@@ -57,7 +57,7 @@ pub const PERIOD_EXTENSION_URL: &str =
 pub const CAMPAIGN_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/campaign";
 /// Where a report's figures come from: `analytics` (DHIS2 computed them)
-/// or `data-values` (kiln computed them from raw data values).
+/// or `data-values` (fhir-pipes computed them from raw data values).
 pub const SOURCE_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source";
 /// DHIS2 UIDs are 11 characters.
@@ -79,7 +79,7 @@ pub fn load_mapping(path: &Path, system: &str) -> Result<HashMap<String, Target>
     for line in NdjsonReader::open(path)? {
         let line = line?;
         let v: Value = serde_json::from_str(&line.text).map_err(|e| {
-            KilnError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+            PipesError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
         })?;
         if v.get("resourceType").and_then(Value::as_str) != Some("Location") {
             continue;
@@ -142,14 +142,14 @@ pub fn parse_analytics(v: &Value, breakdown: Option<&str>) -> Result<Analytics> 
     let headers: Vec<&str> = v
         .get("headers")
         .and_then(Value::as_array)
-        .ok_or_else(|| KilnError::Environment("analytics response has no headers".into()))?
+        .ok_or_else(|| PipesError::Environment("analytics response has no headers".into()))?
         .iter()
         .map(|h| h.get("name").and_then(Value::as_str).unwrap_or(""))
         .collect();
     let col = |name: &str| headers.iter().position(|h| *h == name);
     let need = |name: &str| {
         col(name).ok_or_else(|| {
-            KilnError::Environment(format!("analytics response has no {name} column"))
+            PipesError::Environment(format!("analytics response has no {name} column"))
         })
     };
     let (dx, pe, ou, value) = (need("dx")?, col("pe"), need("ou")?, need("value")?);
@@ -406,7 +406,7 @@ pub struct DateRange {
 impl DateRange {
     pub fn parse(s: &str) -> Result<Self> {
         let bad = |why: &str| {
-            KilnError::Usage(format!(
+            PipesError::Usage(format!(
                 "--range {s:?}: {why}; expected START:END as ISO dates, e.g. 2026-04-05:2026-05-20"
             ))
         };
@@ -498,7 +498,7 @@ fn check_campaign(reference: &str) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(KilnError::Usage(format!(
+        Err(PipesError::Usage(format!(
             "--campaign {reference:?}: expected a reference ResourceType/id, e.g. CarePlan/bgd-mr-sia-2026"
         )))
     }
@@ -699,7 +699,7 @@ fn org_unit_count(api: &Dhis2, level: u32, root: Option<&str>) -> Result<u64> {
         .pointer("/pager/total")
         .and_then(Value::as_u64)
         .ok_or_else(|| {
-            KilnError::Environment(format!(
+            PipesError::Environment(format!(
                 "organisationUnits.json: no pager.total in the count of level {level}"
             ))
         })
@@ -887,13 +887,13 @@ fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) 
             );
         }
         Err(e) if too_large(&e) => {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "indicator {} at level {} for {} is over DHIS2's analytics row limit on its own; ask for shorter periods ({e})",
                 ask.indicators[0], ask.level, ask.when()
             )));
         }
         Err(FetchError::Status { status: 409, body }) => {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "DHIS2 rejected the analytics query for level {} and period {}: {body}",
                 ask.level,
                 match ask.range {
@@ -1169,7 +1169,7 @@ impl<'a> Writer<'a> {
             line.clear();
             if reader
                 .read_line(&mut line)
-                .map_err(|e| KilnError::io(&path, e))?
+                .map_err(|e| PipesError::io(&path, e))?
                 == 0
             {
                 return Ok(());
@@ -1245,16 +1245,16 @@ fn unique<T: Clone + PartialEq>(list: &[T]) -> Vec<T> {
 pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     check_out(&args.out)?;
     if args.chunk == 0 {
-        return Err(KilnError::Usage("--chunk must be at least 1".into()));
+        return Err(PipesError::Usage("--chunk must be at least 1".into()));
     }
     if args.max_rows == 0 {
-        return Err(KilnError::Usage("--max-rows must be at least 1".into()));
+        return Err(PipesError::Usage("--max-rows must be at least 1".into()));
     }
     if args.concurrency == 0 {
-        return Err(KilnError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
     }
     if args.levels.contains(&0) {
-        return Err(KilnError::Usage(
+        return Err(PipesError::Usage(
             "--level counts from 1, the top of the DHIS2 tree".into(),
         ));
     }
@@ -1262,7 +1262,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         if let Some(p) = path {
             check_out(p)?;
             if p == &args.out || Some(p) == args.previous.as_ref() {
-                return Err(KilnError::Usage(format!(
+                return Err(PipesError::Usage(format!(
                     "{flag} {}: must be a file of its own, not --out or --previous",
                     p.display()
                 )));
@@ -1272,21 +1272,21 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     let from_values = args.source == ReportSource::DataValues;
     if let Some(since) = &args.updated_since {
         if !from_values {
-            return Err(KilnError::Usage(
+            return Err(PipesError::Usage(
                 "--updated-since needs --source data-values (analytics has no last-updated filter)"
                     .into(),
             ));
         }
         let shaped = since.len() == 10 || (since.len() >= 16 && since.as_bytes()[10] == b'T');
         if !shaped || super::api::epoch_seconds(since).is_none() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--updated-since {since:?}: expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
             )));
         }
     }
     if let Some(p) = &args.previous {
         if !p.is_file() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--previous {}: no such file",
                 p.display()
             )));
@@ -1301,7 +1301,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         check_campaign(c)?;
     }
     if !args.locations.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--locations {}: no such file",
             args.locations.display()
         )));
@@ -1309,8 +1309,8 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     let system = instance.orgunit_system();
     let mapping = load_mapping(&args.locations, &system)?;
     if mapping.is_empty() {
-        return Err(KilnError::Usage(format!(
-            "no Location in {} carries an identifier under {system}; run `kiln dhis2 locations --instance {}` and load its output first",
+        return Err(PipesError::Usage(format!(
+            "no Location in {} carries an identifier under {system}; run `fhir-pipes dhis2 locations --instance {}` and load its output first",
             args.locations.display(),
             instance.name
         )));
@@ -1343,7 +1343,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
                 range.code()
             );
             if !is_valid_id(&id) {
-                return Err(KilnError::Usage(format!(
+                return Err(PipesError::Usage(format!(
                     "--range {}: report ids for {dx} would be {} characters, over FHIR's 64; use a shorter --instance",
                     range.label(),
                     id.len()
@@ -1358,7 +1358,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     let mut levels: Vec<(u32, u64)> = Vec::new();
     let units = if from_values {
         if let Some(p) = periods.iter().find(|p| Span::of_period(p).is_none()) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--period {p}: --source data-values knows the dates of days, ISO weeks, months, bi-months, quarters, six-months and years only (no relative periods); use --range for other spans"
             )));
         }
@@ -1463,7 +1463,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     if let Some(s) = &saved {
         let differ = plan_differences(&s.plan, &fingerprint);
         if !differ.is_empty() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--resume: the interrupted run at {} was planned differently ({} changed); run without --resume to start over",
                 args.out.display(),
                 differ.join(", ")
@@ -1555,7 +1555,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     let written = (Mutex::new(start), Condvar::new());
     let (tx, rx) = mpsc::sync_channel::<(usize, Result<Fetched>)>(window);
     let started = Instant::now();
-    let mut failure: Option<KilnError> = None;
+    let mut failure: Option<PipesError> = None;
     let mut cursor = start;
     std::thread::scope(|s| {
         for _ in 0..workers {
@@ -1696,7 +1696,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
         write_lines(path, ids)?;
     }
     out.finish()?;
-    std::fs::remove_file(&checkpoint).map_err(|e| KilnError::io(&checkpoint, e))?;
+    std::fs::remove_file(&checkpoint).map_err(|e| PipesError::io(&checkpoint, e))?;
 
     println!(
         "Wrote {} MeasureReports to {} ({} indicators, {} Locations, {} periods; {} values from {} {} requests)",

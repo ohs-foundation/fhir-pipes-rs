@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::cache::Cache;
 use crate::extract::client::{Auth, FhirClient};
 
@@ -60,12 +60,12 @@ pub fn load(
     let label = label_of(source);
     if !is_url(source) {
         if source.contains("://") {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{source}: only http(s) URLs and local paths are supported"
             )));
         }
         let path = Path::new(source);
-        let bytes = std::fs::read(path).map_err(|e| KilnError::io(path, e))?;
+        let bytes = std::fs::read(path).map_err(|e| PipesError::io(path, e))?;
         return Ok(RasterBytes {
             bytes,
             label,
@@ -91,9 +91,9 @@ pub fn load(
     eprintln!("raster: fetching {label} …");
     let fetched = client
         .get(source)
-        .map_err(|e| KilnError::Environment(format!("{source}: {e}")))?;
+        .map_err(|e| PipesError::Environment(format!("{source}: {e}")))?;
     if !looks_like_tiff(&fetched.body) {
-        return Err(KilnError::Environment(format!(
+        return Err(PipesError::Environment(format!(
             "{source}: response is not a TIFF ({} bytes); nothing cached",
             fetched.body.len()
         )));

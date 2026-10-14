@@ -3,12 +3,12 @@
 //! `geography` characteristic, with source and date provenance in
 //! extensions. Population is never a Location attribute in the ICR (the
 //! georegistry rule: Location holds identity and place; revisable
-//! programmatic figures live beside it), so `kiln population` emits these
+//! programmatic figures live beside it), so `fhir-pipes population` emits these
 //! and leaves the Location untouched. As with `location.rs`, every
 //! profile-specific URL is a constant here and nowhere else.
 //!
 //! `estimate-date` is, per the IG, when the estimate was *made*; a modelled
-//! raster only tells us its reference year, so kiln stamps `YEAR-01-01`
+//! raster only tells us its reference year, so fhir-pipes stamps `YEAR-01-01`
 //! unless the operator supplies the real date.
 
 use serde_json::{json, Value};
@@ -60,7 +60,7 @@ pub const KNOWN_SOURCE_CODES: [&str; 9] = [
     "other",
 ];
 
-/// Display text for the `icr-denominator-source-cs` codes kiln emits.
+/// Display text for the `icr-denominator-source-cs` codes fhir-pipes emits.
 pub fn source_display(code: &str) -> Option<&'static str> {
     match code {
         "worldpop" => Some("WorldPop modelled estimate"),

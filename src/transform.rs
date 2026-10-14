@@ -1,9 +1,9 @@
-//! `kiln transform`: pass one, pass two, report.
+//! `fhir-pipes transform`: pass one, pass two, report.
 
 use std::path::Path;
 
 use crate::cli::TransformArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::index::build_index;
 use crate::index::partition::parse_keys;
 use crate::report::Report;
@@ -15,7 +15,7 @@ pub const SNAPSHOT_FILE: &str = "locations.ndjson";
 /// `--out` must either not exist yet or already be a directory.
 pub fn check_out_dir(out: &Path) -> Result<()> {
     if out.exists() && !out.is_dir() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--out {}: not a directory",
             out.display()
         )));
@@ -27,14 +27,14 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
     check_out_dir(&args.out)?;
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "snapshot file not found: {}",
             ndjson.display()
         )));
     }
     let keys = parse_keys(&args.partition_by)?;
     if args.row_group_size == 0 {
-        return Err(KilnError::Usage(
+        return Err(PipesError::Usage(
             "--row-group-size must be at least 1".into(),
         ));
     }
@@ -65,7 +65,7 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
     match std::fs::remove_file(&report_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(KilnError::io(&report_path, e)),
+        Err(e) => return Err(PipesError::io(&report_path, e)),
     }
 
     let organizations = args.snapshot.join(ORGANIZATIONS_FILE);
@@ -113,5 +113,5 @@ pub fn write_report(path: &Path, report: &Report) -> Result<()> {
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    std::fs::write(path, text).map_err(|e| KilnError::io(path, e))
+    std::fs::write(path, text).map_err(|e| PipesError::io(path, e))
 }

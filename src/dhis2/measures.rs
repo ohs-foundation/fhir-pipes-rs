@@ -1,4 +1,4 @@
-//! `kiln dhis2 measures`: DHIS2 indicators and data elements as FHIR Measures.
+//! `fhir-pipes dhis2 measures`: DHIS2 indicators and data elements as FHIR Measures.
 //!
 //! An indicator is numerator ÷ denominator × factor. A percent (factor 100)
 //! is scored `proportion`, any other factor `ratio`, and a plain number
@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::api::{Dhis2, ServerInfo};
 use super::{check_out, write_ndjson, Instance};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::report::Report;
 use crate::transform::write_report;
 
@@ -439,7 +439,7 @@ fn fetch_source(
             .filter(|g| !have.contains(g))
             .collect();
         if !missing.is_empty() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "DHIS2 has no {} group {}",
                 src.what,
                 missing.join(", ")
@@ -471,7 +471,7 @@ fn fetch_source(
             .filter(|i| !found.contains_key(*i))
             .collect();
         if !missing.is_empty() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "DHIS2 has no {} {}",
                 src.what,
                 missing.join(", ")
@@ -528,7 +528,7 @@ pub fn fetch_indicators(
             })
             .collect();
         if !missing.is_empty() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "DHIS2 has no data element group set {}",
                 missing.join(", ")
             )));
@@ -575,14 +575,14 @@ pub fn fetch_indicators(
             .filter(|d| !have.contains(*d))
             .collect();
         if !missing.is_empty() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "DHIS2 has no data set {}",
                 missing.join(", ")
             )));
         }
     }
     if found.is_empty() {
-        return Err(KilnError::Usage(
+        return Err(PipesError::Usage(
             "the selection has no indicators, aggregate data elements or data sets".into(),
         ));
     }

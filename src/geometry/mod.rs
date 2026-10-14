@@ -4,7 +4,7 @@
 //! one's validation and only computes the representative point, producing
 //! the full result (geometry + WKB + point).
 //!
-//! Invalid geometry is reported and passed through unchanged. kiln does not
+//! Invalid geometry is reported and passed through unchanged. fhir-pipes does not
 //! repair; that hides registry problems from the people who must fix them.
 
 pub mod geojson;
@@ -156,7 +156,7 @@ pub fn build(loc: &Location, report: &mut Report) -> Option<GeometryResult> {
             // and `classify` already rejected those (via `bbox_of`), so
             // this should be unreachable in practice. Report rather than
             // fall back to the bbox centre, which can land outside a
-            // crescent-shaped polygon -- kiln promises the representative
+            // crescent-shaped polygon -- fhir-pipes promises the representative
             // point is inside the boundary.
             None => {
                 report.add(

@@ -552,6 +552,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fhir-pipes"
+version = "0.3.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "assert_cmd",
+ "base64 0.22.1",
+ "clap",
+ "flate2",
+ "geo",
+ "geo-traits",
+ "geo-types",
+ "geojson",
+ "httptest",
+ "parquet",
+ "predicates",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tiff",
+ "url",
+ "uuid",
+ "wkb",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1349,36 +1379,6 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "kiln"
-version = "0.2.0"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "assert_cmd",
- "base64 0.22.1",
- "clap",
- "flate2",
- "geo",
- "geo-traits",
- "geo-types",
- "geojson",
- "httptest",
- "parquet",
- "predicates",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tiff",
- "url",
- "uuid",
- "wkb",
 ]
 
 [[package]]

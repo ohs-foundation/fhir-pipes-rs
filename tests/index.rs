@@ -1,4 +1,4 @@
-//! `kiln index`: backfill spatial-index cells onto a snapshot.
+//! `fhir-pipes index`: backfill spatial-index cells onto a snapshot.
 
 use std::path::Path;
 
@@ -78,7 +78,7 @@ fn index_writes_only_the_positioned_locations_that_lack_a_requested_cell() {
     );
     let out = dir.path().join("changes.ndjson");
     let report = dir.path().join("report.json");
-    let assert = std::process::Command::cargo_bin("kiln")
+    let assert = std::process::Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["index", "--snapshot"])
         .arg(dir.path())
@@ -145,7 +145,7 @@ fn refresh_recomputes_a_present_cell_and_a_bad_scheme_is_a_usage_error() {
         )],
     );
     let out = dir.path().join("changes.ndjson");
-    std::process::Command::cargo_bin("kiln")
+    std::process::Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["index", "--snapshot"])
         .arg(dir.path())
@@ -164,7 +164,7 @@ fn refresh_recomputes_a_present_cell_and_a_bad_scheme_is_a_usage_error() {
     .unwrap();
     assert_ne!(cells(&fixed)[0].2, "000000000000000000");
 
-    std::process::Command::cargo_bin("kiln")
+    std::process::Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["index", "--snapshot"])
         .arg(dir.path())

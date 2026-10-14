@@ -1,5 +1,5 @@
 //! DHIS2 indicator expressions, for `--source data-values`: the numerator
-//! and denominator kiln computes itself from raw data values.
+//! and denominator fhir-pipes computes itself from raw data values.
 //!
 //! Covered: numbers, `#{de}`, `#{de.coc}`, `#{de.coc.aoc}` and `#{de.*.aoc}`
 //! (a data element's total, one category option combo, one attribute option

@@ -17,7 +17,7 @@ pub const DEFAULT_BATCH_SIZE: usize = 100;
 /// download off after five minutes. Total per-request deadline, in seconds.
 pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
 pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
-/// Rows kiln aims to keep one analytics request under; DHIS2's own default
+/// Rows fhir-pipes aims to keep one analytics request under; DHIS2's own default
 /// limit is 50,000.
 pub const DEFAULT_ANALYTICS_MAX_ROWS: usize = 20_000;
 /// Analytics requests in flight at once. Each one is a database query on
@@ -26,9 +26,9 @@ pub const DEFAULT_ANALYTICS_CONCURRENCY: usize = 4;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "kiln",
+    name = "fhir-pipes",
     version,
-    about = "Bridge between a FHIR Location registry and GeoParquet"
+    about = "Move data into and out of FHIR servers: SQL-on-FHIR warehouses, GeoParquet, DHIS2"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -51,11 +51,11 @@ pub enum Command {
     Diff(DiffArgs),
     /// Send changed resources to a FHIR server as version-checked transaction bundles
     Load(LoadArgs),
-    /// Backfill spatial-index cells (quadkey, geohash) onto snapshot Locations that lack them; writes the changed resources as FHIR NDJSON for `kiln load` (offline)
+    /// Backfill spatial-index cells (quadkey, geohash) onto snapshot Locations that lack them; writes the changed resources as FHIR NDJSON for `fhir-pipes load` (offline)
     Index(IndexArgs),
-    /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `kiln load` (offline once the raster is cached)
+    /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `fhir-pipes load` (offline once the raster is cached)
     Population(PopulationArgs),
-    /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `kiln load`
+    /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `fhir-pipes load`
     #[command(subcommand)]
     Dhis2(Box<Dhis2Command>),
 }
@@ -70,13 +70,13 @@ pub enum Dhis2Command {
     Reports(Box<Dhis2ReportsArgs>),
 }
 
-/// Where `kiln dhis2 reports` takes its values from.
+/// Where `fhir-pipes dhis2 reports` takes its values from.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReportSource {
     /// DHIS2's analytics API: DHIS2 computes every value.
     #[default]
     Analytics,
-    /// Raw data values; kiln computes the values.
+    /// Raw data values; fhir-pipes computes the values.
     DataValues,
 }
 
@@ -89,31 +89,35 @@ impl ReportSource {
     }
 }
 
-/// Where the DHIS2 instance is, how to sign in, and the short name kiln
+/// Where the DHIS2 instance is, how to sign in, and the short name fhir-pipes
 /// files it under.
 #[derive(clap::Args, Debug, Clone)]
 pub struct Dhis2Conn {
-    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-41-10 (a trailing /api is accepted); falls back to $KILN_DHIS2_URL
-    #[arg(long = "dhis2", env = "KILN_DHIS2_URL")]
+    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-41-10 (a trailing /api is accepted); falls back to $FHIR_PIPES_DHIS2_URL
+    #[arg(long = "dhis2", env = "FHIR_PIPES_DHIS2_URL")]
     pub url: String,
     /// Short name for this instance (letters, digits, hyphens; up to 16), used in identifier systems, ids and the meta tag, e.g. sl-demo
     #[arg(long)]
     pub instance: String,
-    /// DHIS2 personal access token (d2pat_…); falls back to $KILN_DHIS2_TOKEN
+    /// DHIS2 personal access token (d2pat_…); falls back to $FHIR_PIPES_DHIS2_TOKEN
     #[arg(
         long = "dhis2-token",
-        env = "KILN_DHIS2_TOKEN",
+        env = "FHIR_PIPES_DHIS2_TOKEN",
         hide_env_values = true,
         conflicts_with = "user"
     )]
     pub token: Option<String>,
-    /// DHIS2 username for Basic auth; falls back to $KILN_DHIS2_USER
-    #[arg(long = "dhis2-user", env = "KILN_DHIS2_USER", requires = "password")]
+    /// DHIS2 username for Basic auth; falls back to $FHIR_PIPES_DHIS2_USER
+    #[arg(
+        long = "dhis2-user",
+        env = "FHIR_PIPES_DHIS2_USER",
+        requires = "password"
+    )]
     pub user: Option<String>,
-    /// DHIS2 password; falls back to $KILN_DHIS2_PASSWORD
+    /// DHIS2 password; falls back to $FHIR_PIPES_DHIS2_PASSWORD
     #[arg(
         long = "dhis2-password",
-        env = "KILN_DHIS2_PASSWORD",
+        env = "FHIR_PIPES_DHIS2_PASSWORD",
         hide_env_values = true,
         requires = "user"
     )]
@@ -133,7 +137,7 @@ pub struct Dhis2LocationsArgs {
     /// Prefix of the Location ids (PREFIX-<uid>); defaults to the instance name
     #[arg(long)]
     pub id_prefix: Option<String>,
-    /// Country code put on the top org unit as its national admin code (e.g. SLE); kiln transform partitions by it
+    /// Country code put on the top org unit as its national admin code (e.g. SLE); fhir-pipes transform partitions by it
     #[arg(long)]
     pub country_code: Option<String>,
     /// DHIS2 level whose org units are facilities (a Location plus an Organization); defaults to the deepest level
@@ -203,7 +207,7 @@ pub struct Dhis2ReportsArgs {
     pub conn: Dhis2Conn,
     #[command(flatten)]
     pub select: IndicatorSelection,
-    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `kiln dhis2 locations`, or a snapshot's locations.ndjson
+    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `fhir-pipes dhis2 locations`, or a snapshot's locations.ndjson
     #[arg(long)]
     pub locations: PathBuf,
     /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …). Needed unless --range is given
@@ -231,7 +235,7 @@ pub struct Dhis2ReportsArgs {
     /// Rows to aim for per analytics request: periods of the same kind (days, weeks, months, …) are asked for together while indicators × periods × org units at the level stays under this. Breakdown requests return a row per option on top; whatever DHIS2 still calls too large is split, periods first
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_MAX_ROWS)]
     pub max_rows: usize,
-    /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the --locations hierarchy and computed by kiln: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
+    /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the --locations hierarchy and computed by fhir-pipes: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
     #[arg(long, value_enum, default_value_t = ReportSource::Analytics)]
     pub source: ReportSource,
     /// With --source data-values and --previous: recompute only the periods and ranges with data values updated or deleted since this date or time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS); --out keeps the previous reports for the rest
@@ -352,30 +356,30 @@ pub struct InspectArgs {
 }
 
 /// How extract and load authenticate: no header, a fixed bearer token, or an
-/// OAuth client id and secret that kiln trades for tokens itself.
+/// OAuth client id and secret that fhir-pipes trades for tokens itself.
 #[derive(clap::Args, Debug, Clone)]
 pub struct AuthArgs {
-    /// Bearer token; falls back to $KILN_TOKEN
+    /// Bearer token; falls back to $FHIR_PIPES_TOKEN
     #[arg(
         long,
-        env = "KILN_TOKEN",
+        env = "FHIR_PIPES_TOKEN",
         hide_env_values = true,
         conflicts_with = "client_id"
     )]
     pub token: Option<String>,
-    /// OAuth client id; kiln gets its own token (client-credentials grant) and renews it before it expires. Falls back to $KILN_CLIENT_ID
-    #[arg(long, env = "KILN_CLIENT_ID", requires_all = ["client_secret", "token_url"])]
+    /// OAuth client id; fhir-pipes gets its own token (client-credentials grant) and renews it before it expires. Falls back to $FHIR_PIPES_CLIENT_ID
+    #[arg(long, env = "FHIR_PIPES_CLIENT_ID", requires_all = ["client_secret", "token_url"])]
     pub client_id: Option<String>,
-    /// OAuth client secret; falls back to $KILN_CLIENT_SECRET
+    /// OAuth client secret; falls back to $FHIR_PIPES_CLIENT_SECRET
     #[arg(
         long,
-        env = "KILN_CLIENT_SECRET",
+        env = "FHIR_PIPES_CLIENT_SECRET",
         hide_env_values = true,
         requires = "client_id"
     )]
     pub client_secret: Option<String>,
-    /// OAuth token endpoint the client id and secret are sent to; falls back to $KILN_TOKEN_URL
-    #[arg(long, env = "KILN_TOKEN_URL", requires = "client_id")]
+    /// OAuth token endpoint the client id and secret are sent to; falls back to $FHIR_PIPES_TOKEN_URL
+    #[arg(long, env = "FHIR_PIPES_TOKEN_URL", requires = "client_id")]
     pub token_url: Option<String>,
 }
 

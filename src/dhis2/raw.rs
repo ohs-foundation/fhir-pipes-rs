@@ -1,4 +1,4 @@
-//! `kiln dhis2 reports --source data-values`: values computed by kiln from
+//! `fhir-pipes dhis2 reports --source data-values`: values computed by fhir-pipes from
 //! raw data values (`/api/dataValueSets`) instead of DHIS2's analytics.
 //!
 //! Each batch's data values are added up the org unit hierarchy (the
@@ -37,7 +37,7 @@ use super::calendar::{days_in_year, iso, period_days};
 use super::expression::{Expr, Item};
 use super::measures::{Indicator, Kind};
 use super::reports::{Analytics, AnalyticsRow, DateRange};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::client::FetchError;
 use crate::fhir::ndjson::NdjsonReader;
 
@@ -111,8 +111,8 @@ pub struct RawSource {
     pub categories: Vec<Category>,
 }
 
-fn usage(s: String) -> KilnError {
-    KilnError::Usage(s)
+fn usage(s: String) -> PipesError {
+    PipesError::Usage(s)
 }
 
 /// The expressions, data elements, constants and categories of a run, or
@@ -322,7 +322,7 @@ pub fn load_parents(path: &Path, system: &str) -> Result<HashMap<String, Option<
     for line in NdjsonReader::open(path)? {
         let line = line?;
         let v: Value = serde_json::from_str(&line.text).map_err(|e| {
-            KilnError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+            PipesError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
         })?;
         if v.get("resourceType").and_then(Value::as_str) != Some("Location") {
             continue;

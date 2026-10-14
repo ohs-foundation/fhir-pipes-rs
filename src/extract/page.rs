@@ -8,7 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 use url::Url;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::fhir::location::BOUNDARY_EXTENSION_URLS;
 use crate::report::Report;
@@ -98,7 +98,7 @@ pub fn page_resources(
 ) -> Result<PageResult> {
     let base = server.trim_end_matches('/');
     let mut url = Url::parse(&format!("{base}/{resource_type}"))
-        .map_err(|_| KilnError::Usage(format!("--server is not a valid URL: {server}")))?;
+        .map_err(|_| PipesError::Usage(format!("--server is not a valid URL: {server}")))?;
     {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("_count", &PAGE_SIZE.to_string());
@@ -107,9 +107,9 @@ pub fn page_resources(
         }
     }
     if let Some(parent) = incoming.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| KilnError::io(parent, e))?;
+        std::fs::create_dir_all(parent).map_err(|e| PipesError::io(parent, e))?;
     }
-    let file = std::fs::File::create(incoming).map_err(|e| KilnError::io(incoming, e))?;
+    let file = std::fs::File::create(incoming).map_err(|e| PipesError::io(incoming, e))?;
     let mut out = std::io::BufWriter::new(file);
     let mut seen: HashSet<String> = HashSet::new();
     let mut notes = Vec::new();
@@ -119,25 +119,26 @@ pub fn page_resources(
     loop {
         let current = url.to_string();
         if !seen.insert(current.clone()) {
-            return Err(KilnError::Environment(format!(
+            return Err(PipesError::Environment(format!(
                 "cyclic pagination: the server repeated the next link {current}"
             )));
         }
         if pages >= MAX_PAGES {
-            return Err(KilnError::Environment(format!(
+            return Err(PipesError::Environment(format!(
                 "more than {MAX_PAGES} pages ({} resources so far); the server's pagination looks broken or _count is being ignored",
                 notes.len()
             )));
         }
         let fetched = client
             .get(&current)
-            .map_err(|e| KilnError::Environment(format!("fetching {current}: {e}")))?;
+            .map_err(|e| PipesError::Environment(format!("fetching {current}: {e}")))?;
         pages += 1;
-        let bundle: Value = serde_json::from_slice(&fetched.body)
-            .map_err(|e| KilnError::Environment(format!("{current}: response is not JSON: {e}")))?;
+        let bundle: Value = serde_json::from_slice(&fetched.body).map_err(|e| {
+            PipesError::Environment(format!("{current}: response is not JSON: {e}"))
+        })?;
         if let Some(rt) = bundle.get("resourceType").and_then(Value::as_str) {
             if rt != "Bundle" {
-                return Err(KilnError::Environment(format!(
+                return Err(PipesError::Environment(format!(
                     "{current}: expected a Bundle, got resourceType {rt}"
                 )));
             }
@@ -174,16 +175,16 @@ pub fn page_resources(
                 boundary_url: boundary_url(resource),
             });
             serde_json::to_writer(&mut out, resource).map_err(|e| match e.io_error_kind() {
-                Some(kind) => KilnError::io(incoming, std::io::Error::from(kind)),
-                None => KilnError::Json(e),
+                Some(kind) => PipesError::io(incoming, std::io::Error::from(kind)),
+                None => PipesError::Json(e),
             })?;
             out.write_all(b"\n")
-                .map_err(|e| KilnError::io(incoming, e))?;
+                .map_err(|e| PipesError::io(incoming, e))?;
         }
         match next_link(&bundle) {
             Some(next) => {
                 url = url.join(&next).map_err(|_| {
-                    KilnError::Environment(format!(
+                    PipesError::Environment(format!(
                         "the server's next link could not be resolved ({next})"
                     ))
                 })?;
@@ -191,7 +192,7 @@ pub fn page_resources(
             None => break,
         }
     }
-    out.flush().map_err(|e| KilnError::io(incoming, e))?;
+    out.flush().map_err(|e| PipesError::io(incoming, e))?;
     Ok(PageResult {
         notes,
         pages,

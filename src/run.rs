@@ -1,4 +1,4 @@
-//! `kiln run`: extract then transform, with the snapshot as the handoff.
+//! `fhir-pipes run`: extract then transform, with the snapshot as the handoff.
 
 use crate::cli::RunArgs;
 use crate::error::Result;

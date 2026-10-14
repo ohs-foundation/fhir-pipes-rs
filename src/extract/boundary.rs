@@ -17,7 +17,7 @@ use std::sync::mpsc;
 
 use base64::Engine;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
 use crate::report::Report;
@@ -223,7 +223,7 @@ pub fn fetch_boundaries(
         summary.cached, summary.fetched, summary.failed
     );
     match breaker {
-        Some(msg) => Err(KilnError::Environment(msg)),
+        Some(msg) => Err(PipesError::Environment(msg)),
         None => Ok(summary),
     }
 }

@@ -1,4 +1,4 @@
-//! One FHIR Location, flattened into the fields kiln models as columns, plus
+//! One FHIR Location, flattened into the fields fhir-pipes models as columns, plus
 //! the untouched resource JSON for the lossless `fhir_json` column.
 //!
 //! Everything ICR-profile-specific (extension URLs, identifier systems, code
@@ -70,7 +70,7 @@ pub struct Location {
     pub ownership: Option<String>,
     pub overlays_admin_unit_ids: Vec<String>,
     /// Spatial index cells (quadkey / h3 / geohash + level) from the
-    /// spatial-index extension; derived from `position` by kiln.
+    /// spatial-index extension; derived from `position` by fhir-pipes.
     pub spatial_cells: Vec<crate::fhir::spatial::SpatialCell>,
     /// (longitude, latitude), FHIR order.
     pub position: Option<(f64, f64)>,

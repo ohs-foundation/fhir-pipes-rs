@@ -1,4 +1,4 @@
-//! Binary-level tests for `kiln load` against a fake FHIR server.
+//! Binary-level tests for `fhir-pipes load` against a fake FHIR server.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,13 +27,13 @@ fn write_ndjson(dir: &Path, resources: &[Value]) -> PathBuf {
     p
 }
 
-fn kiln() -> Command {
-    let mut c = Command::cargo_bin("kiln").unwrap();
+fn fhir_pipes() -> Command {
+    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     for var in [
-        "KILN_TOKEN",
-        "KILN_CLIENT_ID",
-        "KILN_CLIENT_SECRET",
-        "KILN_TOKEN_URL",
+        "FHIR_PIPES_TOKEN",
+        "FHIR_PIPES_CLIENT_ID",
+        "FHIR_PIPES_CLIENT_SECRET",
+        "FHIR_PIPES_TOKEN_URL",
     ] {
         c.env_remove(var);
     }
@@ -41,7 +41,7 @@ fn kiln() -> Command {
 }
 
 fn load(server: &Server, input: &Path, extra: &[&str]) -> Assert {
-    kiln()
+    fhir_pipes()
         .args(["load", "--server", &server.url("/fhir").to_string(), "--in"])
         .arg(input)
         .args(extra)
@@ -391,12 +391,12 @@ fn client_credentials_authorise_the_preflight_and_every_bundle() {
         .respond_with(ok(transaction_response())),
     );
     // The secret from the environment, the rest as flags.
-    kiln()
+    fhir_pipes()
         .args(["load", "--server", &server.url("/fhir").to_string(), "--in"])
         .arg(&input)
         .args(["--client-id", "key-x", "--token-url"])
         .arg(server.url("/token").to_string())
-        .env("KILN_CLIENT_SECRET", "shh")
+        .env("FHIR_PIPES_CLIENT_SECRET", "shh")
         .assert()
         .success();
 }

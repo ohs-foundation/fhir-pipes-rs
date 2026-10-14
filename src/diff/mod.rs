@@ -1,4 +1,4 @@
-//! `kiln diff`: edited GeoJSON or GeoParquet -> FHIR NDJSON of the Locations
+//! `fhir-pipes diff`: edited GeoJSON or GeoParquet -> FHIR NDJSON of the Locations
 //! that changed. Offline. The snapshot is indexed by id and byte offset;
 //! the input is streamed; each named resource is re-read, rebuilt from the
 //! writable columns, and emitted only when its canonical JSON differs.
@@ -21,7 +21,7 @@ use crate::diff::geojson::{feature_to_row, read_feature_collection, read_feature
 use crate::diff::input::{ColumnValue, InputRow};
 use crate::diff::parquet::read_geoparquet;
 use crate::diff::rebuild::{new_organization, rebuild, rebuild_organization};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::location::strip_reference;
 use crate::fhir::ndjson::{is_gz, LineAccess, Output};
 use crate::fhir::Location;
@@ -48,7 +48,7 @@ impl InputFormat {
             "geojson" | "json" => Ok(Self::FeatureCollection),
             "geojsonl" | "geojsons" => Ok(Self::FeatureLines),
             "parquet" => Ok(Self::GeoParquet),
-            _ => Err(KilnError::Usage(format!(
+            _ => Err(PipesError::Usage(format!(
                 "--in {}: unknown extension; expected .geojson, .json, .geojsonl, .geojsons or .parquet",
                 path.display()
             ))),
@@ -142,7 +142,7 @@ impl Diff<'_> {
                             rebuild_organization(&org_base, &row, snapshot.as_ref(), report);
                         if canonical(&org_new) != canonical(&org_base) {
                             writeln!(self.out, "{org_new}")
-                                .map_err(|e| KilnError::io(self.out_path, e))?;
+                                .map_err(|e| PipesError::io(self.out_path, e))?;
                             self.stats.organizations += 1;
                             emitted += 1;
                         }
@@ -160,7 +160,7 @@ impl Diff<'_> {
                 {
                     let org_id = format!("org-{id}");
                     let org_new = new_organization(&org_id, &row, report);
-                    writeln!(self.out, "{org_new}").map_err(|e| KilnError::io(self.out_path, e))?;
+                    writeln!(self.out, "{org_new}").map_err(|e| PipesError::io(self.out_path, e))?;
                     self.stats.organizations += 1;
                     emitted += 1;
                     if let Some(obj) = rebuilt.as_object_mut() {
@@ -175,7 +175,7 @@ impl Diff<'_> {
         }
 
         if is_create || canonical(&rebuilt) != canonical(&base) {
-            writeln!(self.out, "{rebuilt}").map_err(|e| KilnError::io(self.out_path, e))?;
+            writeln!(self.out, "{rebuilt}").map_err(|e| PipesError::io(self.out_path, e))?;
             self.stats.locations += 1;
             emitted += 1;
         }
@@ -219,28 +219,28 @@ fn tmp_path(out: &Path) -> PathBuf {
 
 /// Flush, fsync and rename the finished changes file into place.
 fn finish(out: Output, tmp: &Path, dest: &Path) -> Result<()> {
-    let file = out.finish().map_err(|e| KilnError::io(tmp, e))?;
-    file.sync_all().map_err(|e| KilnError::io(tmp, e))?;
-    std::fs::rename(tmp, dest).map_err(|e| KilnError::io(dest, e))
+    let file = out.finish().map_err(|e| PipesError::io(tmp, e))?;
+    file.sync_all().map_err(|e| PipesError::io(tmp, e))?;
+    std::fs::rename(tmp, dest).map_err(|e| PipesError::io(dest, e))
 }
 
 pub fn run_diff(args: &DiffArgs) -> Result<()> {
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "snapshot file not found: {}",
             ndjson.display()
         )));
     }
     let format = InputFormat::from_path(&args.input)?;
     if !args.input.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--in {}: not a file",
             args.input.display()
         )));
     }
     if args.out.is_dir() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--out {}: is a directory",
             args.out.display()
         )));
@@ -263,7 +263,7 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
 
     let tmp = tmp_path(&args.out);
     let out = Output::create(&tmp, is_gz(&args.out))
-        .map_err(|e| KilnError::Usage(format!("--out {}: {e}", tmp.display())))?;
+        .map_err(|e| PipesError::Usage(format!("--out {}: {e}", tmp.display())))?;
     let mut diff = Diff {
         index,
         access: LineAccess::open(&ndjson)?,

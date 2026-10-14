@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use geo::{BoundingRect, Coord, Geometry, LineString, Polygon};
 
 use super::{is_data, GeoTransform, Raster, Tile};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ZonalSum {
@@ -90,12 +90,13 @@ fn columns(t: &GeoTransform, width: u32, xa: f64, xb: f64) -> Option<(u32, u32)>
 
 /// Sum of the raster's data pixels whose centres fall inside `geom`.
 ///
-/// `geom` must be in the raster's coordinate system (kiln's boundaries are
+/// `geom` must be in the raster's coordinate system (fhir-pipes' boundaries are
 /// WGS84 GeoJSON and `GeoTiff` refuses projected rasters, so this holds by
 /// construction).
 pub fn zonal_sum(raster: &mut impl Raster, geom: &Geometry<f64>) -> Result<ZonalSum> {
-    let rings = rings_of(geom)
-        .ok_or_else(|| KilnError::Usage("zonal sum needs a Polygon or MultiPolygon".to_string()))?;
+    let rings = rings_of(geom).ok_or_else(|| {
+        PipesError::Usage("zonal sum needs a Polygon or MultiPolygon".to_string())
+    })?;
     let Some(rect) = geom.bounding_rect() else {
         return Ok(ZonalSum::default());
     };

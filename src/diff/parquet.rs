@@ -16,7 +16,7 @@ use serde_json::Value;
 use wkb::reader::read_wkb;
 
 use crate::diff::input::{column_from_json, is_writable, InputRow, ID_COLUMN};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::report::Report;
 use crate::write::schema::GEOMETRY_COLUMN;
 
@@ -28,9 +28,9 @@ pub fn read_geoparquet<F>(path: &Path, report: &mut Report, mut sink: F) -> Resu
 where
     F: FnMut(InputRow, &mut Report) -> Result<()>,
 {
-    let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
+    let file = File::open(path).map_err(|e| PipesError::io(path, e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| KilnError::parquet_at(path, e))?;
+        .map_err(|e| PipesError::parquet_at(path, e))?;
     let geometry_column = geometry_column_name(
         builder.metadata().file_metadata().key_value_metadata(),
         builder.schema(),
@@ -38,7 +38,7 @@ where
     let reader = builder
         .with_batch_size(BATCH_ROWS)
         .build()
-        .map_err(|e| KilnError::parquet_at(path, e))?;
+        .map_err(|e| PipesError::parquet_at(path, e))?;
     let mut index = 0usize;
     for batch in reader {
         let batch = batch?;

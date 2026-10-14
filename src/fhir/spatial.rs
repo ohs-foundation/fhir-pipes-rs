@@ -3,16 +3,16 @@
 //! The ICR IG's `spatial-index` extension carries, per Location, the scheme
 //! (quadkey | h3 | geohash), the level (quadkey zoom / H3 resolution /
 //! geohash precision) and the cell key. The cell is a pure function of the
-//! position, so kiln owns it: `bake-points` writes it at import (Python),
-//! `kiln index` backfills it onto an existing snapshot as an ordinary
-//! version-checked edit, and `kiln diff` recomputes it whenever a position
+//! position, so fhir-pipes owns it: `bake-points` writes it at import (Python),
+//! `fhir-pipes index` backfills it onto an existing snapshot as an ordinary
+//! version-checked edit, and `fhir-pipes diff` recomputes it whenever a position
 //! edit comes through. Quadkey and geohash are computed here; H3 needs a
 //! library and is left for a later round (its cells are still parsed and
 //! carried).
 
 use serde_json::{json, Map, Value};
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 pub const SPATIAL_INDEX_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
@@ -32,7 +32,7 @@ pub struct SpatialCell {
 /// `SCHEME:LEVEL`, e.g. `quadkey:18`.
 pub fn parse_scheme_level(arg: &str) -> Result<(String, u32)> {
     let usage = || {
-        KilnError::Usage(format!(
+        PipesError::Usage(format!(
             "--spatial-index must be SCHEME:LEVEL (e.g. quadkey:18), got {arg:?}"
         ))
     };
@@ -42,23 +42,23 @@ pub fn parse_scheme_level(arg: &str) -> Result<(String, u32)> {
     match scheme {
         "quadkey" if (1..=23).contains(&level) => {}
         "quadkey" => {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "quadkey zoom must be 1-23, got {level}"
             )))
         }
         "geohash" if (1..=12).contains(&level) => {}
         "geohash" => {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "geohash precision must be 1-12, got {level}"
             )))
         }
         "h3" => {
-            return Err(KilnError::Usage(
+            return Err(PipesError::Usage(
                 "h3 cells are not computed yet; use quadkey or geohash".to_string(),
             ))
         }
         _ => {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--spatial-index scheme must be one of {}, got {scheme:?}",
                 SCHEMES.join(", ")
             )))
@@ -132,7 +132,7 @@ pub fn geohash(lon: f64, lat: f64, precision: u32) -> String {
     out
 }
 
-/// The cell for a scheme kiln can compute; `None` for h3 (carried, not computed).
+/// The cell for a scheme fhir-pipes can compute; `None` for h3 (carried, not computed).
 pub fn compute_cell(scheme: &str, level: u32, lon: f64, lat: f64) -> Option<String> {
     match scheme {
         "quadkey" => Some(quadkey(lon, lat, level)),
@@ -227,7 +227,7 @@ pub fn upsert_cell(obj: &mut Object, scheme: &str, level: u32, cell: &str) -> bo
 
 /// Recompute every computable cell already on the resource for a new
 /// position (a position edit must not leave stale cells behind). H3 cells,
-/// which kiln cannot compute, are dropped rather than left wrong.
+/// which fhir-pipes cannot compute, are dropped rather than left wrong.
 pub fn refresh_cells(obj: &mut Object, lon: f64, lat: f64) -> usize {
     let mut changed = 0;
     for existing in cells_of(obj) {
@@ -370,7 +370,7 @@ mod tests {
         upsert_cell(&mut obj, "h3", 9, "8928308280fffff");
         assert_eq!(refresh_cells(&mut obj, 3.39, 6.45), 3);
         let cells = cells_of(&obj);
-        assert_eq!(cells.len(), 2, "h3 dropped: kiln cannot recompute it");
+        assert_eq!(cells.len(), 2, "h3 dropped: fhir-pipes cannot recompute it");
         assert_eq!(
             deepest_quadkey(&cells).unwrap().cell,
             quadkey(3.39, 6.45, 18)

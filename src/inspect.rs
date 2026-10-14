@@ -1,11 +1,11 @@
-//! `kiln inspect`: describe every parquet file under OUT.
+//! `fhir-pipes inspect`: describe every parquet file under OUT.
 
 use std::path::{Path, PathBuf};
 
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
 use crate::cli::InspectArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 #[derive(Debug)]
 pub struct PartitionSummary {
@@ -33,7 +33,7 @@ fn parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| KilnError::io(dir, e))?
+        .map_err(|e| PipesError::io(dir, e))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
     // `PathBuf`'s `Ord` compares component-by-component, not the raw string,
@@ -41,7 +41,7 @@ fn parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     // to a string sort.
     entries.sort();
     for path in entries {
-        let meta = std::fs::symlink_metadata(&path).map_err(|e| KilnError::io(&path, e))?;
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| PipesError::io(&path, e))?;
         if meta.file_type().is_symlink() {
             // Never follow a symlinked directory (e.g. a stray link left
             // behind by a crashed swap) into someone else's files.
@@ -71,7 +71,7 @@ fn group_stats(groups: &[i64], rows: i64) -> (i64, i64, i64) {
 
 pub fn summarize(out_dir: &Path) -> Result<Summary> {
     if !out_dir.is_dir() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "{}: no such directory",
             out_dir.display()
         )));
@@ -83,10 +83,10 @@ pub fn summarize(out_dir: &Path) -> Result<Summary> {
     let mut total_rows = 0i64;
     let mut total_size_bytes = 0u64;
     for path in files {
-        let file = std::fs::File::open(&path).map_err(|e| KilnError::io(&path, e))?;
-        let size_bytes = file.metadata().map_err(|e| KilnError::io(&path, e))?.len();
+        let file = std::fs::File::open(&path).map_err(|e| PipesError::io(&path, e))?;
+        let size_bytes = file.metadata().map_err(|e| PipesError::io(&path, e))?.len();
         let reader =
-            SerializedFileReader::new(file).map_err(|e| KilnError::parquet_at(&path, e))?;
+            SerializedFileReader::new(file).map_err(|e| PipesError::parquet_at(&path, e))?;
         let meta = reader.metadata();
         let rows = meta.file_metadata().num_rows();
         let groups: Vec<i64> = meta.row_groups().iter().map(|rg| rg.num_rows()).collect();

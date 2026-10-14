@@ -14,7 +14,7 @@ use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -27,7 +27,7 @@ pub struct Line {
 const HEAD_PEEK: u64 = 64 * 1024;
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
-/// True for a path kiln reads or writes as gzip.
+/// True for a path fhir-pipes reads or writes as gzip.
 pub fn is_gz(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
@@ -42,7 +42,7 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// A file's text, decompressed when it is gzip.
 pub fn open_text(path: &Path) -> Result<Box<dyn BufRead + Send>> {
-    let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
+    let file = File::open(path).map_err(|e| PipesError::io(path, e))?;
     Ok(read_text(file, is_gz(path)))
 }
 
@@ -65,7 +65,7 @@ pub enum Output {
 
 impl Output {
     pub fn create(path: &Path, gz: bool) -> Result<Self> {
-        let file = File::create(path).map_err(|e| KilnError::io(path, e))?;
+        let file = File::create(path).map_err(|e| PipesError::io(path, e))?;
         let w = BufWriter::with_capacity(1 << 20, file);
         Ok(if gz {
             Output::Gz(GzEncoder::new(w, Compression::default()))
@@ -135,7 +135,7 @@ impl NdjsonReader {
             let n = (&mut reader)
                 .take(HEAD_PEEK)
                 .read_until(b'\n', &mut head)
-                .map_err(|e| KilnError::io(path, e))?;
+                .map_err(|e| PipesError::io(path, e))?;
             if n == 0 || head.iter().any(|b| !b.is_ascii_whitespace()) {
                 break;
             }
@@ -147,7 +147,7 @@ impl NdjsonReader {
         let text = String::from_utf8_lossy(if bom { &head[BOM.len()..] } else { &head });
         let text = text.trim();
         if text == "{" || text.starts_with('[') {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{}: looks like a JSON document, not NDJSON (one resource per line)",
                 path.display()
             )));
@@ -158,7 +158,7 @@ impl NdjsonReader {
         let mut skip = vec![0u8; offset as usize];
         reader
             .read_exact(&mut skip)
-            .map_err(|e| KilnError::io(path, e))?;
+            .map_err(|e| PipesError::io(path, e))?;
         Ok(Self {
             path: path.to_path_buf(),
             reader,
@@ -178,7 +178,7 @@ impl Iterator for NdjsonReader {
             let start = self.offset;
             let n = match self.reader.read_until(b'\n', &mut self.buf) {
                 Ok(n) => n,
-                Err(e) => return Some(Err(KilnError::io(&self.path, e))),
+                Err(e) => return Some(Err(PipesError::io(&self.path, e))),
             };
             if n == 0 {
                 return None;
@@ -200,7 +200,7 @@ impl Iterator for NdjsonReader {
             let text = match std::str::from_utf8(slice) {
                 Ok(s) => s.to_string(),
                 Err(e) => {
-                    return Some(Err(KilnError::Usage(format!(
+                    return Some(Err(PipesError::Usage(format!(
                         "{}: line {}: {e}",
                         self.path.display(),
                         self.number
@@ -231,12 +231,12 @@ pub struct LineAccess {
 impl LineAccess {
     pub fn open(path: &Path) -> Result<Self> {
         if is_gz(path) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{}: read by offset, which a gzip file does not allow; decompress it first",
                 path.display()
             )));
         }
-        let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
+        let file = File::open(path).map_err(|e| PipesError::io(path, e))?;
         Ok(Self {
             path: path.to_path_buf(),
             file,
@@ -246,13 +246,14 @@ impl LineAccess {
     pub fn read_at(&mut self, offset: u64, len: usize) -> Result<String> {
         self.file
             .seek(SeekFrom::Start(offset))
-            .map_err(|e| KilnError::io(&self.path, e))?;
+            .map_err(|e| PipesError::io(&self.path, e))?;
         let mut buf = vec![0u8; len];
         self.file
             .read_exact(&mut buf)
-            .map_err(|e| KilnError::io(&self.path, e))?;
-        String::from_utf8(buf)
-            .map_err(|e| KilnError::Usage(format!("{}: offset {offset}: {e}", self.path.display())))
+            .map_err(|e| PipesError::io(&self.path, e))?;
+        String::from_utf8(buf).map_err(|e| {
+            PipesError::Usage(format!("{}: offset {offset}: {e}", self.path.display()))
+        })
     }
 }
 

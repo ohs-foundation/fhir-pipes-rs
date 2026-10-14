@@ -2,7 +2,7 @@
 //! beats hundreds of identical 404s -- but only when the server actually
 //! says no. `rest.resource[].updateCreate` is optional in a
 //! CapabilityStatement; HAPI FHIR, for one, supports update-as-create and
-//! omits the element. An absent flag is unknown, not a refusal: kiln warns
+//! omits the element. An absent flag is unknown, not a refusal: fhir-pipes warns
 //! and proceeds, and a create that really is unsupported fails on the first
 //! bundle with the server's own error.
 
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 /// `rest.resource[].updateCreate` per resource type, for the types that
 /// state it at all.
@@ -54,9 +54,9 @@ pub fn check_update_create(capability: &Value, needed: &[String]) -> Result<Vec<
         .filter(|t| flags.get(*t) == Some(&false))
         .collect();
     if !refused.is_empty() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "the input creates new {} resources but this FHIR server advertises updateCreate = false for them \
-             (CapabilityStatement rest.resource.updateCreate); kiln load PUTs resources by id, which needs update-as-create. \
+             (CapabilityStatement rest.resource.updateCreate); fhir-pipes load PUTs resources by id, which needs update-as-create. \
              On Google Cloud Healthcare API set enableUpdateCreate=true on the store.",
             refused.join(", ")
         )));
@@ -100,7 +100,7 @@ mod tests {
         assert!(check_update_create(&cap, &[]).unwrap().is_empty());
         let err = check_update_create(&cap, &["Location".to_string()]).unwrap_err();
         assert!(
-            matches!(&err, KilnError::Usage(m) if m.contains("updateCreate") && m.contains("Location")),
+            matches!(&err, PipesError::Usage(m) if m.contains("updateCreate") && m.contains("Location")),
             "{err}"
         );
         let ok = check_update_create(

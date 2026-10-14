@@ -1,4 +1,4 @@
-//! `kiln extract`: page, fetch, merge. See the spec for the phase contracts.
+//! `fhir-pipes extract`: page, fetch, merge. See the spec for the phase contracts.
 
 pub mod boundary;
 pub mod cache;
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::cli::ExtractArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::boundary::{fetch_boundaries, FetchOptions};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
@@ -26,37 +26,37 @@ use crate::transform::write_report;
 /// failure in the page or fetch phase leaves the previous snapshot intact.
 pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     if args.no_cache && (args.refresh || args.cache_dir.is_some()) {
-        return Err(KilnError::Usage(
+        return Err(PipesError::Usage(
             "--no-cache cannot be combined with --refresh or --cache-dir".into(),
         ));
     }
     if args.concurrency == 0 {
-        return Err(KilnError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
     }
     if args.full && args.since.is_some() {
-        return Err(KilnError::Usage(
+        return Err(PipesError::Usage(
             "--since has no effect with --full; drop one".into(),
         ));
     }
     if let Some(s) = &args.since {
         if parse_instant(s).is_none() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--since {s}: not a FHIR instant (e.g. 2026-01-02T03:04:05Z)"
             )));
         }
     }
     let snap = Snapshot::new(&args.snapshot);
     std::fs::create_dir_all(&snap.dir)
-        .map_err(|e| KilnError::Usage(format!("--snapshot {}: {e}", snap.dir.display())))?;
+        .map_err(|e| PipesError::Usage(format!("--snapshot {}: {e}", snap.dir.display())))?;
     // Fail fast, before any paging or fetching, if the snapshot directory
     // exists but isn't writable (e.g. read-only permissions): the same
     // mistake would otherwise surface much later as an opaque I/O error
     // from the merge or state write.
-    let probe = snap.dir.join(".kiln-write-test");
+    let probe = snap.dir.join(".fhir-pipes-write-test");
     std::fs::write(&probe, b"")
         .and_then(|_| std::fs::remove_file(&probe))
         .map_err(|e| {
-            KilnError::Usage(format!(
+            PipesError::Usage(format!(
                 "--snapshot {}: not writable: {e}",
                 snap.dir.display()
             ))
@@ -70,7 +70,7 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     if !args.full {
         if let Some(st) = &state {
             if !same_server(&st.server, &args.server) {
-                return Err(KilnError::Usage(format!(
+                return Err(PipesError::Usage(format!(
                     "snapshot was extracted from {} but --server is {}; pass --full to repoint it",
                     st.server, args.server
                 )));
@@ -262,7 +262,7 @@ fn run_phases(
                     format!(
                         "the server has {server_total} {resource_type} resources but the snapshot has {snapshot_total}; \
                          resources were probably deleted on the server, which an incremental extract cannot see. \
-                         Run kiln extract --full to resynchronise."
+                         Run fhir-pipes extract --full to resynchronise."
                     )
                 } else {
                     format!(
@@ -286,7 +286,7 @@ fn run_phases(
         count: stats.total,
         organization_watermark: org_stats.watermark.clone(),
         organization_count: Some(org_stats.total),
-        kiln_version: env!("CARGO_PKG_VERSION").to_string(),
+        fhir_pipes_version: env!("CARGO_PKG_VERSION").to_string(),
         completed_at: format_utc(std::time::SystemTime::now()),
     };
     new_state.write(&snap.state_path())?;

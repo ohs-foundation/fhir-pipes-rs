@@ -1,4 +1,4 @@
-//! One FHIR Organization, flattened into the fields kiln projects onto its
+//! One FHIR Organization, flattened into the fields fhir-pipes projects onto its
 //! facility's row. The ICR facility pairing (`ICRFacilityOrganization`)
 //! puts the registry codes and the human-readable type labels here.
 

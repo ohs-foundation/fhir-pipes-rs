@@ -1,4 +1,4 @@
-//! Binary-level tests for `kiln export` against a fake FHIR server.
+//! Binary-level tests for `fhir-pipes export` against a fake FHIR server.
 
 use std::path::Path;
 use std::process::Command;
@@ -8,13 +8,13 @@ use assert_cmd::prelude::*;
 use httptest::{all_of, matchers::*, responders::*, Expectation, Server};
 use serde_json::{json, Value};
 
-fn kiln() -> Command {
-    let mut c = Command::cargo_bin("kiln").unwrap();
+fn fhir_pipes() -> Command {
+    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     for var in [
-        "KILN_TOKEN",
-        "KILN_CLIENT_ID",
-        "KILN_CLIENT_SECRET",
-        "KILN_TOKEN_URL",
+        "FHIR_PIPES_TOKEN",
+        "FHIR_PIPES_CLIENT_ID",
+        "FHIR_PIPES_CLIENT_SECRET",
+        "FHIR_PIPES_TOKEN_URL",
     ] {
         c.env_remove(var);
     }
@@ -92,7 +92,7 @@ fn export_follows_next_links_and_writes_one_file_per_type() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("raw");
     let report_path = dir.path().join("report.json");
-    let a = kiln()
+    let a = fhir_pipes()
         .args(["export", "--server", &base, "--token", "tok"])
         .args([
             "--type",
@@ -141,7 +141,7 @@ fn a_failed_export_keeps_the_previous_file() {
     let previous = dir.path().join("Measure.ndjson");
     std::fs::write(&previous, "{\"resourceType\":\"Measure\",\"id\":\"old\"}\n").unwrap();
 
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "export",
             "--server",
@@ -184,7 +184,7 @@ fn a_full_last_page_is_checked_against_the_server_count() {
         ),
     );
     let dir = tempfile::tempdir().unwrap();
-    let a = kiln()
+    let a = fhir_pipes()
         .args(["export", "--server", &base, "--type", "MeasureReport"])
         .arg("--out")
         .arg(dir.path())
@@ -201,7 +201,7 @@ fn a_full_last_page_is_checked_against_the_server_count() {
 #[test]
 fn a_type_that_is_not_a_resource_name_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "export",
             "--server",

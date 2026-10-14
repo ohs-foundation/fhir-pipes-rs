@@ -22,7 +22,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use arrow_schema::SchemaRef;
 
 use crate::write::schema::{RowBatch, BBOX_COLUMN, GEOMETRY_COLUMN};
@@ -62,10 +62,10 @@ impl PartitionWriter {
         schema: SchemaRef,
     ) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| KilnError::io(parent, e))?;
+            std::fs::create_dir_all(parent).map_err(|e| PipesError::io(parent, e))?;
         }
-        let file = File::create(path).map_err(|e| KilnError::io(path, e))?;
-        let file_for_sync = file.try_clone().map_err(|e| KilnError::io(path, e))?;
+        let file = File::create(path).map_err(|e| PipesError::io(path, e))?;
+        let file_for_sync = file.try_clone().map_err(|e| PipesError::io(path, e))?;
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(
                 // Write-once, read-many output: worth spending more CPU than
@@ -81,7 +81,7 @@ impl PartitionWriter {
             .with_properties(props)
             .with_skip_arrow_metadata(true);
         let writer = ArrowWriter::try_new_with_options(file, schema, options)
-            .map_err(|e| KilnError::parquet_at(path, e))?;
+            .map_err(|e| PipesError::parquet_at(path, e))?;
         Ok(Self {
             writer,
             file: file_for_sync,
@@ -136,10 +136,10 @@ impl PartitionWriter {
         }
         self.writer
             .write(&rb)
-            .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
+            .map_err(|e| PipesError::parquet_at(self.path.clone(), e))?;
         self.writer
             .flush()
-            .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
+            .map_err(|e| PipesError::parquet_at(self.path.clone(), e))?;
         self.row_groups = self.writer.flushed_row_groups().len();
         self.rows += rb.num_rows();
         Ok(())
@@ -168,13 +168,13 @@ impl PartitionWriter {
             .append_key_value_metadata(KeyValue::new("geo".into(), geo.to_string()));
         self.writer
             .close()
-            .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
+            .map_err(|e| PipesError::parquet_at(self.path.clone(), e))?;
         // Durability: the atomic dataset swap makes this file visible to
         // readers as soon as the directory rename lands, so its data and
         // metadata must already be on disk before that happens.
         self.file
             .sync_all()
-            .map_err(|e| KilnError::io(self.path.clone(), e))?;
+            .map_err(|e| PipesError::io(self.path.clone(), e))?;
         Ok(PartitionStats {
             rows: self.rows,
             row_groups: self.row_groups,

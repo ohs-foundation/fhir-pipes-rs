@@ -12,7 +12,7 @@ use tiff::decoder::{ChunkType, Decoder, DecodingResult};
 use tiff::tags::Tag;
 
 use super::{GeoTransform, Raster, Tile};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 /// GeoKey 1024 (GTModelType): 2 = geographic lat/lon.
 const GT_MODEL_TYPE_KEY: u16 = 1024;
@@ -33,8 +33,8 @@ pub struct GeoTiff {
     label: String,
 }
 
-fn tiff_err(label: &str, e: tiff::TiffError) -> KilnError {
-    KilnError::Usage(format!("{label}: {e}"))
+fn tiff_err(label: &str, e: tiff::TiffError) -> PipesError {
+    PipesError::Usage(format!("{label}: {e}"))
 }
 
 impl GeoTiff {
@@ -49,8 +49,8 @@ impl GeoTiff {
             .map_err(|e| tiff_err(label, e))?
             .unwrap_or(1);
         if samples != 1 {
-            return Err(KilnError::Usage(format!(
-                "{label}: {samples}-band raster; kiln reads single-band population grids (extract one band first)"
+            return Err(PipesError::Usage(format!(
+                "{label}: {samples}-band raster; fhir-pipes reads single-band population grids (extract one band first)"
             )));
         }
         let transform = geotransform(&mut decoder, label)?;
@@ -65,7 +65,7 @@ impl GeoTiff {
                     .trim_matches(|c: char| c == '\0' || c.is_whitespace())
                     .to_string();
                 Some(s.parse::<f32>().map_err(|_| {
-                    KilnError::Usage(format!("{label}: GDAL_NODATA {s:?} is not a number"))
+                    PipesError::Usage(format!("{label}: GDAL_NODATA {s:?} is not a number"))
                 })?)
             }
             None => None,
@@ -74,7 +74,7 @@ impl GeoTiff {
         // Load-bearing, not cosmetic: the tiff crate does not reject height
         // == 0, and its strip arithmetic would divide by zero.
         if tile.0 == 0 || tile.1 == 0 || width == 0 || height == 0 {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{label}: empty raster or tile ({width}×{height}, tiles {}×{})",
                 tile.0, tile.1
             )));
@@ -107,25 +107,25 @@ fn geotransform(decoder: &mut Decoder<Cursor<Vec<u8>>>, label: &str) -> Result<G
     let scale = f64s(decoder, Tag::ModelPixelScaleTag)?;
     let tie = f64s(decoder, Tag::ModelTiepointTag)?;
     let (Some(scale), Some(tie)) = (scale, tie) else {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "{label}: no ModelPixelScale/ModelTiepoint tags; only north-up GeoTIFFs are supported"
         )));
     };
     if scale.len() < 2 {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "{label}: malformed ModelPixelScale ({} values)",
             scale.len()
         )));
     }
     if tie.len() != 6 {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "{label}: ModelTiepoint must have exactly 6 values (one tiepoint) when ModelPixelScale is present, got {}",
             tie.len()
         )));
     }
     let (px, py) = (scale[0], scale[1]);
     GeoTransform::new(tie[3] - tie[0] * px, tie[4] + tie[1] * py, px, py)
-        .map_err(|e| KilnError::Usage(format!("{label}: {e}")))
+        .map_err(|e| PipesError::Usage(format!("{label}: {e}")))
 }
 
 /// Refuse what `GeoTransform` cannot express: a projected raster (its pixel
@@ -147,12 +147,12 @@ fn check_geokeys(decoder: &mut Decoder<Cursor<Vec<u8>>>, label: &str) -> Result<
             continue;
         }
         if key == GT_MODEL_TYPE_KEY && value != MODEL_TYPE_GEOGRAPHIC {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{label}: not a geographic (lon/lat) raster (GTModelType = {value}); reproject to EPSG:4326 first"
             )));
         }
         if key == GT_RASTER_TYPE_KEY && value == RASTER_TYPE_PIXEL_IS_POINT {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{label}: PixelIsPoint rasters are not supported (coordinates name pixel centres); rewrite as PixelIsArea"
             )));
         }
@@ -180,7 +180,7 @@ impl Raster for GeoTiff {
         let across = self.tiles_across();
         let down = self.tiles_down();
         if tx >= across || ty >= down {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{}: tile ({tx}, {ty}) is outside the {across}×{down} grid",
                 self.label
             )));
@@ -197,7 +197,7 @@ impl Raster for GeoTiff {
         {
             DecodingResult::F32(data) => {
                 if data.len() != (width as usize) * (height as usize) {
-                    return Err(KilnError::Environment(format!(
+                    return Err(PipesError::Environment(format!(
                         "{}: tile {index} decoded to {} values, expected {width}×{height}",
                         self.label,
                         data.len()
@@ -209,7 +209,7 @@ impl Raster for GeoTiff {
                     data,
                 })
             }
-            other => Err(KilnError::Usage(format!(
+            other => Err(PipesError::Usage(format!(
                 "{}: expected 32-bit float samples, got {}",
                 self.label,
                 sample_name(&other)

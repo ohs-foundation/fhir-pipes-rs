@@ -12,7 +12,7 @@ use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqA
 use serde_json::Value;
 
 use crate::diff::input::{column_from_json, is_writable, InputRow, ID_COLUMN};
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::geometry::convert;
 use crate::report::Report;
@@ -70,7 +70,7 @@ pub fn read_feature_collection<F>(path: &Path, mut sink: F) -> Result<()>
 where
     F: FnMut(Feature, usize) -> Result<()>,
 {
-    let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
+    let file = File::open(path).map_err(|e| PipesError::io(path, e))?;
     let mut de = serde_json::Deserializer::from_reader(BufReader::with_capacity(1 << 20, file));
     let mut state = State {
         sink: &mut sink,
@@ -81,9 +81,9 @@ where
     if let Some(e) = state.error.take() {
         return Err(e);
     }
-    outcome.map_err(|e| KilnError::Usage(format!("{}: {e}", path.display())))?;
+    outcome.map_err(|e| PipesError::Usage(format!("{}: {e}", path.display())))?;
     if !state.seen_features {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "{}: not a GeoJSON FeatureCollection (no \"features\" array)",
             path.display()
         )));
@@ -94,7 +94,7 @@ where
 struct State<'s, F> {
     sink: &'s mut F,
     /// The sink's own error, stashed so it survives serde's error type.
-    error: Option<KilnError>,
+    error: Option<PipesError>,
     seen_features: bool,
 }
 
@@ -156,7 +156,7 @@ where
             index += 1;
             if let Err(e) = (self.0.sink)(feature, index) {
                 self.0.error = Some(e);
-                return Err(de::Error::custom("stopped by kiln"));
+                return Err(de::Error::custom("stopped by fhir-pipes"));
             }
         }
         Ok(())
@@ -173,7 +173,7 @@ where
         let line = line?;
         index += 1;
         let feature: Feature = serde_json::from_str(&line.text).map_err(|e| {
-            KilnError::Usage(format!(
+            PipesError::Usage(format!(
                 "{}: line {}: not a GeoJSON Feature: {e}",
                 path.display(),
                 line.number
@@ -268,7 +268,7 @@ mod tests {
             {"type":"Feature","properties":{"id":"a"},"geometry":{"type":"Point","coordinates":[3.25]}}]}"#);
         let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
         assert!(
-            matches!(&err, KilnError::Usage(m) if m.contains("position")),
+            matches!(&err, PipesError::Usage(m) if m.contains("position")),
             "{err}"
         );
     }
@@ -309,10 +309,10 @@ mod tests {
         let mut calls = 0;
         let err = read_feature_collection(f.path(), |_, _| {
             calls += 1;
-            Err(KilnError::Usage("stop".into()))
+            Err(PipesError::Usage("stop".into()))
         })
         .unwrap_err();
-        assert!(matches!(&err, KilnError::Usage(m) if m == "stop"));
+        assert!(matches!(&err, PipesError::Usage(m) if m == "stop"));
         assert_eq!(calls, 1);
     }
 
@@ -321,13 +321,13 @@ mod tests {
         let f = tmp(r#"{"type":"Feature","properties":{},"geometry":null}"#);
         let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
         assert!(
-            matches!(&err, KilnError::Usage(m) if m.contains("FeatureCollection")),
+            matches!(&err, PipesError::Usage(m) if m.contains("FeatureCollection")),
             "{err}"
         );
         let f = tmp(r#"[1,2]"#);
         assert!(matches!(
             read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err(),
-            KilnError::Usage(_)
+            PipesError::Usage(_)
         ));
     }
 
@@ -351,7 +351,7 @@ mod tests {
         let bad = tmp("{\"nope\":1}\n");
         assert!(matches!(
             read_feature_lines(bad.path(), |_, _| Ok(())).unwrap_err(),
-            KilnError::Usage(_)
+            PipesError::Usage(_)
         ));
     }
 }

@@ -7,7 +7,7 @@ use base64::Engine;
 use serde_json::Value;
 
 use crate::cli::Dhis2Conn;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::client::{Auth, FetchError, FhirClient};
 
 const PAGE_SIZE: usize = 500;
@@ -138,7 +138,7 @@ pub fn check_analytics_age(
     let built = info.last_analytics.as_deref();
     let Some(at) = built.and_then(epoch_seconds) else {
         return match max {
-            Some(_) => Err(KilnError::Usage(
+            Some(_) => Err(PipesError::Usage(
                 "--max-analytics-age: DHIS2 does not say when its analytics tables were last built, so their age cannot be checked".into(),
             )),
             None => Ok(None),
@@ -147,7 +147,7 @@ pub fn check_analytics_age(
     let built = built.unwrap_or_default();
     let age = Duration::from_secs((now - at).max(0) as u64);
     match max {
-        Some(max) if age > max => Err(KilnError::Usage(format!(
+        Some(max) if age > max => Err(PipesError::Usage(format!(
             "DHIS2 analytics tables were last built {built}, {} ago, older than --max-analytics-age {}; run analytics in DHIS2 (Data Administration → Analytics Tables) or allow an older build",
             age_text(age),
             age_text(max)
@@ -165,7 +165,7 @@ pub fn api_base(url: &str) -> Result<String> {
     let trimmed = url.trim().trim_end_matches('/');
     let trimmed = trimmed.strip_suffix("/api").unwrap_or(trimmed);
     if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--dhis2 must be an http(s) URL, got {url:?}"
         )));
     }
@@ -207,7 +207,7 @@ impl Dhis2 {
 
     pub fn url(&self, path: &str, query: &[(&str, String)]) -> Result<String> {
         let mut url = url::Url::parse(&format!("{}/{path}", self.base))
-            .map_err(|e| KilnError::Usage(format!("bad DHIS2 URL {}/{path}: {e}", self.base)))?;
+            .map_err(|e| PipesError::Usage(format!("bad DHIS2 URL {}/{path}: {e}", self.base)))?;
         if !query.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (k, v) in query {
@@ -227,7 +227,7 @@ impl Dhis2 {
         let url = self.url(path, query)?;
         match self.client.get_json(&url) {
             Ok(f) => Ok(Ok(serde_json::from_slice(&f.body).map_err(|e| {
-                KilnError::Environment(format!("{url}: response is not JSON: {e}"))
+                PipesError::Environment(format!("{url}: response is not JSON: {e}"))
             })?)),
             Err(e) => Ok(Err(e)),
         }
@@ -240,15 +240,15 @@ impl Dhis2 {
         }
     }
 
-    pub fn error(&self, path: &str, e: FetchError) -> KilnError {
+    pub fn error(&self, path: &str, e: FetchError) -> PipesError {
         match e {
             FetchError::Status { status: 401, .. } | FetchError::Status { status: 403, .. } => {
-                KilnError::Usage(format!(
+                PipesError::Usage(format!(
                     "DHIS2 at {} refused the request ({e}); check --dhis2-token or --dhis2-user/--dhis2-password",
                     self.base
                 ))
             }
-            other => KilnError::Environment(format!("{}/{path}: {other}", self.base)),
+            other => PipesError::Environment(format!("{}/{path}: {other}", self.base)),
         }
     }
 
@@ -264,7 +264,7 @@ impl Dhis2 {
             match v.get(key).and_then(Value::as_array) {
                 Some(items) => out.extend(items.iter().cloned()),
                 None => {
-                    return Err(KilnError::Environment(format!(
+                    return Err(PipesError::Environment(format!(
                         "{}/{path}: response has no {key:?} list",
                         self.base
                     )))

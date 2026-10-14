@@ -64,8 +64,8 @@ jobs:
         shell: bash
         run: |
           set -eu
-          src="target/${{ matrix.target }}/release/kiln"
-          dest="kiln-${{ matrix.target }}"
+          src="target/${{ matrix.target }}/release/fhir-pipes"
+          dest="fhir-pipes-${{ matrix.target }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
             src="${src}.exe"
             dest="${dest}.exe"
@@ -74,6 +74,6 @@ jobs:
           echo "BIN_PATH=$dest" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
-          name: kiln-${{ matrix.target }}
+          name: fhir-pipes-${{ matrix.target }}
           path: ${{ env.BIN_PATH }}
           if-no-files-found: error

@@ -35,7 +35,7 @@ fn main() {
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd),
     };
     if let Err(err) = result {
-        eprintln!("kiln: {err}");
+        eprintln!("fhir-pipes: {err}");
         std::process::exit(err.exit_code());
     }
 }

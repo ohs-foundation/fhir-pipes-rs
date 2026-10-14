@@ -1,11 +1,11 @@
-//! `kiln population`: population denominators for admin units from a raster.
+//! `fhir-pipes population`: population denominators for admin units from a raster.
 //!
 //! Reads the snapshot with the same pass-one index `transform` uses, so the
 //! hierarchy (and its report) come for free; sums the raster under every
 //! admin unit at `--level` with the pixel-centroid rule; rolls the sums up
 //! the partOf chain so every admin ancestor gets a calculated total; and
 //! writes one `ICRTargetPopulation` Group per unit as FHIR NDJSON for
-//! `kiln load`. Group ids are deterministic (`pop-SOURCE-YEAR-LOCATIONID`),
+//! `fhir-pipes load`. Group ids are deterministic (`pop-SOURCE-YEAR-LOCATIONID`),
 //! so re-running replaces the same resources. Locations are never touched.
 
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ use std::time::Duration;
 use geo::Geometry;
 
 use crate::cli::PopulationArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::group::{
     group_id, is_valid_id, target_population_group, TargetPopulation, KNOWN_SOURCE_CODES,
     MAX_ID_LEN, MAX_QUANTITY,
@@ -151,7 +151,7 @@ fn measure(
     Ok(Some(zonal_sum(raster, &geom)?))
 }
 
-/// True when the Group id kiln would mint for this Location is a valid FHIR
+/// True when the Group id fhir-pipes would mint for this Location is a valid FHIR
 /// id; otherwise reports `group_id_too_long` / `group_id_invalid` and returns
 /// false. The prefix `pop-{source}-{year}-` eats into the 64-character limit.
 fn valid_group_id(report: &mut Report, source: &str, year: u16, location_id: &str) -> bool {
@@ -197,32 +197,32 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
     let snapshot = Snapshot::new(&args.snapshot);
     let ndjson = snapshot.locations();
     if !ndjson.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "snapshot file not found: {}",
             ndjson.display()
         )));
     }
     if args.out.is_dir() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--out {}: is a directory",
             args.out.display()
         )));
     }
     if !valid_source_code(&args.source) {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--source must be a code of letters, digits and hyphens, got {:?}",
             args.source
         )));
     }
     if !(1900..=2100).contains(&args.year) {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--year {} is outside 1900–2100",
             args.year
         )));
     }
     if let Some(d) = &args.estimate_date {
         if !valid_iso_date(d) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--estimate-date must be YYYY-MM-DD, got {d:?}"
             )));
         }
@@ -242,12 +242,12 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
         );
     }
     let level = i8::try_from(args.level)
-        .map_err(|_| KilnError::Usage(format!("--level {} is out of range", args.level)))?;
+        .map_err(|_| PipesError::Usage(format!("--level {} is out of range", args.level)))?;
     let targets: Vec<usize> = (0..index.records.len())
         .filter(|&i| index.hierarchy.get(i).and_then(|f| f.admin_level) == Some(level))
         .collect();
     if targets.is_empty() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "no admin units at level {} in {}",
             args.level,
             ndjson.display()
@@ -308,7 +308,7 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
 
     let measured_any = totals.values().any(|t| !t.calculated && t.pixels > 0);
     if !measured_any {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "no admin unit at level {} has a raster pixel centre inside it (raster total {:.0}); is {} the right raster for this snapshot?",
             args.level, grand.sum, loaded.label
         )));
@@ -369,15 +369,15 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             planning_denominator: args.planning_denominator,
         });
         serde_json::to_writer(&mut out, &group)?;
-        out.write_all(b"\n").map_err(|e| KilnError::io(&tmp, e))?;
+        out.write_all(b"\n").map_err(|e| PipesError::io(&tmp, e))?;
         if t.calculated {
             rolled_n += 1;
         } else {
             measured_n += 1;
         }
     }
-    out.finish().map_err(|e| KilnError::io(&tmp, e))?;
-    std::fs::rename(&tmp, &args.out).map_err(|e| KilnError::io(&args.out, e))?;
+    out.finish().map_err(|e| PipesError::io(&tmp, e))?;
+    std::fs::rename(&tmp, &args.out).map_err(|e| PipesError::io(&args.out, e))?;
 
     let assigned: f64 = totals
         .values()

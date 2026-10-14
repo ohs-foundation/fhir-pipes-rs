@@ -51,8 +51,10 @@ fn location(
 #[test]
 #[ignore]
 fn generate() {
-    let facilities: usize = match std::env::var("KILN_BENCH_FACILITIES") {
-        Ok(v) => v.parse().expect("KILN_BENCH_FACILITIES must be a number"),
+    let facilities: usize = match std::env::var("FHIR_PIPES_BENCH_FACILITIES") {
+        Ok(v) => v
+            .parse()
+            .expect("FHIR_PIPES_BENCH_FACILITIES must be a number"),
         Err(_) => 200_000,
     };
     let target_dir = std::env::var("CARGO_TARGET_DIR")

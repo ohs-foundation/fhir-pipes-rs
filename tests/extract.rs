@@ -1,4 +1,4 @@
-//! Binary-level tests for `kiln extract` against a fake FHIR server.
+//! Binary-level tests for `fhir-pipes extract` against a fake FHIR server.
 
 use std::path::Path;
 use std::process::Command;
@@ -50,13 +50,13 @@ fn bundle(entries: Vec<Value>, next: Option<&str>) -> String {
     b.to_string()
 }
 
-fn kiln() -> Command {
-    let mut c = Command::cargo_bin("kiln").unwrap();
+fn fhir_pipes() -> Command {
+    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     for var in [
-        "KILN_TOKEN",
-        "KILN_CLIENT_ID",
-        "KILN_CLIENT_SECRET",
-        "KILN_TOKEN_URL",
+        "FHIR_PIPES_TOKEN",
+        "FHIR_PIPES_CLIENT_ID",
+        "FHIR_PIPES_CLIENT_SECRET",
+        "FHIR_PIPES_TOKEN_URL",
     ] {
         c.env_remove(var);
     }
@@ -64,7 +64,7 @@ fn kiln() -> Command {
 }
 
 fn extract_at(base: &str, snapshot: &Path, extra: &[&str]) -> Assert {
-    kiln()
+    fhir_pipes()
         .args(["extract", "--server", base, "--snapshot"])
         .arg(snapshot)
         .args(extra)
@@ -231,7 +231,7 @@ fn full_extract_writes_snapshot_state_and_inlines_boundaries() {
     assert_eq!(st["server"], server.url("/fhir").to_string());
     assert_eq!(st["watermark"], "2026-01-02T00:00:00Z");
     assert_eq!(st["count"], 2);
-    assert_eq!(st["kiln_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(st["fhir_pipes_version"], env!("CARGO_PKG_VERSION"));
     assert!(st["completed_at"].as_str().unwrap().ends_with('Z'));
 
     let cached: Vec<_> = std::fs::read_dir(snap.path().join("boundaries"))
@@ -981,7 +981,7 @@ fn run_extracts_then_transforms() {
             ),
     );
 
-    let assert = kiln()
+    let assert = fhir_pipes()
         .args([
             "run",
             "--server",
@@ -1029,7 +1029,7 @@ fn run_rejects_a_bad_out_before_extracting() {
             .respond_with(ok(bundle(vec![], None))),
     );
 
-    kiln()
+    fhir_pipes()
         .args([
             "run",
             "--server",
@@ -1057,7 +1057,7 @@ fn run_skips_transform_when_extract_fails() {
             .respond_with(status_code(401).body("no token for you")),
     );
 
-    let assert = kiln()
+    let assert = fhir_pipes()
         .args([
             "run",
             "--server",
@@ -1088,7 +1088,7 @@ fn an_unwritable_snapshot_dir_is_a_usage_error() {
     // Root (and some CI sandboxes) can write through a read-only mode bit;
     // when that's the case here, the premise of this test doesn't hold, so
     // skip rather than fail on an environment we can't control.
-    let probe = snap.path().join(".kiln-write-test-probe");
+    let probe = snap.path().join(".fhir-pipes-write-test-probe");
     let writable = std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(&probe);
     if writable {
@@ -1341,13 +1341,13 @@ fn client_credentials_from_the_environment_authorise_every_request() {
         .respond_with(ok(bundle(vec![], None))),
     );
 
-    kiln()
+    fhir_pipes()
         .args(["extract", "--server", &server.url("/fhir").to_string()])
         .arg("--snapshot")
         .arg(snap.path())
-        .env("KILN_CLIENT_ID", "key-x")
-        .env("KILN_CLIENT_SECRET", "shh")
-        .env("KILN_TOKEN_URL", server.url("/token").to_string())
+        .env("FHIR_PIPES_CLIENT_ID", "key-x")
+        .env("FHIR_PIPES_CLIENT_SECRET", "shh")
+        .env("FHIR_PIPES_TOKEN_URL", server.url("/token").to_string())
         .assert()
         .success();
     assert_eq!(lines(snap.path()).len(), 1);

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::index::IndexRecord;
 use crate::report::Report;
 
@@ -55,20 +55,20 @@ pub fn parse_keys(spec: &str) -> Result<Vec<PartitionKey>> {
             "tier" => PartitionKey::Tier,
             "type" => PartitionKey::Type,
             other => {
-                return Err(KilnError::Usage(format!(
+                return Err(PipesError::Usage(format!(
                 "--partition-by: unknown key {other:?}; available: country, geom_type, tier, type"
             )))
             }
         };
         if !seen.insert(trimmed) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--partition-by: key {trimmed} repeated"
             )));
         }
         keys.push(key);
     }
     if keys.is_empty() {
-        return Err(KilnError::Usage(
+        return Err(PipesError::Usage(
             "--partition-by: no keys given".to_string(),
         ));
     }

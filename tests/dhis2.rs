@@ -1,4 +1,4 @@
-//! Binary-level tests for `kiln dhis2` against a fake DHIS2 Web API.
+//! Binary-level tests for `fhir-pipes dhis2` against a fake DHIS2 Web API.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,13 +11,13 @@ use serde_json::{json, Value};
 
 const ORGUNIT_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit";
 
-fn kiln() -> Command {
-    let mut c = Command::cargo_bin("kiln").unwrap();
+fn fhir_pipes() -> Command {
+    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     for var in [
-        "KILN_DHIS2_URL",
-        "KILN_DHIS2_TOKEN",
-        "KILN_DHIS2_USER",
-        "KILN_DHIS2_PASSWORD",
+        "FHIR_PIPES_DHIS2_URL",
+        "FHIR_PIPES_DHIS2_TOKEN",
+        "FHIR_PIPES_DHIS2_USER",
+        "FHIR_PIPES_DHIS2_PASSWORD",
     ] {
         c.env_remove(var);
     }
@@ -145,7 +145,7 @@ fn locations_pages_through_org_units_and_pairs_facilities() {
     );
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("locations.ndjson");
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "locations",
@@ -156,7 +156,7 @@ fn locations_pages_through_org_units_and_pairs_facilities() {
         ])
         .args(["--id-prefix", "sle", "--country-code", "SLE", "--out"])
         .arg(&out)
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .success();
     let s = stdout(&a);
@@ -189,7 +189,7 @@ fn measures_are_written_for_every_indicator_in_the_group() {
     expect_group(&server);
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("measures.ndjson");
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "measures",
@@ -200,7 +200,7 @@ fn measures_are_written_for_every_indicator_in_the_group() {
         ])
         .args(["--indicator-group", "srxUNt2w5jn", "--out"])
         .arg(&out)
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .success();
     assert!(stdout(&a).contains("Wrote 2 Measures"));
@@ -222,7 +222,7 @@ fn an_unknown_indicator_is_a_usage_error() {
             .respond_with(ok(json!({"indicators": []}))),
     );
     let dir = tempfile::tempdir().unwrap();
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "measures",
@@ -233,7 +233,7 @@ fn an_unknown_indicator_is_a_usage_error() {
         ])
         .args(["--indicator", "nope0000000", "--out"])
         .arg(dir.path().join("m.ndjson"))
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .code(2);
     assert!(stderr(&a).contains("no indicator nope0000000"));
@@ -247,7 +247,7 @@ fn refused_credentials_stop_at_sign_in() {
             .respond_with(status_code(401)),
     );
     let dir = tempfile::tempdir().unwrap();
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "measures",
@@ -275,7 +275,7 @@ fn analytics(rows: Value) -> Value {
     })
 }
 
-/// The org unit count kiln sizes analytics requests from.
+/// The org unit count fhir-pipes sizes analytics requests from.
 fn expect_units(server: &Server, level: u32, total: u64) {
     let filter: &'static str = Box::leak(format!("level:eq:{level}").into_boxed_str());
     server.expect(
@@ -373,7 +373,7 @@ fn reports_split_a_too_large_request_and_skip_unmapped_org_units() {
     .unwrap();
     let out = dir.path().join("reports.ndjson");
     let report = dir.path().join("report.json");
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -396,7 +396,7 @@ fn reports_split_a_too_large_request_and_skip_unmapped_org_units() {
         .arg(&out)
         .arg("--report")
         .arg(&report)
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .success();
     assert!(
@@ -462,7 +462,7 @@ fn reporting_rates_and_breakdowns_come_out_as_valid_ids_and_stratifiers() {
     )
     .unwrap();
     let out = dir.path().join("reports.ndjson");
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -485,7 +485,7 @@ fn reporting_rates_and_breakdowns_come_out_as_valid_ids_and_stratifiers() {
         .arg(&locations)
         .arg("--out")
         .arg(&out)
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .success();
     assert!(
@@ -526,7 +526,7 @@ fn reports_need_locations_carrying_this_instances_identifier() {
         "{\"resourceType\":\"Location\",\"id\":\"nga\",\"identifier\":[{\"system\":\"other\",\"value\":\"x\"}]}\n",
     )
     .unwrap();
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -550,7 +550,7 @@ fn reports_need_locations_carrying_this_instances_identifier() {
         .assert()
         .code(2);
     assert!(
-        stderr(&a).contains("kiln dhis2 locations --instance sl-demo"),
+        stderr(&a).contains("fhir-pipes dhis2 locations --instance sl-demo"),
         "{}",
         stderr(&a)
     );
@@ -573,9 +573,9 @@ fn locations_for(dir: &Path, org_units: &[&str]) -> std::path::PathBuf {
     p
 }
 
-/// `kiln dhis2 reports` for the Immunization group against the stub.
+/// `fhir-pipes dhis2 reports` for the Immunization group against the stub.
 fn reports(server: &Server, locations: &Path, out: &Path) -> Command {
-    let mut c = kiln();
+    let mut c = fhir_pipes();
     c.args([
         "dhis2",
         "reports",
@@ -590,7 +590,7 @@ fn reports(server: &Server, locations: &Path, out: &Path) -> Command {
     .arg(locations)
     .arg("--out")
     .arg(out)
-    .env("KILN_DHIS2_TOKEN", "d2pat_test");
+    .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
     c
 }
 
@@ -1191,7 +1191,7 @@ fn bad_ranges_and_campaigns_are_usage_errors() {
         ),
     ];
     for (args, want) in cases {
-        let a = kiln()
+        let a = fhir_pipes()
             .args([
                 "dhis2",
                 "reports",
@@ -1211,7 +1211,7 @@ fn bad_ranges_and_campaigns_are_usage_errors() {
         assert!(stderr(&a).contains(want), "{args:?}: {}", stderr(&a));
     }
     // Neither a period nor a range.
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -1250,7 +1250,7 @@ fn a_range_whose_ids_would_be_too_long_is_refused_before_any_analytics() {
         ),
     )
     .unwrap();
-    let a = kiln()
+    let a = fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -1271,7 +1271,7 @@ fn a_range_whose_ids_would_be_too_long_is_refused_before_any_analytics() {
         .arg(&locations)
         .arg("--out")
         .arg(dir.path().join("r.ndjson"))
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .code(2);
     assert!(
@@ -1651,7 +1651,7 @@ fn org_unit_groups_are_coded_like_group_sets() {
         );
             groups(&server);
             let out = dir.path().join("l.ndjson");
-            kiln()
+            fhir_pipes()
                 .args([
                     "dhis2",
                     "locations",
@@ -1662,7 +1662,7 @@ fn org_unit_groups_are_coded_like_group_sets() {
                 ])
                 .args(["--out", out.to_str().unwrap()])
                 .args(args)
-                .env("KILN_DHIS2_TOKEN", "d2pat_test")
+                .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
                 .assert()
                 .success();
             read_ndjson(&out)
@@ -1961,7 +1961,7 @@ fn fixture_analytics() -> Vec<(u32, Vec<Value>, Vec<Value>)> {
 }
 
 fn fixture_reports(server: &Server, dir: &Path, out: &Path, extra: &[&str]) -> Assert {
-    kiln()
+    fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -1992,7 +1992,7 @@ fn fixture_reports(server: &Server, dir: &Path, out: &Path, extra: &[&str]) -> A
         .arg("--out")
         .arg(out)
         .args(extra)
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
 }
 
@@ -2156,7 +2156,7 @@ fn averages_annualising_option_combos_and_constants() {
     expect_values(&server, "2025-01-01", "2025-01-31", values);
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("r.ndjson");
-    kiln()
+    fhir_pipes()
         .args([
             "dhis2",
             "reports",
@@ -2178,7 +2178,7 @@ fn averages_annualising_option_combos_and_constants() {
         .arg(hierarchy(dir.path()))
         .arg("--out")
         .arg(&out)
-        .env("KILN_DHIS2_TOKEN", "d2pat_test")
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
         .assert()
         .success();
     let r = comparable(&out);

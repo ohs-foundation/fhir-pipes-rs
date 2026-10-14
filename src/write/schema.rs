@@ -65,7 +65,7 @@ pub fn output_schema() -> SchemaRef {
     schema(false)
 }
 
-/// The schema for `kiln transform --keep-without-geometry`: the same
+/// The schema for `fhir-pipes transform --keep-without-geometry`: the same
 /// columns, with `geom_type`, `lon`, `lat` and `bbox` nullable so a
 /// Location with no point and no boundary can have a row. `geometry` is
 /// nullable in both.

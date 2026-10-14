@@ -15,7 +15,7 @@ pub struct Issue {
     pub detail: String,
 }
 
-/// Serializable so a run can save it and carry on later (`kiln dhis2
+/// Serializable so a run can save it and carry on later (`fhir-pipes dhis2
 /// reports --resume`).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {

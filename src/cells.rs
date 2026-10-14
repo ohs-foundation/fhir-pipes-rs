@@ -1,9 +1,9 @@
-//! `kiln index`: backfill spatial-index cells onto a snapshot.
+//! `fhir-pipes index`: backfill spatial-index cells onto a snapshot.
 //!
 //! Reads `locations.ndjson`, and for every Location with a position that
 //! lacks a cell at one of the requested (scheme, level) pairs, writes the
 //! resource with the cell(s) added to the output NDJSON -- `meta.versionId`
-//! and everything else untouched, so `kiln load` sends it as the same
+//! and everything else untouched, so `fhir-pipes load` sends it as the same
 //! version-checked PUT a `diff` edit would be. Re-running is idempotent:
 //! once loaded and re-extracted, nothing is missing and nothing is written.
 
@@ -12,7 +12,7 @@ use std::io::Write;
 use serde_json::Value;
 
 use crate::cli::IndexArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{is_gz, with_suffix, NdjsonReader, Output};
 use crate::fhir::spatial::{cells_of, compute_cell, parse_scheme_level, upsert_cell};
 use crate::report::Report;
@@ -21,13 +21,13 @@ use crate::snapshot::LOCATIONS_FILE;
 pub fn run_index(args: &IndexArgs) -> Result<()> {
     let ndjson = args.snapshot.join(LOCATIONS_FILE);
     if !ndjson.is_file() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "snapshot file not found: {}",
             ndjson.display()
         )));
     }
     if args.out.is_dir() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--out {}: is a directory",
             args.out.display()
         )));
@@ -92,15 +92,15 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
         }
         if changed {
             serde_json::to_writer(&mut out, &value)?;
-            out.write_all(b"\n").map_err(|e| KilnError::io(&tmp, e))?;
+            out.write_all(b"\n").map_err(|e| PipesError::io(&tmp, e))?;
             written += 1;
             report.add("indexed", &id, "spatial-index cell(s) added");
         } else {
             report.add("already_indexed", &id, "every requested cell present");
         }
     }
-    out.finish().map_err(|e| KilnError::io(&tmp, e))?;
-    std::fs::rename(&tmp, &args.out).map_err(|e| KilnError::io(&args.out, e))?;
+    out.finish().map_err(|e| PipesError::io(&tmp, e))?;
+    std::fs::rename(&tmp, &args.out).map_err(|e| PipesError::io(&args.out, e))?;
 
     println!(
         "Wrote {written} of {seen} Locations to {} ({} already indexed, {} without a position)",
@@ -110,7 +110,7 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
     );
     if let Some(path) = &args.report {
         let json = serde_json::to_string_pretty(&report.to_json())?;
-        std::fs::write(path, json).map_err(|e| KilnError::io(path, e))?;
+        std::fs::write(path, json).map_err(|e| PipesError::io(path, e))?;
     }
     Ok(())
 }

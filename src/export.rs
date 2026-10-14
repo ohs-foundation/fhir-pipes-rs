@@ -1,11 +1,11 @@
-//! `kiln export`: download every resource of the given types from a FHIR
+//! `fhir-pipes export`: download every resource of the given types from a FHIR
 //! server, one NDJSON file per type. Unlike `extract` it keeps no snapshot or
 //! watermark; each run is a full download, written atomically.
 
 use std::time::Duration;
 
 use crate::cli::ExportArgs;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{count_resources, page_resources};
 use crate::report::Report;
@@ -22,7 +22,7 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
     let mut types: Vec<&str> = Vec::new();
     for t in &args.types {
         if !valid_type(t) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--type {t}: not a FHIR resource type name (e.g. MeasureReport)"
             )));
         }
@@ -31,7 +31,7 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
         }
     }
     std::fs::create_dir_all(&args.out)
-        .map_err(|e| KilnError::Usage(format!("--out {}: {e}", args.out.display())))?;
+        .map_err(|e| PipesError::Usage(format!("--out {}: {e}", args.out.display())))?;
     let client = FhirClient::new(
         args.auth.auth(),
         args.retries,
@@ -66,7 +66,7 @@ fn export_type(
             return Err(e);
         }
     };
-    std::fs::rename(&tmp, &out).map_err(|e| KilnError::io(&out, e))?;
+    std::fs::rename(&tmp, &out).map_err(|e| PipesError::io(&out, e))?;
     let total = paged.notes.len();
     // As in extract: a last page that was full with no next link may mean
     // the server stopped paging early, so only then is the count worth a

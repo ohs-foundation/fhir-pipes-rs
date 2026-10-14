@@ -1,4 +1,4 @@
-//! `kiln dhis2`: read a DHIS2 instance into FHIR NDJSON for `kiln load`.
+//! `fhir-pipes dhis2`: read a DHIS2 instance into FHIR NDJSON for `fhir-pipes load`.
 //!
 //! - `locations`: org units become ICR Locations (facilities also get their
 //!   Organization), each carrying the org unit UID as an identifier under a
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::cli::Dhis2Command;
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{is_gz, read_text, with_suffix};
 
 pub const ICR_BASE: &str = "https://icr.healthcampaigns.org";
@@ -64,7 +64,7 @@ pub struct Instance {
 impl Instance {
     pub fn new(name: &str) -> Result<Self> {
         if !valid_name(name, MAX_INSTANCE_LEN) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "--instance must be letters, digits and hyphens, at most {MAX_INSTANCE_LEN} characters, got {name:?}"
             )));
         }
@@ -138,7 +138,7 @@ impl Instance {
 
 pub fn check_out(out: &Path) -> Result<()> {
     if out.is_dir() {
-        return Err(KilnError::Usage(format!(
+        return Err(PipesError::Usage(format!(
             "--out {}: is a directory",
             out.display()
         )));
@@ -189,7 +189,7 @@ impl NdjsonWriter {
 
     pub fn create(out: &Path) -> Result<Self> {
         let tmp = Self::tmp_path(out);
-        let file = File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
+        let file = File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
         Ok(Self::new(out, tmp, file, 0))
     }
 
@@ -201,17 +201,17 @@ impl NdjsonWriter {
         let mut file = OpenOptions::new()
             .write(true)
             .open(&tmp)
-            .map_err(|e| KilnError::io(&tmp, e))?;
-        let len = file.metadata().map_err(|e| KilnError::io(&tmp, e))?.len();
+            .map_err(|e| PipesError::io(&tmp, e))?;
+        let len = file.metadata().map_err(|e| PipesError::io(&tmp, e))?.len();
         if len < bytes {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "{}: {len} bytes, shorter than the {bytes} recorded; run without --resume to start over",
                 tmp.display()
             )));
         }
-        file.set_len(bytes).map_err(|e| KilnError::io(&tmp, e))?;
+        file.set_len(bytes).map_err(|e| PipesError::io(&tmp, e))?;
         file.seek(SeekFrom::End(0))
-            .map_err(|e| KilnError::io(&tmp, e))?;
+            .map_err(|e| PipesError::io(&tmp, e))?;
         Ok(Self::new(out, tmp, file, bytes))
     }
 
@@ -240,7 +240,7 @@ impl NdjsonWriter {
 
     /// The text written up to the last sync, decompressed.
     pub fn read_back(&self) -> Result<Box<dyn std::io::BufRead + Send>> {
-        let file = File::open(&self.tmp).map_err(|e| KilnError::io(&self.tmp, e))?;
+        let file = File::open(&self.tmp).map_err(|e| PipesError::io(&self.tmp, e))?;
         Ok(read_text(file.take(self.bytes), self.gz))
     }
 
@@ -259,7 +259,7 @@ impl NdjsonWriter {
         };
         written
             .expect("written after finish")
-            .map_err(|e| KilnError::io(&self.tmp, e))?;
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
         self.n += 1;
         Ok(())
     }
@@ -276,28 +276,30 @@ impl NdjsonWriter {
 
     /// Flushes everything written to disk; returns the file's length.
     pub fn sync(&mut self) -> Result<u64> {
-        self.end_member().map_err(|e| KilnError::io(&self.tmp, e))?;
+        self.end_member()
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
         let f = self.file.as_mut().expect("synced after finish");
-        f.flush().map_err(|e| KilnError::io(&self.tmp, e))?;
+        f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
         f.get_ref()
             .sync_data()
-            .map_err(|e| KilnError::io(&self.tmp, e))?;
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
         Ok(self.bytes)
     }
 
     /// Renames the file into place; returns the lines this writer wrote.
     pub fn finish(mut self) -> Result<usize> {
-        self.end_member().map_err(|e| KilnError::io(&self.tmp, e))?;
+        self.end_member()
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
         let mut f = self.file.take().expect("finished once");
         // An empty gzip file is not valid gzip; an empty member is.
         if self.gz && self.bytes == 0 {
             f = GzEncoder::new(f, Compression::default())
                 .finish()
-                .map_err(|e| KilnError::io(&self.tmp, e))?;
+                .map_err(|e| PipesError::io(&self.tmp, e))?;
         }
-        f.flush().map_err(|e| KilnError::io(&self.tmp, e))?;
+        f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
         drop(f);
-        std::fs::rename(&self.tmp, &self.out).map_err(|e| KilnError::io(&self.out, e))?;
+        std::fs::rename(&self.tmp, &self.out).map_err(|e| PipesError::io(&self.out, e))?;
         Ok(self.n)
     }
 }

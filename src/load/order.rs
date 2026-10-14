@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 fn parent_id(resource: &Value) -> Option<&str> {
     let reference = resource.get("partOf")?.get("reference")?.as_str()?;
@@ -34,7 +34,7 @@ fn depth(
         }
         if chain.contains(&i) {
             let id = resources[i]["id"].as_str().unwrap_or("?");
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "partOf cycle detected involving Location/{id}; fix the hierarchy before loading"
             )));
         }
@@ -113,7 +113,7 @@ mod tests {
         let input = vec![loc("a", Some("b")), loc("b", Some("a"))];
         let err = order_parents_first(input).unwrap_err();
         assert!(
-            matches!(&err, KilnError::Usage(m) if m.contains("cycle") && m.contains("Location/")),
+            matches!(&err, PipesError::Usage(m) if m.contains("cycle") && m.contains("Location/")),
             "{err}"
         );
     }

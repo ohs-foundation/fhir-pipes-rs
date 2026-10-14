@@ -1,29 +1,51 @@
-# kiln
+# fhir-pipes
 
-**A bridge between a FHIR Location registry and modern GIS tools.**
+Moves data into and out of FHIR servers. One binary, no runtime
+dependencies.
 
-kiln turns the `Location` resources in a FHIR server into a GeoParquet dataset
-that QGIS, DuckDB, GeoPandas and web maps can read directly and fast, and
-carries edits made in those tools back into the FHIR server as ordinary FHIR
-updates. FHIR stays the master registry. The parquet is a derived, disposable
-projection of it.
+Out of FHIR:
 
-It ships as a single static binary with no runtime dependencies: no Python, no
-GDAL, no database. It is designed to run on a laptop in a district office.
+- `refresh` builds a SQL-on-FHIR warehouse: it downloads the resources a
+  directory of ViewDefinitions reads, runs the views, and writes partitioned
+  Parquet tables with a manifest. It can also build map tiles, run your own
+  commands afterwards, and push the warehouse to object storage. See
+  [docs/refresh.md](docs/refresh.md).
+- `extract`, `transform` and `run` turn the `Location` registry into a
+  GeoParquet dataset for QGIS, DuckDB, GeoPandas and web maps.
+- `export` downloads every resource of the given types as NDJSON.
 
-> **Status.** `extract`, `transform`, `run`, `inspect`, `diff` and `load` are
-> implemented in Rust and are what this README describes. The Python package
-> under `python/` still provides `bake` and `bake-points`; it is documented in
-> [python/README.md](python/README.md). A snapshot written by the Python
-> `extract` is accepted by the Rust binary: with no `state.json` it is treated
-> as a full extract on the next run.
+Into FHIR:
+
+- `diff` and `load` carry edits made in a GIS tool back to the server as
+  version-checked updates.
+- `dhis2 locations`, `dhis2 measures` and `dhis2 reports` turn DHIS2 org
+  units, indicators and data into FHIR resources.
+- `population` derives population Groups from a raster such as WorldPop.
+- `index` adds spatial index identifiers (quadkey, geohash) to Locations.
+
+fhir-pipes started as two Recode Labs tools, kiln (the Location and DHIS2
+commands) and fhir-warehouse (`refresh`), and is intended to move into
+[fhir-data-pipes](https://github.com/ohs-foundation/fhir-data-pipes). See
+[docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md](docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md)
+for the reasoning and the plan. A snapshot or state file written by kiln is
+read unchanged.
+
+> **Status.** The Python package under `python/` (still named `kiln`)
+> provides `bake` and `bake-points`, which turn GRID3 and CSV files into
+> Locations; it is documented in [python/README.md](python/README.md) and is
+> due to be ported to Rust. A snapshot written by the Python `extract` is
+> accepted by the binary: with no `state.json` it is treated as a full
+> extract on the next run.
+
+The rest of this README covers the Location registry, GIS and DHIS2
+commands.
 
 ---
 
 ## Contents
 
-- [Why kiln exists](#why-kiln-exists)
-- [What kiln does](#what-kiln-does)
+- [Why the Location registry needs a GIS projection](#why-the-location-registry-needs-a-gis-projection)
+- [What the GIS projection does](#what-the-gis-projection-does)
 - [The workflow](#the-workflow)
 - [Commands](#commands)
 - [The snapshot](#the-snapshot)
@@ -32,14 +54,14 @@ GDAL, no database. It is designed to run on a laptop in a district office.
 - [Round trip: diff and load](#round-trip-diff-and-load)
 - [Reading the output](#reading-the-output)
 - [Design decisions](#design-decisions)
-- [What kiln does not do](#what-kiln-does-not-do)
+- [What fhir-pipes does not do](#what-fhir-pipes-does-not-do)
 - [Future extensions](#future-extensions)
 - [Building](#building)
 - [Repository layout](#repository-layout)
 
 ---
 
-## Why kiln exists
+## Why the Location registry needs a GIS projection
 
 Public health campaign systems built on FHIR keep their places, from the
 country down to the village clinic, as `Location` resources. That is the right
@@ -64,7 +86,7 @@ GeoParquet is that format. QGIS opens it. DuckDB queries it in place, from a
 laptop or from a bucket. GeoPandas loads it. A web map can fetch only the row
 groups that intersect the viewport.
 
-kiln is the translation between those two worlds, in both directions.
+fhir-pipes is the translation between those two worlds, in both directions.
 
 ### Why a projection and not a query layer
 
@@ -73,25 +95,25 @@ a running service, a second copy of the data that has to stay in sync, and a
 custom protocol every client has to learn. A file on disk or in a bucket is
 simpler in every way: no server, nothing to keep alive, every GIS tool already
 speaks it, and it can be rebuilt from the FHIR server at any time. If the
-parquet is wrong, delete it and run kiln again. Nothing is lost.
+parquet is wrong, delete it and run fhir-pipes again. Nothing is lost.
 
 ### Why a single binary
 
-kiln's users include people setting up a country deployment with limited
+fhir-pipes' users include people setting up a country deployment with limited
 connectivity, on machines with a few gigabytes of memory, without a Python or
 GDAL toolchain and without the ability to install one. The original Python
-kiln needed Python 3.11, a package manager, and a system GDAL built against a
+fhir-pipes needed Python 3.11, a package manager, and a system GDAL built against a
 recent Arrow, because at the time GDAL was the only writer of the native
 Parquet geometry type. That is no longer true. The Rust Parquet implementation
 writes it directly, verified against GDAL, DuckDB and pyarrow (see
 [docs/superpowers/spikes/2026-09-05-rust-native-geoparquet](docs/superpowers/spikes/2026-09-05-rust-native-geoparquet)).
-So kiln can be one file you copy onto a machine and run.
+So fhir-pipes can be one file you copy onto a machine and run.
 
 ---
 
-## What kiln does
+## What the GIS projection does
 
-Given a FHIR server, kiln produces this:
+Given a FHIR server, fhir-pipes produces this:
 
 ```
 FHIR server ──extract──▶ snapshot/ ──transform──▶ out/
@@ -120,7 +142,7 @@ The transform is where the value is. Take a clinic as the FHIR server stores it:
 ```
 
 Nothing in that record says which state or district the clinic is in. After
-kiln, the same clinic is one row in a table alongside its neighbours:
+fhir-pipes, the same clinic is one row in a table alongside its neighbours:
 
 ```
 id         name          type        admin_level  tier   admin0_name  admin1_name  admin2_name  geom_type
@@ -131,14 +153,14 @@ kano       Kano          admin-unit  1            1      Nigeria      Kano      
 ng         Nigeria       admin-unit  0            0      Nigeria      -            -            polygon
 ```
 
-The clinic's row carries `Nigeria / Kano / Nassarawa`. kiln walked the
+The clinic's row carries `Nigeria / Kano / Nassarawa`. fhir-pipes walked the
 `partOf` chain for every record, skipped past `gama` because a settlement is
 not an admin unit, and wrote the nearest real admin ancestor at each level as a
 plain column. Every row also has a full ancestry path, a geometry, a
 representative point, and the complete original FHIR resource as JSON, so
 nothing is lost in the projection.
 
-That table is what GIS tools want. Everything else in kiln exists to produce it
+That table is what GIS tools want. Everything else in fhir-pipes exists to produce it
 reliably, quickly, incrementally, and in a form that can be edited and pushed
 back.
 
@@ -155,11 +177,11 @@ A typical cycle, for one country:
    offline and fast, and can be re-run as often as you like.
 3. **Publish.** Copy the output directory to wherever people read it: a shared
    drive, an object storage bucket, a static web server. This step is outside
-   kiln; the output is plain files.
+   fhir-pipes; the output is plain files.
 4. **Use.** Open in QGIS. Query with DuckDB. Join to campaign data. Draw a map.
 5. **Edit.** Move a facility, correct a name, fix a ward boundary, add a new
    site. Do this in QGIS or any tool that can write GeoJSON or GeoParquet.
-6. **Diff.** Compare the edited file to the snapshot. kiln works out which
+6. **Diff.** Compare the edited file to the snapshot. fhir-pipes works out which
    Locations actually changed and writes them as complete FHIR resources.
 7. **Load.** Send the changed resources to the FHIR server, with a version
    check so an edit made on the server in the meantime is never overwritten.
@@ -176,34 +198,34 @@ Steps 5 to 7 happen when someone has something to fix.
 All commands are subcommands of one binary.
 
 ```
-kiln extract   --server URL [AUTH] --snapshot DIR
+fhir-pipes extract   --server URL [AUTH] --snapshot DIR
                [--full] [--since INSTANT] [--timeout SECS]
                [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
                [--no-cache] [--refresh] [--cache-dir DIR]
-kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
+fhir-pipes transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
                [--keep-without-geometry]
-kiln run       <extract flags> <transform flags>
-kiln inspect   --out DIR
-kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
-kiln load      --server URL [AUTH] --in CHANGES.ndjson
+fhir-pipes run       <extract flags> <transform flags>
+fhir-pipes inspect   --out DIR
+fhir-pipes diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
+fhir-pipes load      --server URL [AUTH] --in CHANGES.ndjson
                [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
-kiln export    --server URL [AUTH] --type TYPE [--type TYPE ...] --out DIR
+fhir-pipes export    --server URL [AUTH] --type TYPE [--type TYPE ...] --out DIR
                [--report FILE] [--retries 3] [--timeout SECS]
 
 AUTH:          --token T
              | --client-id ID --client-secret S --token-url URL
-kiln index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
+fhir-pipes index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
                --out CHANGES.ndjson [--refresh] [--report FILE]
-kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
+fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
                --out GROUPS.ndjson [--source worldpop] [--planning-denominator]
                [--estimate-date YYYY-MM-DD] [--report FILE] [--cache-dir DIR]
                [--retries 3] [--timeout 3600]
-kiln dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjson
+fhir-pipes dhis2 locations --dhis2 URL DHIS2_AUTH --instance NAME --out LOCATIONS.ndjson
                [--id-prefix P] [--country-code CC] [--facility-level N] [--root UID]
                [--group-set UID …] [--org-unit-group UID … | --all-org-unit-groups]
                [--report FILE]
-kiln dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
-kiln dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
+fhir-pipes dhis2 measures  --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --out MEASURES.ndjson
+fhir-pipes dhis2 reports   --dhis2 URL DHIS2_AUTH --instance NAME INDICATORS --locations FILE
                (--period PE | --range START:END) […] --level N [--level N …] --out REPORTS.ndjson
                [--campaign TYPE/ID] [--root UID] [--breakdown UID …] [--chunk 10] [--max-rows 20000]
                [--concurrency 4] [--max-analytics-age 7d]
@@ -225,11 +247,11 @@ by offset, which gzip does not allow.
 
 A server that needs authentication gets one of two kinds:
 
-- `--token` (or `$KILN_TOKEN`) is sent as a fixed bearer token. Getting it is
+- `--token` (or `$FHIR_PIPES_TOKEN`) is sent as a fixed bearer token. Getting it is
   up to you, and a run that outlasts it fails with a 401.
-- `--client-id`, `--client-secret` and `--token-url` (or `$KILN_CLIENT_ID`,
-  `$KILN_CLIENT_SECRET`, `$KILN_TOKEN_URL`) are an OAuth client, such as a
-  Keycloak client with service accounts enabled. kiln trades them for a
+- `--client-id`, `--client-secret` and `--token-url` (or `$FHIR_PIPES_CLIENT_ID`,
+  `$FHIR_PIPES_CLIENT_SECRET`, `$FHIR_PIPES_TOKEN_URL`) are an OAuth client, such as a
+  Keycloak client with service accounts enabled. fhir-pipes trades them for a
   token with the client-credentials grant before the first request, and for
   a new one a minute before each token expires, so a long run does not
   outlive its token. A wrong secret or token URL fails before any FHIR
@@ -237,12 +259,12 @@ A server that needs authentication gets one of two kinds:
 
 The two are mutually exclusive; with neither, requests carry no
 Authorization header. Any FHIR R4 server that supports standard search
-with `_lastUpdated`, `Bundle.link` paging and transaction bundles works; kiln
+with `_lastUpdated`, `Bundle.link` paging and transaction bundles works; fhir-pipes
 does not depend on any vendor's extensions.
 
 ```sh
-export KILN_CLIENT_SECRET=...          # keep the secret out of shell history
-kiln run --server https://gateway.example.org/fhir \
+export FHIR_PIPES_CLIENT_SECRET=...          # keep the secret out of shell history
+fhir-pipes run --server https://gateway.example.org/fhir \
   --client-id key-me --token-url https://auth.example.org/realms/R/protocol/openid-connect/token \
   --snapshot snap/ --out out/
 ```
@@ -270,14 +292,14 @@ the whole geospatial half is testable from files with no server involved.
 
 ## The snapshot
 
-The snapshot is kiln's local copy of the registry and the unit of state
+The snapshot is fhir-pipes' local copy of the registry and the unit of state
 between runs.
 
 ```
 snapshot/
   locations.ndjson       one Location resource per line, boundaries inlined
   organizations.ndjson   one Organization per line, for the facility pairing
-  state.json             server URL, watermark, resource count, kiln version
+  state.json             server URL, watermark, resource count, fhir-pipes version
   boundaries/            content addressed cache of fetched boundary attachments
   _extract_report.json   issues found by the last successful extract
   .incoming.ndjson       present only during, or after an interrupted, run
@@ -302,7 +324,7 @@ watermark for one run.
 
 Organizations are paged after Locations with their own watermark,
 `organization_watermark` in `state.json`, and merged the same way. A
-snapshot written before kiln extracted Organizations has no file and no
+snapshot written before fhir-pipes extracted Organizations has no file and no
 watermark, so the next run fetches them in full while Locations stay
 incremental.
 
@@ -313,7 +335,7 @@ file and the incoming file into a new `locations.ndjson`, inlining boundary
 bytes from the cache, then swaps it into place and writes `state.json`. A
 failure in any phase leaves the previous snapshot untouched.
 
-**`boundaries/`** is the boundary cache carried over from the Python kiln.
+**`boundaries/`** is the boundary cache carried over from the Python fhir-pipes.
 Admin boundaries change rarely, and a registry can have tens of thousands of
 them, so every successfully fetched attachment is stored under a hash of its
 URL and served from disk on later runs. A run that is killed halfway through a
@@ -360,7 +382,7 @@ rules follow:
 - Locations should be retired, not deleted. Set `status` to `inactive`. That
   is better registry practice anyway, because other resources may still refer
   to them.
-- `kiln extract --full` discards the snapshot and fetches everything. Run it
+- `fhir-pipes extract --full` discards the snapshot and fetches everything. Run it
   occasionally, or whenever you suspect drift.
 
 To make drift visible, every incremental run ends by asking the server for
@@ -432,7 +454,7 @@ no bounding box and an empty `geometry_types` list.
 | `--row-group-size N` | 20000 | Rows per Parquet row group. |
 | `--keep-without-geometry` | off | Also writes Locations that have no point and no usable boundary, with the geometry columns null. Off, they are reported as `no_geometry` and left out. See [Columns](#columns). |
 
-`kiln run` takes these options too (its `--snapshot` comes from the extract options).
+`fhir-pipes run` takes these options too (its `--snapshot` comes from the extract options).
 
 ### Columns
 
@@ -460,7 +482,7 @@ default partitioning they land in `geom_type=null/` directories, which
 DuckDB reads as a null `geom_type`.
 
 To add geometry later, edit the row: draw a point or a polygon on it in QGIS,
-or set its geometry in DuckDB, then run `kiln diff` and `kiln load` (see
+or set its geometry in DuckDB, then run `fhir-pipes diff` and `fhir-pipes load` (see
 [Round trip](#round-trip-diff-and-load)). A point becomes the Location's
 `position`; a polygon becomes its boundary. The next transform puts the row
 in its point or polygon partition.
@@ -499,7 +521,7 @@ whether an edit to the column will flow back to FHIR.
 | `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
 | `pcode`, `gers_id` | promoted from `identifier` by system, for convenience; `pcode` comes from the ICR pcode system, or failing that the `national-admin-code` system |
 | `settlement_type`, `delivery_strategy`, `facility_level`, `ownership` | the ICR profile extensions |
-| `quadkey`, `quadkey_level` | the deepest quadkey spatial-index cell on the Location and its zoom; every prefix is the containing tile at a coarser zoom. Derived from `position` by kiln; read-only in the round trip |
+| `quadkey`, `quadkey_level` | the deepest quadkey spatial-index cell on the Location and its zoom; every prefix is the containing tile at a coarser zoom. Derived from `position` by fhir-pipes; read-only in the round trip |
 | `nhfr_code`, `nhfr_uid` | promoted from the paired Organization's `identifier` by system |
 | `organization_identifier` | the paired Organization's `identifier`, list of struct `{system, value}` |
 | `facility_level_text`, `ownership_text` | the `text` of the paired Organization's `type` concepts holding those codings |
@@ -539,9 +561,9 @@ geometry, and the position is kept in its own columns.
 | `organization_json` | the complete paired Organization as JSON text; null when there is none |
 
 The last column is the guarantee that the projection loses nothing. Any field
-kiln does not model as a column is still there, queryable with DuckDB's JSON
+fhir-pipes does not model as a column is still there, queryable with DuckDB's JSON
 functions, and `diff` uses it as the base when reconstructing an edited
-resource, so an extension kiln has never heard of survives a round trip
+resource, so an extension fhir-pipes has never heard of survives a round trip
 through QGIS untouched.
 
 ### The report
@@ -549,7 +571,7 @@ through QGIS untouched.
 `_report.json` records what transform found and could not or would not fix:
 dangling parents, cycles, nodes orphaned by a cycle upstream, duplicate
 p-codes, boundaries that did not parse, invalid polygons, facilities whose GPS
-point falls outside their own district. kiln keeps going past all of them.
+point falls outside their own district. fhir-pipes keeps going past all of them.
 Deciding what to do about them is the registry owner's job, and the report is
 how they find out.
 
@@ -579,7 +601,7 @@ The kinds, grouped by where they arise:
 - Dataset: `duplicate_pcode`, `point_outside_parent`, `small_partition`,
   `partition_value_sanitized`, `partition_value_collision`, `row_vanished`
 - Organization pairing: `organization_missing`, `organization_name_mismatch`
-- Population (`kiln population`): `no_boundary`, `no_pixels`, `rollup_incomplete`,
+- Population (`fhir-pipes population`): `no_boundary`, `no_pixels`, `rollup_incomplete`,
   `rollup_empty`, `group_id_too_long`, `group_id_invalid`, `quantity_out_of_range`,
   `cache_error`, `unknown_source_code`
 
@@ -587,11 +609,11 @@ The kinds, grouped by where they arise:
 
 ## How transform works: the two pass design
 
-The Python kiln held everything in memory: every resource, every parsed
+The Python fhir-pipes held everything in memory: every resource, every parsed
 polygon, all at once in a dataframe. That is fine on a workstation and not
 fine on a two gigabyte laptop with a country of detailed ward boundaries.
 
-The Rust kiln reads the snapshot twice and never holds the geometries.
+The Rust fhir-pipes reads the snapshot twice and never holds the geometries.
 
 ### Pass one: index
 
@@ -609,7 +631,7 @@ Then drop everything else. The record is on the order of a hundred bytes plus
 its strings. A million Locations index into a few hundred megabytes at most,
 and the polygons, which are where the real bulk is, are not resident.
 
-All of kiln's logic runs on this index:
+All of fhir-pipes' logic runs on this index:
 
 1. **Hierarchy.** Follow `partOf` from every node to the root, with
    memoisation so shared ancestor chains are walked once. Detect dangling
@@ -682,13 +704,13 @@ the dataset lists every place and geometry can be added later.
 
 Editing happens in GIS tools because that is where the good editing tools are.
 QGIS can move a point, redraw a boundary, or edit a name in a table view, and
-it can do it against the kiln parquet loaded as a layer. What it cannot do is
+it can do it against the fhir-pipes parquet loaded as a layer. What it cannot do is
 talk FHIR. `diff` and `load` close that gap.
 
 ### diff
 
 ```
-kiln diff --snapshot snapshot/ --in edits.geojson --out changes.ndjson
+fhir-pipes diff --snapshot snapshot/ --in edits.geojson --out changes.ndjson
 ```
 
 Input is GeoJSON or GeoParquet, detected by extension, with an `id` column.
@@ -754,7 +776,7 @@ writable column holding a value of the wrong type, ignored for that row),
 ### index
 
 ```
-kiln index --snapshot DIR --spatial-index quadkey:18 --out changes.ndjson [--refresh] [--report FILE]
+fhir-pipes index --snapshot DIR --spatial-index quadkey:18 --out changes.ndjson [--refresh] [--report FILE]
 ```
 
 The ICR IG lets a point Location carry the **spatial index cell** it falls
@@ -764,13 +786,13 @@ so that de-duplication, tile-level joins and containment queries
 (`Location?quadkey=0313131` is every point inside that tile, because FHIR
 string search is prefix matching and quadkeys are prefix-hierarchical)
 need no geometry engine. The cell is a pure function of the position, so
-kiln owns it: `bake-points --spatial-index quadkey:18` writes it at import,
+fhir-pipes owns it: `bake-points --spatial-index quadkey:18` writes it at import,
 and `index` backfills it onto Locations that were loaded without one.
 
 `index` reads the snapshot, and for every Location that has a position but
 lacks a cell at one of the requested scheme/level pairs, writes the resource
 with the cell(s) added to the output NDJSON — `meta.versionId` and everything
-else untouched, so `kiln load` sends it as the same version-checked `PUT` a
+else untouched, so `fhir-pipes load` sends it as the same version-checked `PUT` a
 `diff` edit would be. Locations without a position and Locations that already
 carry every requested cell are counted and skipped. `--refresh` recomputes
 the requested cells even where present (after a bug, or a scheme change).
@@ -778,15 +800,15 @@ Re-running after a load and a fresh extract writes nothing.
 
 `diff` keeps the cells honest on the way back: when an edit moves a
 Location's position, every quadkey and geohash cell already on it is
-recomputed for the new point (an H3 cell, which kiln cannot compute, is
+recomputed for the new point (an H3 cell, which fhir-pipes cannot compute, is
 dropped rather than left wrong), and clearing the position removes them all.
-Quadkey and geohash are computed in kiln with no dependency; H3 cells are
+Quadkey and geohash are computed in fhir-pipes with no dependency; H3 cells are
 parsed and carried but not computed yet.
 
 ### population
 
 ```
-kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY --out GROUPS.ndjson
+fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY --out GROUPS.ndjson
                 [--source worldpop] [--planning-denominator] [--estimate-date YYYY-MM-DD]
                 [--report FILE] [--cache-dir DIR] [--retries 3] [--timeout 3600]
 ```
@@ -824,7 +846,7 @@ gets a **rolled-up** total that is exactly the sum of its published
 descendants, flagged `is-calculated = true`. Admin units at other levels are
 not measured directly and the summary says how many; facilities and other
 points are never counted. A unit the hierarchy pass dropped (a `partOf`
-cycle, or a chain deeper than kiln follows) has no level and is not measured
+cycle, or a chain deeper than fhir-pipes follows) has no level and is not measured
 either — it shows up only under pass one's own report kinds (`cycle`,
 `too_deep`), so check those when the assigned share is lower than expected.
 
@@ -835,7 +857,7 @@ level, or the wrong raster — and a run in which *no* unit overlaps the raster
 at all is an error, not an empty file.
 
 Group ids are `pop-SOURCE-YEAR-LOCATIONID`, so a re-run rewrites the same
-resources; `kiln load` sends them as plain `PUT`s (no `ifMatch` — kiln owns
+resources; `fhir-pipes load` sends them as plain `PUT`s (no `ifMatch` — fhir-pipes owns
 these Groups outright). Load the Locations first: `load` orders `partOf`
 parents before children but knows nothing about a Group's `geography`
 reference. `--year` names the raster's reference year (it becomes part of
@@ -846,7 +868,7 @@ not carry, so pass `--estimate-date` when you know it. `--source` is the
 code outside `icr-denominator-source-cs` is reported as
 `unknown_source_code`). `--planning-denominator` marks the written Groups as
 the figures campaigns plan against; the IG expects exactly one planning
-denominator per geography, which kiln cannot check across runs.
+denominator per geography, which fhir-pipes cannot check across runs.
 
 Report kinds this command adds: `no_boundary` (a unit at `--level` had no
 usable polygon), `no_pixels` (a polygon with no data-pixel centre inside —
@@ -867,18 +889,18 @@ their ids collide, and the second load replaces the first.
 ### dhis2
 
 ```
-kiln dhis2 locations --dhis2 URL --instance NAME --out LOCATIONS.ndjson [--id-prefix P] [--country-code CC]
-kiln dhis2 measures  --dhis2 URL --instance NAME --indicator-group UID --out MEASURES.ndjson
-kiln dhis2 reports   --dhis2 URL --instance NAME --indicator-group UID --locations LOCATIONS.ndjson
+fhir-pipes dhis2 locations --dhis2 URL --instance NAME --out LOCATIONS.ndjson [--id-prefix P] [--country-code CC]
+fhir-pipes dhis2 measures  --dhis2 URL --instance NAME --indicator-group UID --out MEASURES.ndjson
+fhir-pipes dhis2 reports   --dhis2 URL --instance NAME --indicator-group UID --locations LOCATIONS.ndjson
                      --period LAST_12_MONTHS --level 2 --level 3 --out REPORTS.ndjson
 ```
 
 Reads a DHIS2 instance (Web API, 2.38 or later) and writes FHIR NDJSON for
-`kiln load`. Nothing is written to DHIS2. Sign in with a personal access
-token (`--dhis2-token`, `$KILN_DHIS2_TOKEN`, sent as `Authorization:
+`fhir-pipes load`. Nothing is written to DHIS2. Sign in with a personal access
+token (`--dhis2-token`, `$FHIR_PIPES_DHIS2_TOKEN`, sent as `Authorization:
 ApiToken …`) or a username and password (`--dhis2-user` / `--dhis2-password`,
-`$KILN_DHIS2_USER` / `$KILN_DHIS2_PASSWORD`, Basic). `--dhis2` (or
-`$KILN_DHIS2_URL`) is the instance's base URL; a trailing `/api` is fine.
+`$FHIR_PIPES_DHIS2_USER` / `$FHIR_PIPES_DHIS2_PASSWORD`, Basic). `--dhis2` (or
+`$FHIR_PIPES_DHIS2_URL`) is the instance's base URL; a trailing `/api` is fine.
 Use a read-only DHIS2 user: a token can do whatever its user can.
 
 `--instance` is a short name for the DHIS2 instance (letters, digits and
@@ -893,7 +915,7 @@ across runs: ids are deterministic, so a re-run replaces the same resources.
 facility level (by default the deepest level) become admin units; the
 facility level becomes facility Locations, each paired with an
 `ICRFacilityOrganization` (`managingOrganization` → `org-<location id>`), as
-kiln models facilities everywhere else. Location ids are `PREFIX-<uid>`
+fhir-pipes models facilities everywhere else. Location ids are `PREFIX-<uid>`
 (`--id-prefix`, default the instance name). Each Location carries the org
 unit UID as its `official` identifier, plus the DHIS2 code when there is
 one. Polygon and MultiPolygon geometry becomes the boundary extension, a
@@ -960,17 +982,17 @@ indicator, org unit and period, id `NAME-<indicator>-<orgunit>-<period>`:
 | system name | `reporter.display` |
 
 DHIS2 computes every value: it adds up the numerator and the denominator
-for that org unit and period, then divides. kiln never sums or averages
+for that org unit and period, then divides. fhir-pipes never sums or averages
 indicator values; ask for each level you want. Requests use
 `includeNumDen` and `skipRounding`, and send `Cache-Control: no-cache` so a
 proxy cannot answer from before the last analytics run. Periods can be
 ISO (`2025`, `2025Q1`, `202501`, `2025W5`, `2025April`, …) or relative
 (`LAST_12_MONTHS`, `THIS_YEAR`, …); a period with no data returns no rows
-and so no reports. Values reflect the last analytics table run, which kiln
+and so no reports. Values reflect the last analytics table run, which fhir-pipes
 prints at the start, with a warning when it is more than 7 days old.
 `--max-analytics-age 7d` (also `36h`, `2w`) refuses the run instead when
 the build is older than that, naming the build time and its age. DHIS2
-gives the build time in its own time zone; kiln reads it as UTC, which is
+gives the build time in its own time zone; fhir-pipes reads it as UTC, which is
 a few hours either way at most.
 
 `--range START:END` (repeatable, ISO dates, both included, e.g.
@@ -981,7 +1003,7 @@ instead of `--period`. DHIS2 computes the value over the range the way it
 does for a period. The report's `period.start` and `period.end` are the
 two dates, the `dhis2-period` extension reads `2026-04-05/2026-05-20` (an
 ISO 8601 interval), and the id ends in `20260405-20260520`. That makes ids
-17 characters longer than a monthly report's; kiln refuses a range whose
+17 characters longer than a monthly report's; fhir-pipes refuses a range whose
 ids would go over FHIR's 64 characters (a reporting rate with an
 `--instance` longer than 7 characters) before asking for any values. Each
 range is its own request (split by indicators if DHIS2 calls it too large),
@@ -996,7 +1018,7 @@ report as changed, once.
 
 `--source data-values` reads raw data values (`/api/dataValueSets`,
 `orgUnit` with `children=true`, `startDate`/`endDate`) instead of
-analytics, and kiln computes each value itself, in the same shape: same
+analytics, and fhir-pipes computes each value itself, in the same shape: same
 ids, periods, populations, scores and strata. Each batch's values are
 added up the org unit tree of the `--locations` file (`partOf`) to every
 requested level at once, so the Locations must reach down to where data
@@ -1028,7 +1050,7 @@ is entered. The rules followed, and where they stop:
   towards that category's option it holds. An item whose data elements do
   not all have the category gets no breakdown, as in analytics. Org unit
   group set and data element group set breakdowns are not computed.
-- `date` is when the run started (kiln computed the values then), not the
+- `date` is when the run started (fhir-pipes computed the values then), not the
   analytics build; `--max-analytics-age` does not apply.
 
 `--updated-since DATE` (with `--source data-values` and `--previous`) asks
@@ -1040,7 +1062,7 @@ the whole baseline for the next run; `--changed` has what to load. A
 daily run:
 
 ```sh
-kiln dhis2 reports … --source data-values --out bgd-reports.ndjson \
+fhir-pipes dhis2 reports … --source data-values --out bgd-reports.ndjson \
   --previous bgd-reports.ndjson --updated-since 2026-10-12 \
   --changed bgd-changed.ndjson --removed bgd-removed.txt
 ```
@@ -1076,7 +1098,7 @@ server. A row whose org unit has no Location is skipped and reported once
 as `unmapped_org_unit`.
 
 Large exports (hundreds of periods, thousands of org units) are split into
-batches. Before asking for values, kiln asks DHIS2 how many org units each
+batches. Before asking for values, fhir-pipes asks DHIS2 how many org units each
 `--level` has (under `--root` when given). Each analytics request carries
 up to `--chunk` indicators (10) and as many periods as keep indicators ×
 periods × org units under `--max-rows` (20,000 rows; DHIS2's own limit is
@@ -1086,24 +1108,24 @@ and so on. A relative period (`LAST_12_MONTHS`) always goes alone, since
 DHIS2 expands it into several periods. A batch's breakdowns are asked for
 with the same periods; they return one row per option, so they are not
 counted in the estimate. When DHIS2 answers that a result is over its row
-limit (E7128, E7151), kiln splits the request in two and tries again: the
+limit (E7128, E7151), fhir-pipes splits the request in two and tries again: the
 periods first, then the indicators.
 
 Reports are written as each batch arrives, so memory holds a few batches
 at a time rather than the whole export. `--concurrency` (4) batches are
 fetched at once; the output is written in planned order (level, then
 indicator chunk, then periods, sorted by id within each batch), so it is
-the same file whatever the setting. After each batch kiln prints a line
+the same file whatever the setting. After each batch fhir-pipes prints a line
 like
 `[37/412] level 4 · 20260421…20260427 (7 periods) · 10 items: 33,656 values · 4m12s elapsed, ~38m left`.
 
 The file is written as `OUT.ndjson.tmp` and renamed when the run succeeds.
-After each batch kiln syncs it to disk and records in `OUT.ndjson.resume`
+After each batch fhir-pipes syncs it to disk and records in `OUT.ndjson.resume`
 how many batches it holds and how long it is. A run that fails, or is
 stopped, keeps both files; `--resume` carries on after the last batch
 recorded, cutting off anything written after it (a batch half-written
 when the run stopped is fetched again), and the output is the same file
-an uninterrupted run writes, with the same summary. kiln refuses to resume
+an uninterrupted run writes, with the same summary. fhir-pipes refuses to resume
 if anything that decides the batches or their content has changed since:
 the arguments (other than `--concurrency`), the DHIS2 URL, an org unit
 count, when DHIS2 last built its analytics tables, or the `--locations` or
@@ -1143,8 +1165,8 @@ hash per id, not the previous reports, and the previous file is read a
 second time at the end to find the removed ids.
 
 ```sh
-kiln dhis2 reports … --out bgd-reports.ndjson                # first run: load all of it
-kiln dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndjson \
+fhir-pipes dhis2 reports … --out bgd-reports.ndjson                # first run: load all of it
+fhir-pipes dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndjson \
   --changed bgd-changed.ndjson --removed bgd-removed.txt   # later runs: load the changes
 ```
 
@@ -1163,19 +1185,19 @@ averages and annualised denominators), `bad_number`, `unmapped_org_unit`,
 The Sierra Leone demo instance is open, so the whole chain can be tried:
 
 ```sh
-export KILN_DHIS2_URL=https://play.im.dhis2.org/stable-2-41-10
-export KILN_DHIS2_USER=admin KILN_DHIS2_PASSWORD=district
-kiln dhis2 locations --instance sl-demo --id-prefix sle --country-code SLE --out sl-locations.ndjson
-kiln dhis2 measures --instance sl-demo --indicator-group srxUNt2w5jn --out sl-measures.ndjson
-kiln dhis2 reports --instance sl-demo --indicator-group srxUNt2w5jn --locations sl-locations.ndjson \
+export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-41-10
+export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
+fhir-pipes dhis2 locations --instance sl-demo --id-prefix sle --country-code SLE --out sl-locations.ndjson
+fhir-pipes dhis2 measures --instance sl-demo --indicator-group srxUNt2w5jn --out sl-measures.ndjson
+fhir-pipes dhis2 reports --instance sl-demo --indicator-group srxUNt2w5jn --locations sl-locations.ndjson \
   --period 2025 --period LAST_12_MONTHS --level 2 --level 3 --out sl-reports.ndjson
-for f in sl-locations sl-measures sl-reports; do kiln load --server URL --in $f.ndjson; done
+for f in sl-locations sl-measures sl-reports; do fhir-pipes load --server URL --in $f.ndjson; done
 ```
 
 ### load
 
 ```
-kiln load --server URL [AUTH] --in changes.ndjson [--dry-run] [--batch-size 100]
+fhir-pipes load --server URL [AUTH] --in changes.ndjson [--dry-run] [--batch-size 100]
           [--concurrency 1]
 ```
 
@@ -1195,7 +1217,7 @@ bundle fails with the server's own error.
 Every entry whose resource carries a `meta.versionId` is sent with
 `ifMatch` set to that version. If the resource was changed on the server
 after the snapshot was taken, the server answers 412 (some answer 409),
-nothing in that bundle is written, and kiln reads each version-checked
+nothing in that bundle is written, and fhir-pipes reads each version-checked
 resource in the bundle back to name exactly which ids conflicted and what
 version the server has now. The run stops there; bundles before it stay
 committed, and re-running the same file is safe because every entry is a
@@ -1235,7 +1257,7 @@ on the next transform.
 
 ## Reading the output
 
-The output is an ordinary GeoParquet dataset. Nothing about it is kiln
+The output is an ordinary GeoParquet dataset. Nothing about it is fhir-pipes
 specific once written.
 
 **DuckDB**, straight off the files, no extension needed for the geometry type:
@@ -1257,7 +1279,7 @@ FROM 'out/locations/**/*.parquet'
 WHERE ST_Intersects(geometry, ST_MakeEnvelope(3, 6, 4, 7));
 ```
 
-A field kiln did not promote to a column is still reachable:
+A field fhir-pipes did not promote to a column is still reachable:
 
 ```sql
 SELECT id, fhir_json->>'$.extension[0].url' FROM 'out/locations/**/*.parquet';
@@ -1268,7 +1290,7 @@ The edit-and-push-back loop, step by step, is in [docs/qgis.md](docs/qgis.md).
 
 **GeoPandas** reads it with `read_parquet`.
 
-**Vector tiles.** kiln does not make tiles. Two paths that start from its
+**Vector tiles.** fhir-pipes does not make tiles. Two paths that start from its
 output:
 
 - On demand: DuckDB's `ST_AsMVT` cuts a Mapbox Vector Tile per request from
@@ -1276,14 +1298,14 @@ output:
 - Pre baked: tippecanoe over the partition files, one layer per Location
   type, produces a PMTiles archive for fully static hosting.
 
-Both are a few lines of glue outside kiln, and both are rebuilt from the same
+Both are a few lines of glue outside fhir-pipes, and both are rebuilt from the same
 parquet after every transform.
 
 For a production deployment the likely tile server is
 [Martin](https://maplibre.org/martin/), a MapLibre project written in Rust.
 It serves PMTiles from local files or over HTTP, so it can front the
 tippecanoe output directly, and it has a GeoParquet source backed by DuckDB
-that would cut tiles from kiln's parquet with no bake step at all. That
+that would cut tiles from fhir-pipes' parquet with no bake step at all. That
 source is marked unstable at the time of writing; the PMTiles path is the
 one to rely on until it settles.
 
@@ -1315,7 +1337,7 @@ column keep older readers working. Writing both costs a few bytes per row.
 `position_longitude`, `identifier`. Someone who knows the resource can find
 the column, and someone who knows the column can find the field.
 
-**`fhir_json` in every row.** The projection is lossless. Whatever kiln does
+**`fhir_json` in every row.** The projection is lossless. Whatever fhir-pipes does
 not model still survives, is still queryable, and still round trips.
 
 **Report, don't repair.** Invalid geometry, duplicate codes, broken chains are
@@ -1327,22 +1349,22 @@ stale copy safe. Without it, a GIS user working from yesterday's export could
 overwrite today's server side correction without either party noticing.
 
 **Generic FHIR.** Standard search, standard paging, standard transaction
-bundles, standard `If-Match`. kiln has no dependency on any particular
+bundles, standard `If-Match`. fhir-pipes has no dependency on any particular
 server's extensions, so the same binary works against HAPI, a hosted FHIR
 store, or anything else that implements R4.
 
 **No GDAL, no GEOS, no Python at runtime.** The deployment constraint drives
-this. Everything kiln needs from those libraries turned out to be available
-in pure Rust, at the cost of not offering geometry repair, which kiln did not
+this. Everything fhir-pipes needs from those libraries turned out to be available
+in pure Rust, at the cost of not offering geometry repair, which fhir-pipes did not
 want to offer anyway. The population raster is read the same way: the
-pure-Rust `tiff` crate decodes WorldPop's DEFLATE tiles, and kiln's own
+pure-Rust `tiff` crate decodes WorldPop's DEFLATE tiles, and fhir-pipes' own
 scanline fill does the zonal sum.
 
 ---
 
-## What kiln does not do
+## What fhir-pipes does not do
 
-- **Make tiles.** See above. Tippecanoe and DuckDB do this well from kiln's
+- **Make tiles.** See above. Tippecanoe and DuckDB do this well from fhir-pipes'
   output.
 - **Repair geometry.** Reported, never fixed.
 - **Delete resources.** Retire them with `status = inactive`.
@@ -1351,7 +1373,7 @@ scanline fill does the zonal sum.
   key includes the country.
 - **Import external data into Locations.** Turning a GRID3 ward file or a CSV
   of facilities into FHIR resources is the job of `bake` and `bake-points`,
-  which remain in the Python package under `python/` for now. `kiln
+  which remain in the Python package under `python/` for now. `fhir-pipes
   population` is the deliberate exception: it derives Groups from the
   registry's own boundaries and a published raster, and writes nothing onto
   a Location.
@@ -1368,7 +1390,7 @@ are likely to matter.
 
 **Change notifications.** Today extract is run on a schedule or by hand. A
 FHIR server that supports Subscriptions, or any outboard notification of
-resource changes, could trigger `kiln run` so the parquet is never more than a
+resource changes, could trigger `fhir-pipes run` so the parquet is never more than a
 minute behind the registry. The watermark logic already supports this; only
 the trigger is missing.
 
@@ -1383,20 +1405,20 @@ partition layout already accommodates it; what is missing is the merge
 command and a decision about how the report combines.
 
 **`bake` and `bake-points` in Rust.** Porting the import side of the Python
-kiln, so the whole toolkit is one binary. The GeoJSON and CSV parsing are
+fhir-pipes, so the whole toolkit is one binary. The GeoJSON and CSV parsing are
 straightforward; `--dissolve-parents` needs polygon union, which is available
 in pure Rust but is the piece to prototype first.
 
 **Tile baking as an optional step.** If a Rust tiler matures to the point of
-matching tippecanoe's generalisation quality, `kiln tiles` could become an
-optional subcommand. Until then, tippecanoe is the right tool and kiln stays
+matching tippecanoe's generalisation quality, `fhir-pipes tiles` could become an
+optional subcommand. Until then, tippecanoe is the right tool and fhir-pipes stays
 out of the way.
 
 **Other resource types.** The same projection idea applies to any resource
 with a spatial or hierarchical shape: `Organization` hierarchies, `Group`
 households with a location, campaign `CarePlan` targets. The snapshot and
 transform machinery is resource agnostic; the column mapping is not, and each
-type would need its own. `Group` has a first foothold: `kiln population`
+type would need its own. `Group` has a first foothold: `fhir-pipes population`
 writes `ICRTargetPopulation` Groups, though it does not yet extract or
 project them.
 
@@ -1404,7 +1426,7 @@ project them.
 before `load`, so profile violations are caught locally rather than by the
 server.
 
-**Geometry repair as an explicit opt in.** If a deployment wants kiln to fix
+**Geometry repair as an explicit opt in.** If a deployment wants fhir-pipes to fix
 invalid polygons rather than report them, a `--repair` flag could do so. That
 would mean taking on GEOS or a pure Rust equivalent, and it would need to be
 clearly marked in the report which geometries were altered.
@@ -1417,7 +1439,7 @@ Requires a stable Rust toolchain.
 
 ```sh
 cargo build --release
-./target/release/kiln --help
+./target/release/fhir-pipes --help
 ```
 
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
@@ -1432,15 +1454,15 @@ cargo test
 
 Integration tests read the fixture snapshot under `tests/fixtures/snapshot/`, run a
 transform, and verify the output with DuckDB when it is on `PATH`; they skip
-that check otherwise. DuckDB is never linked into kiln.
+that check otherwise. DuckDB is never linked into fhir-pipes.
 
 A synthetic country can be generated for timing (one country, 20 states, 400
-districts as 200-vertex polygons, and `KILN_BENCH_FACILITIES` facilities,
+districts as 200-vertex polygons, and `FHIR_PIPES_BENCH_FACILITIES` facilities,
 default 200,000):
 
 ```sh
 cargo test --release --test generate_snapshot -- --ignored --nocapture
-./target/release/kiln transform --snapshot target/bench/snapshot --out target/bench/out
+./target/release/fhir-pipes transform --snapshot target/bench/snapshot --out target/bench/out
 ```
 
 Measured on an Apple Silicon laptop, single runs, release build:
@@ -1459,7 +1481,7 @@ slower per row, mostly in boundary parsing.
 ## Repository layout
 
 ```
-kiln/
+fhir-pipes/
   Cargo.toml
   src/
     main.rs, cli.rs, error.rs
@@ -1474,10 +1496,10 @@ kiln/
     run.rs
     diff/        input rows from GeoJSON and GeoParquet, resource rebuild, canonical compare
     load/        parents-first ordering, transaction bundles with ifMatch, capability preflight
-    cells.rs     kiln index: spatial-index backfill
+    cells.rs     fhir-pipes index: spatial-index backfill
     raster/      GeoTIFF reader (tiff crate), pixel-centroid zonal sum, raster fetch cache
-    population.rs  kiln population: measure admin units, roll up, emit ICRTargetPopulation Groups
-    dhis2/       kiln dhis2: DHIS2 Web API client, org units → Locations, indicators → Measures, analytics → MeasureReports
+    population.rs  fhir-pipes population: measure admin units, roll up, emit ICRTargetPopulation Groups
+    dhis2/       fhir-pipes dhis2: DHIS2 Web API client, org units → Locations, indicators → Measures, analytics → MeasureReports
   tests/
     fixtures/snapshot/
     fixtures/raster/   a 40×30 COG with known sums

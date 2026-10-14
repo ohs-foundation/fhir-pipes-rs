@@ -9,7 +9,7 @@
 //! a new token shortly before the current one expires, so a run can outlast
 //! any one token.
 //!
-//! `kiln dhis2` uses the same client against the DHIS2 Web API, with a
+//! `fhir-pipes dhis2` uses the same client against the DHIS2 Web API, with a
 //! complete Authorization value (`ApiToken …` or `Basic …`) and plain JSON.
 
 use std::io::Read as _;
@@ -20,7 +20,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use serde_json::Value;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 const RETRY_BASE: f64 = 0.5;
 const RETRY_MAX: f64 = 30.0;
@@ -193,9 +193,9 @@ impl FhirClient {
         let http = Client::builder()
             .default_headers(headers)
             .timeout(timeout)
-            .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("fhir-pipes/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|e| KilnError::Environment(format!("cannot build HTTP client: {e}")))?;
+            .map_err(|e| PipesError::Environment(format!("cannot build HTTP client: {e}")))?;
         let mut client = Self {
             http,
             retries: retries.max(1),
@@ -204,11 +204,11 @@ impl FhirClient {
         client.auth = match auth {
             Auth::None => Authorizer::None,
             Auth::Token(t) => Authorizer::Fixed(bearer(&t).ok_or_else(|| {
-                KilnError::Usage("token contains characters that are not valid in a header".into())
+                PipesError::Usage("token contains characters that are not valid in a header".into())
             })?),
             Auth::Header(h) => {
                 let mut v = HeaderValue::from_str(&h).map_err(|_| {
-                    KilnError::Usage(
+                    PipesError::Usage(
                         "credentials contain characters that are not valid in a header".into(),
                     )
                 })?;
@@ -226,7 +226,7 @@ impl FhirClient {
                     .append_pair("client_secret", &client_secret)
                     .finish();
                 let first = client.request_token(&token_url, &form).map_err(|e| {
-                    KilnError::Environment(format!("cannot get a token from {token_url}: {e}"))
+                    PipesError::Environment(format!("cannot get a token from {token_url}: {e}"))
                 })?;
                 Authorizer::Renewing(TokenSource {
                     url: token_url,

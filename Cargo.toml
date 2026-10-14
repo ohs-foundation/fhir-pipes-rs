@@ -1,12 +1,12 @@
 [package]
-name = "kiln"
-version = "0.2.0"
+name = "fhir-pipes"
+version = "0.3.0"
 edition = "2021"
-description = "Bridge between a FHIR Location registry and GeoParquet"
+description = "Move data into and out of FHIR servers: SQL-on-FHIR warehouses, GeoParquet, DHIS2"
 license = "Apache-2.0"
 
 [[bin]]
-name = "kiln"
+name = "fhir-pipes"
 path = "src/main.rs"
 
 [dependencies]

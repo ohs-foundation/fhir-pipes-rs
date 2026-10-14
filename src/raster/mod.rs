@@ -1,4 +1,4 @@
-//! Rasters kiln can read without GDAL: a GeoTIFF decoded by the pure-Rust
+//! Rasters fhir-pipes can read without GDAL: a GeoTIFF decoded by the pure-Rust
 //! `tiff` crate, plus the georeferencing that maps a pixel to a WGS84
 //! coordinate. Only north-up geographic (lon/lat) rasters — WorldPop's
 //! layout — are supported; anything else is a usage error, never a silent
@@ -8,7 +8,7 @@ pub mod fetch;
 pub mod geotiff;
 pub mod zonal;
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 
 /// Affine georeferencing for a north-up raster. Pixel (col, row) covers
 /// lon [x0 + col·px, x0 + (col+1)·px) and lat (y0 − (row+1)·py, y0 − row·py].
@@ -27,12 +27,12 @@ impl GeoTransform {
     /// zero/negative pixel size (a negative `py` would silently flip north and south).
     pub fn new(x0: f64, y0: f64, px: f64, py: f64) -> Result<GeoTransform> {
         if ![x0, y0, px, py].iter().all(|v| v.is_finite()) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "geotransform has a non-finite value: origin ({x0}, {y0}), pixel ({px}, {py})"
             )));
         }
         if !(px > 0.0 && py > 0.0) {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "pixel size must be positive, got ({px}, {py})"
             )));
         }
@@ -72,7 +72,7 @@ pub trait Raster {
     fn tile_size(&self) -> (u32, u32);
     /// Decode the chunk at tile column `tx`, tile row `ty`. `tx` must be
     /// `< tiles_across()` and `ty < tiles_down()`; implementations return
-    /// `KilnError::Usage` otherwise, never panic.
+    /// `PipesError::Usage` otherwise, never panic.
     fn read_tile(&mut self, tx: u32, ty: u32) -> Result<Tile>;
 
     fn tiles_across(&self) -> u32 {
@@ -155,7 +155,7 @@ impl Raster for MemRaster {
     }
     fn read_tile(&mut self, tx: u32, ty: u32) -> Result<Tile> {
         if tx >= self.tiles_across() || ty >= self.tiles_down() {
-            return Err(KilnError::Usage(format!(
+            return Err(PipesError::Usage(format!(
                 "tile ({tx}, {ty}) is outside the grid"
             )));
         }

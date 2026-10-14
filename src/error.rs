@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
-pub enum KilnError {
+pub enum PipesError {
     #[error("{0}")]
     Usage(String),
     #[error("{path}: {source}")]
@@ -29,16 +29,16 @@ pub enum KilnError {
     Environment(String),
 }
 
-impl KilnError {
+impl PipesError {
     pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        KilnError::Io {
+        PipesError::Io {
             path: path.into(),
             source,
         }
     }
 
     pub fn parquet_at(path: impl Into<PathBuf>, source: parquet::errors::ParquetError) -> Self {
-        KilnError::ParquetAt {
+        PipesError::ParquetAt {
             path: path.into(),
             source,
         }
@@ -47,10 +47,10 @@ impl KilnError {
     /// Exit status: 2 for operator-fixable problems, 1 for everything else.
     pub fn exit_code(&self) -> i32 {
         match self {
-            KilnError::Usage(_) => 2,
+            PipesError::Usage(_) => 2,
             _ => 1,
         }
     }
 }
 
-pub type Result<T> = std::result::Result<T, KilnError>;
+pub type Result<T> = std::result::Result<T, PipesError>;

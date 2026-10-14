@@ -84,7 +84,9 @@ pub fn build_index(
             report.add(
                 "boundary_unresolved_url",
                 &loc.id,
-                &format!("boundary is a url reference ({url}); run kiln extract to inline it"),
+                &format!(
+                    "boundary is a url reference ({url}); run fhir-pipes extract to inline it"
+                ),
             );
         }
         let geometry = geometry::summarize(&loc, &mut report);

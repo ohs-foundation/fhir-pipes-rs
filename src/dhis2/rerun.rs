@@ -1,4 +1,4 @@
-//! Running `kiln dhis2 reports` again: comparing with a previous run's
+//! Running `fhir-pipes dhis2 reports` again: comparing with a previous run's
 //! output (`--previous`), and continuing an interrupted run (`--resume`).
 //!
 //! A full export can be close to a million reports, so neither keeps
@@ -16,7 +16,7 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::error::{KilnError, Result};
+use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{is_gz, with_suffix, NdjsonReader, Output};
 use crate::report::Report;
 
@@ -114,7 +114,7 @@ fn each_report(path: &Path, mut f: impl FnMut(&str, &Value) -> Result<()>) -> Re
     for line in NdjsonReader::open(path)? {
         let line = line?;
         let v: Value = serde_json::from_str(&line.text).map_err(|e| {
-            KilnError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+            PipesError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
         })?;
         if v.get("resourceType").and_then(Value::as_str) != Some("MeasureReport") {
             continue;
@@ -224,10 +224,10 @@ pub fn write_lines(out: &Path, lines: &[String]) -> Result<()> {
     let tmp = with_suffix(out, ".tmp");
     let mut w = Output::create(&tmp, is_gz(out))?;
     for l in lines {
-        writeln!(w, "{l}").map_err(|e| KilnError::io(&tmp, e))?;
+        writeln!(w, "{l}").map_err(|e| PipesError::io(&tmp, e))?;
     }
-    w.finish().map_err(|e| KilnError::io(&tmp, e))?;
-    std::fs::rename(&tmp, out).map_err(|e| KilnError::io(out, e))
+    w.finish().map_err(|e| PipesError::io(&tmp, e))?;
+    std::fs::rename(&tmp, out).map_err(|e| PipesError::io(out, e))
 }
 
 /// A file as the plan sees it: its path, length and modification time, so
@@ -281,13 +281,13 @@ impl Checkpoint {
     pub fn read(path: &Path) -> Result<Option<Self>> {
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| {
-                KilnError::Usage(format!(
+                PipesError::Usage(format!(
                     "{}: not a checkpoint ({e}); run without --resume to start over",
                     path.display()
                 ))
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(KilnError::io(path, e)),
+            Err(e) => Err(PipesError::io(path, e)),
         }
     }
 
@@ -296,8 +296,8 @@ impl Checkpoint {
     pub fn write(&self, path: &Path) -> Result<()> {
         let tmp = with_suffix(path, ".tmp");
         let bytes = serde_json::to_vec(self)?;
-        std::fs::write(&tmp, bytes).map_err(|e| KilnError::io(&tmp, e))?;
-        std::fs::rename(&tmp, path).map_err(|e| KilnError::io(path, e))
+        std::fs::write(&tmp, bytes).map_err(|e| PipesError::io(&tmp, e))?;
+        std::fs::rename(&tmp, path).map_err(|e| PipesError::io(path, e))
     }
 }
 

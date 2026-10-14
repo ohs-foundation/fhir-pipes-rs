@@ -1,4 +1,4 @@
-//! `kiln population`: raster → per-unit Groups, rolled up the hierarchy.
+//! `fhir-pipes population`: raster → per-unit Groups, rolled up the hierarchy.
 
 use std::path::Path;
 use std::process::Command;
@@ -70,7 +70,7 @@ fn write_snapshot(dir: &Path, resources: &[Value]) {
 }
 
 fn run(dir: &Path, raster: &str, extra: &[&str]) -> Assert {
-    Command::cargo_bin("kiln")
+    Command::cargo_bin("fhir-pipes")
         .unwrap()
         .args(["population", "--snapshot"])
         .arg(dir)
