@@ -27,7 +27,7 @@ The layer is in lon/lat (CRS84, shown by QGIS as EPSG:4326) and carries every
 column: the writable ones such as `name`, `status`, `part_of`, `identifier`
 and `position_longitude`/`position_latitude`; the derived ones such as
 `admin1_name`, `path` and `tier`; and `fhir_json`, the complete resource.
-See the README section "Columns" for which group each column is in.
+See the section "Columns" in [locations.md](locations.md#columns) for which group each column is in.
 
 To see everything at once, add the `locations/` directory itself as a layer.
 The default layout is one file per country, geometry type and Location type,
@@ -109,8 +109,8 @@ fhir-pipes load --server https://fhir.example/fhir --in changes.ndjson
 
 If the server needs authentication, pass `--token` (or set `FHIR_PIPES_TOKEN`), or
 an OAuth client with `--client-id`, `--client-secret` and `--token-url` (or
-`FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET`, `FHIR_PIPES_TOKEN_URL`); see "Commands" in
-the README. Load sends the resources parents first in transaction bundles, each
+`FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET`, `FHIR_PIPES_TOKEN_URL`); see
+[Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server). Load sends the resources parents first in transaction bundles, each
 existing resource with a version check. If someone changed one of them on the
 server since your snapshot was taken, the server refuses that bundle, fhir-pipes
 names the conflicting ids, and nothing in that bundle is written. Refresh
