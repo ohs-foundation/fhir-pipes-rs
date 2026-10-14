@@ -91,8 +91,10 @@ existing fhir-data-pipes warehouses.
 4. **fhir-warehouse becomes the `refresh` command** of that tool. It plays
    the role the Java controller plays today. kiln's commands remain
    available as individual subcommands.
-5. **sof is an external dependency**, not vendored. The fork's changes go
-   upstream to `octofhir/sof`.
+5. **sof is brought in house** (changed later the same day). octofhir/sof
+   has had no upstream changes since 2026-06-28, so it lives in
+   `crates/sof` and `crates/sof-lint` as `fhir-pipes-sof`, and depends only
+   on the actively maintained `octofhir-fhirpath` crate.
 6. **Drop the fhir-pipes-rs code; keep its RFC** and use its 12 views as an
    acceptance test.
 7. **Deployment configuration lives in its own repo.** ICR-specific parts
@@ -180,3 +182,20 @@ duckdb -c "select count(*) from (select columns(*)::varchar from 'out/materializ
                                  except all
                                  select columns(*)::varchar from 'sof-out/location_flat.parquet')"
 ```
+
+## Progress
+
+2026-10-14: started as `ohs-foundation/fhir-pipes-rs`, with the history of
+kiln, fhir-warehouse and the sof fork.
+
+- kiln renamed to fhir-pipes (binary, `FHIR_PIPES_*` environment variables;
+  kiln's `state.json` still reads).
+- sof in `crates/`, moved to arrow and parquet 59; 144/144 official
+  SQL-on-FHIR v2.1 tests in memory, 149/149 through generated DuckDB SQL.
+- fhir-warehouse is `fhir-pipes refresh`, calling extract, transform and
+  export in process instead of running kiln.
+- The 12 fhir-data-pipes views run through `refresh` on the Synthea sample
+  with the row counts above.
+
+Gaps 1 (incremental views), 4 (nested Parquet-on-FHIR) and 5 (porting
+`bake`) are still open. Gaps 2 and 3 are done.
