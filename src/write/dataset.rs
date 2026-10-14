@@ -16,7 +16,7 @@ use crate::index::{Index, IndexRecord};
 use crate::report::Report;
 use crate::snapshot::index::index_by_id;
 use crate::write::parquet::PartitionWriter;
-use crate::write::schema::{OutputRow, RowBatch};
+use crate::write::schema::{output_schema, output_schema_optional_geometry, OutputRow, RowBatch};
 
 pub const DATASET_DIR: &str = "locations";
 const STAGING_DIR: &str = ".locations.tmp";
@@ -31,6 +31,8 @@ pub struct WrittenPartition {
     /// `key=value/key=value` as written under the dataset directory.
     pub partition: String,
     pub rows: usize,
+    /// Rows written with null geometry (only with --keep-without-geometry).
+    pub rows_without_geometry: usize,
 }
 
 /// Re-read and parse one record's line. Diagnostics were reported in pass
@@ -180,8 +182,14 @@ fn write_partitions(
         hierarchy,
         order,
         report,
+        keep_without_geometry,
         ..
     } = index;
+    let schema = if *keep_without_geometry {
+        output_schema_optional_geometry()
+    } else {
+        output_schema()
+    };
     let records: &[IndexRecord] = records;
     let hierarchy: &Hierarchy = hierarchy;
     let order: &[u32] = order;
@@ -243,9 +251,11 @@ fn write_partitions(
             .iter()
             .fold(staging.to_path_buf(), |p, s| p.join(s))
             .join("part-0.parquet");
-        let mut writer = PartitionWriter::create(&path, row_group_size)?;
-        let mut batch = RowBatch::new();
+        let mut writer =
+            PartitionWriter::create_with_schema(&path, row_group_size, schema.clone())?;
+        let mut batch = RowBatch::with_schema(schema.clone());
         let mut geometry_types: Vec<String> = Vec::new();
+        let mut rows_without_geometry = 0usize;
 
         for &i in idxs {
             let i = i as usize;
@@ -254,10 +264,19 @@ fn write_partitions(
                 report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
                 continue;
             };
-            let mut silent = Report::default();
-            let Some(geom) = geometry::build(&loc, &mut silent) else {
-                report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
-                continue;
+            // Pass one kept a row without geometry only when asked to
+            // (--keep-without-geometry); a row it gave geometry must still
+            // have it.
+            let geom = match rec.geometry {
+                None => None,
+                Some(_) => {
+                    let mut silent = Report::default();
+                    let Some(geom) = geometry::build(&loc, &mut silent) else {
+                        report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
+                        continue;
+                    };
+                    Some(geom)
+                }
             };
             let Some(info) = hierarchy.get(i) else {
                 report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
@@ -299,7 +318,9 @@ fn write_partitions(
                 }
             }
 
-            if let Some(parent_idx) = nearest_polygon_ancestor(hierarchy, records, i) {
+            if let (Some(geom), Some(parent_idx)) =
+                (&geom, nearest_polygon_ancestor(hierarchy, records, i))
+            {
                 if let Some(parent) = parent_cache.get(parent_idx, records, &mut lines)? {
                     let pt = geo::Point::new(geom.lon, geom.lat);
                     if !parent.intersects(&pt) {
@@ -315,20 +336,28 @@ fn write_partitions(
                 }
             }
 
-            let type_name = match &geom.geometry {
-                geo::Geometry::Point(_) => "Point",
-                geo::Geometry::Polygon(_) => "Polygon",
-                geo::Geometry::MultiPolygon(_) => "MultiPolygon",
-                _ => "Geometry",
-            };
-            if !geometry_types.iter().any(|t| t == type_name) {
-                geometry_types.push(type_name.to_string());
+            match &geom {
+                Some(geom) => {
+                    let type_name = match &geom.geometry {
+                        geo::Geometry::Point(_) => "Point",
+                        geo::Geometry::Polygon(_) => "Polygon",
+                        geo::Geometry::MultiPolygon(_) => "MultiPolygon",
+                        _ => "Geometry",
+                    };
+                    if !geometry_types.iter().any(|t| t == type_name) {
+                        geometry_types.push(type_name.to_string());
+                    }
+                }
+                None => rows_without_geometry += 1,
             }
 
-            let (quadkey, quadkey_level) =
-                crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells)
-                    .map(|c| (Some(c.cell.clone()), Some(c.level as i32)))
-                    .unwrap_or((None, None));
+            // Spatial cells are derived from the position; a row without
+            // geometry leaves them null even if the resource carries some.
+            let (quadkey, quadkey_level) = geom
+                .as_ref()
+                .and_then(|_| crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells))
+                .map(|c| (Some(c.cell.clone()), Some(c.level as i32)))
+                .unwrap_or((None, None));
             let row = OutputRow {
                 id: loc.id,
                 version_id: loc.version_id.clone(),
@@ -378,11 +407,11 @@ fn write_partitions(
                 overlays_admin_unit_ids: loc.overlays_admin_unit_ids,
                 organization_json: org.as_ref().map(|o| o.fhir_json.clone()),
                 country: rec.country.clone(),
-                geom_type: geom.kind.as_str().to_string(),
-                lon: geom.lon,
-                lat: geom.lat,
-                wkb: geom.wkb(),
-                bbox: geom.bbox,
+                geom_type: geom.as_ref().map(|g| g.kind.as_str().to_string()),
+                lon: geom.as_ref().map(|g| g.lon),
+                lat: geom.as_ref().map(|g| g.lat),
+                wkb: geom.as_ref().map(|g| g.wkb()).unwrap_or_default(),
+                bbox: geom.as_ref().map(|g| g.bbox),
                 fhir_json: loc.fhir_json,
             };
             batch.push(&row);
@@ -401,6 +430,7 @@ fn write_partitions(
             path,
             partition,
             rows: stats.rows,
+            rows_without_geometry,
         });
     }
 
@@ -440,7 +470,7 @@ mod tests {
     #[test]
     fn writes_one_file_per_partition_and_swaps_atomically() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
         let rel: Vec<String> = written
@@ -476,7 +506,7 @@ mod tests {
         assert!(!out.path().join(".locations.bak").exists());
 
         // Second run replaces the dataset and leaves no backup behind.
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
         assert!(!out.path().join(".locations.bak").exists());
         assert!(out
@@ -486,9 +516,60 @@ mod tests {
     }
 
     #[test]
+    fn keep_without_geometry_writes_ghost_and_remote_with_null_geometry() {
+        let out = tempfile::tempdir().unwrap();
+        let mut index = build_index(&fixture(), None, true).unwrap();
+        let keys = parse_keys("country,geom_type").unwrap();
+        let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        assert_eq!(written.iter().map(|w| w.rows).sum::<usize>(), 10);
+        let null = written
+            .iter()
+            .find(|w| w.partition == "country=NG/geom_type=null")
+            .unwrap();
+        assert_eq!((null.rows, null.rows_without_geometry), (2, 2));
+        assert_eq!(
+            written
+                .iter()
+                .map(|w| w.rows_without_geometry)
+                .sum::<usize>(),
+            2
+        );
+        // The same point_outside_parent as without the flag: rows without
+        // geometry are not checked against their parent.
+        assert_eq!(index.report.count("point_outside_parent"), 1);
+        assert_eq!(index.report.count("row_vanished"), 0);
+    }
+
+    #[test]
+    fn rows_without_geometry_come_last_in_a_shared_partition() {
+        let out = tempfile::tempdir().unwrap();
+        let mut index = build_index(&fixture(), None, true).unwrap();
+        let keys = parse_keys("tier").unwrap();
+        let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 10, None).unwrap();
+        let tier2 = written.iter().find(|w| w.partition == "tier=2").unwrap();
+        assert_eq!((tier2.rows, tier2.rows_without_geometry), (3, 1));
+        let file = std::fs::File::open(&tier2.path).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut ids = Vec::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let col = batch.column_by_name("id").unwrap();
+            let col = col
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .unwrap();
+            ids.extend(col.iter().map(|v| v.unwrap().to_string()));
+        }
+        assert_eq!(ids.last().map(String::as_str), Some("ghost"), "{ids:?}");
+    }
+
+    #[test]
     fn partition_by_tier_groups_non_consecutive_rows() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("tier").unwrap();
         let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
         let mut parts: Vec<&str> = written.iter().map(|w| w.partition.as_str()).collect();
@@ -514,7 +595,7 @@ mod tests {
             b"{\"resourceType\":\"Location\",\"id\":\"x\"}\n",
         )
         .unwrap();
-        let mut index = build_index(snapshot.path(), None).unwrap();
+        let mut index = build_index(snapshot.path(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         let written =
             write_dataset(snapshot.path(), &mut index, out.path(), &keys, 3, None).unwrap();
@@ -529,7 +610,7 @@ mod tests {
         let backup = out.path().join(".locations.bak");
         std::fs::create_dir_all(backup.join("country=NG")).unwrap();
         std::fs::write(backup.join("country=NG/marker"), b"old").unwrap();
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
         assert!(!backup.exists());
@@ -546,7 +627,7 @@ mod tests {
     #[test]
     fn mid_write_failure_leaves_the_live_dataset_untouched() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
         let before = snapshot_files(&out.path().join("locations"));
@@ -555,7 +636,7 @@ mod tests {
         // A record whose recorded offset is now nonsense (as if the ndjson
         // had shrunk out from under it): the seek succeeds but the read
         // fails, so the whole write must abort partway through.
-        let mut broken = build_index(&fixture(), None).unwrap();
+        let mut broken = build_index(&fixture(), None, false).unwrap();
         let last = *broken.order.last().unwrap();
         broken.records[last as usize].offset = 1 << 40;
         let err = write_dataset(&fixture(), &mut broken, out.path(), &keys, 3, None);
@@ -573,11 +654,11 @@ mod tests {
     #[test]
     fn a_rerun_with_different_keys_leaves_only_its_own_files() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
 
-        let mut index2 = build_index(&fixture(), None).unwrap();
+        let mut index2 = build_index(&fixture(), None, false).unwrap();
         let tier_keys = parse_keys("tier").unwrap();
         write_dataset(&fixture(), &mut index2, out.path(), &tier_keys, 3, None).unwrap();
 
@@ -603,7 +684,7 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         symlink(&real, out.path().join("locations")).unwrap();
 
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         let err = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap_err();
         assert!(err.to_string().contains("symlink"), "{err}");
@@ -616,7 +697,7 @@ mod tests {
         std::fs::create_dir_all(staging.join("country=STALE")).unwrap();
         std::fs::write(staging.join("country=STALE/junk"), b"stale").unwrap();
 
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
 
@@ -634,7 +715,7 @@ mod tests {
         std::fs::create_dir_all(backup.join("country=OLDER")).unwrap();
         std::fs::write(backup.join("country=OLDER/marker"), b"backup").unwrap();
 
-        let mut index = build_index(&fixture(), None).unwrap();
+        let mut index = build_index(&fixture(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
         write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
 

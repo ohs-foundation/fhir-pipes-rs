@@ -23,7 +23,9 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
 use crate::error::{KilnError, Result};
-use crate::write::schema::{output_schema, RowBatch, BBOX_COLUMN, GEOMETRY_COLUMN};
+use arrow_schema::SchemaRef;
+
+use crate::write::schema::{RowBatch, BBOX_COLUMN, GEOMETRY_COLUMN};
 
 pub struct PartitionStats {
     pub rows: usize,
@@ -38,13 +40,27 @@ pub struct PartitionWriter {
     /// have held a separate handle to the same file all along.
     file: File,
     path: PathBuf,
+    /// Over the rows with a geometry only; meaningless while `with_geometry` is 0.
     bbox: [f64; 4],
     rows: usize,
+    /// Rows whose geometry is not null.
+    with_geometry: usize,
     row_groups: usize,
 }
 
 impl PartitionWriter {
+    #[cfg(test)]
     pub fn create(path: &Path, row_group_size: usize) -> Result<Self> {
+        Self::create_with_schema(path, row_group_size, crate::write::schema::output_schema())
+    }
+
+    /// As [`create`](Self::create), for a batch schema other than the
+    /// default (the optional-geometry one). Batches written must match it.
+    pub fn create_with_schema(
+        path: &Path,
+        row_group_size: usize,
+        schema: SchemaRef,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| KilnError::io(parent, e))?;
         }
@@ -64,7 +80,7 @@ impl PartitionWriter {
         let options = ArrowWriterOptions::new()
             .with_properties(props)
             .with_skip_arrow_metadata(true);
-        let writer = ArrowWriter::try_new_with_options(file, output_schema(), options)
+        let writer = ArrowWriter::try_new_with_options(file, schema, options)
             .map_err(|e| KilnError::parquet_at(path, e))?;
         Ok(Self {
             writer,
@@ -72,6 +88,7 @@ impl PartitionWriter {
             path: path.to_path_buf(),
             bbox: [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
             rows: 0,
+            with_geometry: 0,
             row_groups: 0,
         })
     }
@@ -102,12 +119,12 @@ impl PartitionWriter {
             })
             .collect();
         for row in 0..rb.num_rows() {
-            // Upstream is expected to drop rows whose geometry failed to
-            // build before they ever reach a RowBatch; this is a defensive
-            // check so a null geometry can never widen the file bbox.
+            // A row without geometry (written by --keep-without-geometry)
+            // has a null bbox too; it must not widen the file bbox.
             if geometry.is_null(row) {
                 continue;
             }
+            self.with_geometry += 1;
             for (i, col) in bbox_cols.iter().enumerate() {
                 let v = col.value(row);
                 if i < 2 {
@@ -128,26 +145,24 @@ impl PartitionWriter {
         Ok(())
     }
 
-    /// Append the `geo` metadata and close the file.
+    /// Append the `geo` metadata and close the file. The bbox covers the
+    /// rows that have a geometry; a file with none leaves it out (it is
+    /// optional in GeoParquet).
     pub fn finish(mut self, geometry_types: &[String]) -> Result<PartitionStats> {
-        let bbox = if self.rows == 0 {
-            serde_json::Value::Null
-        } else {
-            serde_json::json!(self.bbox)
-        };
+        let mut column = serde_json::json!({
+            "encoding": "WKB",
+            "geometry_types": geometry_types,
+        });
+        if self.with_geometry > 0 {
+            column["bbox"] = serde_json::json!(self.bbox);
+        }
+        column["covering"] = serde_json::json!({"bbox": {
+            "xmin": [BBOX_COLUMN, "xmin"], "ymin": [BBOX_COLUMN, "ymin"],
+            "xmax": [BBOX_COLUMN, "xmax"], "ymax": [BBOX_COLUMN, "ymax"]}});
         let geo = serde_json::json!({
             "version": "1.1.0",
             "primary_column": GEOMETRY_COLUMN,
-            "columns": {
-                GEOMETRY_COLUMN: {
-                    "encoding": "WKB",
-                    "geometry_types": geometry_types,
-                    "bbox": bbox,
-                    "covering": {"bbox": {
-                        "xmin": [BBOX_COLUMN, "xmin"], "ymin": [BBOX_COLUMN, "ymin"],
-                        "xmax": [BBOX_COLUMN, "xmax"], "ymax": [BBOX_COLUMN, "ymax"]}}
-                }
-            }
+            "columns": {GEOMETRY_COLUMN: column}
         });
         self.writer
             .append_key_value_metadata(KeyValue::new("geo".into(), geo.to_string()));
@@ -184,11 +199,11 @@ mod tests {
             tier: "site".into(),
             path: format!("/{id}"),
             country: "NG".into(),
-            geom_type: "point".into(),
-            lon: x,
-            lat: y,
+            geom_type: Some("point".into()),
+            lon: Some(x),
+            lat: Some(y),
             wkb,
-            bbox: [x, y, x, y],
+            bbox: Some([x, y, x, y]),
             fhir_json: "{}".into(),
             ..Default::default()
         }
@@ -266,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_writer_finishes_with_null_bbox() {
+    fn empty_writer_finishes_without_a_bbox() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.parquet");
         let writer = PartitionWriter::create(&path, 10).unwrap();
@@ -282,7 +297,80 @@ mod tests {
             .find(|kv| kv.key == "geo")
             .unwrap();
         let geo: serde_json::Value = serde_json::from_str(geo.value.as_ref().unwrap()).unwrap();
-        assert!(geo["columns"]["geometry"]["bbox"].is_null());
+        assert!(geo["columns"]["geometry"].get("bbox").is_none());
+    }
+
+    fn geo_metadata(path: &Path) -> serde_json::Value {
+        let reader = SerializedFileReader::new(std::fs::File::open(path).unwrap()).unwrap();
+        let kv = reader
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .unwrap();
+        let geo = kv.iter().find(|kv| kv.key == "geo").unwrap();
+        serde_json::from_str(geo.value.as_ref().unwrap()).unwrap()
+    }
+
+    fn row_without_geometry(id: &str) -> OutputRow {
+        OutputRow {
+            id: id.into(),
+            tier: "site".into(),
+            path: format!("/{id}"),
+            country: "NG".into(),
+            fhir_json: "{}".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rows_without_geometry_do_not_widen_the_file_bbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.parquet");
+        let schema = crate::write::schema::output_schema_optional_geometry();
+        let mut writer = PartitionWriter::create_with_schema(&path, 10, schema.clone()).unwrap();
+        let mut batch = RowBatch::with_schema(schema);
+        batch.push(&row("a", 3.0, 6.0));
+        batch.push(&row("b", 4.0, 7.0));
+        batch.push(&row_without_geometry("ghost"));
+        writer.write(&mut batch).unwrap();
+        let stats = writer.finish(&["Point".to_string()]).unwrap();
+        assert_eq!(stats.rows, 3);
+        let geo = geo_metadata(&path);
+        assert_eq!(
+            geo["columns"]["geometry"]["bbox"],
+            serde_json::json!([3.0, 6.0, 4.0, 7.0])
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_geometry_at_all_has_no_bbox_and_no_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("none.parquet");
+        let schema = crate::write::schema::output_schema_optional_geometry();
+        let mut writer = PartitionWriter::create_with_schema(&path, 10, schema.clone()).unwrap();
+        let mut batch = RowBatch::with_schema(schema);
+        batch.push(&row_without_geometry("ghost"));
+        batch.push(&row_without_geometry("remote"));
+        writer.write(&mut batch).unwrap();
+        let stats = writer.finish(&[]).unwrap();
+        assert_eq!(stats.rows, 2);
+        let column = &geo_metadata(&path)["columns"]["geometry"];
+        assert!(column.get("bbox").is_none(), "{column}");
+        assert_eq!(column["geometry_types"], serde_json::json!([]));
+        assert!(column.get("covering").is_some());
+
+        // The geometry columns are optional in the file itself.
+        let reader = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let fields = reader
+            .metadata()
+            .file_metadata()
+            .schema()
+            .get_fields()
+            .to_vec();
+        for name in ["geometry", "geom_type", "lon", "lat", "bbox"] {
+            let field = fields.iter().find(|f| f.name() == name).unwrap();
+            assert!(field.is_optional(), "{name} should be optional");
+        }
     }
 
     #[test]

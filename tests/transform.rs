@@ -427,3 +427,225 @@ fn facility_rows_carry_their_organization() {
     assert_eq!(column(&out, "nhfr_code")["paired"], None);
     assert!(report_counts(&out).get("organization_missing").is_none());
 }
+
+/// Every row of the dataset under `out`, as (id, row) with the columns this
+/// file checks: geometry is null, and the text of a few others.
+fn read_rows(out: &Path) -> std::collections::BTreeMap<String, serde_json::Value> {
+    use arrow_array::Array;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fn files(dir: &Path, into: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(&path, into);
+            } else if path.extension().is_some_and(|e| e == "parquet") {
+                into.push(path);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    files(&out.join("locations"), &mut paths);
+    let mut rows = std::collections::BTreeMap::new();
+    for path in paths {
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let text = |name: &str, r: usize| -> serde_json::Value {
+                let col = batch.column_by_name(name).unwrap();
+                if col.is_null(r) {
+                    return serde_json::Value::Null;
+                }
+                let col = col
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .unwrap();
+                col.value(r).into()
+            };
+            let is_null = |name: &str, r: usize| batch.column_by_name(name).unwrap().is_null(r);
+            for r in 0..batch.num_rows() {
+                let id = text("id", r).as_str().unwrap().to_string();
+                rows.insert(
+                    id,
+                    serde_json::json!({
+                        "file": path.strip_prefix(out).unwrap().to_string_lossy().replace('\\', "/"),
+                        "geometry_null": is_null("geometry", r),
+                        "geom_type": text("geom_type", r),
+                        "lon_null": is_null("lon", r),
+                        "lat_null": is_null("lat", r),
+                        "bbox_null": is_null("bbox", r),
+                        "quadkey_null": is_null("quadkey", r),
+                        "country": text("country", r),
+                        "tier": text("tier", r),
+                        "path": text("path", r),
+                        "pcode": text("pcode", r),
+                        "admin1_name": text("admin1_name", r),
+                        "name": text("name", r),
+                    }),
+                );
+            }
+        }
+    }
+    rows
+}
+
+fn transform(out: &Path, extra: &[&str]) -> String {
+    let assert = Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["transform", "--snapshot"])
+        .arg(fixture_snapshot())
+        .arg("--out")
+        .arg(out)
+        .args(extra)
+        .assert()
+        .success();
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
+#[test]
+fn without_keep_without_geometry_ghost_and_remote_have_no_row() {
+    let out = tempfile::tempdir().unwrap();
+    let stdout = transform(out.path(), &[]);
+    assert!(!stdout.contains("have no geometry"), "{stdout}");
+    let rows = read_rows(out.path());
+    assert_eq!(rows.len(), 8);
+    assert!(!rows.contains_key("ghost"));
+    assert!(!rows.contains_key("remote"));
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path().join("_report.json")).unwrap())
+            .unwrap();
+    assert!(report.get("written_without_geometry").is_none());
+    assert_eq!(report["counts"]["no_geometry"], 2);
+}
+
+#[test]
+fn keep_without_geometry_writes_ghost_and_remote_with_null_geometry() {
+    let out = tempfile::tempdir().unwrap();
+    let stdout = transform(out.path(), &["--keep-without-geometry"]);
+    assert!(
+        stdout.contains("Wrote 10 rows across 6 partitions"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("2 of these rows have no geometry"),
+        "{stdout}"
+    );
+    let rows = read_rows(out.path());
+    assert_eq!(rows.len(), 10);
+
+    let ghost = &rows["ghost"];
+    assert_eq!(
+        ghost["file"],
+        "locations/country=NG/geom_type=null/type=admin-unit/part-0.parquet"
+    );
+    for col in [
+        "geometry_null",
+        "lon_null",
+        "lat_null",
+        "bbox_null",
+        "quadkey_null",
+    ] {
+        assert_eq!(ghost[col], true, "ghost {col}");
+    }
+    assert_eq!(ghost["geom_type"], serde_json::Value::Null);
+    assert_eq!(ghost["country"], "NG");
+    assert_eq!(ghost["tier"], "2");
+    assert_eq!(ghost["path"], "/ng/kano/ghost");
+    assert_eq!(ghost["pcode"], "NG001003");
+    assert_eq!(ghost["admin1_name"], "Kano");
+    assert_eq!(ghost["name"], "Ghost Ward");
+
+    let remote = &rows["remote"];
+    assert_eq!(remote["geometry_null"], true);
+    assert_eq!(remote["tier"], "site");
+    assert_eq!(
+        remote["file"],
+        "locations/country=NG/geom_type=null/type=operational-area/part-0.parquet"
+    );
+
+    // Rows with geometry are as they were.
+    let clinic = &rows["clinic"];
+    assert_eq!(clinic["geometry_null"], false);
+    assert_eq!(clinic["geom_type"], "point");
+    assert_eq!(clinic["bbox_null"], false);
+
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path().join("_report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["written_without_geometry"], 2);
+    assert_eq!(report["counts"]["no_geometry"], 2);
+    let ghost_issue = report["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "no_geometry" && i["location_id"] == "ghost")
+        .unwrap();
+    assert!(
+        ghost_issue["detail"]
+            .as_str()
+            .unwrap()
+            .contains("written without geometry"),
+        "{ghost_issue}"
+    );
+}
+
+#[test]
+fn without_the_flag_the_geometry_columns_stay_required() {
+    // The flag changes the schema (nullable geometry columns), so a run
+    // without it must keep the required ones.
+    let out = tempfile::tempdir().unwrap();
+    transform(out.path(), &[]);
+    let path = out
+        .path()
+        .join("locations/country=NG/geom_type=point/type=facility/part-0.parquet");
+    let reader =
+        parquet::file::reader::SerializedFileReader::new(std::fs::File::open(&path).unwrap())
+            .unwrap();
+    use parquet::file::reader::FileReader;
+    let fields = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .to_vec();
+    for name in ["geom_type", "lon", "lat", "bbox"] {
+        let field = fields.iter().find(|f| f.name() == name).unwrap();
+        assert!(!field.is_optional(), "{name} should stay required");
+    }
+}
+
+#[test]
+fn duckdb_reads_rows_without_geometry_as_null_when_available() {
+    if Command::new("duckdb").arg("--version").output().is_err() {
+        eprintln!("duckdb not on PATH; skipping");
+        return;
+    }
+    let out = tempfile::tempdir().unwrap();
+    transform(out.path(), &["--keep-without-geometry"]);
+    let glob = format!("{}/locations/**/*.parquet", out.path().display());
+    let sql = format!(
+        "SELECT id, geometry IS NULL, geom_type IS NULL, lon IS NULL, bbox IS NULL, admin1_name \
+         FROM read_parquet('{glob}', hive_partitioning=false) ORDER BY id;"
+    );
+    let output = Command::new("duckdb")
+        .args(["-csv", "-noheader", "-c", &sql])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(text.lines().count(), 10, "{text}");
+    assert!(text.contains("ghost,true,true,true,true,Kano"), "{text}");
+    assert!(text.contains("remote,true,true,true,true,Kano"), "{text}");
+    assert!(
+        text.contains("clinic,false,false,false,false,Kano"),
+        "{text}"
+    );
+}
