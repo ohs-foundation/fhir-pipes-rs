@@ -1344,6 +1344,7 @@ dependencies = [
  "geo-traits",
  "geo-types",
  "geojson",
+ "httpdate",
  "httptest",
  "parquet",
  "predicates",

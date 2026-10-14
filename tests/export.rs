@@ -438,3 +438,29 @@ fn state_from_another_server_is_not_used() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], "new");
 }
+
+#[test]
+fn the_watermark_never_passes_the_servers_clock_at_the_start() {
+    // A resource stamped after the search began (here, absurdly, in 2099)
+    // must not push the watermark past the server's clock: an update made
+    // while paging would be skipped by every later run.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/MeasureReport"))
+            .times(1)
+            .respond_with(status_code(200).body(bundle(
+                vec![updated("a", "2099-01-01T00:00:00Z", "complete")],
+                None,
+            ))),
+    );
+    export_incremental(&server, &out);
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join(".export-state.json")).unwrap())
+            .unwrap();
+    let watermark = state["types"]["MeasureReport"]["watermark"]
+        .as_str()
+        .unwrap();
+    assert!(watermark < "2099", "{watermark}");
+}

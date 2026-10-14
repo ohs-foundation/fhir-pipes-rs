@@ -33,6 +33,9 @@ pub struct PageResult {
     /// rare; a server that stops paging early looks exactly like this, so
     /// the caller cross-checks the count when it sees it.
     pub last_page_full: bool,
+    /// The server's HTTP `Date` on the first page: when the search began, by
+    /// the server's clock. Caps the watermark (see `capped_watermark`).
+    pub started: Option<String>,
 }
 
 pub fn next_link(bundle: &Value) -> Option<String> {
@@ -115,6 +118,7 @@ pub fn page_resources(
     let mut notes = Vec::new();
     let mut pages = 0usize;
     let mut last_page_len;
+    let mut started: Option<String> = None;
 
     loop {
         let current = url.to_string();
@@ -133,6 +137,9 @@ pub fn page_resources(
             .get(&current)
             .map_err(|e| PipesError::Environment(format!("fetching {current}: {e}")))?;
         pages += 1;
+        if pages == 1 {
+            started = fetched.date.clone();
+        }
         let bundle: Value = serde_json::from_slice(&fetched.body).map_err(|e| {
             PipesError::Environment(format!("{current}: response is not JSON: {e}"))
         })?;
@@ -197,6 +204,7 @@ pub fn page_resources(
         notes,
         pages,
         last_page_full: last_page_len >= PAGE_SIZE,
+        started,
     })
 }
 

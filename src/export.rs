@@ -20,7 +20,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{count_resources, page_resources};
 use crate::report::Report;
-use crate::snapshot::instant::{format_utc, later};
+use crate::snapshot::instant::{capped_watermark, format_utc, later};
 use crate::snapshot::merge::{MergeFiles, merge_file};
 use crate::snapshot::same_server;
 use crate::transform::write_report;
@@ -225,10 +225,9 @@ fn export_changes(
         paged.pages,
         out.display()
     );
-    Ok(Some(type_state(
-        stats.watermark.or_else(|| Some(since.to_string())),
-        stats.total,
-    )))
+    let watermark = capped_watermark(stats.watermark, paged.started.as_deref())
+        .or_else(|| Some(since.to_string()));
+    Ok(Some(type_state(watermark, stats.total)))
 }
 
 fn tmp_path(dir: &Path, resource_type: &str) -> PathBuf {
@@ -284,7 +283,10 @@ fn export_all(
         .iter()
         .filter_map(|n| n.last_updated.as_deref())
         .fold(None, |w, u| later(w.as_deref(), u));
-    Ok(type_state(watermark, total))
+    Ok(type_state(
+        capped_watermark(watermark, paged.started.as_deref()),
+        total,
+    ))
 }
 
 #[cfg(test)]

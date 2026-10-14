@@ -15,7 +15,7 @@ use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
 use crate::extract::page::{count_resources, page_locations, page_resources};
 use crate::report::Report;
-use crate::snapshot::instant::{format_utc, parse_instant};
+use crate::snapshot::instant::{capped_watermark, format_utc, parse_instant};
 use crate::snapshot::merge::{MergeFiles, merge, merge_file};
 use crate::snapshot::{Snapshot, State, same_server};
 use crate::transform::write_report;
@@ -281,9 +281,12 @@ fn run_phases(
 
     let new_state = State {
         server: args.server.trim_end_matches('/').to_string(),
-        watermark: stats.watermark.clone(),
+        watermark: capped_watermark(stats.watermark.clone(), paged.started.as_deref()),
         count: stats.total,
-        organization_watermark: org_stats.watermark.clone(),
+        organization_watermark: capped_watermark(
+            org_stats.watermark.clone(),
+            org_paged.started.as_deref(),
+        ),
         organization_count: Some(org_stats.total),
         fhir_pipes_version: env!("CARGO_PKG_VERSION").to_string(),
         completed_at: format_utc(std::time::SystemTime::now()),

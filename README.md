@@ -110,7 +110,10 @@ for each type. With `--incremental`, a type that has one is searched with
 a run fetches only what changed. A `_lastUpdated` search cannot see a deleted
 resource, so after the merge the server's count is compared with the file's,
 and a type whose counts differ is downloaded in full. `refresh` exports this
-way unless given `--full`.
+way unless given `--full`. The watermark is never later than the server's
+clock when the search began (its HTTP `Date`), less five minutes, so a
+resource updated while a run is paging is fetched by the next run. `extract`
+sets its Location and Organization watermarks the same way.
 
 ## Connecting to a FHIR server
 

@@ -99,6 +99,8 @@ impl std::fmt::Display for FetchError {
 
 pub struct Fetched {
     pub body: Vec<u8>,
+    /// The response's HTTP `Date` header: the server's clock when it answered.
+    pub date: Option<String>,
 }
 
 impl std::fmt::Debug for Fetched {
@@ -368,8 +370,16 @@ impl FhirClient {
                             body: read_error_body(resp),
                         });
                     } else {
+                        let date = resp
+                            .headers()
+                            .get(reqwest::header::DATE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
                         return match resp.bytes() {
-                            Ok(b) => Ok(Fetched { body: b.to_vec() }),
+                            Ok(b) => Ok(Fetched {
+                                body: b.to_vec(),
+                                date,
+                            }),
                             Err(e) => Err(FetchError::Transport(format!("reading body: {e}"))),
                         };
                     }
