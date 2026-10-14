@@ -38,6 +38,10 @@ tempfile = "3"
 arrow = { workspace = true }
 fhir-pipes-sof = { workspace = true, features = ["parquet"] }
 fhir-pipes-sof-lint = { workspace = true }
+# views (formerly the octofhir-sof command-line tool)
+tokio = { workspace = true }
+sqlx-postgres = { workspace = true }
+annotate-snippets = "0.11"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -79,6 +79,7 @@ The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged.
 | Command | Direction | What it does | Docs |
 |---|---|---|---|
 | `refresh` | out | Build or refresh a SQL-on-FHIR Parquet warehouse | [refresh.md](docs/refresh.md) |
+| `views run`, `sql`, `validate`, `lint`, `test` | | Run views over local FHIR files or PostgreSQL, generate their SQL, check them, run SQL-on-FHIR test cases | below |
 | `export` | out | Download every resource of the given types as NDJSON | below |
 | `extract` | out | Copy Locations and Organizations into a local snapshot, incrementally | [locations.md](docs/locations.md) |
 | `transform` | transform | Snapshot → partitioned GeoParquet (the `locations` transform) | [locations.md](docs/locations.md) |
@@ -92,6 +93,20 @@ The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged.
 
 Run `fhir-pipes <command> --help` for every option. NDJSON paths ending in
 `.gz` are read and written compressed.
+
+`views` works with ViewDefinitions directly, without a warehouse:
+
+```sh
+fhir-pipes views run patient_flat.json --input raw/Patient.ndjson          # CSV to stdout
+fhir-pipes views run views/ --input raw/ --output parquet --out tables/   # one file per view
+fhir-pipes views sql patient_flat.json --dialect duckdb                     # the SQL for a view
+fhir-pipes views validate patient_flat.json                                 # structure checks
+fhir-pipes views lint patient_flat.json --package hl7.fhir.r4.core          # selectors against FHIR R4
+fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
+```
+
+`views run --db URL` runs against PostgreSQL holding FHIR resources as JSONB
+instead of files. A directory of views is read as `refresh` reads it.
 
 `export` downloads every resource of each `--type` to `DIR/<TYPE>.ndjson`:
 
@@ -144,8 +159,8 @@ default. Connection errors, 429 and 5xx responses are retried up to
   Location registry is extracted incrementally so far.
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
-- The PostgreSQL SQL generator in `crates/sof` is compiled in but not exposed
-  as a command, and its dependencies are not yet optional.
+- The PostgreSQL and async dependencies that `views run --db` and
+  `views sql` need are always compiled in; they are not yet optional.
 - `bake` and `bake-points`, which turn GRID3 and CSV files into Locations,
   are still in the Python package under `python/` (named `kiln`); see
   [python/README.md](python/README.md).
@@ -176,6 +191,7 @@ Cargo.toml        the fhir-pipes binary and the workspace
 src/
   main.rs, cli.rs, error.rs
   warehouse/      refresh: config, views, partitioning, manifest, tiles, hooks, push
+  views/          views: run, sql, validate, lint, test
   export.rs       export
   extract/        FHIR client with retry and OAuth, paging, boundary fetch and cache
   snapshot/       state.json, merge by id

@@ -37,19 +37,11 @@ pub fn discover(dir: &Path, strip_prefix: &[String]) -> Result<Vec<View>> {
     for path in files {
         let text =
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let Ok(mut json) = serde_json::from_str::<Value>(&text) else {
+        let Some((json, definition)) = parse_view(&text)
+            .with_context(|| format!("parsing ViewDefinition {}", path.display()))?
+        else {
             continue;
         };
-        let is_view = json
-            .get("resourceType")
-            .and_then(Value::as_str)
-            .is_some_and(|t| t == "ViewDefinition" || t.ends_with("/ViewDefinition"));
-        if !is_view {
-            continue;
-        }
-        json["resourceType"] = Value::String("ViewDefinition".into());
-        let definition = ViewDefinition::from_json(&json)
-            .with_context(|| format!("parsing ViewDefinition {}", path.display()))?;
         let errors: Vec<String> = validate_structure(&definition)
             .into_iter()
             .filter(|f| f.severity == Severity::Error)
@@ -82,6 +74,26 @@ pub fn discover(dir: &Path, strip_prefix: &[String]) -> Result<Vec<View>> {
         }
     }
     Ok(views)
+}
+
+/// Parse a ViewDefinition from JSON text. An IG build's logical-model form,
+/// whose `resourceType` ends with `/ViewDefinition`, is accepted and returned
+/// as plain ViewDefinition JSON. `Ok(None)` when the text is not JSON or not a
+/// view.
+pub fn parse_view(text: &str) -> Result<Option<(Value, ViewDefinition)>> {
+    let Ok(mut json) = serde_json::from_str::<Value>(text) else {
+        return Ok(None);
+    };
+    let is_view = json
+        .get("resourceType")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t == "ViewDefinition" || t.ends_with("/ViewDefinition"));
+    if !is_view {
+        return Ok(None);
+    }
+    json["resourceType"] = Value::String("ViewDefinition".into());
+    let definition = ViewDefinition::from_json(&json)?;
+    Ok(Some((json, definition)))
 }
 
 /// The table name for a view: snake case, minus the first matching prefix
