@@ -176,9 +176,10 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
     steps
 }
 
-/// A hook program as it is run: a path with `/` is relative to the config file.
+/// A hook program as it is run: a path (with `/`, or `\` on Windows) is
+/// relative to the config file.
 fn hook_program(s: &Settings, program: &str) -> String {
-    if program.contains('/') {
+    if tools::is_path(program) {
         s.base_dir.join(program).display().to_string()
     } else {
         program.to_string()

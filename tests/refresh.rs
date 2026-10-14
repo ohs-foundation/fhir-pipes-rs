@@ -279,6 +279,8 @@ fn flags_override_the_config() {
 }
 
 #[test]
+// The hooks run through sh.
+#[cfg(unix)]
 fn hooks_run_after_their_step_only() {
     let server = Server::run();
     serve_types(&server, &["Observation", "Patient"]);

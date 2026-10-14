@@ -5,15 +5,38 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-/// Where a tool is: a path containing `/` as given, else the first match on PATH.
-pub fn find(tool: &str) -> Option<PathBuf> {
-    if tool.contains('/') {
-        let p = PathBuf::from(tool);
-        return p.is_file().then_some(p);
+/// True when a tool or hook program is given as a path rather than a name to
+/// look up on PATH: it contains `/`, or on Windows also `\`.
+pub fn is_path(tool: &str) -> bool {
+    tool.contains('/') || (cfg!(windows) && tool.contains('\\'))
+}
+
+/// The file names a tool can have: on Windows `duckdb` is `duckdb.exe` (or a
+/// `.cmd` or `.bat` script) unless it already has an extension.
+fn candidates(tool: &str) -> Vec<String> {
+    if cfg!(windows) && Path::new(tool).extension().is_none() {
+        [".exe", ".cmd", ".bat", ""]
+            .iter()
+            .map(|ext| format!("{tool}{ext}"))
+            .collect()
+    } else {
+        vec![tool.to_string()]
     }
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(tool))
+}
+
+/// Where a tool is: a path as given, else the first match on PATH.
+pub fn find(tool: &str) -> Option<PathBuf> {
+    if is_path(tool) {
+        return candidates(tool)
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file());
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).find_map(|dir| {
+        candidates(tool)
+            .into_iter()
+            .map(|name| dir.join(name))
             .find(|p| p.is_file())
     })
 }
@@ -87,10 +110,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn find_uses_path_and_explicit_paths() {
         assert!(find("sh").is_some());
         assert!(find("/bin/sh").is_some());
         assert!(find("/no/such/tool").is_none());
         assert!(find("no-such-tool-anywhere").is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn find_adds_exe_on_windows() {
+        // cmd.exe is on every Windows PATH; it is found by its bare name.
+        let cmd = find("cmd").expect("cmd on PATH");
+        assert!(find(cmd.to_str().unwrap()).is_some());
+        assert!(find(r"C:\no\such\tool").is_none());
+        assert!(find("no-such-tool-anywhere").is_none());
+    }
+
+    #[test]
+    fn paths_and_names() {
+        assert!(is_path("./tool"));
+        assert!(is_path("/usr/bin/duckdb"));
+        assert!(!is_path("duckdb"));
+        assert_eq!(is_path(r"tools\duckdb"), cfg!(windows));
     }
 }
