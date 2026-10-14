@@ -421,6 +421,19 @@ metadata's bounding box covers only the rows that have a geometry; a file
 whose rows all lack one (only possible with `--keep-without-geometry`) has
 no bounding box and an empty `geometry_types` list.
 
+### transform options
+
+| Option | Default | What it does |
+|---|---|---|
+| `--snapshot DIR` | required | The snapshot to read (`locations.ndjson`, and `organizations.ndjson` when present). |
+| `--out DIR` | required | Where to write; the dataset goes to `DIR/locations` and the report to `DIR/_report.json`. |
+| `--country CC` | from the level 0 admin unit | Puts every row under this country code instead of the one derived from the hierarchy. |
+| `--partition-by KEYS` | `country,geom_type,type` | Comma-separated partition keys: any of `country`, `geom_type`, `tier`, `type`. |
+| `--row-group-size N` | 20000 | Rows per Parquet row group. |
+| `--keep-without-geometry` | off | Also writes Locations that have no point and no usable boundary, with the geometry columns null. Off, they are reported as `no_geometry` and left out. See [Columns](#columns). |
+
+`kiln run` takes these options too (its `--snapshot` comes from the extract options).
+
 ### Columns
 
 By default, one row per Location that has a usable geometry and a resolved
@@ -657,6 +670,11 @@ boundary is a registry problem, and silently fixing it would hide that from
 the people who need to know. The representative point is a `geo` interior
 point. WKB is encoded directly. There is no GEOS and no GDAL anywhere in the
 binary.
+
+A Location with neither a `position` nor a usable boundary has no geometry.
+By default it is reported and produces no row; with
+`--keep-without-geometry` it is written with the geometry columns null, so
+the dataset lists every place and geometry can be added later.
 
 ---
 
