@@ -326,7 +326,9 @@ fn incremental_export_merges_what_changed() {
     count_reply(&server, 3);
     let a = export_incremental(&server, &out);
     assert!(
-        stdout(&a).contains("MeasureReport: 1 new, 1 changed since 2026-10-02T00:00:00Z, 3 in all"),
+        stdout(&a).contains(
+            "MeasureReport: 1 new, 1 updated or fetched again since 2026-10-02T00:00:00Z, 3 in all"
+        ),
         "{}",
         stdout(&a)
     );

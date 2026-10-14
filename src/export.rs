@@ -215,7 +215,10 @@ fn export_changes(
         ),
     }
     println!(
-        "{resource_type}: {} new, {} changed since {since}, {} in all, {} pages -> {}",
+        // `updated` counts every id fetched again. The search is `ge` the
+        // watermark, so resources stamped with that exact instant (a batch
+        // loaded in one transaction) come back each run unchanged.
+        "{resource_type}: {} new, {} updated or fetched again since {since}, {} in all, {} pages -> {}",
         stats.added,
         stats.updated,
         stats.total,

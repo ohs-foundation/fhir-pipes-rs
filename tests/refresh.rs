@@ -419,7 +419,7 @@ fn a_second_refresh_downloads_only_what_changed() {
         .args(["--only", "views"])
         .assert()
         .success()
-        .stdout(has("Observation: 0 new, 1 changed"))
+        .stdout(has("Observation: 0 new, 1 updated or fetched again"))
         .stdout(has("IcrObs (Observation) → parquet/obs (3 rows)"));
     let sle = rows(
         &dir.path()
