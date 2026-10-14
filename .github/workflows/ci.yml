@@ -29,6 +29,8 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     strategy:
+      # One target failing should not hide whether the others build.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -49,17 +51,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # aarch64 musl cross-compiles C code (aws-lc, brought in by the
+      # octofhir-fhirpath crate's HTTP client). Ubuntu has no aarch64 musl
+      # compiler and the glibc one links glibc-only symbols, so zig compiles
+      # and links it instead.
       - if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: pip install ziglang cargo-zigbuild
       - if: "!contains(matrix.target, 'musl')"
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - if: contains(matrix.target, 'musl')
+      - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          AR_aarch64_unknown_linux_musl: aarch64-linux-gnu-ar
+      - if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
       - name: Rename binary for upload
         shell: bash
         run: |
