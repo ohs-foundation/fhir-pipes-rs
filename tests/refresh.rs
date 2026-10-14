@@ -346,3 +346,98 @@ fn a_broken_view_stops_the_run() {
         .failure()
         .stderr(has("bad.json"));
 }
+
+/// The fixture resources of `t`, each with a meta.lastUpdated.
+fn stamped(t: &str, at: &str) -> Vec<Value> {
+    read_ndjson(&fixtures().join(format!("raw/{t}.ndjson")))
+        .into_iter()
+        .map(|mut r| {
+            r["meta"] = json!({"lastUpdated": at});
+            r
+        })
+        .collect()
+}
+
+fn full_search(
+    t: &str,
+) -> impl httptest::matchers::Matcher<httptest::http::Request<httptest::bytes::Bytes>> + use<> {
+    all_of![
+        request::method_path("GET", format!("/fhir/{t}")),
+        request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+        request::query(url_decoded(not(contains(key("_summary"))))),
+    ]
+}
+
+#[test]
+fn a_second_refresh_downloads_only_what_changed() {
+    let mut server = Server::run();
+    for t in ["Observation", "Patient"] {
+        server.expect(
+            Expectation::matching(full_search(t))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(stamped(t, "2026-10-01T00:00:00Z")))),
+        );
+    }
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    cmd(&config).args(["--only", "views"]).assert().success();
+    server.verify_and_clear();
+
+    // Second run: each type is searched from its watermark. One Observation
+    // changed; the counts still match, so nothing is downloaded in full.
+    let mut changed = stamped("Observation", "2026-10-02T00:00:00Z").remove(0);
+    changed["valueInteger"] = json!(30);
+    let since = ("_lastUpdated", "ge2026-10-01T00:00:00Z");
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Observation"),
+            request::query(url_decoded(contains(since))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(vec![changed]))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Patient"),
+            request::query(url_decoded(contains(since))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(vec![]))),
+    );
+    for (t, n) in [("Observation", 3), ("Patient", 2)] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", format!("/fhir/{t}")),
+                request::query(url_decoded(contains(("_summary", "count")))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(
+                json!({"resourceType": "Bundle", "type": "searchset", "total": n}).to_string(),
+            )),
+        );
+    }
+    cmd(&config)
+        .args(["--only", "views"])
+        .assert()
+        .success()
+        .stdout(has("Observation: 0 new, 1 changed"))
+        .stdout(has("IcrObs (Observation) → parquet/obs (3 rows)"));
+    let sle = rows(
+        &dir.path()
+            .join("data/parquet/obs/country=SLE/part-0.parquet"),
+    );
+    assert!(sle.iter().any(|r| get(r, "value") == "30"));
+    server.verify_and_clear();
+
+    // --full downloads everything again.
+    for t in ["Observation", "Patient"] {
+        server.expect(
+            Expectation::matching(full_search(t))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(stamped(t, "2026-10-03T00:00:00Z")))),
+        );
+    }
+    cmd(&config)
+        .args(["--only", "views", "--full"])
+        .assert()
+        .success();
+}
