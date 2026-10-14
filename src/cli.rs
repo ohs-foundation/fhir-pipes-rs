@@ -17,6 +17,12 @@ pub const DEFAULT_BATCH_SIZE: usize = 100;
 /// download off after five minutes. Total per-request deadline, in seconds.
 pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
 pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
+/// Rows kiln aims to keep one analytics request under; DHIS2's own default
+/// limit is 50,000.
+pub const DEFAULT_ANALYTICS_MAX_ROWS: usize = 20_000;
+/// Analytics requests in flight at once. Each one is a database query on
+/// the DHIS2 server, so this stays low.
+pub const DEFAULT_ANALYTICS_CONCURRENCY: usize = 4;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -51,7 +57,7 @@ pub enum Command {
     Population(PopulationArgs),
     /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `kiln load`
     #[command(subcommand)]
-    Dhis2(Dhis2Command),
+    Dhis2(Box<Dhis2Command>),
 }
 
 #[derive(Subcommand, Debug)]
@@ -61,7 +67,26 @@ pub enum Dhis2Command {
     /// Indicators as Measures
     Measures(Dhis2MeasuresArgs),
     /// Indicator values from DHIS2 analytics as MeasureReports, one per indicator, org unit and period
-    Reports(Dhis2ReportsArgs),
+    Reports(Box<Dhis2ReportsArgs>),
+}
+
+/// Where `kiln dhis2 reports` takes its values from.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReportSource {
+    /// DHIS2's analytics API: DHIS2 computes every value.
+    #[default]
+    Analytics,
+    /// Raw data values; kiln computes the values.
+    DataValues,
+}
+
+impl ReportSource {
+    pub fn code(self) -> &'static str {
+        match self {
+            ReportSource::Analytics => "analytics",
+            ReportSource::DataValues => "data-values",
+        }
+    }
 }
 
 /// Where the DHIS2 instance is, how to sign in, and the short name kiln
@@ -120,6 +145,12 @@ pub struct Dhis2LocationsArgs {
     /// Org unit group set UID, repeatable (e.g. Facility Type): each org unit's group in the set is added to its Location's type (and its Organization's, for facilities), coded like a --breakdown on the same set
     #[arg(long = "group-set")]
     pub group_sets: Vec<String>,
+    /// Org unit group UID, repeatable (e.g. the group of all districts): each member's Location (and Organization) gets the group in its type. A group in a group set is coded as --group-set codes it; a group in no set under …/CodeSystem/dhis2/INSTANCE/org-unit-group
+    #[arg(long = "org-unit-group")]
+    pub org_unit_groups: Vec<String>,
+    /// Every org unit group, as --org-unit-group
+    #[arg(long, conflicts_with = "org_unit_groups")]
+    pub all_org_unit_groups: bool,
     /// Output NDJSON file of Location and Organization resources
     #[arg(long)]
     pub out: PathBuf,
@@ -175,21 +206,58 @@ pub struct Dhis2ReportsArgs {
     /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `kiln dhis2 locations`, or a snapshot's locations.ndjson
     #[arg(long)]
     pub locations: PathBuf,
-    /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …)
-    #[arg(long = "period", required = true)]
+    /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …). Needed unless --range is given
+    #[arg(long = "period", required_unless_present = "ranges")]
     pub periods: Vec<String>,
+    /// Date range START:END, repeatable (ISO dates, both included, e.g. 2026-04-05:2026-05-20): one value per indicator and org unit for the whole range, asked for with DHIS2's startDate and endDate instead of a period. Report ids end in 20260405-20260520
+    #[arg(long = "range")]
+    pub ranges: Vec<String>,
+    /// Campaign every report belongs to, as a reference (e.g. CarePlan/bgd-mr-sia-2026), added as the ICR campaign extension. Report ids do not include it, so one run should cover one campaign's periods
+    #[arg(long)]
+    pub campaign: Option<String>,
     /// DHIS2 org unit level to report on, repeatable (1 = the top)
     #[arg(long = "level", required = true)]
     pub levels: Vec<u32>,
+    /// Only org units at or below this one: each level is asked for as LEVEL-n;ROOT. Needed when
+    /// the user can see top-level org units outside the tree being reported on
+    #[arg(long)]
+    pub root: Option<String>,
     /// Also break every value down by this DHIS2 dimension, repeatable: a category (e.g. Fixed/Outreach), an org unit group set (e.g. Facility Type) or a data element group set. Each becomes a stratifier on the report; DHIS2 leaves out items the dimension does not apply to
     #[arg(long = "breakdown")]
     pub breakdowns: Vec<String>,
     /// Indicators per analytics request (halved automatically when DHIS2 says a result is too large)
     #[arg(long, default_value_t = DEFAULT_INDICATORS_PER_REQUEST)]
     pub chunk: usize,
-    /// Output NDJSON file of MeasureReport resources
+    /// Rows to aim for per analytics request: periods of the same kind (days, weeks, months, …) are asked for together while indicators × periods × org units at the level stays under this. Breakdown requests return a row per option on top; whatever DHIS2 still calls too large is split, periods first
+    #[arg(long, default_value_t = DEFAULT_ANALYTICS_MAX_ROWS)]
+    pub max_rows: usize,
+    /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the --locations hierarchy and computed by kiln: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
+    #[arg(long, value_enum, default_value_t = ReportSource::Analytics)]
+    pub source: ReportSource,
+    /// With --source data-values and --previous: recompute only the periods and ranges with data values updated or deleted since this date or time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS); --out keeps the previous reports for the rest
+    #[arg(long, requires = "previous")]
+    pub updated_since: Option<String>,
+    /// Refuse to run when DHIS2's analytics tables were last built longer ago than this (e.g. 36h, 7d, 2w): values are only as fresh as that build. Without it, a build over 7 days old is warned about
+    #[arg(long, value_parser = crate::dhis2::api::parse_age)]
+    pub max_analytics_age: Option<std::time::Duration>,
+    /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
+    #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
+    pub concurrency: usize,
+    /// Output NDJSON file of MeasureReport resources: every report this run returns, with or without --previous, so it is the baseline for the next run
     #[arg(long)]
     pub out: PathBuf,
+    /// A previous run's --out (it may be the same file as --out): reports with the same content there count as unchanged. `date`, when DHIS2 last built its analytics tables, is not compared
+    #[arg(long)]
+    pub previous: Option<PathBuf>,
+    /// With --previous: also write the new and changed reports here, the ones to load
+    #[arg(long, requires = "previous")]
+    pub changed: Option<PathBuf>,
+    /// With --previous: write here, one per line, the ids of previous reports this run asked for again (same indicators, levels' org units and periods) that DHIS2 no longer returns, to delete from the FHIR server
+    #[arg(long, requires = "previous")]
+    pub removed: Option<PathBuf>,
+    /// Continue an interrupted run after its last fully written batch instead of starting over. Refused if anything that shapes the batches has changed since (arguments, org unit counts, the analytics build, the --locations or --previous file)
+    #[arg(long)]
+    pub resume: bool,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,
@@ -446,6 +514,9 @@ pub struct LoadArgs {
     /// Resources per transaction bundle
     #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
     pub batch_size: usize,
+    /// Bundles posted at once. A bundle waits for the earlier bundles holding resources it references (partOf parents, managing Organizations), so parents still land first; otherwise bundles commit in any order
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: usize,
     /// Attempts per request
     #[arg(long, default_value_t = DEFAULT_RETRIES)]
     pub retries: usize,

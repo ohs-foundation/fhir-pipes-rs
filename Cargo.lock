@@ -1360,6 +1360,7 @@ dependencies = [
  "assert_cmd",
  "base64 0.22.1",
  "clap",
+ "flate2",
  "geo",
  "geo-traits",
  "geo-types",

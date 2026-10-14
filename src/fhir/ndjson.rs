@@ -1,9 +1,18 @@
 //! Streaming NDJSON. `NdjsonReader` yields each line with its byte offset so
 //! pass two can seek straight back to it; `LineAccess` does that seek.
+//!
+//! A path ending in `.gz` is gzip: read through a decoder (any number of
+//! concatenated members), and written through an encoder by `Output`.
+//! Offsets into a gzip file are offsets into its decompressed text, so
+//! `LineAccess` refuses one.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+use flate2::read::MultiGzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 use crate::error::{KilnError, Result};
 
@@ -18,13 +27,95 @@ pub struct Line {
 const HEAD_PEEK: u64 = 64 * 1024;
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
-#[derive(Debug)]
+/// True for a path kiln reads or writes as gzip.
+pub fn is_gz(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+}
+
+/// `path` with `suffix` added after its whole name: `a.ndjson.gz` + `.tmp`.
+pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// A file's text, decompressed when it is gzip.
+pub fn open_text(path: &Path) -> Result<Box<dyn BufRead + Send>> {
+    let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
+    Ok(read_text(file, is_gz(path)))
+}
+
+/// Text from any reader, decompressed when `gz`.
+pub fn read_text(r: impl Read + Send + 'static, gz: bool) -> Box<dyn BufRead + Send> {
+    if gz {
+        Box::new(BufReader::with_capacity(1 << 20, MultiGzDecoder::new(r)))
+    } else {
+        Box::new(BufReader::with_capacity(1 << 20, r))
+    }
+}
+
+/// A file being written, plain or gzip. `finish` completes the gzip
+/// stream and flushes; dropping it unfinished may leave the stream cut off,
+/// which is what a temporary file of a failed run is.
+pub enum Output {
+    Plain(BufWriter<File>),
+    Gz(GzEncoder<BufWriter<File>>),
+}
+
+impl Output {
+    pub fn create(path: &Path, gz: bool) -> Result<Self> {
+        let file = File::create(path).map_err(|e| KilnError::io(path, e))?;
+        let w = BufWriter::with_capacity(1 << 20, file);
+        Ok(if gz {
+            Output::Gz(GzEncoder::new(w, Compression::default()))
+        } else {
+            Output::Plain(w)
+        })
+    }
+
+    pub fn finish(self) -> std::io::Result<File> {
+        let mut w = match self {
+            Output::Plain(w) => w,
+            Output::Gz(e) => e.finish()?,
+        };
+        w.flush()?;
+        w.into_inner().map_err(|e| e.into_error())
+    }
+}
+
+impl Write for Output {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Output::Plain(w) => w.write(buf),
+            Output::Gz(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Output::Plain(w) => w.flush(),
+            Output::Gz(w) => w.flush(),
+        }
+    }
+}
+
 pub struct NdjsonReader {
     path: PathBuf,
-    reader: BufReader<File>,
+    reader: Box<dyn BufRead + Send>,
     offset: u64,
     number: usize,
     buf: Vec<u8>,
+}
+
+impl std::fmt::Debug for NdjsonReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NdjsonReader")
+            .field("path", &self.path)
+            .field("offset", &self.offset)
+            .field("number", &self.number)
+            .finish()
+    }
 }
 
 impl NdjsonReader {
@@ -35,9 +126,9 @@ impl NdjsonReader {
     /// single-line JSON document entirely into memory before we could reject
     /// it. A leading UTF-8 BOM is skipped and accounted for so every
     /// downstream offset -- and `LineAccess::read_at` -- stays correct.
+    /// A `.gz` file is read decompressed; offsets are into its text.
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
-        let mut reader = BufReader::with_capacity(1 << 20, file);
+        let mut reader = open_text(path)?;
         let mut head = Vec::new();
         loop {
             head.clear();
@@ -61,9 +152,12 @@ impl NdjsonReader {
                 path.display()
             )));
         }
+        // Start again from the top (a gzip stream cannot seek back).
         let offset = if bom { BOM.len() as u64 } else { 0 };
+        let mut reader = open_text(path)?;
+        let mut skip = vec![0u8; offset as usize];
         reader
-            .seek(SeekFrom::Start(offset))
+            .read_exact(&mut skip)
             .map_err(|e| KilnError::io(path, e))?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -136,6 +230,12 @@ pub struct LineAccess {
 
 impl LineAccess {
     pub fn open(path: &Path) -> Result<Self> {
+        if is_gz(path) {
+            return Err(KilnError::Usage(format!(
+                "{}: read by offset, which a gzip file does not allow; decompress it first",
+                path.display()
+            )));
+        }
         let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -187,6 +287,31 @@ mod tests {
         assert_eq!(lines[1].offset, 12);
         assert_eq!(lines[1].len, 10);
         assert_eq!(lines[1].number, 3);
+    }
+
+    #[test]
+    fn gzip_is_read_through_every_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.ndjson.gz");
+        let mut bytes = Vec::new();
+        for part in ["\u{feff}{\"id\":\"a\"}\n\n", "{\"id\":\"b\"}\n"] {
+            let mut out = Output::create(&dir.path().join("part"), true).unwrap();
+            out.write_all(part.as_bytes()).unwrap();
+            out.finish().unwrap();
+            bytes.extend(std::fs::read(dir.path().join("part")).unwrap());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let texts: Vec<String> = NdjsonReader::open(&path)
+            .unwrap()
+            .map(|l| l.unwrap().text)
+            .collect();
+        assert_eq!(texts, ["{\"id\":\"a\"}", "{\"id\":\"b\"}"]);
+        assert!(LineAccess::open(&path).is_err());
+        assert!(is_gz(&path) && !is_gz(Path::new("a.ndjson")));
+        assert_eq!(
+            with_suffix(&path, ".tmp"),
+            dir.path().join("a.ndjson.gz.tmp")
+        );
     }
 
     #[test]

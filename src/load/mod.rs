@@ -3,6 +3,12 @@
 //! precise conflict list on 412 or 409. The first failed bundle aborts;
 //! committed bundles stay committed, and because every entry is a PUT by
 //! id with a version check, re-running is safe.
+//!
+//! `--concurrency N` posts bundles from N threads. A resource id is in one
+//! bundle only (the input may not repeat one), so no two bundles in flight
+//! write the same resource, and a bundle starts only once every earlier
+//! bundle holding a resource it references is committed, so parents still
+//! land first on a server that checks references.
 
 pub mod bundle;
 pub mod capability;
@@ -10,6 +16,8 @@ pub mod order;
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -18,7 +26,7 @@ use crate::cli::LoadArgs;
 use crate::error::{KilnError, Result};
 use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::ndjson::NdjsonReader;
-use crate::load::bundle::{plan, Bundle};
+use crate::load::bundle::{dependencies, plan, Bundle};
 use crate::load::capability::check_update_create;
 use crate::load::order::order_parents_first;
 
@@ -112,9 +120,112 @@ fn probe_conflicts(client: &FhirClient, base: &str, bundle: &Bundle) -> Vec<Stri
     out
 }
 
+/// Posts one bundle; the error says what was and was not written.
+fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> Result<()> {
+    let body = b.to_json().to_string().into_bytes();
+    match client.post_json(base, body) {
+        Ok(_) => Ok(()),
+        Err(FetchError::Status {
+            status: status @ (409 | 412),
+            body,
+        }) => {
+            let conflicts = probe_conflicts(client, base, b);
+            let detail = if conflicts.is_empty() {
+                format!("server response: {body}")
+            } else {
+                format!(
+                    "{} conflict(s):\n  {}",
+                    conflicts.len(),
+                    conflicts.join("\n  ")
+                )
+            };
+            Err(KilnError::Environment(format!(
+                "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
+                 These resources changed on the server after the snapshot was taken: \
+                 run extract, re-apply the edit, and diff again."
+            )))
+        }
+        Err(e) => Err(KilnError::Environment(format!(
+            "bundle {n}/{count} failed: {e}; bundles committed before it stay committed, re-running is safe"
+        ))),
+    }
+}
+
+/// Posts every bundle, `concurrency` at a time. Workers take bundles in
+/// order; each waits until the earlier bundles it references are
+/// committed. The first failure stops new bundles from starting; those
+/// already in flight finish, and the error is returned.
+fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: usize) -> Result<()> {
+    let count = bundles.len();
+    let deps = dependencies(bundles);
+    let next = AtomicUsize::new(0);
+    // Which bundles are committed, and whether to stop.
+    let state = (Mutex::new((vec![false; count], false)), Condvar::new());
+    let (tx, rx) = mpsc::channel::<(usize, Result<()>)>();
+    let mut failure: Option<KilnError> = None;
+    std::thread::scope(|s| {
+        for _ in 0..concurrency.clamp(1, count.max(1)) {
+            let tx = tx.clone();
+            let (next, state, deps) = (&next, &state, &deps);
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= count {
+                    break;
+                }
+                {
+                    let (lock, changed) = state;
+                    let mut st = lock.lock().unwrap();
+                    while !st.1 && deps[i].iter().any(|&j| !st.0[j]) {
+                        st = changed.wait(st).unwrap();
+                    }
+                    if st.1 {
+                        break;
+                    }
+                }
+                let r = post(client, base, &bundles[i], i + 1, count);
+                // Recorded before the next bundle is taken, so one worker
+                // stops right after a failure, as a sequential load does.
+                {
+                    let mut st = state.0.lock().unwrap();
+                    match r {
+                        Ok(()) => st.0[i] = true,
+                        Err(_) => st.1 = true,
+                    }
+                }
+                state.1.notify_all();
+                if tx.send((i, r)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        for (i, r) in rx.iter() {
+            match r {
+                Ok(()) => eprintln!(
+                    "bundle {}/{count} committed ({} resources)",
+                    i + 1,
+                    bundles[i].entries.len()
+                ),
+                Err(e) => {
+                    if failure.is_none() {
+                        failure = Some(e);
+                    }
+                }
+            }
+        }
+    });
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 pub fn run_load(args: &LoadArgs) -> Result<()> {
     if args.batch_size == 0 {
         return Err(KilnError::Usage("--batch-size must be at least 1".into()));
+    }
+    if args.concurrency == 0 {
+        return Err(KilnError::Usage("--concurrency must be at least 1".into()));
     }
     if !args.input.is_file() {
         return Err(KilnError::Usage(format!(
@@ -177,41 +288,7 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
     }
 
     let count = bundles.len();
-    for (i, b) in bundles.iter().enumerate() {
-        let n = i + 1;
-        let body = b.to_json().to_string().into_bytes();
-        match client.post_json(&base, body) {
-            Ok(_) => eprintln!(
-                "bundle {n}/{count} committed ({} resources)",
-                b.entries.len()
-            ),
-            Err(FetchError::Status {
-                status: status @ (409 | 412),
-                body,
-            }) => {
-                let conflicts = probe_conflicts(&client, &base, b);
-                let detail = if conflicts.is_empty() {
-                    format!("server response: {body}")
-                } else {
-                    format!(
-                        "{} conflict(s):\n  {}",
-                        conflicts.len(),
-                        conflicts.join("\n  ")
-                    )
-                };
-                return Err(KilnError::Environment(format!(
-                    "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
-                     These resources changed on the server after the snapshot was taken: \
-                     run extract, re-apply the edit, and diff again."
-                )));
-            }
-            Err(e) => {
-                return Err(KilnError::Environment(format!(
-                    "bundle {n}/{count} failed: {e}; bundles before it were committed, re-running is safe"
-                )))
-            }
-        }
-    }
+    post_all(&client, &base, &bundles, args.concurrency)?;
     println!("Loaded {total} resources in {count} bundle(s) to {base}");
     Ok(())
 }

@@ -87,9 +87,34 @@ pub struct Options<'a> {
     pub prefix: &'a str,
     pub country_code: Option<&'a str>,
     pub facility_level: u32,
-    /// Org unit uid → its groups in the requested group sets, as
-    /// (group set uid, group uid, group name).
-    pub groups: HashMap<String, Vec<(String, String, String)>>,
+    /// Org unit uid → the groups added to its type.
+    pub groups: HashMap<String, Vec<GroupType>>,
+}
+
+/// An org unit group on a Location's type: coded under each group set it
+/// is given for (`…/dimension/<set uid>`, the system a `--breakdown` by the
+/// set uses), or, for a group in no set, under `…/org-unit-group`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupType {
+    pub group: String,
+    pub name: String,
+    pub sets: Vec<String>,
+}
+
+impl GroupType {
+    fn concept(&self, instance: &Instance) -> Value {
+        let coding: Vec<Value> = if self.sets.is_empty() {
+            vec![
+                json!({"system": instance.group_system("org-unit-group"), "code": self.group, "display": self.name}),
+            ]
+        } else {
+            self.sets
+                .iter()
+                .map(|set| json!({"system": instance.dimension_system(Some(set)), "code": self.group, "display": self.name}))
+                .collect()
+        };
+        json!({"coding": coding, "text": self.name})
+    }
 }
 
 pub fn location_id(prefix: &str, uid: &str) -> String {
@@ -205,9 +230,7 @@ pub fn resources(
         .get(&unit.id)
         .into_iter()
         .flatten()
-        .map(|(set, code, name)| {
-            json!({"coding": [{"system": opts.instance.dimension_system(Some(set)), "code": code, "display": name}], "text": name})
-        })
+        .map(|g| g.concept(opts.instance))
         .collect();
     let mut types = vec![json!({"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]})];
     types.extend(group_types.iter().cloned());
@@ -333,6 +356,76 @@ pub fn build(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Valu
     out
 }
 
+const GROUP_FIELDS: &str = "id,name,groupSets[id],organisationUnits[id]";
+
+/// `--org-unit-group` and `--all-org-unit-groups`: each group's members get
+/// it in their type, unless a `--group-set` already gave it to them.
+/// Returns how many groups were read.
+fn add_org_unit_groups(
+    api: &Dhis2,
+    args: &Dhis2LocationsArgs,
+    groups: &mut HashMap<String, Vec<GroupType>>,
+) -> Result<usize> {
+    let list = if args.all_org_unit_groups {
+        let mut all = api.paged(
+            "organisationUnitGroups.json",
+            "organisationUnitGroups",
+            &[("fields", GROUP_FIELDS.into())],
+        )?;
+        all.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        all
+    } else {
+        let mut list = Vec::new();
+        for uid in &args.org_unit_groups {
+            match api.try_get(
+                &format!("organisationUnitGroups/{uid}.json"),
+                &[("fields", GROUP_FIELDS.into())],
+            )? {
+                Ok(v) => list.push(v),
+                Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
+                    return Err(KilnError::Usage(format!(
+                        "DHIS2 has no org unit group {uid}"
+                    )))
+                }
+                Err(e) => return Err(api.error("organisationUnitGroups", e)),
+            }
+        }
+        list
+    };
+    let ids = |v: &Value, key: &str| -> Vec<String> {
+        let mut ids: Vec<String> = v
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        ids.sort();
+        ids
+    };
+    for g in &list {
+        let (Some(gid), Some(name)) = (
+            g.get("id").and_then(Value::as_str),
+            g.get("name").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let group = GroupType {
+            group: gid.to_string(),
+            name: name.to_string(),
+            sets: ids(g, "groupSets"),
+        };
+        for ou in ids(g, "organisationUnits") {
+            let mine = groups.entry(ou).or_default();
+            if !mine.iter().any(|t| t.group == group.group) {
+                mine.push(group.clone());
+            }
+        }
+    }
+    Ok(list.len())
+}
+
 pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
     check_out(&args.out)?;
     let instance = Instance::new(&args.conn.instance)?;
@@ -388,7 +481,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
     let deepest = units.iter().map(|u| u.level).max().unwrap_or(1);
     let facility_level = args.facility_level.unwrap_or(deepest);
     fill_missing_boundaries(&mut units, facility_level, &mut report);
-    let mut groups: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<GroupType>> = HashMap::new();
     for set in &args.group_sets {
         let v = match api.try_get(
             &format!("organisationUnitGroupSets/{set}.json"),
@@ -424,14 +517,18 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
                 .flatten()
             {
                 if let Some(ou) = ou.get("id").and_then(Value::as_str) {
-                    groups.entry(ou.to_string()).or_default().push((
-                        set.clone(),
-                        gid.to_string(),
-                        gname.to_string(),
-                    ));
+                    groups.entry(ou.to_string()).or_default().push(GroupType {
+                        group: gid.to_string(),
+                        name: gname.to_string(),
+                        sets: vec![set.clone()],
+                    });
                 }
             }
         }
+    }
+    let n_groups = add_org_unit_groups(&api, args, &mut groups)?;
+    if n_groups > 0 {
+        eprintln!("{n_groups} org unit groups");
     }
     let opts = Options {
         instance: &instance,
@@ -499,14 +596,24 @@ mod tests {
             prefix: "sle",
             country_code: Some("SLE"),
             facility_level: 3,
-            groups: HashMap::from([(
-                "f".to_string(),
-                vec![(
-                    "J5jldMd8OHv".to_string(),
-                    "uYxK4wmcPqA".to_string(),
-                    "CHP".to_string(),
-                )],
-            )]),
+            groups: HashMap::from([
+                (
+                    "f".to_string(),
+                    vec![GroupType {
+                        group: "uYxK4wmcPqA".to_string(),
+                        name: "CHP".to_string(),
+                        sets: vec!["J5jldMd8OHv".to_string()],
+                    }],
+                ),
+                (
+                    "d".to_string(),
+                    vec![GroupType {
+                        group: "hSgatV6qHFI".to_string(),
+                        name: "Districts".to_string(),
+                        sets: vec![],
+                    }],
+                ),
+            ]),
         }
     }
 
@@ -574,6 +681,13 @@ mod tests {
             .unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&decoded).unwrap(), poly);
         assert_eq!(district["identifier"].as_array().unwrap().len(), 2);
+        // A group in no set is coded under the org-unit-group system.
+        assert_eq!(
+            district["type"][1],
+            json!({"coding": [{"system": instance.group_system("org-unit-group"),
+                               "code": "hSgatV6qHFI", "display": "Districts"}],
+                   "text": "Districts"})
+        );
 
         let org = &out[2];
         assert_eq!(org["resourceType"], "Organization");

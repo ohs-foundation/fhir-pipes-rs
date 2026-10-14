@@ -60,6 +60,106 @@ impl ServerInfo {
     }
 }
 
+/// Seconds since 1970 of a DHIS2 timestamp (`2026-10-12T02:07:00.052`, or
+/// a date alone), read as UTC: on a server in another time zone it is off
+/// by those hours, which does not matter for an age in days.
+pub fn epoch_seconds(ts: &str) -> Option<i64> {
+    let b = ts.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let s = ts.get(r)?;
+        s.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| s.parse().ok())?
+    };
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let (hh, mm, ss) = if b.len() >= 19 && b[10] == b'T' {
+        (num(11..13)?, num(14..16)?, num(17..19)?)
+    } else {
+        (0, 0, 0)
+    };
+    // Days from 1970-01-01 to y-m-d in the proleptic Gregorian calendar
+    // (Howard Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// `--max-analytics-age`: `7d`, `36h`, `2w`.
+pub fn parse_age(s: &str) -> std::result::Result<Duration, String> {
+    let s = s.trim();
+    let (n, unit) = s.split_at(s.len().saturating_sub(1));
+    let secs = match unit {
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 7 * 86_400,
+        _ => {
+            return Err(format!(
+                "{s:?}: expected a number of hours, days or weeks, e.g. 36h, 7d, 2w"
+            ))
+        }
+    };
+    match n.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(Duration::from_secs(n * secs)),
+        _ => Err(format!(
+            "{s:?}: expected a whole number before {unit}, e.g. 7{unit}"
+        )),
+    }
+}
+
+/// `28 days`, `36 hours`.
+pub fn age_text(age: Duration) -> String {
+    let h = age.as_secs() / 3600;
+    if h >= 48 {
+        format!("{} days", h / 24)
+    } else {
+        format!("{h} hours")
+    }
+}
+
+/// Values are only as fresh as DHIS2's last analytics build. Over `max`,
+/// the run is refused; with no `max`, a build over a week old is only
+/// warned about (the returned line). `now` is seconds since 1970.
+pub fn check_analytics_age(
+    info: &ServerInfo,
+    max: Option<Duration>,
+    now: i64,
+) -> Result<Option<String>> {
+    const WARN_AFTER: Duration = Duration::from_secs(7 * 86_400);
+    let built = info.last_analytics.as_deref();
+    let Some(at) = built.and_then(epoch_seconds) else {
+        return match max {
+            Some(_) => Err(KilnError::Usage(
+                "--max-analytics-age: DHIS2 does not say when its analytics tables were last built, so their age cannot be checked".into(),
+            )),
+            None => Ok(None),
+        };
+    };
+    let built = built.unwrap_or_default();
+    let age = Duration::from_secs((now - at).max(0) as u64);
+    match max {
+        Some(max) if age > max => Err(KilnError::Usage(format!(
+            "DHIS2 analytics tables were last built {built}, {} ago, older than --max-analytics-age {}; run analytics in DHIS2 (Data Administration → Analytics Tables) or allow an older build",
+            age_text(age),
+            age_text(max)
+        ))),
+        None if age > WARN_AFTER => Ok(Some(format!(
+            "warning: DHIS2 analytics tables were last built {} ago; values are as of {built} (--max-analytics-age refuses an old build)",
+            age_text(age)
+        ))),
+        _ => Ok(None),
+    }
+}
+
 /// `https://x/dhis/`, `https://x/dhis/api` → `https://x/dhis/api`.
 pub fn api_base(url: &str) -> Result<String> {
     let trimmed = url.trim().trim_end_matches('/');
@@ -218,6 +318,53 @@ mod tests {
             local.timestamp("2026-10-12T02:07:00.052").as_deref(),
             Some("2026-10-12")
         );
+    }
+
+    #[test]
+    fn timestamps_count_seconds_from_1970() {
+        assert_eq!(epoch_seconds("1970-01-01"), Some(0));
+        assert_eq!(epoch_seconds("2000-03-01T00:00:00"), Some(951_868_800));
+        assert_eq!(
+            epoch_seconds("2026-10-12T02:07:00.052"),
+            Some(1_791_770_820)
+        );
+        assert_eq!(epoch_seconds("nonsense"), None);
+        assert_eq!(epoch_seconds("2026-13-01"), None);
+    }
+
+    #[test]
+    fn ages_are_hours_days_or_weeks() {
+        assert_eq!(parse_age("36h"), Ok(Duration::from_secs(36 * 3600)));
+        assert_eq!(parse_age("7d"), Ok(Duration::from_secs(7 * 86_400)));
+        assert_eq!(parse_age("2w"), Ok(Duration::from_secs(14 * 86_400)));
+        for bad in ["7", "d", "0d", "7m", "-1d", "1.5d"] {
+            assert!(parse_age(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_old_analytics_build_is_warned_about_or_refused() {
+        let info = ServerInfo {
+            last_analytics: Some("2026-09-15T03:00:00.000".into()),
+            ..Default::default()
+        };
+        let now = epoch_seconds("2026-10-13T12:00:00").unwrap();
+        let warning = check_analytics_age(&info, None, now).unwrap().unwrap();
+        assert!(warning.contains("28 days ago"), "{warning}");
+        let e = check_analytics_age(&info, parse_age("7d").ok(), now).unwrap_err();
+        assert!(
+            e.to_string().contains("last built 2026-09-15T03:00:00.000, 28 days ago, older than --max-analytics-age 7 days"),
+            "{e}"
+        );
+        assert!(check_analytics_age(&info, parse_age("5w").ok(), now)
+            .unwrap()
+            .is_none());
+        let fresh = epoch_seconds("2026-09-16T03:00:00").unwrap();
+        assert!(check_analytics_age(&info, None, fresh).unwrap().is_none());
+        assert!(check_analytics_age(&ServerInfo::default(), None, now)
+            .unwrap()
+            .is_none());
+        assert!(check_analytics_age(&ServerInfo::default(), parse_age("7d").ok(), now).is_err());
     }
 
     #[test]

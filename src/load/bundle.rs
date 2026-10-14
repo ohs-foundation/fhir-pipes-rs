@@ -1,6 +1,8 @@
 //! Transaction bundles of `PUT <Type>/<id>`, `ifMatch` on every entry that
 //! has a version to check.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 pub struct Entry {
@@ -49,6 +51,60 @@ impl Bundle {
     }
 }
 
+/// Every `reference` string in a resource, as `Type/id` (the last two
+/// segments, after any `/_history/<v>` is cut off).
+fn references(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(o) => {
+            for (k, x) in o {
+                match (k.as_str(), x) {
+                    ("reference", Value::String(r)) => {
+                        let r = r.split("/_history/").next().unwrap_or(r);
+                        let mut parts = r.rsplit('/');
+                        if let (Some(id), Some(t)) = (parts.next(), parts.next()) {
+                            out.push(format!("{t}/{id}"));
+                        }
+                    }
+                    _ => references(x, out),
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| references(x, out)),
+        _ => {}
+    }
+}
+
+/// For each bundle, the earlier bundles holding a resource it references
+/// (a `partOf` parent, a `managingOrganization`, …). Loaded one at a time
+/// those are always committed first; in parallel, a bundle waits for them.
+/// Later bundles are never waited for, so there is no cycle to wait on.
+pub fn dependencies(bundles: &[Bundle]) -> Vec<Vec<usize>> {
+    let mut home: HashMap<String, usize> = HashMap::new();
+    for (i, b) in bundles.iter().enumerate() {
+        for e in &b.entries {
+            home.insert(format!("{}/{}", e.resource_type, e.id), i);
+        }
+    }
+    bundles
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let mut refs = Vec::new();
+            for e in &b.entries {
+                references(&e.resource, &mut refs);
+            }
+            let mut deps: Vec<usize> = refs
+                .iter()
+                .filter_map(|r| home.get(r).copied())
+                .filter(|&j| j < i)
+                .collect();
+            deps.sort_unstable();
+            deps.dedup();
+            deps
+        })
+        .collect()
+}
+
 /// Chunk already-ordered resources into bundles of `batch_size`. Every
 /// resource has been validated to carry string `resourceType` and `id`.
 pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
@@ -82,6 +138,33 @@ pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_bundle_depends_on_earlier_bundles_it_references() {
+        let resources = vec![
+            json!({"resourceType": "Organization", "id": "o"}),
+            json!({"resourceType": "Location", "id": "a"}),
+            json!({"resourceType": "Location", "id": "b", "partOf": {"reference": "Location/a"}}),
+            json!({"resourceType": "Location", "id": "c", "partOf": {"reference": "https://x/fhir/Location/b/_history/2"},
+                   "managingOrganization": {"reference": "Organization/o"}}),
+            // A reference to a later bundle or outside the input is not waited for.
+            json!({"resourceType": "Location", "id": "d", "partOf": {"reference": "Location/zzz"}}),
+        ];
+        let bundles = plan(resources, 1);
+        assert_eq!(
+            dependencies(&bundles),
+            [vec![], vec![], vec![1], vec![0, 2], vec![]]
+        );
+        let two = plan(
+            vec![
+                json!({"resourceType": "Location", "id": "a"}),
+                json!({"resourceType": "Location", "id": "b", "partOf": {"reference": "Location/a"}}),
+            ],
+            2,
+        );
+        // Within one bundle the transaction itself takes care of it.
+        assert_eq!(dependencies(&two), [Vec::<usize>::new()]);
+    }
 
     #[test]
     fn if_match_is_a_weak_etag() {
