@@ -39,12 +39,25 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
         ));
     }
 
-    let mut index = build_index(&ndjson, args.country.as_deref())?;
-    eprintln!(
-        "indexed {} resources, {} with geometry and hierarchy",
-        index.read,
-        index.order.len()
-    );
+    let mut index = build_index(&ndjson, args.country.as_deref(), args.keep_without_geometry)?;
+    if args.keep_without_geometry {
+        let without = index
+            .order
+            .iter()
+            .filter(|&&i| index.records[i as usize].geometry.is_none())
+            .count();
+        eprintln!(
+            "indexed {} resources, {} with a place in the hierarchy ({without} of them without geometry)",
+            index.read,
+            index.order.len()
+        );
+    } else {
+        eprintln!(
+            "indexed {} resources, {} with geometry and hierarchy",
+            index.read,
+            index.order.len()
+        );
+    }
 
     // A stale report must never describe a dataset it does not match:
     // remove it before writing, rewrite it only on success.
@@ -66,13 +79,25 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
         organizations,
     )?;
 
-    write_report(&report_path, &index.report)?;
+    let without_geometry: usize = written.iter().map(|w| w.rows_without_geometry).sum();
+    let mut report_json = index.report.to_json();
+    if args.keep_without_geometry {
+        // Present only with the flag, so the report says these rows were
+        // written, not dropped, next to their no_geometry issues.
+        report_json["written_without_geometry"] = without_geometry.into();
+    }
+    write_json(&report_path, &report_json)?;
     let rows: usize = written.iter().map(|w| w.rows).sum();
     println!(
         "Wrote {rows} rows across {} partitions to {}",
         written.len(),
         args.out.display()
     );
+    if args.keep_without_geometry {
+        println!(
+            "{without_geometry} of these rows have no geometry; --keep-without-geometry wrote them with the geometry columns null"
+        );
+    }
     for w in &written {
         let rel = w.path.strip_prefix(&args.out).unwrap_or(&w.path);
         eprintln!("  {} ({} rows)", rel.display(), w.rows);
@@ -82,7 +107,11 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
 }
 
 pub fn write_report(path: &Path, report: &Report) -> Result<()> {
-    let mut text = serde_json::to_string_pretty(&report.to_json())?;
+    write_json(path, &report.to_json())
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
     std::fs::write(path, text).map_err(|e| KilnError::io(path, e))
 }

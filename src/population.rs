@@ -232,7 +232,7 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("{:04}-01-01", args.year));
 
-    let index = build_index(&ndjson, None)?;
+    let index = build_index(&ndjson, None, false)?;
     let mut report = index.report;
     if !KNOWN_SOURCE_CODES.contains(&args.source.as_str()) {
         report.add(

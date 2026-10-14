@@ -644,3 +644,171 @@ fn a_position_edit_recomputes_the_spatial_index_cells() {
         "lon > 0, lat > 0 is quadrant 1 at zoom 1: {cell}"
     );
 }
+
+/// WKB for a point, and for a polygon with one ring.
+fn wkb_point(x: f64, y: f64) -> Vec<u8> {
+    let mut b = vec![1u8];
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&x.to_le_bytes());
+    b.extend_from_slice(&y.to_le_bytes());
+    b
+}
+
+fn wkb_polygon(ring: &[(f64, f64)]) -> Vec<u8> {
+    let mut b = vec![1u8];
+    b.extend_from_slice(&3u32.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+    for (x, y) in ring {
+        b.extend_from_slice(&x.to_le_bytes());
+        b.extend_from_slice(&y.to_le_bytes());
+    }
+    b
+}
+
+/// Copy `from` to `to`, replacing the geometry of the rows named in `set`,
+/// as a GIS edit of the transform output would.
+fn set_geometry(from: &Path, to: &Path, set: &[(&str, Vec<u8>)]) {
+    use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(from).unwrap()).unwrap();
+    let kv = builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .cloned();
+    let schema = builder.schema().clone();
+    let reader = builder.build().unwrap();
+    let mut writer =
+        ArrowWriter::try_new(std::fs::File::create(to).unwrap(), schema, None).unwrap();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let ids = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone();
+        let old = batch
+            .column_by_name("geometry")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap()
+            .clone();
+        let new: BinaryArray = (0..batch.num_rows())
+            .map(|r| match set.iter().find(|(id, _)| *id == ids.value(r)) {
+                Some((_, wkb)) => Some(wkb.clone()),
+                None => (!old.is_null(r)).then(|| old.value(r).to_vec()),
+            })
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|v| v.as_deref())
+            .collect();
+        let (i, _) = batch.schema().column_with_name("geometry").unwrap();
+        let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+        columns[i] = Arc::new(new);
+        writer
+            .write(&RecordBatch::try_new(batch.schema(), columns).unwrap())
+            .unwrap();
+    }
+    for kv in kv.unwrap_or_default() {
+        writer.append_key_value_metadata(kv);
+    }
+    writer.close().unwrap();
+}
+
+#[test]
+fn geometry_added_to_a_row_written_without_geometry_is_a_geometry_addition() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot(dir.path());
+    // Two Locations with no position and no boundary.
+    let ward = json!({
+        "resourceType": "Location", "id": "ward", "meta": {"versionId": "1"},
+        "name": "Ward", "status": "active",
+        "type": [{"coding": [{"code": "admin-unit"}]}],
+        "partOf": {"reference": "Location/ng"}
+    });
+    let site = json!({
+        "resourceType": "Location", "id": "site", "meta": {"versionId": "1"},
+        "name": "Site", "status": "active",
+        "type": [{"coding": [{"code": "admin-unit"}]}],
+        "partOf": {"reference": "Location/ng"}
+    });
+    std::fs::write(
+        snap.join("locations.ndjson"),
+        format!("{}\n{}\n{ward}\n{site}\n", ng(), clinic()),
+    )
+    .unwrap();
+    let dataset = dir.path().join("out");
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["transform", "--keep-without-geometry", "--snapshot"])
+        .arg(&snap)
+        .arg("--out")
+        .arg(&dataset)
+        .assert()
+        .success();
+    let null_file =
+        dataset.join("locations/country=NG/geom_type=null/type=admin-unit/part-0.parquet");
+    assert!(null_file.exists());
+
+    // Unedited, every file (the null one included) makes no change.
+    let mut files = Vec::new();
+    parquet_files(&dataset.join("locations"), &mut files);
+    assert_eq!(files.len(), 3, "{files:?}");
+    for (i, file) in files.iter().enumerate() {
+        let out = dir.path().join(format!("unedited-{i}.ndjson"));
+        let a = diff(&snap, file, &out).success();
+        assert!(
+            stdout(&a).contains("0 changed"),
+            "{}: {}",
+            file.display(),
+            stdout(&a)
+        );
+        assert_eq!(report(&out)["counts"], json!({}), "{}", file.display());
+    }
+
+    // A point drawn on one, a polygon on the other.
+    let edited = dir.path().join("edited.parquet");
+    set_geometry(
+        &null_file,
+        &edited,
+        &[
+            ("ward", wkb_point(4.5, 7.5)),
+            (
+                "site",
+                wkb_polygon(&[(4.0, 7.0), (5.0, 7.0), (5.0, 8.0), (4.0, 8.0), (4.0, 7.0)]),
+            ),
+        ],
+    );
+    let out = dir.path().join("changes.ndjson");
+    let a = diff(&snap, &edited, &out).success();
+    assert!(
+        stdout(&a).contains("2 changed, 0 unchanged, 0 new"),
+        "{}",
+        stdout(&a)
+    );
+    assert_eq!(report(&out)["counts"], json!({}));
+    let got = changes(&out);
+    let ward = got.iter().find(|r| r["id"] == "ward").unwrap();
+    assert_eq!(ward["position"], json!({"longitude": 4.5, "latitude": 7.5}));
+    assert_eq!(ward["meta"]["versionId"], "1");
+    let site = got.iter().find(|r| r["id"] == "site").unwrap();
+    assert!(site.get("position").is_none());
+    let boundary = site["extension"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["url"] == BOUNDARY_EXT)
+        .expect("boundary added");
+    assert_eq!(
+        decode(boundary["valueAttachment"]["data"].as_str().unwrap()),
+        json!({"type": "Polygon", "coordinates": [[[4.0, 7.0], [5.0, 7.0], [5.0, 8.0], [4.0, 8.0], [4.0, 7.0]]]})
+    );
+}

@@ -181,6 +181,7 @@ kiln extract   --server URL [AUTH] --snapshot DIR
                [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
                [--no-cache] [--refresh] [--cache-dir DIR]
 kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
+               [--keep-without-geometry]
 kiln run       <extract flags> <transform flags>
 kiln inspect   --out DIR
 kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
@@ -415,14 +416,59 @@ kilobytes, including over HTTP with range requests.
 The geometry column uses the native Parquet `GEOMETRY` logical type, with the
 GeoParquet 1.1 file metadata and a `bbox` column alongside for readers that
 predate the logical type. GDAL 3.12+, QGIS, DuckDB 1.5+, pyarrow 21+ and
-GeoPandas all read it; older readers fall back to the metadata.
+GeoPandas all read it; older readers fall back to the metadata. The file
+metadata's bounding box covers only the rows that have a geometry; a file
+whose rows all lack one (only possible with `--keep-without-geometry`) has
+no bounding box and an empty `geometry_types` list.
+
+### transform options
+
+| Option | Default | What it does |
+|---|---|---|
+| `--snapshot DIR` | required | The snapshot to read (`locations.ndjson`, and `organizations.ndjson` when present). |
+| `--out DIR` | required | Where to write; the dataset goes to `DIR/locations` and the report to `DIR/_report.json`. |
+| `--country CC` | from the level 0 admin unit | Puts every row under this country code instead of the one derived from the hierarchy. |
+| `--partition-by KEYS` | `country,geom_type,type` | Comma-separated partition keys: any of `country`, `geom_type`, `tier`, `type`. |
+| `--row-group-size N` | 20000 | Rows per Parquet row group. |
+| `--keep-without-geometry` | off | Also writes Locations that have no point and no usable boundary, with the geometry columns null. Off, they are reported as `no_geometry` and left out. See [Columns](#columns). |
+
+`kiln run` takes these options too (its `--snapshot` comes from the extract options).
 
 ### Columns
 
-One row per Location that has a usable geometry and a resolved place in the
-hierarchy. A Location with no geometry, a boundary that did not parse, an
-empty or unsupported geometry, a `partOf` chain that cycles or exceeds twelve
-levels, or an id that repeats an earlier one is reported and produces no row.
+By default, one row per Location that has a usable geometry and a resolved
+place in the hierarchy. A Location with no geometry, a boundary that did not
+parse, an empty or unsupported geometry, a `partOf` chain that cycles or
+exceeds twelve levels, or an id that repeats an earlier one is reported and
+produces no row.
+
+With `--keep-without-geometry`, every Location with a resolved place in the
+hierarchy gets a row, whether or not it has geometry. This is for a table of
+every place in the registry when most of them have no coordinates yet, such
+as a DHIS2 org unit tree where only a few facilities carry GPS points. A
+Location with no `position` and no usable boundary (none at all, a URL
+boundary not yet fetched, or one that did not parse, was empty or was an
+unsupported type) is written with `geometry`, `geom_type`, `lon`, `lat`,
+`bbox`, `quadkey` and `quadkey_level` null. Every other column is filled as
+usual: id, name, type, identifiers, pcode, the paired Organization, and the
+whole derived hierarchy. Its issues still appear in the report, with
+"written without geometry" added to their detail. A cycle, a chain deeper
+than twelve levels, a repeated id or a line that does not parse still
+produces no row. These rows sort after the rows with geometry in their file,
+by country then id, and they count towards `duplicate_pcode`. With the
+default partitioning they land in `geom_type=null/` directories, which
+DuckDB reads as a null `geom_type`.
+
+To add geometry later, edit the row: draw a point or a polygon on it in QGIS,
+or set its geometry in DuckDB, then run `kiln diff` and `kiln load` (see
+[Round trip](#round-trip-diff-and-load)). A point becomes the Location's
+`position`; a polygon becomes its boundary. The next transform puts the row
+in its point or polygon partition.
+
+Without the flag, `geom_type`, `lon`, `lat` and `bbox` are required columns.
+With it, those four are nullable in every file of the dataset, including
+files whose rows all have geometry. `geometry` is nullable in both.
+
 Columns are named after the FHIR path they come from
 wherever one exists, so you can guess the column from the resource and the
 resource from the column. They fall into four groups, and the group tells you
@@ -481,9 +527,9 @@ geometry, and the position is kept in its own columns.
 | `admin0_name` … `admin4_name`, `admin0_code` … `admin4_code` | nearest admin ancestor at each level; an admin unit deeper than level 4 is reported as `admin_level_beyond_columns` and does not appear in these columns |
 | `overlays_admin_unit_ids` | admin units this operational area overlaps, when it is not in the tree |
 | `country` | ISO code, from the level 0 ancestor |
-| `geom_type` | `polygon` or `point` |
-| `lon`, `lat` | the FHIR position when the resource has one, otherwise a point inside the geometry; a position that falls outside its own boundary is reported as `position_outside_boundary` and is written as given |
-| `bbox` | struct of `xmin, ymin, xmax, ymax` |
+| `geom_type` | `polygon` or `point`; null for a row without geometry |
+| `lon`, `lat` | the FHIR position when the resource has one, otherwise a point inside the geometry; a position that falls outside its own boundary is reported as `position_outside_boundary` and is written as given. Null for a row without geometry |
+| `bbox` | struct of `xmin, ymin, xmax, ymax`; null for a row without geometry |
 
 **Lossless fallback.**
 
@@ -510,7 +556,12 @@ how they find out.
 The file has three keys. `counts` maps each issue kind to an exact count.
 `issues` lists individual issues as `{kind, location_id, detail}`, capped at
 1,000 per kind so a systematic fault cannot produce a report larger than the
-dataset; `truncated` maps any capped kind to the number omitted. For a few
+dataset; `truncated` maps any capped kind to the number omitted. With
+`--keep-without-geometry` there is a fourth, `written_without_geometry`: the
+number of rows written with null geometry. Their `no_geometry` issues, and
+any boundary issues on the same rows, are still counted, so with the flag
+read those counts as "rows without geometry", not "rows dropped". The printed summary says the same on the line after
+the row count. For a few
 kinds `location_id` is not a single id: `duplicate_pcode` carries the
 comma-joined ids, `small_partition` and the `partition_value_*` kinds carry
 the partition path or `key=value`, and a resource with no id is `<unknown>`.
@@ -572,7 +623,8 @@ All of kiln's logic runs on this index:
 4. **Sort order.** A Hilbert curve key from the centre of each bounding box
    over a fixed world extent, so keys are the same across snapshots and are
    not disturbed by one far-flung outlier. Sort the index by partition, then
-   by key.
+   by key. Rows kept by `--keep-without-geometry` have no box; they sort
+   after all the others, by country then id.
 
 ### Pass two: write
 
@@ -618,6 +670,11 @@ boundary is a registry problem, and silently fixing it would hide that from
 the people who need to know. The representative point is a `geo` interior
 point. WKB is encoded directly. There is no GEOS and no GDAL anywhere in the
 binary.
+
+A Location with neither a `position` nor a usable boundary has no geometry.
+By default it is reported and produces no row; with
+`--keep-without-geometry` it is written with the geometry columns null, so
+the dataset lists every place and geometry can be added later.
 
 ---
 
@@ -668,6 +725,10 @@ resource *should* now be:
    differs. Drawing a polygon on a point row adds a boundary. Drawing a
    point on a boundary row is reported as `geometry_kind_changed` and
    skipped, since erasing a boundary that way is not a plausible intent.
+   A null geometry makes no geometry change. A row written by
+   `transform --keep-without-geometry` has a null geometry, so it round
+   trips unchanged; draw a point on it and the Location gains a `position`,
+   draw a polygon and it gains a boundary.
    Comparison is on the WKB after rounding coordinates to seven decimals,
    so a float round trip through a GIS tool does not register as an edit,
    and coordinates are written back rounded the same way. Invalid polygons

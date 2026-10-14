@@ -339,6 +339,9 @@ pub struct TransformArgs {
     /// Comma-separated partition keys: any of country, geom_type, tier, type
     #[arg(long, default_value = DEFAULT_PARTITION_BY)]
     pub partition_by: String,
+    /// Also write Locations that have no point and no usable boundary, with the geometry columns null (by default they are reported and left out)
+    #[arg(long)]
+    pub keep_without_geometry: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -468,6 +471,9 @@ pub struct RunArgs {
     /// Comma-separated partition keys: any of country, geom_type, tier, type
     #[arg(long, default_value = DEFAULT_PARTITION_BY)]
     pub partition_by: String,
+    /// Also write Locations that have no point and no usable boundary, with the geometry columns null (by default they are reported and left out)
+    #[arg(long)]
+    pub keep_without_geometry: bool,
 }
 
 impl RunArgs {
@@ -478,6 +484,7 @@ impl RunArgs {
             country: self.country.clone(),
             row_group_size: self.row_group_size,
             partition_by: self.partition_by.clone(),
+            keep_without_geometry: self.keep_without_geometry,
         }
     }
 }

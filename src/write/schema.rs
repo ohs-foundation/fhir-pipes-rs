@@ -60,7 +60,20 @@ pub fn geometry_field() -> Field {
     Field::new(GEOMETRY_COLUMN, DataType::Binary, true).with_metadata(meta)
 }
 
+/// The schema every partition file is written with.
 pub fn output_schema() -> SchemaRef {
+    schema(false)
+}
+
+/// The schema for `kiln transform --keep-without-geometry`: the same
+/// columns, with `geom_type`, `lon`, `lat` and `bbox` nullable so a
+/// Location with no point and no boundary can have a row. `geometry` is
+/// nullable in both.
+pub fn output_schema_optional_geometry() -> SchemaRef {
+    schema(true)
+}
+
+fn schema(optional_geometry: bool) -> SchemaRef {
     let mut fields = vec![
         Field::new("id", DataType::Utf8, false),
         utf8("version_id"),
@@ -121,11 +134,15 @@ pub fn output_schema() -> SchemaRef {
         list_utf8("overlays_admin_unit_ids"),
         utf8("organization_json"),
         Field::new("country", DataType::Utf8, false),
-        Field::new("geom_type", DataType::Utf8, false),
-        Field::new("lon", DataType::Float64, false),
-        Field::new("lat", DataType::Float64, false),
+        Field::new("geom_type", DataType::Utf8, optional_geometry),
+        Field::new("lon", DataType::Float64, optional_geometry),
+        Field::new("lat", DataType::Float64, optional_geometry),
         geometry_field(),
-        Field::new(BBOX_COLUMN, DataType::Struct(bbox_fields()), false),
+        Field::new(
+            BBOX_COLUMN,
+            DataType::Struct(bbox_fields()),
+            optional_geometry,
+        ),
         Field::new("fhir_json", DataType::Utf8, false),
     ]);
     Arc::new(Schema::new(fields))
@@ -173,11 +190,14 @@ pub struct OutputRow {
     pub overlays_admin_unit_ids: Vec<String>,
     pub organization_json: Option<String>,
     pub country: String,
-    pub geom_type: String,
-    pub lon: f64,
-    pub lat: f64,
+    /// `None`, with `lon`, `lat` and `bbox`, for a row without geometry;
+    /// only the optional-geometry schema accepts that.
+    pub geom_type: Option<String>,
+    pub lon: Option<f64>,
+    pub lat: Option<f64>,
+    /// Empty for a row without geometry; written as null.
     pub wkb: Vec<u8>,
-    pub bbox: [f64; 4],
+    pub bbox: Option<[f64; 4]>,
     pub fhir_json: String,
 }
 
@@ -256,8 +276,14 @@ fn push_list(b: &mut ListBuilder<StringBuilder>, items: &[String]) {
 
 impl RowBatch {
     pub fn new() -> Self {
+        Self::with_schema(output_schema())
+    }
+
+    /// Builders for `schema`: [`output_schema`] or
+    /// [`output_schema_optional_geometry`].
+    pub fn with_schema(schema: SchemaRef) -> Self {
         Self {
-            schema: output_schema(),
+            schema,
             id: StringBuilder::new(),
             version_id: StringBuilder::new(),
             last_updated: StringBuilder::new(),
@@ -365,21 +391,36 @@ impl RowBatch {
         self.organization_json
             .append_option(r.organization_json.as_deref());
         self.country.append_value(&r.country);
-        self.geom_type.append_value(&r.geom_type);
-        self.lon.append_value(r.lon);
-        self.lat.append_value(r.lat);
+        self.geom_type.append_option(r.geom_type.as_deref());
+        self.lon.append_option(r.lon);
+        self.lat.append_option(r.lat);
         if r.wkb.is_empty() {
             self.geometry.append_null();
         } else {
             self.geometry.append_value(&r.wkb);
         }
-        for (i, v) in r.bbox.iter().enumerate() {
-            self.bbox
-                .field_builder::<Float64Builder>(i)
-                .unwrap()
-                .append_value(*v);
+        match r.bbox {
+            Some(bbox) => {
+                for (i, v) in bbox.iter().enumerate() {
+                    self.bbox
+                        .field_builder::<Float64Builder>(i)
+                        .unwrap()
+                        .append_value(*v);
+                }
+                self.bbox.append(true);
+            }
+            None => {
+                // The struct is null; its children need a slot each, masked
+                // by the struct's own null.
+                for i in 0..4 {
+                    self.bbox
+                        .field_builder::<Float64Builder>(i)
+                        .unwrap()
+                        .append_null();
+                }
+                self.bbox.append(false);
+            }
         }
-        self.bbox.append(true);
         self.fhir_json.append_value(&r.fhir_json);
         self.rows += 1;
     }
@@ -495,11 +536,11 @@ mod tests {
             path: "/ng/a".into(),
             ancestor_ids: vec!["ng".into()],
             country: "NG".into(),
-            geom_type: "point".into(),
-            lon: 1.0,
-            lat: 2.0,
+            geom_type: Some("point".into()),
+            lon: Some(1.0),
+            lat: Some(2.0),
             wkb: vec![1, 0, 0, 0, 0],
-            bbox: [1.0, 2.0, 1.0, 2.0],
+            bbox: Some([1.0, 2.0, 1.0, 2.0]),
             fhir_json: "{}".into(),
             nhfr_code: Some("05/08".into()),
             organization_identifier: vec![(Some("s".into()), Some("v".into()))],
@@ -584,35 +625,66 @@ mod tests {
     }
 
     #[test]
-    fn all_default_row_round_trips_with_null_geometry() {
+    fn a_row_without_geometry_has_null_geometry_columns() {
+        let mut batch = RowBatch::with_schema(output_schema_optional_geometry());
+        batch.push(&OutputRow {
+            id: "ghost".into(),
+            country: "NG".into(),
+            ..Default::default()
+        });
+        batch.push(&OutputRow {
+            id: "point".into(),
+            geom_type: Some("point".into()),
+            lon: Some(1.0),
+            lat: Some(2.0),
+            wkb: vec![1, 0, 0, 0, 0],
+            bbox: Some([1.0, 2.0, 1.0, 2.0]),
+            ..Default::default()
+        });
+        let rb = batch.finish().unwrap();
+        assert_eq!(rb.num_rows(), 2);
+        for name in ["geometry", "geom_type", "lon", "lat", "bbox"] {
+            let col = rb.column_by_name(name).unwrap();
+            assert!(
+                col.is_null(0),
+                "{name} is null for the row without geometry"
+            );
+            assert!(col.is_valid(1), "{name} is set for the row with geometry");
+        }
+        let country = rb.column_by_name("country").unwrap();
+        assert!(country.is_valid(0));
+    }
+
+    #[test]
+    fn the_default_schema_refuses_a_row_without_geometry() {
         let mut batch = RowBatch::new();
         batch.push(&OutputRow::default());
-        let rb = batch.finish().unwrap();
-        assert_eq!(rb.num_rows(), 1);
-        let geometry = rb
-            .column_by_name("geometry")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow_array::BinaryArray>()
-            .unwrap();
-        assert!(
-            geometry.is_null(0),
-            "an empty wkb must land as a null geometry, not a zero-length value"
-        );
-        let lon = rb
-            .column_by_name("lon")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow_array::Float64Array>()
-            .unwrap();
-        assert_eq!(lon.value(0), 0.0);
+        assert!(batch.finish().is_err());
+    }
+
+    #[test]
+    fn only_the_geometry_columns_differ_between_the_two_schemas() {
+        let required = output_schema();
+        let optional = output_schema_optional_geometry();
+        assert_eq!(required.fields().len(), optional.fields().len());
+        for (a, b) in required.fields().iter().zip(optional.fields()) {
+            assert_eq!(a.name(), b.name());
+            assert_eq!(a.data_type(), b.data_type());
+            let geometry_column = ["geom_type", "lon", "lat", "bbox"].contains(&a.name().as_str());
+            assert_eq!(
+                a.is_nullable() != b.is_nullable(),
+                geometry_column,
+                "{}",
+                a.name()
+            );
+        }
     }
 
     #[test]
     fn bbox_values_land_in_the_right_slots() {
-        let mut batch = RowBatch::new();
+        let mut batch = RowBatch::with_schema(output_schema_optional_geometry());
         let row = OutputRow {
-            bbox: [1.0, 2.0, 3.0, 4.0],
+            bbox: Some([1.0, 2.0, 3.0, 4.0]),
             ..Default::default()
         };
         batch.push(&row);
