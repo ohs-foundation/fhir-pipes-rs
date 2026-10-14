@@ -136,3 +136,59 @@ fn test_runs_the_official_suite() {
         .success()
         .stdout(contains("144/144 passed"));
 }
+
+#[test]
+fn out_that_is_the_input_file_is_refused_and_the_input_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("Patient.ndjson");
+    fs::copy(fixtures().join("raw/Patient.ndjson"), &input).unwrap();
+    let before = fs::read(&input).unwrap();
+    for output in ["ndjson", "csv"] {
+        views()
+            .arg("run")
+            .arg(fixtures().join("views/Binary-IcrPatient.json"))
+            .arg("--input")
+            .arg(&input)
+            .args(["--output", output, "--out"])
+            .arg(&input)
+            .assert()
+            .failure()
+            .stderr(contains("is the --input file"));
+        assert_eq!(fs::read(&input).unwrap(), before, "--output {output}");
+    }
+}
+
+#[test]
+fn stdin_takes_formatted_json_and_ndjson_for_ndjson_output() {
+    let view = fixtures().join("views/Binary-IcrPatient.json");
+    let formatted = "{\n  \"resourceType\": \"Patient\",\n  \"id\": \"p1\"\n}\n";
+    let bundle = "{\n  \"resourceType\": \"Bundle\",\n  \"entry\": [\n    {\"resource\": {\"resourceType\": \"Patient\", \"id\": \"p1\"}},\n    {\"resource\": {\"resourceType\": \"Patient\", \"id\": \"p2\"}}\n  ]\n}\n";
+    let array = "[\n  {\"resourceType\": \"Patient\", \"id\": \"p1\"}\n]\n";
+    for (input, ids) in [
+        (formatted, vec!["p1"]),
+        (bundle, vec!["p1", "p2"]),
+        (array, vec!["p1"]),
+    ] {
+        let a = views()
+            .arg("run")
+            .arg(&view)
+            .args(["--input", "-", "--output", "ndjson"])
+            .write_stdin(input)
+            .assert()
+            .success();
+        let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+        for id in ids {
+            assert!(out.contains(&format!(r#""id":"{id}""#)), "{input}\n{out}");
+        }
+    }
+    let ndjson = fs::read_to_string(fixtures().join("raw/Patient.ndjson")).unwrap();
+    views()
+        .arg("run")
+        .arg(&view)
+        .args(["--input", "-", "--output", "ndjson"])
+        .write_stdin(format!("\n{ndjson}"))
+        .assert()
+        .success()
+        .stdout(contains(r#""id":"p2""#))
+        .stderr(contains("2 rows"));
+}

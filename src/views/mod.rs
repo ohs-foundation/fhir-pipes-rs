@@ -316,32 +316,43 @@ fn parse_ndjson(text: &str, threads: usize) -> Result<Vec<serde_json::Value>> {
     })
 }
 
-/// Stream NDJSON input through one view, writing NDJSON rows as they are
-/// produced, without holding the input or the output in memory. Returns the
-/// number of rows written.
-async fn stream_ndjson(view: &ViewDefinition, input: &Path, sink: &mut dyn Write) -> Result<usize> {
-    use std::io::BufRead;
+/// The next non-blank line of `reader` and its 1-based number, counting from
+/// `*line_no`.
+fn next_line(reader: &mut dyn io::BufRead, line_no: &mut usize) -> Result<Option<(usize, String)>> {
+    loop {
+        let mut line = String::new();
+        let n = reader
+            .read_line(&mut line)
+            .with_context(|| format!("reading line {}", *line_no + 1))?;
+        if n == 0 {
+            return Ok(None);
+        }
+        *line_no += 1;
+        if !line.trim().is_empty() {
+            return Ok(Some((*line_no, line)));
+        }
+    }
+}
 
+/// Stream NDJSON through one view, writing NDJSON rows as they are produced,
+/// without holding the input or the output in memory. `first` is a line the
+/// caller already read from `reader`. Returns the number of rows written.
+async fn stream_ndjson(
+    view: &ViewDefinition,
+    first: Option<(usize, String)>,
+    mut reader: Box<dyn io::BufRead>,
+    mut line_no: usize,
+    sink: &mut dyn Write,
+) -> Result<usize> {
     let compiled = fhir_pipes_sof::CompiledView::compile(view)
         .await
         .context("compiling view")?;
-    let reader: Box<dyn BufRead> = if input.as_os_str() == "-" {
-        Box::new(io::BufReader::new(io::stdin()))
-    } else {
-        Box::new(io::BufReader::new(
-            fs::File::open(input).with_context(|| format!("opening {}", input.display()))?,
-        ))
-    };
-
     let names: Vec<String> = compiled.columns().iter().map(|c| c.name.clone()).collect();
     let mut total = 0;
-    for (i, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("reading line {}", i + 1))?;
-        if line.trim().is_empty() {
-            continue;
-        }
+    let mut next = first;
+    while let Some((number, line)) = next {
         let value: serde_json::Value =
-            serde_json::from_str(&line).with_context(|| format!("parsing line {}", i + 1))?;
+            serde_json::from_str(&line).with_context(|| format!("parsing line {number}"))?;
         // A Bundle or array on one line is expanded into its resources.
         let mut resources = Vec::new();
         push_resource(value, &mut resources);
@@ -358,8 +369,40 @@ async fn stream_ndjson(view: &ViewDefinition, input: &Path, sink: &mut dyn Write
                 total += 1;
             }
         }
+        next = next_line(reader.as_mut(), &mut line_no)?;
     }
     Ok(total)
+}
+
+/// Refuse an --out that is the --input file: the output is opened for
+/// writing before (or while) the input is read, which would empty it.
+fn check_out_is_not_input(input: Option<&PathBuf>, out: Option<&PathBuf>) -> Result<()> {
+    let (Some(input), Some(out)) = (input, out) else {
+        return Ok(());
+    };
+    if input.as_os_str() == "-" || !out.exists() {
+        return Ok(());
+    }
+    let same = match (input.canonicalize(), out.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if same {
+        bail!(
+            "--out {} is the --input file; writing it would empty the input",
+            out.display()
+        );
+    }
+    Ok(())
+}
+
+fn open_sink(out: Option<&PathBuf>) -> Result<Box<dyn Write>> {
+    Ok(match out {
+        Some(path) => Box::new(
+            fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
+        ),
+        None => Box::new(io::stdout().lock()),
+    })
 }
 
 /// Resource text of unknown shape (stdin has no extension to go by): one JSON
@@ -615,29 +658,62 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             // file per view into the --out directory.
             let multi = view.is_dir();
 
+            if !multi {
+                check_out_is_not_input(input.as_ref(), out.as_ref())?;
+            }
+
             // One view, NDJSON in and NDJSON out: stream it resource by
-            // resource in bounded memory.
-            let ndjson_in = input.as_ref().is_some_and(|p| {
-                p.as_os_str() == "-" || p.extension().is_some_and(|x| x == "ndjson")
-            });
+            // resource in bounded memory. A .ndjson file is taken at its word.
+            // Stdin is streamed when its first line is one whole JSON value;
+            // otherwise (formatted JSON, a Bundle or an array over several
+            // lines) it is read whole, as for the other output formats.
+            let mut stdin_resources: Option<Vec<serde_json::Value>> = None;
+            let stdin_in = input.as_ref().is_some_and(|p| p.as_os_str() == "-");
+            let ndjson_in = stdin_in
+                || input
+                    .as_ref()
+                    .is_some_and(|p| p.extension().is_some_and(|x| x == "ndjson"));
             if !multi && output.eq_ignore_ascii_case("ndjson") && ndjson_in {
-                let (_, view) = read_view(view)?;
+                let (_, view_def) = read_view(view)?;
                 let path = input.as_ref().expect("checked above");
-                let mut sink: Box<dyn Write> = match out {
-                    Some(path) => Box::new(
-                        fs::File::create(path)
-                            .with_context(|| format!("creating {}", path.display()))?,
-                    ),
-                    None => Box::new(io::stdout().lock()),
+                let mut reader: Box<dyn io::BufRead> = if stdin_in {
+                    Box::new(io::BufReader::new(io::stdin()))
+                } else {
+                    Box::new(io::BufReader::new(
+                        fs::File::open(path)
+                            .with_context(|| format!("opening {}", path.display()))?,
+                    ))
                 };
-                let n = stream_ndjson(&view, path, &mut sink).await?;
-                sink.flush().ok();
-                eprintln!("{n} rows");
-                return Ok(());
+                let mut line_no = 0;
+                let first = next_line(reader.as_mut(), &mut line_no)?;
+                let one_value_per_line = !stdin_in
+                    || first.as_ref().is_none_or(|(_, l)| {
+                        serde_json::from_str::<serde::de::IgnoredAny>(l).is_ok()
+                    });
+                if one_value_per_line {
+                    let mut sink = open_sink(out.as_ref())?;
+                    let n = stream_ndjson(&view_def, first, reader, line_no, &mut sink).await?;
+                    sink.flush().ok();
+                    eprintln!("{n} rows");
+                    return Ok(());
+                }
+                let mut text = first.map(|(_, l)| l).unwrap_or_default();
+                reader
+                    .read_to_string(&mut text)
+                    .context("reading FHIR resources from stdin")?;
+                let mut resources = Vec::new();
+                parse_resource_text(&text, &mut resources).context("parsing stdin")?;
+                if resources.is_empty() {
+                    bail!("no FHIR resources on stdin");
+                }
+                stdin_resources = Some(resources);
             }
 
             let views = load_views(view)?;
             let source = match (input, db) {
+                (Some(_), _) if stdin_resources.is_some() => {
+                    Source::Files(stdin_resources.take().expect("checked"))
+                }
                 (Some(path), _) => Source::Files(load_resources(path, threads)?),
                 (None, Some(db)) => Source::Db(
                     PgPool::connect(db)
@@ -673,13 +749,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             } else {
                 let (_, view) = &views[0];
                 let result = run_view(&source, view, threads).await?;
-                let mut sink: Box<dyn Write> = match out {
-                    Some(path) => Box::new(
-                        fs::File::create(path)
-                            .with_context(|| format!("creating {}", path.display()))?,
-                    ),
-                    None => Box::new(io::stdout().lock()),
-                };
+                let mut sink = open_sink(out.as_ref())?;
                 writer.write(&result, &mut sink).context("writing output")?;
                 sink.flush().ok();
             }
