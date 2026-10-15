@@ -97,7 +97,7 @@ pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> Result<()> 
     }
     write_json(&report_path, &report_json)?;
     // diff, index and population read the snapshot with the same profile.
-    profile.save_copy(&args.snapshot)?;
+    profile.save_copy(&args.snapshot);
     let rows: usize = written.iter().map(|w| w.rows).sum();
     println!(
         "Wrote {rows} rows across {} partitions to {}",

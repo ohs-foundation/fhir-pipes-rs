@@ -253,12 +253,24 @@ impl Profile {
         }
     }
 
-    /// Keep a copy beside the snapshot, for a later `diff`.
-    pub fn save_copy(&self, snapshot: &Path) -> Result<()> {
+    /// Keep a copy beside the snapshot, for a later `diff`. Nothing is
+    /// written when the copy is already this profile; a snapshot that cannot
+    /// be written to gets a warning, not a failed transform.
+    pub fn save_copy(&self, snapshot: &Path) {
         let path = snapshot.join(SNAPSHOT_COPY);
-        let tmp = snapshot.join(format!("{SNAPSHOT_COPY}.tmp"));
-        std::fs::write(&tmp, &self.text).map_err(|e| PipesError::io(&tmp, e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| PipesError::io(&path, e))
+        if std::fs::read_to_string(&path).is_ok_and(|copy| copy == self.text) {
+            return;
+        }
+        let tmp = snapshot.join(format!("{SNAPSHOT_COPY}.{}.tmp", std::process::id()));
+        let written = std::fs::write(&tmp, &self.text).and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            eprintln!(
+                "fhir-pipes: warning: could not keep a copy of the profile at {} ({e}); \
+                 pass --profile to diff, index and population",
+                path.display()
+            );
+        }
     }
 
     /// Every extra column name, Location columns first.
@@ -513,7 +525,7 @@ mod tests {
             Profile::for_snapshot(None, dir.path()).unwrap().name,
             "base"
         );
-        icr_example().save_copy(dir.path()).unwrap();
+        icr_example().save_copy(dir.path());
         assert_eq!(Profile::for_snapshot(None, dir.path()).unwrap().name, "icr");
     }
 

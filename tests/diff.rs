@@ -8,6 +8,9 @@ use assert_cmd::prelude::*;
 use base64::Engine;
 use serde_json::{Value, json};
 
+/// These fixtures are ICR-shaped: run with the example ICR profile.
+const ICR_PROFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml");
+
 const BOUNDARY_EXT: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
 const PCODE: &str = "https://icr.healthcampaigns.org/identifiers/pcode";
@@ -127,6 +130,7 @@ fn write_input(dir: &Path, name: &str, text: &str) -> PathBuf {
 fn diff(snap: &Path, input: &Path, out: &Path) -> Assert {
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["diff", "--snapshot"])
         .arg(snap)
         .arg("--in")
@@ -497,6 +501,7 @@ fn geoparquet_written_by_transform_round_trips_unchanged() {
     let dataset = dir.path().join("out");
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(&snap)
         .arg("--out")
@@ -748,6 +753,7 @@ fn geometry_added_to_a_row_written_without_geometry_is_a_geometry_addition() {
     let dataset = dir.path().join("out");
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args([
             "transform",
             "locations",

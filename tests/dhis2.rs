@@ -12,7 +12,15 @@ use serde_json::{Value, json};
 const ORGUNIT_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit";
 
 fn fhir_pipes() -> Command {
-    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
+    let mut c = {
+        // ICR-shaped fixtures: the example ICR profile.
+        let mut c = Command::cargo_bin("fhir-pipes").unwrap();
+        c.env(
+            "FHIR_PIPES_PROFILE",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml"),
+        );
+        c
+    };
     for var in [
         "FHIR_PIPES_DHIS2_URL",
         "FHIR_PIPES_DHIS2_TOKEN",

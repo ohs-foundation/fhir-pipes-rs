@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
 use tiff::tags::Tag;
 
+/// These fixtures are ICR-shaped: run with the example ICR profile.
+const ICR_PROFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml");
+
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/raster/pop_small_cog.tif"
@@ -72,6 +75,7 @@ fn write_snapshot(dir: &Path, resources: &[Value]) {
 fn run(dir: &Path, raster: &str, extra: &[&str]) -> Assert {
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["population", "--snapshot"])
         .arg(dir)
         .args(["--raster", raster, "--year", "2026", "--out"])

@@ -51,7 +51,15 @@ fn bundle(entries: Vec<Value>, next: Option<&str>) -> String {
 }
 
 fn fhir_pipes() -> Command {
-    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
+    let mut c = {
+        // ICR-shaped fixtures: the example ICR profile.
+        let mut c = Command::cargo_bin("fhir-pipes").unwrap();
+        c.env(
+            "FHIR_PIPES_PROFILE",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml"),
+        );
+        c
+    };
     for var in [
         "FHIR_PIPES_TOKEN",
         "FHIR_PIPES_CLIENT_ID",
