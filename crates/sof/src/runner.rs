@@ -4,21 +4,30 @@
 //! against a PostgreSQL database and returns structured results.
 
 use serde_json::Value;
+#[cfg(feature = "postgres")]
 use sqlx_core::row::Row;
+#[cfg(feature = "postgres")]
 use sqlx_core::sql_str::AssertSqlSafe;
+#[cfg(feature = "postgres")]
 use sqlx_postgres::{PgPool, PgRow};
 
-use crate::column::{ColumnInfo, ColumnType};
+#[cfg(feature = "postgres")]
+use crate::Error;
+use crate::Result;
+use crate::column::ColumnInfo;
+#[cfg(any(feature = "postgres", test))]
+use crate::column::ColumnType;
 use crate::sql_generator::{GeneratedColumn, SqlGenerator};
 use crate::view_definition::ViewDefinition;
-use crate::{Error, Result};
 
 /// Executes ViewDefinitions against a PostgreSQL database.
+#[cfg(feature = "postgres")]
 pub struct ViewRunner {
     pool: PgPool,
     generator: SqlGenerator,
 }
 
+#[cfg(feature = "postgres")]
 impl ViewRunner {
     /// Create a new ViewRunner with the given connection pool.
     pub fn new(pool: PgPool) -> Self {
@@ -123,6 +132,7 @@ pub async fn run_with<E: SqlExecutor + ?Sized>(
 }
 
 /// Extract values from a row based on column definitions.
+#[cfg(feature = "postgres")]
 fn extract_row_values(row: &PgRow, columns: &[GeneratedColumn]) -> Vec<Value> {
     columns
         .iter()
@@ -132,6 +142,7 @@ fn extract_row_values(row: &PgRow, columns: &[GeneratedColumn]) -> Vec<Value> {
 }
 
 /// Extract a single column value from a row.
+#[cfg(feature = "postgres")]
 fn extract_column_value(row: &PgRow, index: usize, col_type: &ColumnType) -> Value {
     match col_type {
         ColumnType::Integer | ColumnType::Integer64 => row

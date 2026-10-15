@@ -2,6 +2,8 @@ name: ci
 on:
   push:
     branches: [main]
+    # A version tag (v0.3.0) also publishes a GitHub release with the binaries.
+    tags: ['v*']
   pull_request:
 permissions:
   contents: read
@@ -24,7 +26,13 @@ jobs:
         run: cargo fmt --all --check
       - if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The optional features (postgres, fhir-packages) are off in releases
+      # but must still build and pass.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --locked --all-features
   release-build:
     needs: test
     runs-on: ${{ matrix.os }}
@@ -82,3 +90,31 @@ jobs:
           name: fhir-pipes-${{ matrix.target }}
           path: ${{ env.BIN_PATH }}
           if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches Cargo.toml
+        shell: bash
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: fhir-pipes-*
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum fhir-pipes-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

@@ -12,6 +12,8 @@
 //! `fhir-test-cases/sql-on-fhir` checkout and can be overridden with
 //! `SOF_TEST_CASES_DIR`.
 
+#![cfg(feature = "postgres")]
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 

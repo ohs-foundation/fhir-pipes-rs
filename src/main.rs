@@ -43,7 +43,9 @@ fn main() {
         return;
     }
     let result: error::Result<()> = match cli.command {
-        cli::Command::Transform(args) => transform::run_transform(&args),
+        cli::Command::Transform(cli::TransformCommand::Locations(args)) => {
+            transform::run_transform(&args)
+        }
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
         cli::Command::Extract(args) => extract::run_extract(&args),
         cli::Command::Export(args) => export::run_export(&args),
