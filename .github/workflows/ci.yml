@@ -1,16 +1,45 @@
 name: ci
+# Tests run on every PR and push to main. The five optimised release builds
+# are slow (LTO), and nobody uses their output until a release, so they run
+# only:
+#   - for a version tag (v0.3.0), which then publishes the release;
+#   - when run by hand (Actions > ci > Run workflow), e.g. before tagging;
+#   - for a PR or push that changes Cargo.toml, Cargo.lock or the workflows,
+#     since dependency changes are what break cross-compiled builds;
+#   - weekly, so a new toolchain that breaks a target shows up before release day.
 on:
   push:
     branches: [main]
-    # A version tag (v0.3.0) also publishes a GitHub release with the binaries.
     tags: ['v*']
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'
 permissions:
   contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # Did this change touch what the release builds depend on?
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            build:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/*/Cargo.toml'
+              - '.github/workflows/**'
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -34,7 +63,12 @@ jobs:
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --all-features
   release-build:
-    needs: test
+    needs: [changes, test]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'schedule'
+      || needs.changes.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       # One target failing should not hide whether the others build.
