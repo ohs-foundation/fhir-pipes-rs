@@ -446,3 +446,267 @@ fn a_second_refresh_downloads_only_what_changed() {
         .assert()
         .success();
 }
+
+/// Whether the duckdb command is installed; checks that need it are skipped
+/// without it.
+fn have_duckdb() -> bool {
+    std::process::Command::new("duckdb")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// One value from a duckdb query, run in `dir`.
+fn duckdb_value(dir: &Path, db: Option<&Path>, sql: &str) -> String {
+    let mut c = std::process::Command::new("duckdb");
+    if let Some(db) = db {
+        c.arg(db);
+    }
+    let mut child = c
+        .args(["-noheader", "-list"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), sql.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success() && out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn the_catalog_has_a_view_per_table_and_the_extra_views() {
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(
+        &server.url_str("/fhir"),
+        "\n[catalog]\nextra = \"extra.sql\"\n",
+    );
+    fs::write(
+        dir.path().join("extra.sql"),
+        "CREATE OR REPLACE VIEW obs_sle AS SELECT * FROM obs WHERE country = 'SLE';\n",
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views"])
+        .assert()
+        .success()
+        .stdout(has("catalog.sql: 3 table view(s)"));
+    let data = dir.path().join("data");
+    let sql = fs::read_to_string(data.join("catalog.sql")).unwrap();
+    for table in ["locations", "obs", "patient"] {
+        assert!(
+            sql.contains(&format!(
+                "CREATE OR REPLACE VIEW \"{table}\" AS\n  SELECT * FROM read_parquet('parquet/{table}/country=*/**/*.parquet'"
+            )),
+            "{sql}"
+        );
+    }
+    assert!(sql.contains("CREATE OR REPLACE VIEW obs_sle"), "{sql}");
+    if have_duckdb() {
+        let n = duckdb_value(
+            &data,
+            None,
+            ".read catalog.sql\nSELECT (SELECT count(*) FROM obs) || ',' || (SELECT count(*) FROM obs_sle);",
+        );
+        assert_eq!(n, "3,2");
+    }
+}
+
+#[test]
+fn without_a_catalog_section_there_is_no_catalog() {
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    cmd(&config).args(["--only", "views"]).assert().success();
+    assert!(!dir.path().join("data/catalog.sql").exists());
+    cmd(&config)
+        .args(["--only", "catalog"])
+        .assert()
+        .failure()
+        .stderr(has("--only catalog needs a [catalog] section"));
+}
+
+#[test]
+fn a_local_catalog_duckdb_is_built_in_the_catalog_step() {
+    if !have_duckdb() {
+        return;
+    }
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(
+        &server.url_str("/fhir"),
+        "\n[catalog]\nduckdb_file = true\n",
+    );
+    cmd(&config)
+        .args(["--only", "views"])
+        .assert()
+        .success()
+        .stdout(has("   catalog.duckdb"));
+    let data = dir.path().join("data");
+    assert!(!data.join("catalog.duckdb.tmp").exists());
+    // Relative paths: read from the warehouse directory.
+    assert_eq!(
+        duckdb_value(
+            &data,
+            Some(Path::new("catalog.duckdb")),
+            "SELECT count(*) FROM patient;"
+        ),
+        "2"
+    );
+}
+
+/// A fake rclone that copies into $MIRROR as if it were the bucket, and logs
+/// each call to $LOG.
+#[cfg(unix)]
+fn fake_rclone(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("rclone");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+echo "$1 $(eval echo \${$#})" >> "$LOG"
+if [ "$1" = lsd ]; then echo "          -1 2026-01-01 00:00:00        -1 bkt"; exit 0; fi
+for a; do src=$dst; dst=$a; done
+rest=${dst#*:}
+rest=${rest#*/}
+case "$1" in
+  sync) mkdir -p "$MIRROR/$rest" && cp -R "$src/." "$MIRROR/$rest/" ;;
+  copyto) mkdir -p "$(dirname "$MIRROR/$rest")" && cp "$src" "$MIRROR/$rest" ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// With a base_url, catalog.duckdb is built during the push, after the tables
+/// are uploaded, and its views read the uploaded copy.
+#[test]
+#[cfg(unix)]
+fn the_pushed_catalog_reads_the_uploaded_tables() {
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let dir = tempfile::tempdir().unwrap();
+    let mirror = dir.path().join("mirror");
+    let rclone = fake_rclone(dir.path());
+    let duckdb_file = have_duckdb();
+    let (root, config) = setup(
+        &server.url_str("/fhir"),
+        &format!(
+            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\nfiles = [\"manifest.json\", \"catalog.sql\", \"catalog.duckdb\"]\n\n[catalog]\nbase_url = '{}'\nduckdb_file = {duckdb_file}\n",
+            rclone.display(),
+            mirror.display()
+        ),
+    );
+    let log = dir.path().join("rclone.log");
+    cmd(&config)
+        .args(["--only", "views", "--push"])
+        .env("MIRROR", &mirror)
+        .env("LOG", &log)
+        .assert()
+        .success();
+    let calls: Vec<String> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let at = |what: &str| {
+        calls
+            .iter()
+            .position(|c| c.ends_with(what))
+            .unwrap_or_else(|| panic!("{what} not pushed: {calls:#?}"))
+    };
+    assert!(at("r:bkt/parquet") < at("r:bkt/catalog.sql"), "{calls:#?}");
+    let sql = fs::read_to_string(mirror.join("catalog.sql")).unwrap();
+    assert!(
+        sql.contains(&format!(
+            "read_parquet('{}/parquet/obs/country=*/**/*.parquet'",
+            mirror.display()
+        )),
+        "{sql}"
+    );
+    if duckdb_file {
+        assert!(
+            at("r:bkt/catalog.sql") < at("r:bkt/catalog.duckdb"),
+            "{calls:#?}"
+        );
+        // The local tables are gone: the views read the mirror.
+        fs::remove_dir_all(root.path().join("data/parquet")).unwrap();
+        assert_eq!(
+            duckdb_value(
+                dir.path(),
+                Some(&mirror.join("catalog.duckdb")),
+                "SELECT count(*) FROM obs;"
+            ),
+            "3"
+        );
+    }
+}
+
+/// A relative --data, and a table named after a SQL keyword.
+#[test]
+fn the_catalog_takes_a_relative_data_dir_and_keyword_table_names() {
+    if !have_duckdb() {
+        return;
+    }
+    let (dir, config) = setup(NOWHERE, "\n[catalog]\nduckdb_file = true\n");
+    let data = dir.path().join("data");
+    let group = data.join("parquet/group/country=SLE");
+    fs::create_dir_all(&group).unwrap();
+    fs::copy(
+        data.join("parquet/locations/country=SLE/part-0.parquet"),
+        group.join("part-0.parquet"),
+    )
+    .unwrap();
+    // cmd runs in the config's directory, where data/ is.
+    cmd(&config)
+        .args(["--data", "data", "--only", "catalog"])
+        .assert()
+        .success()
+        .stdout(has("   catalog.duckdb"));
+    assert_eq!(
+        duckdb_value(
+            &data,
+            Some(Path::new("catalog.duckdb")),
+            "SELECT (SELECT count(*) FROM \"group\") || ',' || (SELECT count(*) FROM locations);"
+        ),
+        "2,2"
+    );
+}
+
+/// Without duckdb_file, a catalog.duckdb listed in push.files (built by a
+/// hook, say) is uploaded as any other listed file.
+#[test]
+#[cfg(unix)]
+fn a_listed_catalog_duckdb_is_pushed_when_fhir_pipes_does_not_build_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mirror = dir.path().join("mirror");
+    let rclone = fake_rclone(dir.path());
+    let (root, config) = setup(
+        NOWHERE,
+        &format!(
+            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\nfiles = [\"catalog.duckdb\"]\n\n[catalog]\n",
+            rclone.display()
+        ),
+    );
+    fs::write(root.path().join("data/catalog.duckdb"), "built by a hook").unwrap();
+    cmd(&config)
+        .args(["--only", "catalog", "--push"])
+        .env("MIRROR", &mirror)
+        .env("LOG", dir.path().join("rclone.log"))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(mirror.join("catalog.duckdb")).unwrap(),
+        "built by a hook"
+    );
+    assert!(mirror.join("catalog.sql").is_file());
+}

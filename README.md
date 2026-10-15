@@ -79,8 +79,9 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 ```
 
 A full refresh can also extract and transform the Location registry, build
-map tiles, run your own commands afterwards, and push the warehouse to object
-storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
+map tiles, write a DuckDB catalog (a view per table, which a dashboard can
+attach by URL), run your own commands afterwards, and push the warehouse to
+object storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
 partitioning and hooks.
 
 ### How the views run
