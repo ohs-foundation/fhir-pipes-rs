@@ -318,3 +318,86 @@ fn input_directories_are_read_recursively_without_hidden_files() {
     assert!(!out.contains("hidden1"), "{out}");
     assert_eq!(out.lines().count(), 3, "{out}");
 }
+
+/// A Bundle that is an entry of another resolves its own urns: wrapping it
+/// in an outer Bundle that maps the same urn elsewhere changes nothing.
+#[test]
+fn a_nested_bundle_resolves_its_own_urns() {
+    let dir = tempfile::tempdir().unwrap();
+    let view = dir.path().join("obs.json");
+    fs::write(
+        &view,
+        r#"{"resourceType": "ViewDefinition", "name": "obs", "resource": "Observation", "status": "active",
+            "select": [{"column": [
+              {"name": "id", "path": "id"},
+              {"name": "patient_id", "path": "subject.getReferenceKey(Patient)"}]}]}"#,
+    )
+    .unwrap();
+    let inner = serde_json::json!({
+        "resourceType": "Bundle", "type": "collection",
+        "entry": [
+            {"fullUrl": "urn:uuid:p", "resource": {"resourceType": "Patient", "id": "inner-p"}},
+            {"fullUrl": "urn:uuid:o", "resource": {"resourceType": "Observation", "id": "o1",
+                "subject": {"reference": "urn:uuid:p"}}}
+        ]
+    });
+    let outer = serde_json::json!({
+        "resourceType": "Bundle", "type": "collection",
+        "entry": [
+            {"fullUrl": "urn:uuid:p", "resource": {"resourceType": "Patient", "id": "outer-p"}},
+            {"fullUrl": "urn:uuid:inner", "resource": inner}
+        ]
+    });
+    let json = dir.path().join("outer.json");
+    fs::write(&json, outer.to_string()).unwrap();
+    let ndjson = dir.path().join("outer.ndjson");
+    fs::write(&ndjson, format!("{outer}\n")).unwrap();
+    for input in [&json, &ndjson] {
+        views()
+            .arg("run")
+            .arg(&view)
+            .arg("--input")
+            .arg(input)
+            .args(["--output", "ndjson"])
+            .assert()
+            .success()
+            .stdout(r#"{"id":"o1","patient_id":"inner-p"}"#.to_string() + "\n");
+    }
+}
+
+/// A symlink to a directory is not followed, so a link back up the tree does
+/// not read the same files again; a symlinked file is read.
+#[test]
+#[cfg(unix)]
+fn input_directories_skip_symlinked_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(
+        input.join("p.json"),
+        r#"{"resourceType": "Patient", "id": "p1"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("elsewhere.json"),
+        r#"{"resourceType": "Patient", "id": "p2"}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&input, input.join("again")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("elsewhere.json"), input.join("linked.json"))
+        .unwrap();
+    let a = views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrPatient.json"))
+        .arg("--input")
+        .arg(&input)
+        .args(["--output", "ndjson"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(
+        out.contains(r#""id":"p1""#) && out.contains(r#""id":"p2""#),
+        "{out}"
+    );
+}

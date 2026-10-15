@@ -316,25 +316,31 @@ fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>>
 }
 
 /// The `.json` and `.ndjson` files under `dir`, in subdirectories too.
-/// Hidden files and directories (`.export-state.json`) are skipped.
+/// Hidden files and directories (`.export-state.json`) are skipped, and so
+/// are symlinked directories, which could lead back up the tree and read the
+/// same files again. Symlinked files are read.
 fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in
         fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
     {
-        let path = entry
-            .with_context(|| format!("reading directory {}", dir.display()))?
-            .path();
+        let entry = entry.with_context(|| format!("reading directory {}", dir.display()))?;
+        let path = entry.path();
         if path
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with('.'))
         {
             continue;
         }
-        if path.is_dir() {
+        // file_type() does not follow a symlink; is_dir() and is_file() do.
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", path.display()))?;
+        if kind.is_dir() {
             collect_resource_files(&path, out)?;
-        } else if path
-            .extension()
-            .is_some_and(|x| x == "json" || x == "ndjson")
+        } else if (kind.is_file() || (kind.is_symlink() && path.is_file()))
+            && path
+                .extension()
+                .is_some_and(|x| x == "json" || x == "ndjson")
         {
             out.push(path);
         }
@@ -552,10 +558,14 @@ fn bundle_urns(entries: &[serde_json::Value]) -> HashMap<String, String> {
         .collect()
 }
 
-/// Rewrite every `reference` in `value` that is a key of `urns`.
+/// Rewrite every `reference` in `value` that is a key of `urns`. A Bundle
+/// inside `value` is left alone: it resolves its own entries when it is read.
 fn resolve_urns(value: &mut serde_json::Value, urns: &HashMap<String, String>) {
     match value {
         serde_json::Value::Object(map) => {
+            if map.get("resourceType").and_then(|v| v.as_str()) == Some("Bundle") {
+                return;
+            }
             if let Some(serde_json::Value::String(reference)) = map.get_mut("reference")
                 && let Some(resolved) = urns.get(reference.as_str())
             {
