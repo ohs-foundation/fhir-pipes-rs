@@ -12,7 +12,7 @@ fn transform_writes_dataset_and_report() {
     let out = tempfile::tempdir().unwrap();
     let assert = Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -43,7 +43,13 @@ fn transform_rejects_missing_snapshot_with_exit_2() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot", "/nonexistent", "--out"])
+        .args([
+            "transform",
+            "locations",
+            "--snapshot",
+            "/nonexistent",
+            "--out",
+        ])
         .arg(out.path())
         .assert()
         .failure()
@@ -56,7 +62,7 @@ fn transform_rejects_bad_partition_key_with_exit_2() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -74,7 +80,7 @@ fn transform_rejects_an_out_path_that_is_a_file() {
     std::fs::write(&out_file, "not a directory").unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(&out_file)
@@ -90,7 +96,7 @@ fn a_stale_report_is_replaced() {
     std::fs::write(out.path().join("_report.json"), "stale").unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -113,7 +119,7 @@ fn a_failed_transform_removes_the_stale_report_and_keeps_the_dataset() {
 
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -137,7 +143,7 @@ fn duckdb_reads_the_output_when_available() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -193,7 +199,7 @@ fn inspect_summarises_a_written_dataset() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -250,7 +256,7 @@ fn inspect_ignores_stale_staging_and_backup_dirs() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out.path())
@@ -352,7 +358,7 @@ fn column(out: &Path, name: &str) -> std::collections::HashMap<String, Option<St
 fn transform_into(snap: &Path, out: &Path) {
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(snap)
         .arg("--out")
         .arg(out)
@@ -499,7 +505,7 @@ fn read_rows(out: &Path) -> std::collections::BTreeMap<String, serde_json::Value
 fn transform(out: &Path, extra: &[&str]) -> String {
     let assert = Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
         .arg(out)

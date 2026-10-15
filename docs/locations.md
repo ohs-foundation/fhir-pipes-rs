@@ -8,8 +8,8 @@ version-checked FHIR updates. FHIR stays the master registry; the Parquet is
 a derived, disposable projection of it. `index` and `population` add spatial
 index identifiers and population Groups derived from the registry.
 
-The command is `fhir-pipes transform` today, and `fhir-pipes run` extracts and
-transforms in one step. These commands came from kiln.
+The command is `fhir-pipes transform locations`, and `fhir-pipes run` extracts
+and transforms in one step. These commands came from kiln.
 
 ## Why the Location registry needs a GIS projection
 
@@ -151,7 +151,7 @@ fhir-pipes extract   --server URL [AUTH] --snapshot DIR
                [--full] [--since INSTANT] [--timeout SECS]
                [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
                [--no-cache] [--refresh] [--cache-dir DIR]
-fhir-pipes transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
+fhir-pipes transform locations --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
                [--keep-without-geometry]
 fhir-pipes run       <extract flags> <transform flags>
 fhir-pipes inspect   --out DIR
@@ -169,7 +169,7 @@ fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
 `AUTH`, timeouts and retries work as for every command; see
 [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server).
 
-`extract` and `load` touch the network. `transform`, `inspect` and `diff`
+`extract` and `load` touch the network. `transform locations`, `inspect` and `diff`
 never do. That split is deliberate: a slow server or an expired token has
 nothing to do with whether your geometry is valid, and keeping them apart
 means the whole geospatial half is testable from files with no server
@@ -290,7 +290,7 @@ case it is and that the snapshot is incomplete.
 
 ## The output dataset
 
-`transform` writes one GeoParquet dataset per snapshot:
+`transform locations` writes one GeoParquet dataset per snapshot:
 
 ```
 out/
@@ -328,7 +328,7 @@ metadata's bounding box covers only the rows that have a geometry; a file
 whose rows all lack one (only possible with `--keep-without-geometry`) has
 no bounding box and an empty `geometry_types` list.
 
-### transform options
+### transform locations options
 
 | Option | Default | What it does |
 |---|---|---|
@@ -633,7 +633,7 @@ resource *should* now be:
    point on a boundary row is reported as `geometry_kind_changed` and
    skipped, since erasing a boundary that way is not a plausible intent.
    A null geometry makes no geometry change. A row written by
-   `transform --keep-without-geometry` has a null geometry, so it round
+   `transform locations --keep-without-geometry` has a null geometry, so it round
    trips unchanged; draw a point on it and the Location gains a `position`,
    draw a polygon and it gains a boundary.
    Comparison is on the WKB after rounding coordinates to seven decimals,
@@ -763,7 +763,7 @@ the Group is still written), `rollup_empty`, `group_id_too_long`,
 `group_id_invalid`, `quantity_out_of_range`, `cache_error`,
 `unknown_source_code`. The report also carries pass one's snapshot-quality
 kinds (`no_geometry` for point-only facilities, `orphan`, `cycle`, …), since
-`population` reads the snapshot with the same index `transform` builds.
+`population` reads the snapshot with the same index `transform locations` builds.
 
 What this is not: age–sex bands (WorldPop publishes those as separate
 rasters; run `population` once per raster with a distinct `--source` when
@@ -1020,7 +1020,7 @@ default 200,000):
 
 ```sh
 cargo test --release --test generate_snapshot -- --ignored --nocapture
-./target/release/fhir-pipes transform --snapshot target/bench/snapshot --out target/bench/out
+./target/release/fhir-pipes transform locations --snapshot target/bench/snapshot --out target/bench/out
 ```
 
 Measured on an Apple Silicon laptop, single runs, release build:
