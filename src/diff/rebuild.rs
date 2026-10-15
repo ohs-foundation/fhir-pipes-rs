@@ -327,9 +327,9 @@ fn upsert_extension_code(obj: &mut Object, url: &str, system: Option<&str>, code
     }
 }
 
-/// A coding under `system` anywhere in `Location.type`: set its code, or
-/// add a concept holding it; clearing removes those codings and any
-/// concept left empty.
+/// A coding under `system` anywhere in `Location.type`: set its code
+/// (dropping the display if the code changes), or add a concept holding it;
+/// clearing removes those codings and any concept left empty.
 fn upsert_type_coding(obj: &mut Object, system: &str, code: Option<&str>) {
     let types = array_mut(obj, "type");
     match code {
@@ -347,6 +347,10 @@ fn upsert_type_coding(obj: &mut Object, system: &str, code: Option<&str>) {
                 .find(|coding| system_is(coding, system));
             match found {
                 Some(Value::Object(coding)) => {
+                    // A display belongs to the old code.
+                    if coding.get("code").and_then(Value::as_str) != Some(c) {
+                        coding.remove("display");
+                    }
                     coding.insert("code".into(), Value::String(c.to_string()));
                 }
                 _ => types.push(json!({"coding": [{"system": system, "code": c}]})),
@@ -1051,7 +1055,10 @@ mod tests {
 
     #[test]
     fn facility_level_and_ownership_upsert_codings_by_system() {
-        let base = json!({"resourceType":"Location","id":"a","type":[{"coding":[{"code":"facility"}]},{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc"}]}]});
+        let base = json!({"resourceType":"Location","id":"a","type":[{"coding":[{"code":"facility"}]},{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc","display":"PHC"}],"text":"Primary Health Centre"}]});
+        // An unchanged code keeps its display.
+        let same = apply(base.clone(), &[("facility_level", text("phc"))]);
+        assert_eq!(same["type"][1]["coding"][0]["display"], "PHC");
         let out = apply(
             base,
             &[
@@ -1059,7 +1066,12 @@ mod tests {
                 ("ownership", text("public")),
             ],
         );
-        assert_eq!(out["type"][1]["coding"][0]["code"], "hospital");
+        // A new code drops the old code's display; the concept text is its
+        // own column (type_text) and stays.
+        assert_eq!(
+            out["type"][1],
+            json!({"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"hospital"}],"text":"Primary Health Centre"})
+        );
         assert_eq!(
             out["type"][2],
             json!({"coding":[{"system":OWNERSHIP_SYSTEM,"code":"public"}]})
@@ -1071,7 +1083,10 @@ mod tests {
                 ("ownership", ColumnValue::Null),
             ],
         );
-        assert_eq!(out["type"], json!([{"coding":[{"code":"facility"}]}]));
+        assert_eq!(
+            out["type"],
+            json!([{"coding":[{"code":"facility"}]},{"text":"Primary Health Centre"}])
+        );
     }
 
     #[test]
