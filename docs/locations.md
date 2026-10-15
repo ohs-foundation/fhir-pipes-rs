@@ -411,7 +411,7 @@ whether an edit to the column will flow back to FHIR.
 | `identifier` | `Location.identifier`, list of struct `{system, value}` |
 | `position_longitude`, `position_latitude` | `Location.position` |
 | `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
-| *the profile's Location columns* | ICR: `pcode` and `gers_id` from `identifier` by system (`pcode` from the pcode system, or failing that `national-admin-code`), `settlement_type` and `delivery_strategy` from extensions, `facility_level` and `ownership` from `type` codings. See [profiles.md](profiles.md#column-kinds) |
+| *the profile's Location columns* | ICR: `pcode` and `gers_id` from `identifier` by system (`pcode` from the pcode system, or failing that `national-admin-code`), `settlement_type` from the settlement-type extension's CodeableConcept, `facility_level` and `ownership` from `type` codings. See [profiles.md](profiles.md#column-kinds) |
 | `quadkey`, `quadkey_level` | with a profile that names a spatial index extension: the deepest quadkey cell on the Location and its zoom; every prefix is the containing tile at a coarser zoom. Derived from `position` by fhir-pipes; read-only in the round trip |
 | `organization_identifier` | the paired Organization's `identifier`, list of struct `{system, value}` |
 | *the profile's Organization columns* | ICR: `nhfr_code` and `nhfr_uid` from the paired Organization's `identifier` by system, `facility_level_text` and `ownership_text` from the `text` of its `type` concepts holding those codings |

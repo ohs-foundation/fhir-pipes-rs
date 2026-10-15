@@ -13,3 +13,4 @@ out/
 .DS_Store
 # The profile copy transform keeps beside a snapshot (the tests transform this one).
 tests/fixtures/snapshot/profile.toml
+examples/icr/snapshot/profile.toml
