@@ -24,7 +24,13 @@ jobs:
         run: cargo fmt --all --check
       - if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The optional features (postgres, fhir-packages) are off in releases
+      # but must still build and pass.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --locked
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --locked --all-features
   release-build:
     needs: test
     runs-on: ${{ matrix.os }}

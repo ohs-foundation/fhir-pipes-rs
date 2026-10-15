@@ -45,7 +45,9 @@ mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
 pub use eval::{CompiledView, execute, execute_blocking, execute_parallel};
-pub use runner::{SqlExecutor, ViewResult, ViewRunner, run_with};
+#[cfg(feature = "postgres")]
+pub use runner::ViewRunner;
+pub use runner::{SqlExecutor, ViewResult, run_with};
 pub use sql_generator::{Dialect, GeneratedColumn, GeneratedSql, SqlGenerator, create_table};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
 
@@ -63,6 +65,7 @@ pub enum Error {
     InvalidPath(String),
 
     /// An error occurred while executing SQL.
+    #[cfg(feature = "postgres")]
     #[error("SQL execution error: {0}")]
     Sql(#[from] sqlx_core::error::Error),
 
