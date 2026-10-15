@@ -255,6 +255,13 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
     );
     println!("server:     {} (raw/{})", s.server, s.server_name);
     println!("auth:       {}", s.auth_kind());
+    match s.fetch {
+        config::Fetch::Bulk => println!(
+            "fetch:      bulk ($export, waiting up to {} s)",
+            s.bulk_timeout
+        ),
+        f => println!("fetch:      {}", f.name()),
+    }
     println!("data:       {}", s.data.display());
     println!(
         "views:      {}",

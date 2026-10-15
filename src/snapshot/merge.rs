@@ -83,7 +83,8 @@ struct Meta {
     last_updated: Option<String>,
 }
 
-fn id_and_updated(text: &str) -> Option<(String, Option<String>)> {
+/// A resource line's id and meta.lastUpdated; `None` without an id.
+pub fn id_and_updated(text: &str) -> Option<(String, Option<String>)> {
     let head: Head = serde_json::from_str(text).ok()?;
     let id = head.id?;
     let updated = head.meta.and_then(|m| m.last_updated);

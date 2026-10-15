@@ -449,6 +449,156 @@ fn a_second_refresh_downloads_only_what_changed() {
         .success();
 }
 
+/// A Bulk Data export behind `/status/<job>`: the kick-off for Observation
+/// and Patient (with `_since` when given), a status URL that is done at
+/// once, each of `files` as one output, `deleted` as one Bundle, and the
+/// DELETE after the files are read.
+fn serve_bulk(
+    server: &Server,
+    job: &str,
+    since: Option<&str>,
+    transaction_time: &str,
+    files: &[(&str, Vec<Value>)],
+    deleted: &[&str],
+) {
+    let kick_off = all_of![
+        request::method_path("GET", "/fhir/$export"),
+        request::query(url_decoded(contains(("_type", "Observation,Patient")))),
+        request::headers(contains(("prefer", "respond-async"))),
+    ];
+    let kick_off = match since {
+        Some(s) => Expectation::matching(all_of![
+            kick_off,
+            request::query(url_decoded(contains(("_since", s.to_string())))),
+        ]),
+        None => Expectation::matching(all_of![
+            kick_off,
+            request::query(url_decoded(not(contains(key("_since"))))),
+        ]),
+    };
+    let status = format!("/status/{job}");
+    server.expect(
+        kick_off.times(1).respond_with(
+            status_code(202).insert_header("Content-Location", server.url_str(&status)),
+        ),
+    );
+    let output: Vec<Value> = files
+        .iter()
+        .map(
+            |(t, _)| json!({"type": t, "url": server.url_str(&format!("/files/{job}/{t}.ndjson"))}),
+        )
+        .collect();
+    let mut manifest = json!({
+        "transactionTime": transaction_time,
+        "request": server.url_str("/fhir/$export"),
+        "requiresAccessToken": false,
+        "output": output,
+        "error": [],
+    });
+    if !deleted.is_empty() {
+        let path = format!("/files/{job}/deleted.ndjson");
+        manifest["deleted"] = json!([{"type": "Bundle", "url": server.url_str(&path)}]);
+        let bundle = json!({"resourceType": "Bundle", "type": "transaction",
+            "entry": deleted.iter().map(|r| json!({"request": {"method": "DELETE", "url": r}})).collect::<Vec<_>>()});
+        server.expect(
+            Expectation::matching(request::method_path("GET", path))
+                .times(1)
+                .respond_with(status_code(200).body(format!("{bundle}\n"))),
+        );
+    }
+    server.expect(
+        Expectation::matching(request::method_path("GET", status.clone()))
+            .times(1)
+            .respond_with(status_code(200).body(manifest.to_string())),
+    );
+    for (t, resources) in files {
+        let body: String = resources.iter().map(|r| format!("{r}\n")).collect();
+        server.expect(
+            Expectation::matching(request::method_path(
+                "GET",
+                format!("/files/{job}/{t}.ndjson"),
+            ))
+            .times(1)
+            .respond_with(status_code(200).body(body)),
+        );
+    }
+    server.expect(
+        Expectation::matching(request::method_path("DELETE", status))
+            .times(1)
+            .respond_with(status_code(202)),
+    );
+}
+
+#[test]
+fn views_read_a_bulk_export_as_they_read_a_search() {
+    let mut server = Server::run();
+    let fixture = |t: &str| read_ndjson(&fixtures().join(format!("raw/{t}.ndjson")));
+    serve_bulk(
+        &server,
+        "1",
+        None,
+        "2026-10-01T00:00:00Z",
+        &[
+            ("Observation", fixture("Observation")),
+            ("Patient", fixture("Patient")),
+        ],
+        &[],
+    );
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("name = \"test\"", "name = \"test\"\nfetch = \"bulk\"");
+    fs::write(&config, text).unwrap();
+    cmd(&config)
+        .args(["--only", "views"])
+        .assert()
+        .success()
+        .stdout(has("export Observation, Patient ($export)"))
+        .stdout(has("IcrObs (Observation) → parquet/obs (3 rows)"))
+        .stdout(has("IcrPatient (Patient) → parquet/patient (2 rows)"));
+    // The same tables as from a search (views_are_downloaded_run_and_partitioned).
+    let obs = dir.path().join("data/parquet/obs");
+    assert_eq!(rows(&obs.join("country=SLE/part-0.parquet")).len(), 2);
+    let none = rows(&obs.join("country=__HIVE_DEFAULT_PARTITION__/part-0.parquet"));
+    assert_eq!(none.len(), 1);
+    assert_eq!(get(&none[0], "id"), "o3");
+    server.verify_and_clear();
+
+    // Second run: changes since the first export's transactionTime. One
+    // Observation changed and Patient p2 was deleted.
+    let mut changed = fixture("Observation").remove(0);
+    changed["valueInteger"] = json!(30);
+    serve_bulk(
+        &server,
+        "2",
+        Some("2026-10-01T00:00:00Z"),
+        "2026-10-02T00:00:00Z",
+        &[("Observation", vec![changed])],
+        &["Patient/p2"],
+    );
+    for (t, n) in [("Observation", 3), ("Patient", 1)] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", format!("/fhir/{t}")),
+                request::query(url_decoded(contains(("_summary", "count")))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(
+                json!({"resourceType": "Bundle", "type": "searchset", "total": n}).to_string(),
+            )),
+        );
+    }
+    cmd(&config)
+        .args(["--only", "views"])
+        .assert()
+        .success()
+        .stdout(has("Patient: 0 new, 0 updated or fetched again since 2026-10-01T00:00:00Z, 1 deleted, 1 in all"))
+        .stdout(has("IcrObs (Observation) → parquet/obs (3 rows)"))
+        .stdout(has("IcrPatient (Patient) → parquet/patient (1 rows)"));
+    let sle = rows(&obs.join("country=SLE/part-0.parquet"));
+    assert!(sle.iter().any(|r| get(r, "value") == "30"));
+}
+
 /// Whether the duckdb command is installed; checks that need it are skipped
 /// without it.
 fn have_duckdb() -> bool {
