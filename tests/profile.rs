@@ -346,3 +346,117 @@ fn diff_refuses_undeclared_columns_whatever_their_value() {
         .stderr(contains("undeclared"));
     assert!(!changes.exists());
 }
+
+/// docs/icr-profile.md's example: ICR data under ICR's profile, and the edit
+/// it walks through.
+#[test]
+fn the_icr_walkthrough_example_behaves_as_documented() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/icr/snapshot");
+    let snap = tempfile::tempdir().unwrap();
+    for f in ["locations.ndjson", "organizations.ndjson"] {
+        fs::copy(example.join(f), snap.path().join(f)).unwrap();
+    }
+    let out = tempfile::tempdir().unwrap();
+    transform(snap.path(), out.path(), Some(ICR_PROFILE));
+    assert!(
+        out.path()
+            .join("locations/country=NGA/geom_type=point/type=facility")
+            .is_dir()
+    );
+    let cols = columns(out.path());
+    for c in [
+        "pcode",
+        "settlement_type",
+        "facility_level",
+        "quadkey",
+        "nhfr_code",
+    ] {
+        assert!(cols.iter().any(|x| x == c), "{c} missing");
+    }
+    for c in ["delivery_strategy", "overlays_admin_unit_ids"] {
+        assert!(!cols.iter().any(|x| x == c), "{c} present");
+    }
+
+    let work = tempfile::tempdir().unwrap();
+    let input = work.path().join("edits.geojson");
+    fs::write(
+        &input,
+        json!({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "geometry": null, "properties":
+                {"id": "e164b9cb-92d5-4c2b-a415-46c50945370c", "settlement_type": "hard-to-reach"}},
+            {"type": "Feature", "geometry": null, "properties":
+                {"id": "2d14d838-685c-4723-9f73-06392f7ff353", "facility_level": "secondary"}}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let changes = work.path().join("changes.ndjson");
+    diff(snap.path(), &input, &changes, None).success();
+    let written: Vec<Value> = fs::read_to_string(&changes)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        written.len(),
+        3,
+        "two Locations and the mirrored Organization"
+    );
+    let settlement = written
+        .iter()
+        .find(|r| r["id"] == "e164b9cb-92d5-4c2b-a415-46c50945370c")
+        .unwrap();
+    assert_eq!(
+        settlement["extension"][0]["valueCodeableConcept"]["coding"][0],
+        json!({
+            "system": "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs",
+            "code": "hard-to-reach"
+        })
+    );
+    let org = written
+        .iter()
+        .find(|r| r["resourceType"] == "Organization")
+        .unwrap();
+    assert_eq!(
+        org["type"][1],
+        json!({
+            "coding": [{
+                "system": "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs",
+                "code": "secondary"
+            }],
+            "text": "Primary Health Clinic"
+        })
+    );
+}
+
+/// An untouched transform output written back through diff changes nothing,
+/// including the settlement-type CodeableConcept (its display included).
+#[test]
+fn an_unedited_icr_parquet_round_trip_changes_nothing() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/icr/snapshot");
+    let snap = tempfile::tempdir().unwrap();
+    for f in ["locations.ndjson", "organizations.ndjson"] {
+        fs::copy(example.join(f), snap.path().join(f)).unwrap();
+    }
+    let out = tempfile::tempdir().unwrap();
+    transform(snap.path(), out.path(), Some(ICR_PROFILE));
+    let work = tempfile::tempdir().unwrap();
+    let parts: Vec<PathBuf> = walk(&out.path().join("locations"))
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+        .collect();
+    assert_eq!(parts.len(), 4);
+    for (i, part) in parts.iter().enumerate() {
+        let changes = work.path().join(format!("changes-{i}.ndjson"));
+        let run = diff(snap.path(), part, &changes, None).success();
+        let output = run.get_output();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.lines().any(|l| l.starts_with("0 changed,")), "{text}");
+        let written = fs::read_to_string(&changes).unwrap_or_default();
+        assert!(written.trim().is_empty(), "{}: {written}", part.display());
+    }
+}

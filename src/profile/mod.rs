@@ -168,15 +168,20 @@ impl Column {
             }),
             Kind::ExtensionCode => {
                 let url = self.url.as_deref()?;
-                resource
+                let ext = resource
                     .get("extension")?
                     .as_array()?
                     .iter()
                     .filter_map(Value::as_object)
-                    .find(|e| e.get("url").and_then(Value::as_str) == Some(url))
-                    .and_then(|e| e.get("valueCode"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .find(|e| e.get("url").and_then(Value::as_str) == Some(url))?;
+                match self.system.as_deref() {
+                    // A CodeableConcept extension: the code under `system`.
+                    Some(system) => coding_code_by_system(ext.get("valueCodeableConcept"), system),
+                    None => ext
+                        .get("valueCode")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                }
             }
             Kind::TypeCoding => {
                 coding_code_by_system(resource.get("type"), self.system.as_deref()?)
@@ -361,7 +366,7 @@ impl Profile {
                 }
                 let stray = match c.kind {
                     Kind::Identifier => c.url.is_some() || c.system.is_some(),
-                    Kind::ExtensionCode => !c.systems.is_empty() || c.system.is_some(),
+                    Kind::ExtensionCode => !c.systems.is_empty(),
                     Kind::TypeCoding | Kind::TypeText => !c.systems.is_empty() || c.url.is_some(),
                 };
                 if stray {
@@ -418,6 +423,30 @@ pub(crate) fn icr_example() -> Profile {
     .expect("the ICR example profile parses")
 }
 
+/// The ICR example plus two things ICR's IG does not have, so tests still
+/// cover them: an overlays extension and a plain valueCode extension column.
+#[cfg(test)]
+pub(crate) const TEST_OVERLAYS_EXTENSION: &str =
+    "https://example.org/StructureDefinition/overlays-admin-unit";
+#[cfg(test)]
+pub(crate) const TEST_DELIVERY_STRATEGY_EXTENSION: &str =
+    "https://example.org/StructureDefinition/delivery-strategy";
+#[cfg(test)]
+pub(crate) fn test_profile() -> Profile {
+    let mut p = icr_example();
+    p.location.overlays_extension = Some(TEST_OVERLAYS_EXTENSION.into());
+    p.location.columns.push(Column {
+        name: "delivery_strategy".into(),
+        kind: Kind::ExtensionCode,
+        systems: Vec::new(),
+        url: Some(TEST_DELIVERY_STRATEGY_EXTENSION.into()),
+        system: None,
+        mirror_to_organization: false,
+    });
+    p.check().expect("the test profile is valid");
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,7 +465,6 @@ mod tests {
                 "pcode",
                 "gers_id",
                 "settlement_type",
-                "delivery_strategy",
                 "facility_level",
                 "ownership"
             ]
@@ -467,7 +495,7 @@ mod tests {
                 "needs `systems`",
             ),
             (
-                "[[location.column]]\nname = \"x\"\nkind = \"extension_code\"\nurl = \"u\"\nsystem = \"s\"",
+                "[[location.column]]\nname = \"x\"\nkind = \"extension_code\"\nurl = \"u\"\nsystems = [\"s\"]",
                 "does not use",
             ),
             (
@@ -501,7 +529,9 @@ mod tests {
                 {"system": "x", "code": "facility"},
                 {"system": "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs", "code": "public"}
             ]}],
-            "extension": [{"url": "https://icr.healthcampaigns.org/StructureDefinition/settlement-type", "valueCode": "urban"}],
+            "extension": [{"url": "https://icr.healthcampaigns.org/StructureDefinition/settlement-type",
+                "valueCodeableConcept": {"coding": [
+                    {"system": "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs", "code": "urban"}]}}],
         });
         let ids = vec![Identifier {
             system: Some("https://icr.healthcampaigns.org/identifiers/national-admin-code".into()),

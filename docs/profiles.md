@@ -12,7 +12,8 @@ an admin hierarchy or a country.
 [examples/profiles/icr.toml](../examples/profiles/icr.toml) is a complete
 profile, for the Integrated Campaign Registry (ICR). ICR's own copy lives with
 its IG in recodelabs/icr; the one here is a snapshot used as the example and by
-the tests.
+the tests. [icr-profile.md](icr-profile.md) runs it on a small piece of ICR
+data and shows what each part reads and writes.
 
 ## Contents
 
@@ -89,7 +90,7 @@ name = "my-ig"            # shown in messages
 | Key | Used by | Meaning |
 |---|---|---|
 | `boundary_extensions` | extract, run, refresh, transform, diff, dhis2 | Boundary attachment extensions to read before the HL7 one. `extract` fetches and inlines an attachment `url` under them as it does under the HL7 one. A new boundary written by `diff` or `dhis2` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
-| `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. |
+| `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. ICR's IG has none. |
 | `spatial_index_extension` | transform, diff, index | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
 | `admin_unit_type` | transform, population, dhis2 | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
 | `type_systems` | population | Code systems of the Location type codes. `population --type CODE` selects Locations with that code under any of these, wherever the coding sits in `type`. Empty or absent: a code under any system. |
@@ -162,20 +163,38 @@ The whole `identifier` list column, if also edited, is applied first.
 
 ### extension_code
 
-`valueCode` of the extension with `url`.
+The code in the extension with `url`: its `valueCode`, or with `system`, the
+code under that system in its `valueCodeableConcept`.
+
+```toml
+[[location.column]]
+name = "access"
+kind = "extension_code"
+url = "https://example.org/fhir/StructureDefinition/access"
+```
+
+`extension: [{url: …/access, valueCode: "seasonal"}]` → `access = "seasonal"`.
+
+When the IG gives the extension a CodeableConcept value, name its code system:
 
 ```toml
 [[location.column]]
 name = "settlement_type"
 kind = "extension_code"
 url = "https://example.org/fhir/StructureDefinition/settlement-type"
+system = "https://example.org/fhir/CodeSystem/settlement-type"
 ```
 
-`extension: [{url: …/settlement-type, valueCode: "urban"}]` →
-`settlement_type = "urban"`.
+`extension: [{url: …/settlement-type, valueCodeableConcept: {coding: [{system:
+…/CodeSystem/settlement-type, code: "urban"}]}}]` → `settlement_type =
+"urban"`.
 
-**diff** sets `valueCode` on that extension, adds the extension if missing,
-and removes it when the value is cleared.
+**diff** leaves the extension alone when the value is unchanged. An edit sets
+`valueCode`, or with `system` replaces the coding under that system in
+`valueCodeableConcept`. It keeps other systems' codings and drops the old
+coding's display and the concept text. A missing extension is added.
+Clearing the value removes the extension; with `system`, it removes that
+system's coding, and the extension once no coding is left.
 
 ### type_coding
 
@@ -194,7 +213,7 @@ mirror_to_organization = true
 `ownership = "public"`.
 
 **diff** sets that coding's code, adds a concept holding it if missing, and
-removes the coding when cleared. With `mirror_to_organization = true`, an
+removes the coding when cleared. A new code drops the coding's old `display`. With `mirror_to_organization = true`, an
 edit is also written to the paired Organization's type: always for a new
 row, and for an existing one only when the value was edited.
 

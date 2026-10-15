@@ -99,8 +99,10 @@ An implementation guide's extra Location and Organization columns, admin
 units and codes, and the URLs `dhis2` and `population` write, come from a
 profile: a TOML file given with `--profile` (a path or an https URL),
 `FHIR_PIPES_PROFILE`, or `profile =` in `fhir-pipes.toml`. Without one, only
-base FHIR is read. [docs/profiles.md](docs/profiles.md) explains the format;
-[examples/profiles/icr.toml](examples/profiles/icr.toml) is ICR's.
+base FHIR is read. [docs/profiles.md](docs/profiles.md) explains the format.
+[examples/profiles/icr.toml](examples/profiles/icr.toml) is ICR's, and
+[docs/icr-profile.md](docs/icr-profile.md) runs it on a small piece of ICR
+data to show what each part does.
 
 ## Commands
 

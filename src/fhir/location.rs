@@ -452,19 +452,19 @@ mod tests {
     fn parse_str(s: &str, report: &mut Report) -> Option<Location> {
         Location::parse(
             &serde_json::from_str(s).unwrap(),
-            &crate::profile::icr_example(),
+            &crate::profile::test_profile(),
             report,
         )
     }
 
-    /// A profile column's value by name (ICR example profile).
+    /// A profile column's value by name (the test profile).
     fn col<'a>(loc: &'a Location, name: &str) -> Option<&'a str> {
-        let i = crate::profile::icr_example()
+        let i = crate::profile::test_profile()
             .location
             .columns
             .iter()
             .position(|c| c.name == name)
-            .expect("an ICR column");
+            .expect("a test profile column");
         loc.columns[i].as_deref()
     }
 
@@ -484,9 +484,10 @@ mod tests {
             "identifier":[{"system":"https://icr.healthcampaigns.org/identifiers/pcode","value":"NG1"},
                           {"system":"https://icr.healthcampaigns.org/identifiers/overture-gers","value":"g1"}],
             "position":{"longitude":3.25,"latitude":6.25},
-            "extension":[{"url":"https://icr.healthcampaigns.org/StructureDefinition/settlement-type","valueCode":"urban"},
-                         {"url":"https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy","valueCode":"fixed"},
-                         {"url":"https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit","valueReference":{"reference":"Location/kano"}}]
+            "extension":[{"url":"https://icr.healthcampaigns.org/StructureDefinition/settlement-type",
+                          "valueCodeableConcept":{"coding":[{"system":"https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs","code":"urban"}]}},
+                         {"url":"https://example.org/StructureDefinition/delivery-strategy","valueCode":"fixed"},
+                         {"url":"https://example.org/StructureDefinition/overlays-admin-unit","valueReference":{"reference":"Location/kano"}}]
         }"#, &mut report).unwrap();
         assert_eq!(loc.id, "clinic");
         assert_eq!(loc.version_id.as_deref(), Some("3"));
@@ -706,7 +707,7 @@ mod tests {
         let mut report = Report::default();
         let loc = parse_str(
             r#"{"resourceType":"Location","id":"b","extension":[
-            {"url":"https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit",
+            {"url":"https://example.org/StructureDefinition/overlays-admin-unit",
              "valueReference":{"reference":"Location/"}}]}"#,
             &mut report,
         )

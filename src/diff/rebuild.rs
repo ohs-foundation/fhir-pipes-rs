@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
 use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow};
 use crate::fhir::location::{
-    GEOJSON_CONTENT_TYPE, HL7_BOUNDARY_EXTENSION_URL, is_boundary_extension,
+    GEOJSON_CONTENT_TYPE, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension,
 };
 use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
@@ -112,9 +112,12 @@ fn apply_profile_column(
             let system = identifier_system_of(obj, &column.systems);
             upsert_identifier(obj, &system, value)
         }
-        Kind::ExtensionCode => {
-            upsert_extension_code(obj, column.url.as_deref().unwrap_or_default(), value)
-        }
+        Kind::ExtensionCode => upsert_extension_code(
+            obj,
+            column.url.as_deref().unwrap_or_default(),
+            column.system.as_deref(),
+            value,
+        ),
         Kind::TypeCoding => {
             upsert_type_coding(obj, column.system.as_deref().unwrap_or_default(), value)
         }
@@ -295,25 +298,96 @@ fn url_is(entry: &Value, url: &str) -> bool {
     entry.get("url").and_then(Value::as_str) == Some(url)
 }
 
-fn upsert_extension_code(obj: &mut Object, url: &str, code: Option<&str>) {
+/// Set the extension's `valueCode`, or with `system` the coding under
+/// `system` in its `valueCodeableConcept`. An unchanged value leaves the
+/// extension as it is, so a round trip of unedited rows keeps displays, text
+/// and other systems' codings. A changed code keeps the concept's other
+/// codings and drops what described the old code (its display and the
+/// concept text). Clearing removes the coding, and the extension once
+/// nothing is left in it.
+fn upsert_extension_code(obj: &mut Object, url: &str, system: Option<&str>, code: Option<&str>) {
+    let current = obj
+        .get("extension")
+        .and_then(Value::as_array)
+        .and_then(|exts| exts.iter().find(|e| url_is(e, url)))
+        .and_then(|ext| match system {
+            Some(s) => coding_code_by_system(ext.get("valueCodeableConcept"), s),
+            None => ext
+                .get("valueCode")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    if current.as_deref() == code {
+        return;
+    }
     let exts = array_mut(obj, "extension");
-    match code {
-        Some(c) => match exts.iter_mut().find(|e| url_is(e, url)) {
-            Some(Value::Object(e)) => {
+    let pos = exts.iter().position(|e| url_is(e, url));
+    match (code, system) {
+        (Some(c), None) => match pos.and_then(|i| exts[i].as_object_mut()) {
+            Some(e) => {
+                e.retain(|k, _| !k.starts_with("value"));
                 e.insert("valueCode".into(), Value::String(c.to_string()));
             }
-            _ => exts.push(json!({"url": url, "valueCode": c})),
+            None => exts.push(json!({"url": url, "valueCode": c})),
         },
-        None => exts.retain(|e| !url_is(e, url)),
+        (Some(c), Some(s)) => {
+            let coding = json!({"system": s, "code": c});
+            let concept = pos
+                .and_then(|i| exts[i].as_object_mut())
+                .and_then(|e| e.get_mut("valueCodeableConcept"))
+                .and_then(Value::as_object_mut);
+            match concept {
+                Some(cc) => {
+                    cc.remove("text");
+                    let codings = cc
+                        .entry("coding")
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if !codings.is_array() {
+                        *codings = Value::Array(Vec::new());
+                    }
+                    let codings = codings.as_array_mut().expect("an array");
+                    match codings.iter().position(|x| system_is(x, s)) {
+                        Some(i) => codings[i] = coding,
+                        None => codings.push(coding),
+                    }
+                }
+                None => match pos.and_then(|i| exts[i].as_object_mut()) {
+                    Some(e) => {
+                        e.retain(|k, _| !k.starts_with("value"));
+                        e.insert("valueCodeableConcept".into(), json!({"coding": [coding]}));
+                    }
+                    None => {
+                        exts.push(json!({"url": url, "valueCodeableConcept": {"coding": [coding]}}))
+                    }
+                },
+            }
+        }
+        (None, None) => exts.retain(|e| !url_is(e, url)),
+        (None, Some(s)) => {
+            if let Some(i) = pos {
+                let left = exts[i]
+                    .get_mut("valueCodeableConcept")
+                    .and_then(|cc| cc.get_mut("coding"))
+                    .and_then(Value::as_array_mut)
+                    .map(|codings| {
+                        codings.retain(|x| !system_is(x, s));
+                        codings.len()
+                    })
+                    .unwrap_or(0);
+                if left == 0 {
+                    exts.remove(i);
+                }
+            }
+        }
     }
     if exts.is_empty() {
         obj.remove("extension");
     }
 }
 
-/// A coding under `system` anywhere in `Location.type`: set its code, or
-/// add a concept holding it; clearing removes those codings and any
-/// concept left empty.
+/// A coding under `system` anywhere in `Location.type`: set its code
+/// (dropping the display if the code changes), or add a concept holding it;
+/// clearing removes those codings and any concept left empty.
 fn upsert_type_coding(obj: &mut Object, system: &str, code: Option<&str>) {
     let types = array_mut(obj, "type");
     match code {
@@ -331,6 +405,10 @@ fn upsert_type_coding(obj: &mut Object, system: &str, code: Option<&str>) {
                 .find(|coding| system_is(coding, system));
             match found {
                 Some(Value::Object(coding)) => {
+                    // A display belongs to the old code.
+                    if coding.get("code").and_then(Value::as_str) != Some(c) {
+                        coding.remove("display");
+                    }
                     coding.insert("code".into(), Value::String(c.to_string()));
                 }
                 _ => types.push(json!({"coding": [{"system": system, "code": c}]})),
@@ -670,11 +748,12 @@ mod tests {
     const OWNERSHIP_SYSTEM: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs";
     const SETTLEMENT_TYPE_EXTENSION_URL: &str =
         "https://icr.healthcampaigns.org/StructureDefinition/settlement-type";
-    const DELIVERY_STRATEGY_EXTENSION_URL: &str =
-        "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy";
+    const SETTLEMENT_TYPE_SYSTEM: &str =
+        "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs";
+    const DELIVERY_STRATEGY_EXTENSION_URL: &str = crate::profile::TEST_DELIVERY_STRATEGY_EXTENSION;
 
     fn icr() -> Profile {
-        crate::profile::icr_example()
+        crate::profile::test_profile()
     }
 
     fn org_base() -> Value {
@@ -981,8 +1060,49 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_codeable_concept_extension_is_left_alone() {
+        let ext = json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+            "coding":[{"system":"https://example.org/local","code":"village"},
+                      {"system":SETTLEMENT_TYPE_SYSTEM,"code":"rural","display":"Rural"}],
+            "text":"Rural village"}});
+        let base = json!({"resourceType":"Location","id":"a","extension":[ext.clone()]});
+        // The exported value written back as it was: nothing changes.
+        let out = apply(base.clone(), &[("settlement_type", text("rural"))]);
+        assert_eq!(out["extension"], json!([ext]));
+
+        // Only another system's coding: the column reads null, and a null
+        // written back does not delete the extension.
+        let other = json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+            "coding":[{"system":"https://example.org/local","code":"village"}]}});
+        let only_other = json!({"resourceType":"Location","id":"a","extension":[other.clone()]});
+        let out = apply(only_other, &[("settlement_type", ColumnValue::Null)]);
+        assert_eq!(out["extension"], json!([other]));
+
+        // A changed code replaces only that system's coding; the text and
+        // display described the old code and go.
+        let out = apply(base.clone(), &[("settlement_type", text("hard-to-reach"))]);
+        assert_eq!(
+            out["extension"][0]["valueCodeableConcept"],
+            json!({"coding":[{"system":"https://example.org/local","code":"village"},
+                             {"system":SETTLEMENT_TYPE_SYSTEM,"code":"hard-to-reach"}]})
+        );
+
+        // Clearing removes that system's coding and keeps the rest.
+        let out = apply(base, &[("settlement_type", ColumnValue::Null)]);
+        assert_eq!(
+            out["extension"][0]["valueCodeableConcept"]["coding"],
+            json!([{"system":"https://example.org/local","code":"village"}])
+        );
+    }
+
+    #[test]
     fn profile_extensions_upsert_by_url_and_clear() {
-        let base = json!({"resourceType":"Location","id":"a","extension":[{"url":"https://example.org/keep","valueString":"k"},{"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCode":"rural"}]});
+        // settlement_type is a CodeableConcept extension (ICR's IG);
+        // delivery_strategy a plain valueCode one (the test profile).
+        let base = json!({"resourceType":"Location","id":"a","extension":[
+            {"url":"https://example.org/keep","valueString":"k"},
+            {"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+                "coding":[{"system":SETTLEMENT_TYPE_SYSTEM,"code":"rural","display":"Rural"}]}}]});
         let out = apply(
             base,
             &[
@@ -990,10 +1110,24 @@ mod tests {
                 ("delivery_strategy", text("fixed")),
             ],
         );
-        assert_eq!(out["extension"][1]["valueCode"], "urban");
+        // The stale display goes with the old code.
+        assert_eq!(
+            out["extension"][1],
+            json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+                "coding":[{"system":SETTLEMENT_TYPE_SYSTEM,"code":"urban"}]}})
+        );
         assert_eq!(
             out["extension"][2],
             json!({"url":DELIVERY_STRATEGY_EXTENSION_URL,"valueCode":"fixed"})
+        );
+        // A valueCode written by an older tool becomes the IG's shape.
+        let old = json!({"resourceType":"Location","id":"a","extension":[
+            {"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCode":"rural"}]});
+        let out2 = apply(old, &[("settlement_type", text("urban"))]);
+        assert_eq!(
+            out2["extension"][0],
+            json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+                "coding":[{"system":SETTLEMENT_TYPE_SYSTEM,"code":"urban"}]}})
         );
         let out = apply(
             out,
@@ -1015,7 +1149,10 @@ mod tests {
 
     #[test]
     fn facility_level_and_ownership_upsert_codings_by_system() {
-        let base = json!({"resourceType":"Location","id":"a","type":[{"coding":[{"code":"facility"}]},{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc"}]}]});
+        let base = json!({"resourceType":"Location","id":"a","type":[{"coding":[{"code":"facility"}]},{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc","display":"PHC"}],"text":"Primary Health Centre"}]});
+        // An unchanged code keeps its display.
+        let same = apply(base.clone(), &[("facility_level", text("phc"))]);
+        assert_eq!(same["type"][1]["coding"][0]["display"], "PHC");
         let out = apply(
             base,
             &[
@@ -1023,7 +1160,12 @@ mod tests {
                 ("ownership", text("public")),
             ],
         );
-        assert_eq!(out["type"][1]["coding"][0]["code"], "hospital");
+        // A new code drops the old code's display; the concept text is its
+        // own column (type_text) and stays.
+        assert_eq!(
+            out["type"][1],
+            json!({"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"hospital"}],"text":"Primary Health Centre"})
+        );
         assert_eq!(
             out["type"][2],
             json!({"coding":[{"system":OWNERSHIP_SYSTEM,"code":"public"}]})
@@ -1035,7 +1177,10 @@ mod tests {
                 ("ownership", ColumnValue::Null),
             ],
         );
-        assert_eq!(out["type"], json!([{"coding":[{"code":"facility"}]}]));
+        assert_eq!(
+            out["type"],
+            json!([{"coding":[{"code":"facility"}]},{"text":"Primary Health Centre"}])
+        );
     }
 
     #[test]
