@@ -19,7 +19,7 @@ mod partition;
 mod push;
 mod tiles;
 mod tools;
-mod views;
+pub(crate) mod views;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
