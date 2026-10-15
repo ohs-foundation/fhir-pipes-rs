@@ -1110,8 +1110,10 @@ fn a_range_is_one_value_per_org_unit_with_breakdowns_and_the_campaign() {
                  "valueString": "2026-04-05/2026-05-20"},
                 {"url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
                  "valueReference": {"reference": "CarePlan/bgd-mr-sia-2026"}},
-                {"url": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source",
-                 "valueCode": "analytics"}
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/report-source",
+                 "valueCodeableConcept": {"coding": [{
+                     "system": "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs",
+                     "code": "dhis2-analytics", "display": "DHIS2 analytics"}]}}
             ])
         );
         let st = &rep["group"][0]["stratifier"][0]["stratum"][0];
@@ -2013,7 +2015,7 @@ fn comparable(p: &Path) -> BTreeMap<String, Value> {
             r.as_object_mut().unwrap().remove("date");
             let ext = r["extension"].as_array_mut().unwrap();
             ext.retain(|e| {
-                e["url"] != "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source"
+                e["url"] != "https://icr.healthcampaigns.org/StructureDefinition/report-source"
             });
             (r["id"].as_str().unwrap().to_string(), r)
         })
@@ -2102,9 +2104,11 @@ fn data_values_give_the_same_reports_as_analytics() {
     assert_eq!(x.len(), y.len());
     let r = read_ndjson(&from_values);
     assert!(
-        r.iter().all(
-            |r| r["extension"].as_array().unwrap().last().unwrap()["valueCode"] == "data-values"
-        )
+        r.iter().all(|r| {
+            r["extension"].as_array().unwrap().last().unwrap()["valueCodeableConcept"]["coding"][0]
+                ["code"]
+                == "dhis2-data-values"
+        })
     );
     assert!(r[0]["date"].as_str().unwrap().ends_with('Z'));
 }

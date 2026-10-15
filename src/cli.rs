@@ -130,6 +130,15 @@ impl ReportSource {
             ReportSource::DataValues => "data-values",
         }
     }
+
+    /// The code and display of the coding written in the profile's
+    /// `source_extension`, under its `source_system`.
+    pub fn coding(self) -> (&'static str, &'static str) {
+        match self {
+            ReportSource::Analytics => ("dhis2-analytics", "DHIS2 analytics"),
+            ReportSource::DataValues => ("dhis2-data-values", "DHIS2 data values"),
+        }
+    }
 }
 
 /// Where the DHIS2 instance is, how to sign in, and the short name fhir-pipes

@@ -1,0 +1,25 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRReportSourceCS",
+  "id": "icr-report-source-cs",
+  "title": "ICR Report Source",
+  "description": "Where a MeasureReport's figures came from: the source system and, where it offers more than one, the route through it.",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs",
+  "concept": [
+    {
+      "code": "dhis2-analytics",
+      "display": "DHIS2 analytics",
+      "definition": "Values computed by DHIS2 from its analytics tables (`/api/analytics`), as of the last analytics build."
+    },
+    {
+      "code": "dhis2-data-values",
+      "display": "DHIS2 data values",
+      "definition": "Raw DHIS2 data values (`/api/dataValueSets`), summed up the org unit tree and divided by fhir-pipes."
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 2
+}

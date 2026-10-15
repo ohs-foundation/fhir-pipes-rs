@@ -970,8 +970,8 @@ struct Writer<'a> {
     mapping: &'a HashMap<String, Target>,
     /// `--campaign`, added to every report after the period extension.
     campaign: Option<&'a str>,
-    /// `analytics` or `data-values`, the source extension's code.
-    source: &'static str,
+    /// Analytics or data values, written in the source extension.
+    source: ReportSource,
     state: Checkpoint,
     checkpoint: PathBuf,
     tally: Tally,
@@ -1066,7 +1066,10 @@ impl<'a> Writer<'a> {
                         if let Some(c) = self.campaign {
                             ext.push(json!({"url": self.instance.urls.campaign_extension, "valueReference": {"reference": c}}));
                         }
-                        ext.push(json!({"url": self.instance.urls.source_extension, "valueCode": self.source}));
+                        let (code, display) = self.source.coding();
+                        ext.push(json!({"url": self.instance.urls.source_extension,
+                            "valueCodeableConcept": {"coding": [{"system": self.instance.urls.source_system,
+                                "code": code, "display": display}]}}));
                     }
                     out.insert(r["id"].as_str().unwrap_or_default().to_string(), r);
                 }
@@ -1527,7 +1530,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         indicators: &indicators,
         mapping: &mapping,
         campaign: args.campaign.as_deref(),
-        source: args.source.code(),
+        source: args.source,
         state,
         checkpoint: checkpoint.clone(),
         tally: Tally::default(),

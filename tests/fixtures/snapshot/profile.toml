@@ -115,7 +115,10 @@ location_type_system = "https://icr.healthcampaigns.org/CodeSystem/icr-location-
 country_code_system = "https://icr.healthcampaigns.org/identifiers/national-admin-code"
 period_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period"
 campaign_extension = "https://icr.healthcampaigns.org/StructureDefinition/campaign"
-source_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source"
+# Where each MeasureReport came from, a CodeableConcept under source_system:
+# dhis2-analytics or dhis2-data-values (--source).
+source_extension = "https://icr.healthcampaigns.org/StructureDefinition/report-source"
+source_system = "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs"
 indicator_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-indicator"
 
 # fhir-pipes population: population Groups for admin units or catchments.

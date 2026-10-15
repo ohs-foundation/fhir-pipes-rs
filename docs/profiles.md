@@ -120,7 +120,8 @@ All required for `fhir-pipes dhis2`.
 | `location_profile`, `facility_organization_profile` | `meta.profile` of the Locations and facility Organizations written. |
 | `location_type_system` | The system of the Location type codes written (`admin_unit_type`, `facility_type`). |
 | `country_code_system` | The identifier system `--country-code` is written under on the top org unit. Make it one the admin code column reads, so it becomes the country. |
-| `period_extension`, `campaign_extension`, `source_extension` | Extensions on the MeasureReports written. |
+| `period_extension`, `campaign_extension` | Extensions on the MeasureReports written. |
+| `source_extension`, `source_system` | The extension on each MeasureReport that says where its figures came from: a `valueCodeableConcept` with code `dhis2-analytics` or `dhis2-data-values` (`--source`) under `source_system`. |
 | `indicator_extension` | The extension on the Measures written. |
 
 `dhis2 locations` also needs `[location] admin_unit_type` and
@@ -304,9 +305,9 @@ For each URL under the IG's canonical, the check reports:
 |---|---|
 | An extension the profile names is not in the IG | error |
 | An extension cannot sit on the resource it is read from: its `context` is, say, Task, or an element below the root such as `Location.position`. A FHIRPath context other than a list of types (`Location \| Organization`) is listed as not checked | error |
-| An `extension_code` column without `system` on an extension whose value is a CodeableConcept, or with `system` on one whose value is a `code` or a `Coding` (fhir-pipes reads `valueCodeableConcept`, not `valueCoding`) | error |
-| An `extension_code` column's `system` is not in the ValueSet the extension is bound to, following the IG's ValueSets it imports. A binding that leads outside the IG is not judged | warning |
-| A code system the profile names is not in the IG, or `admin_unit_type`, `facility_type` or a `known_source_codes` entry is not a code in it | error |
+| An `extension_code` column without `system` on an extension whose value is a CodeableConcept, or with `system` on one whose value is a `code` or a `Coding` (fhir-pipes reads `valueCodeableConcept`, not `valueCoding`). The same for `[dhis2] source_extension`, which must be a CodeableConcept | error |
+| An `extension_code` column's `system`, or `[dhis2] source_system`, is not in the ValueSet the extension is bound to, following the IG's ValueSets it imports. A binding that leads outside the IG is not judged | warning |
+| A code system the profile names is not in the IG, or `admin_unit_type`, `facility_type`, a `known_source_codes` entry or a code `dhis2 reports` writes under `source_system` is not a code in it | error |
 | A later `type_systems` entry (an older URI) is not in the IG | warning |
 | A `meta.profile` (`location_profile`, `group_profile` …) is not in the IG, or constrains another type | error |
 | An identifier system is not sliced in any of the IG's profiles of that resource type (by a `system` pattern on the slice's `system`, or a `patternIdentifier` on the slice) | warning |
@@ -322,7 +323,6 @@ new columns.
 For ICR's profile against its current IG:
 
 ```
-error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-source is not an extension in the IG
 warning: [location] type_systems: https://icr.healthcampaigns.org/CodeSystem/icr-location-type is not a CodeSystem in the IG
 warning: [[location.column]] pcode: https://icr.healthcampaigns.org/identifiers/national-admin-code is not an identifier slice in any of the IG's Location profiles
 warning: [dhis2] country_code_system: https://icr.healthcampaigns.org/identifiers/national-admin-code is not an identifier slice in any of the IG's Location profiles
@@ -334,7 +334,7 @@ in the IG's Location profiles but not read by the profile:
   https://icr.healthcampaigns.org/StructureDefinition/catchment-of
   urn:iso:std:iso:3166
   urn:iso:std:iso:3166:-2
-1 error(s), 3 warning(s)
+0 error(s), 3 warning(s)
 ```
 
 ## Error messages
