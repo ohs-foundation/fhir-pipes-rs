@@ -88,7 +88,7 @@ name = "my-ig"            # shown in messages
 
 | Key | Used by | Meaning |
 |---|---|---|
-| `boundary_extensions` | transform, diff, dhis2 | Boundary attachment extensions to read before the HL7 one. A new boundary written by `diff` or `dhis2` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
+| `boundary_extensions` | extract, run, refresh, transform, diff, dhis2 | Boundary attachment extensions to read before the HL7 one. `extract` fetches and inlines an attachment `url` under them as it does under the HL7 one. A new boundary written by `diff` or `dhis2` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
 | `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. |
 | `spatial_index_extension` | transform, diff, index | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
 | `admin_unit_type` | transform, population, dhis2 | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |

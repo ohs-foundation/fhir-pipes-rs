@@ -170,6 +170,7 @@ fn export_changes(
         Some(since),
         &incoming,
         report,
+        &[],
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -189,6 +190,7 @@ fn export_changes(
         &|_| None,
         &HashMap::new(),
         report,
+        &[],
     )?;
     match count_resources(client, &args.server, resource_type) {
         Some(server_total) if server_total as usize != stats.total => {
@@ -245,7 +247,7 @@ fn export_all(
     report: &mut Report,
 ) -> Result<TypeState> {
     let tmp = tmp_path(&args.out, resource_type);
-    let paged = match page_resources(client, &args.server, resource_type, None, &tmp, report) {
+    let paged = match page_resources(client, &args.server, resource_type, None, &tmp, report, &[]) {
         Ok(p) => p,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);

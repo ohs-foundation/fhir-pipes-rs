@@ -31,10 +31,12 @@ struct MergeInput<'a> {
     full: bool,
     lookup: &'a dyn Fn(&str) -> Option<Vec<u8>>,
     failures: &'a HashMap<String, String>,
+    /// The profile's boundary extensions, beside the HL7 one.
+    boundary_extensions: &'a [String],
 }
 
 /// Replace the boundary attachment that carries `url` with inline base64 data.
-fn inline_boundary(resource: &mut Value, url: &str, bytes: &[u8]) -> bool {
+fn inline_boundary(resource: &mut Value, url: &str, bytes: &[u8], extra: &[String]) -> bool {
     let Some(exts) = resource.get_mut("extension").and_then(Value::as_array_mut) else {
         return false;
     };
@@ -42,7 +44,7 @@ fn inline_boundary(resource: &mut Value, url: &str, bytes: &[u8]) -> bool {
         let is_boundary = ext
             .get("url")
             .and_then(Value::as_str)
-            .is_some_and(|u| is_boundary_extension(u, &[]));
+            .is_some_and(|u| is_boundary_extension(u, extra));
         if !is_boundary {
             continue;
         }
@@ -109,6 +111,7 @@ pub fn merge(
     lookup: &dyn Fn(&str) -> Option<Vec<u8>>,
     failures: &HashMap<String, String>,
     report: &mut Report,
+    boundary_extensions: &[String],
 ) -> Result<MergeStats> {
     merge_file(
         &MergeFiles::locations(snap),
@@ -117,6 +120,7 @@ pub fn merge(
         lookup,
         failures,
         report,
+        boundary_extensions,
     )
 }
 
@@ -157,12 +161,14 @@ pub fn merge_file(
     lookup: &dyn Fn(&str) -> Option<Vec<u8>>,
     failures: &HashMap<String, String>,
     report: &mut Report,
+    boundary_extensions: &[String],
 ) -> Result<MergeStats> {
     let input = MergeInput {
         notes,
         full,
         lookup,
         failures,
+        boundary_extensions,
     };
     let result = merge_into(files, &input, report);
     if result.is_err() {
@@ -242,7 +248,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
                 let mut resource: Value = serde_json::from_str(&line.text)?;
                 match (input.lookup)(url) {
                     Some(bytes) => {
-                        inline_boundary(&mut resource, url, &bytes);
+                        inline_boundary(&mut resource, url, &bytes, input.boundary_extensions);
                     }
                     None => report.add(
                         "boundary_fetch_failed",
@@ -340,6 +346,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut report,
+            &[],
         )
         .unwrap();
         assert_eq!((stats.total, stats.added, stats.updated), (2, 1, 1));
@@ -415,7 +422,16 @@ mod tests {
         );
         let lookup = |u: &str| bytes.get(u).cloned();
         let mut report = Report::default();
-        let stats = merge(&snap, &notes, false, &lookup, &HashMap::new(), &mut report).unwrap();
+        let stats = merge(
+            &snap,
+            &notes,
+            false,
+            &lookup,
+            &HashMap::new(),
+            &mut report,
+            &[],
+        )
+        .unwrap();
         assert_eq!((stats.total, stats.added, stats.updated), (3, 1, 1));
         assert_eq!(stats.watermark.as_deref(), Some("2026-01-04T00:00:00Z"));
         let text = std::fs::read_to_string(snap.locations()).unwrap();
@@ -456,7 +472,7 @@ mod tests {
         let mut failures = HashMap::new();
         failures.insert("https://x/n".to_string(), "HTTP 404".to_string());
         let mut report = Report::default();
-        let stats = merge(&snap, &notes, true, &|_| None, &failures, &mut report).unwrap();
+        let stats = merge(&snap, &notes, true, &|_| None, &failures, &mut report, &[]).unwrap();
         assert_eq!((stats.total, stats.added, stats.updated), (1, 1, 0));
         assert_eq!(report.count("boundary_fetch_failed"), 1);
         let text = std::fs::read_to_string(snap.locations()).unwrap();
@@ -490,6 +506,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut report,
+            &[],
         )
         .unwrap();
         assert_eq!(stats.total, 2, "the unparsed line plus d");
@@ -518,6 +535,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         assert_eq!((stats.total, stats.added), (1, 1));
@@ -535,6 +553,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(stats.watermark.as_deref(), Some("2026-01-01T00:00:00Z"));
@@ -562,6 +581,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut Report::default(),
+            &[],
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 1);
@@ -580,7 +600,16 @@ mod tests {
         bytes.insert("https://x/m".to_string(), b"new bytes".to_vec());
         let lookup = |u: &str| bytes.get(u).cloned();
         let mut report = Report::default();
-        merge(&snap, &notes, false, &lookup, &HashMap::new(), &mut report).unwrap();
+        merge(
+            &snap,
+            &notes,
+            false,
+            &lookup,
+            &HashMap::new(),
+            &mut report,
+            &[],
+        )
+        .unwrap();
         let text = std::fs::read_to_string(snap.locations()).unwrap();
         let v: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         let exts = v["extension"].as_array().unwrap();
@@ -605,7 +634,16 @@ mod tests {
         bytes.insert("https://x/h".to_string(), b"hl7 bytes".to_vec());
         let lookup = |u: &str| bytes.get(u).cloned();
         let mut report = Report::default();
-        merge(&snap, &notes, false, &lookup, &HashMap::new(), &mut report).unwrap();
+        merge(
+            &snap,
+            &notes,
+            false,
+            &lookup,
+            &HashMap::new(),
+            &mut report,
+            &[],
+        )
+        .unwrap();
         let text = std::fs::read_to_string(snap.locations()).unwrap();
         let v: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
         let att = &v["extension"][0]["valueAttachment"];
@@ -637,6 +675,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         assert_eq!((stats.total, stats.added), (1, 1));
@@ -673,6 +712,7 @@ mod tests {
             &|_| None,
             &HashMap::new(),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         assert_eq!((stats.total, stats.added, stats.updated), (1, 0, 1));

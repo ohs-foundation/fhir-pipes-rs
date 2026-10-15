@@ -1360,3 +1360,68 @@ fn client_credentials_from_the_environment_authorise_every_request() {
         .success();
     assert_eq!(lines(snap.path()).len(), 1);
 }
+
+#[test]
+fn run_fetches_boundaries_under_a_profile_boundary_extension() {
+    // A boundary under an extension only the profile names: extract must
+    // fetch and inline it, or transform finds no geometry.
+    const SERVICE_AREA: &str = "https://example.org/StructureDefinition/service-area";
+    let server = Server::run();
+    expect_no_organizations(&server);
+    let snap = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let profile = work.path().join("custom.toml");
+    std::fs::write(
+        &profile,
+        format!("name = \"custom\"\n\n[location]\nboundary_extensions = [\"{SERVICE_AREA}\"]\n"),
+    )
+    .unwrap();
+    let burl = server.url("/b/area.geojson").to_string();
+    let area = json!({
+        "resourceType": "Location",
+        "id": "area",
+        "meta": {"lastUpdated": "2026-01-01T00:00:00Z"},
+        "status": "active",
+        "name": "area",
+        "extension": [{
+            "url": SERVICE_AREA,
+            "valueAttachment": {"contentType": "application/geo+json", "url": burl},
+        }],
+    });
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(vec![area], None))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/area.geojson"))
+            .times(1)
+            .respond_with(
+                status_code(200)
+                    .body(r#"{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}"#),
+            ),
+    );
+
+    let assert = fhir_pipes()
+        .args(["run", "--server", &server.url("/fhir").to_string()])
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--snapshot")
+        .arg(snap.path())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .success();
+
+    let err = stderr(&assert);
+    assert!(
+        err.contains("boundaries: 0 cached, 1 fetched, 0 failed"),
+        "{err}"
+    );
+    let rows = lines(snap.path());
+    assert!(attachment(&rows[0])["data"].is_string(), "{}", rows[0]);
+    assert!(attachment(&rows[0])["url"].is_null());
+    let text = stdout(&assert);
+    assert!(text.contains("Wrote 1 rows"), "{text}");
+}

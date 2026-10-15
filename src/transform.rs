@@ -25,6 +25,13 @@ pub fn check_out_dir(out: &Path) -> Result<()> {
 }
 
 pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> Result<()> {
+    let profile = Profile::for_snapshot(profile, &args.snapshot)?;
+    transform_with(args, &profile)
+}
+
+/// `run_transform` with the profile already loaded (`run` loads it once for
+/// both of its steps).
+pub fn transform_with(args: &TransformArgs, profile: &Profile) -> Result<()> {
     check_out_dir(&args.out)?;
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
@@ -40,11 +47,10 @@ pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> Result<()> 
         ));
     }
 
-    let profile = Profile::for_snapshot(profile, &args.snapshot)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
     let mut index = build_index(
         &ndjson,
-        &profile,
+        profile,
         args.country.as_deref(),
         args.keep_without_geometry,
     )?;
@@ -80,7 +86,7 @@ pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> Result<()> 
     let organizations = organizations.is_file().then_some(organizations.as_path());
     let written = write_dataset(
         &ndjson,
-        &profile,
+        profile,
         &mut index,
         &args.out,
         &keys,

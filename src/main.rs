@@ -49,7 +49,8 @@ fn main() {
             transform::run_transform(&args, profile)
         }
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
-        cli::Command::Extract(args) => extract::run_extract(&args),
+        cli::Command::Extract(args) => profile::Profile::for_snapshot(profile, &args.snapshot)
+            .and_then(|p| extract::run_extract(&args, &p.location.boundary_extensions)),
         cli::Command::Export(args) => export::run_export(&args),
         cli::Command::Run(args) => run::run(&args, profile),
         cli::Command::Diff(args) => diff::run_diff(&args, profile),
