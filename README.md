@@ -118,9 +118,20 @@ fhir-pipes export --server https://fhir.example.org/fhir --type Patient --type O
 ```
 
 It pages the search, writes each file beside the target and renames it into
-place, so a failed run leaves the previous download intact. Each run is a full
-download. When the last page is full and has no next link, the server's count
-is checked and a difference is reported as `count_mismatch`.
+place, so a failed run leaves the previous download intact. When the last page
+is full and has no next link, the server's count is checked and a difference
+is reported as `count_mismatch`.
+
+`OUT/.export-state.json` records the greatest `meta.lastUpdated` downloaded
+for each type. With `--incremental`, a type that has one is searched with
+`_lastUpdated=ge<that time>` and the result is merged into its file by id, so
+a run fetches only what changed. A `_lastUpdated` search cannot see a deleted
+resource, so after the merge the server's count is compared with the file's,
+and a type whose counts differ is downloaded in full. `refresh` exports this
+way unless given `--full`. The watermark is never later than the server's
+clock when the search began (its HTTP `Date`), less five minutes, so a
+resource updated while a run is paging is fetched by the next run. `extract`
+sets its Location and Organization watermarks the same way.
 
 ## Connecting to a FHIR server
 
@@ -158,8 +169,6 @@ default. Connection errors, 429 and 5xx responses are retried up to
 
 ## Not done yet
 
-- `refresh` downloads every resource the views read on every run. Only the
-  Location registry is extracted incrementally so far.
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
 - The `octofhir-fhirpath` crate depends on an HTTP client it does not use,

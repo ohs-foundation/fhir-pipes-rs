@@ -4,8 +4,9 @@
 //!
 //! Steps, in order:
 //!   locations  extract and transform the Location registry → parquet/locations
-//!   views      export each resource type the views read, run the views in
-//!              memory (fhir-pipes-sof), partition each table by a looked-up column
+//!   views      export each resource type the views read (only what changed
+//!              since the last refresh), run the views in memory
+//!              (fhir-pipes-sof), partition each table by a looked-up column
 //!   tiles      the registry → PMTiles (duckdb + tippecanoe); runs beside views
 //!   manifest   manifest.json: row counts, views, the extract state
 //!   hooks      commands from the config (e.g. a catalog build)
@@ -73,7 +74,8 @@ pub struct RefreshArgs {
     /// Reuse downloaded NDJSON where present instead of downloading again.
     #[arg(long, env = "FHIR_PIPES_REUSE_RAW")]
     reuse_raw: bool,
-    /// Re-extract every Location instead of only the changed ones.
+    /// Download everything again (Locations and every resource type the views
+    /// read) instead of only what changed since the last refresh.
     #[arg(long)]
     full: bool,
     /// Push: show what would change without changing it.
