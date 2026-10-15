@@ -17,9 +17,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding, get_writer};
-use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult, ViewRunner};
-use fhir_pipes_sof_lint::{FhirSchemaProvider, Severity, lint, lint_shareable, validate_structure};
-use sqlx_postgres::PgPool;
+use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
+use fhir_pipes_sof_lint::{Finding, Severity, lint_shareable, validate_structure};
 
 use crate::warehouse::views::{discover, parse_view};
 
@@ -186,7 +185,56 @@ fn load_views(path: &Path) -> Result<Vec<(String, ViewDefinition)>> {
 /// Where `run` reads resources from, shared by every view in one run.
 enum Source {
     Files(Vec<serde_json::Value>),
-    Db(PgPool),
+    #[cfg(feature = "postgres")]
+    Db(sqlx_postgres::PgPool),
+}
+
+#[cfg(feature = "postgres")]
+async fn connect(db: &str) -> Result<Source> {
+    let pool = sqlx_postgres::PgPool::connect(db)
+        .await
+        .context("connecting to the database")?;
+    Ok(Source::Db(pool))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn connect(_db: &str) -> Result<Source> {
+    bail!(
+        "--db needs PostgreSQL support, which this fhir-pipes was built without; \
+         build it with `--features postgres`"
+    )
+}
+
+/// Findings from checking `view`'s selectors and generated SQL against a
+/// FHIR package (FH01–FH10).
+#[cfg(feature = "fhir-packages")]
+async fn package_findings(
+    view: &ViewDefinition,
+    package: &str,
+    version: Option<&str>,
+) -> Result<Vec<Finding>> {
+    let provider = fhir_pipes_sof_lint::FhirSchemaProvider::load(package, version)
+        .await
+        .with_context(|| format!("loading package {package}"))?;
+    if provider.is_empty() {
+        bail!(
+            "package `{package}` has no StructureDefinitions in the store; \
+             pass --version to install it"
+        );
+    }
+    Ok(fhir_pipes_sof_lint::lint(view, &provider))
+}
+
+#[cfg(not(feature = "fhir-packages"))]
+async fn package_findings(
+    _view: &ViewDefinition,
+    _package: &str,
+    _version: Option<&str>,
+) -> Result<Vec<Finding>> {
+    bail!(
+        "--package needs FHIR package support, which this fhir-pipes was built without; \
+         build it with `--features fhir-packages` (--shareable works without it)"
+    )
 }
 
 async fn run_view(source: &Source, view: &ViewDefinition, threads: usize) -> Result<ViewResult> {
@@ -197,7 +245,8 @@ async fn run_view(source: &Source, view: &ViewDefinition, threads: usize) -> Res
             fhir_pipes_sof::execute_parallel(view, resources, threads)
         })
         .context("running view"),
-        Source::Db(pool) => ViewRunner::new(pool.clone())
+        #[cfg(feature = "postgres")]
+        Source::Db(pool) => fhir_pipes_sof::ViewRunner::new(pool.clone())
             .run(view)
             .await
             .context("running view"),
@@ -581,7 +630,7 @@ impl ReportFormat {
 fn report_findings(
     origin: &str,
     source: &str,
-    findings: &[fhir_pipes_sof_lint::Finding],
+    findings: &[Finding],
     fmt: ReportFormat,
     color: bool,
     ok_msg: &str,
@@ -715,11 +764,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                     Source::Files(stdin_resources.take().expect("checked"))
                 }
                 (Some(path), _) => Source::Files(load_resources(path, threads)?),
-                (None, Some(db)) => Source::Db(
-                    PgPool::connect(db)
-                        .await
-                        .context("connecting to the database")?,
-                ),
+                (None, Some(db)) => connect(db).await?,
                 (None, None) => {
                     bail!("pass --input <file|dir|-> to run on files, or --db <url>")
                 }
@@ -809,16 +854,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             let (source, view) = read_view(view)?;
             let mut findings = Vec::new();
             if let Some(package) = package {
-                let provider = FhirSchemaProvider::load(package, version.as_deref())
-                    .await
-                    .with_context(|| format!("loading package {package}"))?;
-                if provider.is_empty() {
-                    bail!(
-                        "package `{package}` has no StructureDefinitions in the store; \
-                         pass --version to install it"
-                    );
-                }
-                findings.extend(lint(&view, &provider));
+                findings.extend(package_findings(&view, package, version.as_deref()).await?);
             }
             if *shareable {
                 findings.extend(lint_shareable(&view, allow_fn));
