@@ -18,6 +18,9 @@ tools, kiln and fhir-warehouse, and the octofhir/sof SQL-on-FHIR engine. The
 reasoning and the plan are in
 [docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md](docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md).
 
+[ROADMAP.md](ROADMAP.md) lists what each release can do, what is next, and
+what was decided against.
+
 ## Install
 
 Download the binary for your platform from the
@@ -200,11 +203,10 @@ default. Connection errors, 429 and 5xx responses are retried up to
 
 ## Not done yet
 
+The open items are in [ROADMAP.md](ROADMAP.md#next). The main ones:
+
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
-- `octofhir-fhirpath` comes from the ohs-foundation/fhirpath-rs fork, which
-  drops an HTTP client the library never used (and the `aws-lc` C library with
-  it), until octofhir/fhirpath-rs#175 is released.
 - `bake` and `bake-points`, which turn GRID3 and CSV files into Locations,
   are still in the Python package under `python/` (named `kiln`); see
   [python/README.md](python/README.md).
@@ -265,13 +267,14 @@ src/
   raster/, population.rs
                   population Groups from a raster
   dhis2/          DHIS2 import
+  profile/        profiles: loading, and `profile check` against an IG
 crates/
   sof/            fhir-pipes-sof: the ViewDefinition engine (from octofhir/sof)
   sof-lint/       fhir-pipes-sof-lint: ViewDefinition checks
 tests/            integration tests per command; fixtures under tests/fixtures
 python/           bake and bake-points (still the Python kiln package)
 docs/
-  refresh.md, locations.md, dhis2.md, qgis.md
+  refresh.md, locations.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
   notes/          the consolidation notes
   superpowers/    kiln's design specs, plans and spikes
 ```
