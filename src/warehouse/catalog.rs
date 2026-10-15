@@ -74,9 +74,11 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
             fs::remove_file(p).with_context(|| format!("removing {}", p.display()))?;
         }
     }
-    // Relative paths resolve against the warehouse directory.
+    // DuckDB runs in the warehouse directory, so relative paths in the views
+    // resolve against it; the database is named relative to it too, since
+    // s.data may itself be relative.
     let mut child = Command::new(&s.duckdb)
-        .arg(&tmp)
+        .arg(format!("{DUCKDB_FILE}.tmp"))
         .current_dir(&s.data)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -224,20 +226,10 @@ fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// A table name as a SQL identifier, quoted unless it is a plain lower-case name.
+/// A table name as a quoted SQL identifier, so a name that is a keyword
+/// (`group`) works. Queries can still name it unquoted where DuckDB allows.
 fn ident(name: &str) -> String {
-    let plain = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if plain {
-        name.to_string()
-    } else {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// A relative file path as a URL path: bytes outside the unreserved set, `/`
@@ -280,10 +272,10 @@ mod tests {
     fn relative_paths_are_globbed_from_the_partition_level() {
         let sql = render(&tables(), None, None, "T");
         assert!(sql.contains(
-            "CREATE OR REPLACE VIEW coverage AS\n  SELECT * FROM read_parquet('parquet/coverage/country=*/**/*.parquet', hive_partitioning = true, union_by_name = true);"
+            "CREATE OR REPLACE VIEW \"coverage\" AS\n  SELECT * FROM read_parquet('parquet/coverage/country=*/**/*.parquet', hive_partitioning = true, union_by_name = true);"
         ), "{sql}");
         assert!(sql.contains("-- empty: no files"), "{sql}");
-        assert!(!sql.contains("VIEW empty"), "{sql}");
+        assert!(!sql.contains("VIEW \"empty\""), "{sql}");
         assert!(sql.contains("duckdb -init catalog.sql"), "{sql}");
     }
 
@@ -324,8 +316,9 @@ mod tests {
 
     #[test]
     fn names_and_paths_are_escaped() {
-        assert_eq!(ident("indicator_value"), "indicator_value");
-        assert_eq!(ident("Odd-Name"), "\"Odd-Name\"");
+        assert_eq!(ident("indicator_value"), "\"indicator_value\"");
+        assert_eq!(ident("group"), "\"group\"");
+        assert_eq!(ident("o\"d"), "\"o\"\"d\"");
         assert_eq!(
             url_path("parquet/t/country=Côte d'Ivoire/part-0.parquet"),
             "parquet/t/country=C%C3%B4te%20d%27Ivoire/part-0.parquet"

@@ -57,9 +57,16 @@ pub fn push(s: &Settings) -> Result<()> {
         tools::run(&mut cmd)?;
         println!("   {dir}/");
     }
+    // The catalog's files are uploaded below, after it is built, even when
+    // `files` lists them.
+    let managed: &[&str] = if s.catalog.is_some() {
+        &[catalog::SQL_FILE, catalog::DUCKDB_FILE]
+    } else {
+        &[]
+    };
     for file in &p.files {
         let src = s.data.join(file);
-        if !src.is_file() {
+        if !src.is_file() || managed.contains(&file.as_str()) {
             continue;
         }
         let mut cmd = Command::new(&s.rclone);
@@ -85,7 +92,7 @@ pub fn push(s: &Settings) -> Result<()> {
         }
         for file in files {
             let src = s.data.join(file);
-            if p.files.iter().any(|f| f == file) || !(src.is_file() || s.dry_run) {
+            if !(src.is_file() || s.dry_run) {
                 continue;
             }
             let mut cmd = Command::new(&s.rclone);

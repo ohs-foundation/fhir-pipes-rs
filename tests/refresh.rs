@@ -503,7 +503,7 @@ fn the_catalog_has_a_view_per_table_and_the_extra_views() {
     for table in ["locations", "obs", "patient"] {
         assert!(
             sql.contains(&format!(
-                "CREATE OR REPLACE VIEW {table} AS\n  SELECT * FROM read_parquet('parquet/{table}/country=*/**/*.parquet'"
+                "CREATE OR REPLACE VIEW \"{table}\" AS\n  SELECT * FROM read_parquet('parquet/{table}/country=*/**/*.parquet'"
             )),
             "{sql}"
         );
@@ -601,7 +601,7 @@ fn the_pushed_catalog_reads_the_uploaded_tables() {
     let (root, config) = setup(
         &server.url_str("/fhir"),
         &format!(
-            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\n\n[catalog]\nbase_url = '{}'\nduckdb_file = {duckdb_file}\n",
+            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\nfiles = [\"manifest.json\", \"catalog.sql\", \"catalog.duckdb\"]\n\n[catalog]\nbase_url = '{}'\nduckdb_file = {duckdb_file}\n",
             rclone.display(),
             mirror.display()
         ),
@@ -649,4 +649,35 @@ fn the_pushed_catalog_reads_the_uploaded_tables() {
             "3"
         );
     }
+}
+
+/// A relative --data, and a table named after a SQL keyword.
+#[test]
+fn the_catalog_takes_a_relative_data_dir_and_keyword_table_names() {
+    if !have_duckdb() {
+        return;
+    }
+    let (dir, config) = setup(NOWHERE, "\n[catalog]\nduckdb_file = true\n");
+    let data = dir.path().join("data");
+    let group = data.join("parquet/group/country=SLE");
+    fs::create_dir_all(&group).unwrap();
+    fs::copy(
+        data.join("parquet/locations/country=SLE/part-0.parquet"),
+        group.join("part-0.parquet"),
+    )
+    .unwrap();
+    // cmd runs in the config's directory, where data/ is.
+    cmd(&config)
+        .args(["--data", "data", "--only", "catalog"])
+        .assert()
+        .success()
+        .stdout(has("   catalog.duckdb"));
+    assert_eq!(
+        duckdb_value(
+            &data,
+            Some(Path::new("catalog.duckdb")),
+            "SELECT (SELECT count(*) FROM \"group\") || ',' || (SELECT count(*) FROM locations);"
+        ),
+        "2,2"
+    );
 }
