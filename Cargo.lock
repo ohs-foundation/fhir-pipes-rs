@@ -2869,8 +2869,7 @@ dependencies = [
 [[package]]
 name = "octofhir-fhirpath"
 version = "0.4.55"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3a0b53b3f753a76dfa347419f5a245e3398bd5ac56c9df52811c3ddf0f5bec0"
+source = "git+https://github.com/ohs-foundation/fhirpath-rs?rev=e7af4aa#e7af4aafccfb03c69ac7d1ea8c33c5796071b24c"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -2892,7 +2891,6 @@ dependencies = [
  "papaya",
  "parking_lot",
  "regex",
- "reqwest 0.13.4",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4335,9 +4333,9 @@ dependencies = [
 
 [[package]]
 name = "tabled"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5dc662e6da844ad6e428ad16b57967c9d33c82e16bb1c258326c0c078605dff"
+checksum = "2d2596a104db1900b943f97d793a6c99addca918c4525c999f751a0f17d472eb"
 dependencies = [
  "papergrid",
  "testing_table",

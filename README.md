@@ -171,9 +171,9 @@ default. Connection errors, 429 and 5xx responses are retried up to
 
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
-- The `octofhir-fhirpath` crate depends on an HTTP client it does not use,
-  which brings in the `aws-lc` C library and slows builds. Removing it needs
-  a change upstream.
+- `octofhir-fhirpath` comes from the ohs-foundation/fhirpath-rs fork, which
+  drops an HTTP client the library never used (and the `aws-lc` C library with
+  it), until octofhir/fhirpath-rs#175 is released.
 - `bake` and `bake-points`, which turn GRID3 and CSV files into Locations,
   are still in the Python package under `python/` (named `kiln`); see
   [python/README.md](python/README.md).

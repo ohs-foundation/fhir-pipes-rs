@@ -57,10 +57,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      # aarch64 musl cross-compiles C code (aws-lc, brought in by the
-      # octofhir-fhirpath crate's HTTP client). Ubuntu has no aarch64 musl
-      # compiler and the glibc one links glibc-only symbols, so zig compiles
-      # and links it instead.
+      # aarch64 musl cross-compiles C code (zstd, lz4, and aws-lc when a
+      # feature brings in an HTTPS client). Ubuntu has no aarch64 musl compiler
+      # and the glibc one links glibc-only symbols, so zig compiles and links.
       - if: matrix.target == 'aarch64-unknown-linux-musl'
         run: pip install ziglang cargo-zigbuild
       - if: "!contains(matrix.target, 'musl')"
