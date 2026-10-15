@@ -105,6 +105,8 @@ fn cmd(config: &Path) -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_USERNAME",
+        "FHIR_PIPES_PASSWORD",
         "FHIR_PIPES_PROFILE",
     ] {
         c.env_remove(var);
@@ -709,4 +711,49 @@ fn a_listed_catalog_duckdb_is_pushed_when_fhir_pipes_does_not_build_it() {
         "built by a hook"
     );
     assert!(mirror.join("catalog.sql").is_file());
+}
+
+/// The username from the config, the password only from the environment.
+#[test]
+fn locations_are_extracted_with_basic_auth() {
+    let server = Server::run();
+    let basic = || request::headers(contains(("authorization", "Basic YWRtaW46QWRtaW4xMjM=")));
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Location"),
+            basic()
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(vec![]))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Organization"),
+            basic()
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(vec![]))),
+    );
+    let (_dir, config) = setup(&server.url_str("/fhir"), "");
+    let text = fs::read_to_string(&config).unwrap().replace(
+        "name = \"test\"\n",
+        "name = \"test\"\nusername = \"admin\"\n",
+    );
+    fs::write(&config, text).unwrap();
+    cmd(&config)
+        .args(["--only", "locations", "--full", "--check"])
+        .env("FHIR_PIPES_PASSWORD", "Admin123")
+        .assert()
+        .success()
+        .stdout(has("auth:       basic"));
+    cmd(&config)
+        .args(["--only", "locations", "--full"])
+        .env("FHIR_PIPES_PASSWORD", "Admin123")
+        .assert()
+        .success();
+    cmd(&config)
+        .args(["--only", "locations", "--full"])
+        .assert()
+        .failure()
+        .stderr(has("FHIR_PIPES_PASSWORD"));
 }
