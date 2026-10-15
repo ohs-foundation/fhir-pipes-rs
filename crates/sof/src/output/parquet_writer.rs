@@ -259,7 +259,8 @@ impl ParquetWriter {
     }
 
     /// Apply a temporal parser to one JSON value, logging (and nulling) values
-    /// that are not strings or do not parse.
+    /// that are not strings or do not parse. The log names the column, not the
+    /// value, which may be patient data (as upstream octofhir/sof 0.1.3).
     fn temporal_value<T>(
         col: &ColumnInfo,
         value: &Option<&Value>,
@@ -269,7 +270,6 @@ impl ParquetWriter {
         let Value::String(s) = value else {
             tracing::warn!(
                 column = %col.name,
-                value = %value,
                 "non-string value in {} column written as null",
                 col.col_type
             );
@@ -279,7 +279,6 @@ impl ParquetWriter {
         if parsed.is_none() {
             tracing::warn!(
                 column = %col.name,
-                value = %s,
                 "unparseable {} value written as null",
                 col.col_type
             );
@@ -391,8 +390,10 @@ mod temporal {
             .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
             .ok()?;
         let secs = i64::from(t.num_seconds_from_midnight());
-        let micros = i64::from(t.nanosecond() / 1_000);
-        Some(secs * 1_000_000 + micros)
+        let micros = secs * 1_000_000 + i64::from(t.nanosecond() / 1_000);
+        // chrono reads 23:59:60 as a leap second, past the end of the day an
+        // Arrow Time64 can hold.
+        (micros < 86_400_000_000).then_some(micros)
     }
 }
 
@@ -652,6 +653,12 @@ mod tests {
             Some((13 * 3600 + 45 * 60 + 30) * 1_000_000)
         );
         assert_eq!(temporal::time_to_micros("25:00:00"), None);
+        // A leap second is past the end of the day a Time64 can hold.
+        assert_eq!(temporal::time_to_micros("23:59:60"), None);
+        assert_eq!(
+            temporal::time_to_micros("23:59:59.999999"),
+            Some(86_399_999_999)
+        );
     }
 
     #[test]
