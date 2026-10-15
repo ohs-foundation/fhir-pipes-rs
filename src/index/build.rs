@@ -53,10 +53,12 @@ pub const WRITTEN_WITHOUT_GEOMETRY: &str = "written without geometry (--keep-wit
 /// it. Such rows sort after every row with geometry, by country then id.
 pub fn build_index(
     ndjson: &Path,
+    profile: &crate::profile::Profile,
     country_override: Option<&str>,
     keep_without_geometry: bool,
 ) -> crate::error::Result<Index> {
     let mut report = Report::default();
+    let code_column = profile.location.admin_code_column.as_deref();
     let mut records: Vec<IndexRecord> = Vec::new();
     let mut read = 0usize;
 
@@ -77,7 +79,7 @@ pub fn build_index(
                 continue;
             }
         };
-        let Some(loc) = Location::parse(&value, &mut report) else {
+        let Some(loc) = Location::parse(&value, profile, &mut report) else {
             continue;
         };
         if let Some(Boundary::Url(url)) = &loc.boundary {
@@ -94,7 +96,9 @@ pub fn build_index(
             id: loc.id,
             part_of: loc.part_of,
             name: loc.name,
-            pcode: loc.pcode,
+            admin_code: loc.admin_code,
+            is_admin: loc.type_code.is_some()
+                && loc.type_code.as_deref() == profile.location.admin_unit_type.as_deref(),
             type_code: loc.type_code,
             managing_organization: loc.managing_organization,
             offset: line.offset,
@@ -125,11 +129,17 @@ pub fn build_index(
             Some(c) => c.to_string(),
             None => match hierarchy.country(&records, i) {
                 Some(c) => c,
+                // Without an admin code in the profile there is no country
+                // to find, and nothing to report about every row.
+                None if code_column.is_none() => UNKNOWN_COUNTRY.to_string(),
                 None => {
                     report.add(
                         "no_country",
                         &records[i].id,
-                        "no admin-unit ancestor carries a pcode; filed under 'unknown'",
+                        &format!(
+                            "no admin unit ancestor carries an admin code ({}); filed under 'unknown'",
+                            code_column.unwrap_or_default()
+                        ),
                     );
                     UNKNOWN_COUNTRY.to_string()
                 }
@@ -167,13 +177,13 @@ pub fn build_index(
         }
     }
 
-    // Duplicate-pcode detection is scoped to retained rows only: a dropped
+    // Duplicate admin code detection is scoped to retained rows only: a dropped
     // record (no geometry without --keep-without-geometry, or trimmed by
     // the hierarchy resolver) never reaches the output, so it should never
     // manufacture a collision with one that does.
     let mut by_pcode: HashMap<&str, Vec<u32>> = HashMap::new();
     for &(i, _) in &retained {
-        if let Some(p) = &records[i as usize].pcode {
+        if let Some(p) = &records[i as usize].admin_code {
             by_pcode.entry(p.as_str()).or_default().push(i);
         }
     }
@@ -190,10 +200,12 @@ pub fn build_index(
             .map(|&i| records[i as usize].id.as_str())
             .collect();
         names.sort();
+        // Named after the column: duplicate_pcode for ICR.
+        let column = code_column.unwrap_or("admin_code");
         report.add(
-            "duplicate_pcode",
+            &format!("duplicate_{column}"),
             &names.join(", "),
-            &format!("pcode {pcode} claimed by {} Locations", names.len()),
+            &format!("{column} {pcode} claimed by {} Locations", names.len()),
         );
     }
 
@@ -238,7 +250,7 @@ mod tests {
 
     #[test]
     fn indexes_the_fixture_snapshot() {
-        let index = build_index(&fixture(), None, false).unwrap();
+        let index = build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         assert_eq!(index.read, 12);
         assert_eq!(
             index.records.len(),
@@ -311,7 +323,13 @@ mod tests {
 
     #[test]
     fn country_override_wins() {
-        let index = build_index(&fixture(), Some("XX"), false).unwrap();
+        let index = build_index(
+            &fixture(),
+            &crate::profile::icr_example(),
+            Some("XX"),
+            false,
+        )
+        .unwrap();
         assert!(
             index
                 .order
@@ -325,7 +343,7 @@ mod tests {
     fn empty_snapshot_yields_empty_order() {
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), b"{\"resourceType\":\"Location\",\"id\":\"x\"}\n").unwrap();
-        let index = build_index(f.path(), None, false).unwrap();
+        let index = build_index(f.path(), &crate::profile::icr_example(), None, false).unwrap();
         assert_eq!(index.records.len(), 1);
         assert!(index.order.is_empty());
         assert_eq!(index.report.count("no_geometry"), 1);
@@ -342,14 +360,14 @@ mod tests {
         );
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), ndjson).unwrap();
-        let index = build_index(f.path(), None, false).unwrap();
+        let index = build_index(f.path(), &crate::profile::icr_example(), None, false).unwrap();
         assert_eq!(index.report.count("duplicate_pcode"), 0);
         assert_eq!(index.order.len(), 1);
     }
 
     #[test]
     fn keep_without_geometry_retains_ghost_and_remote_last() {
-        let index = build_index(&fixture(), None, true).unwrap();
+        let index = build_index(&fixture(), &crate::profile::icr_example(), None, true).unwrap();
         assert!(index.keep_without_geometry);
         let retained: Vec<&str> = index
             .order
@@ -407,7 +425,7 @@ mod tests {
 
     #[test]
     fn without_the_flag_no_issue_mentions_written_rows() {
-        let index = build_index(&fixture(), None, false).unwrap();
+        let index = build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         assert!(!index.keep_without_geometry);
         assert!(
             index
@@ -430,7 +448,7 @@ mod tests {
         );
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), ndjson).unwrap();
-        let index = build_index(f.path(), None, true).unwrap();
+        let index = build_index(f.path(), &crate::profile::icr_example(), None, true).unwrap();
         let retained: Vec<&str> = index
             .order
             .iter()
@@ -470,7 +488,7 @@ mod tests {
         );
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), ndjson).unwrap();
-        let index = build_index(f.path(), None, true).unwrap();
+        let index = build_index(f.path(), &crate::profile::icr_example(), None, true).unwrap();
         assert_eq!(index.order.len(), 2);
         assert_eq!(index.report.count("duplicate_pcode"), 1);
     }
@@ -485,7 +503,7 @@ mod tests {
         );
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), ndjson).unwrap();
-        let index = build_index(f.path(), None, true).unwrap();
+        let index = build_index(f.path(), &crate::profile::icr_example(), None, true).unwrap();
         let retained: Vec<&str> = index
             .order
             .iter()
@@ -503,7 +521,7 @@ mod tests {
         );
         let f = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(f.path(), ndjson).unwrap();
-        let index = build_index(f.path(), None, false).unwrap();
+        let index = build_index(f.path(), &crate::profile::icr_example(), None, false).unwrap();
         assert_eq!(index.read, 3);
         assert_eq!(index.records.len(), 2);
         assert_eq!(index.report.count("malformed_field"), 1);

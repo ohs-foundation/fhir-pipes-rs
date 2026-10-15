@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
-use crate::fhir::location::{BOUNDARY_EXTENSION_URLS, GEOJSON_CONTENT_TYPE};
+use crate::fhir::location::{GEOJSON_CONTENT_TYPE, is_boundary_extension};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::snapshot::Snapshot;
@@ -42,7 +42,7 @@ fn inline_boundary(resource: &mut Value, url: &str, bytes: &[u8]) -> bool {
         let is_boundary = ext
             .get("url")
             .and_then(Value::as_str)
-            .is_some_and(|u| BOUNDARY_EXTENSION_URLS.contains(&u));
+            .is_some_and(|u| is_boundary_extension(u, &[]));
         if !is_boundary {
             continue;
         }

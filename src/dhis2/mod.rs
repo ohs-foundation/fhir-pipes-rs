@@ -32,18 +32,20 @@ use serde_json::{Value, json};
 use crate::cli::Dhis2Command;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{is_gz, read_text, with_suffix};
+use crate::profile::{Dhis2Profile, Profile};
 
-pub const ICR_BASE: &str = "https://icr.healthcampaigns.org";
-pub const PROJECT_TAG_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs";
 /// Instance names go into every id, so they are kept short.
 pub const MAX_INSTANCE_LEN: usize = 16;
 
-pub fn run(cmd: &Dhis2Command) -> Result<()> {
+/// Every system, profile and extension URL comes from the profile's [dhis2]
+/// section (and the Location roles from [location] and [organization]).
+pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> Result<()> {
+    let profile = Profile::load(profile)?;
+    profile.dhis2()?;
     match cmd {
-        Dhis2Command::Locations(args) => locations::run_locations(args),
-        Dhis2Command::Measures(args) => measures::run_measures(args),
-        Dhis2Command::Reports(args) => reports::run_reports(args),
+        Dhis2Command::Locations(args) => locations::run_locations(args, &profile),
+        Dhis2Command::Measures(args) => measures::run_measures(args, &profile),
+        Dhis2Command::Reports(args) => reports::run_reports(args, &profile),
     }
 }
 
@@ -55,14 +57,24 @@ pub fn valid_name(name: &str, max: usize) -> bool {
 }
 
 /// The short name an instance is filed under, and everything derived from
-/// it: identifier systems, ids, canonical URLs and the meta tag.
+/// it: identifier systems, ids, canonical URLs and the meta tag, all under
+/// the profile's [dhis2] base.
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub name: String,
+    pub urls: Dhis2Profile,
+    /// [location] admin_unit_type: the type code of an org unit above facility level.
+    pub admin_unit_type: Option<String>,
+    /// [organization] facility_type: the type code of a facility.
+    pub facility_type: Option<String>,
+    /// [organization] id_prefix of a facility's Organization (`org-`).
+    pub org_id_prefix: String,
+    /// The boundary extension a written Location carries.
+    pub boundary_extension: String,
 }
 
 impl Instance {
-    pub fn new(name: &str) -> Result<Self> {
+    pub fn new(name: &str, profile: &Profile) -> Result<Self> {
         if !valid_name(name, MAX_INSTANCE_LEN) {
             return Err(PipesError::Usage(format!(
                 "--instance must be letters, digits and hyphens, at most {MAX_INSTANCE_LEN} characters, got {name:?}"
@@ -70,56 +82,91 @@ impl Instance {
         }
         Ok(Self {
             name: name.to_string(),
+            urls: profile.dhis2()?.clone(),
+            admin_unit_type: profile.location.admin_unit_type.clone(),
+            facility_type: profile.organization.facility_type.clone(),
+            org_id_prefix: profile.organization.id_prefix.clone(),
+            boundary_extension: profile
+                .location
+                .boundary_extensions
+                .first()
+                .cloned()
+                .unwrap_or_else(|| crate::fhir::location::HL7_BOUNDARY_EXTENSION_URL.to_string()),
         })
     }
 
+    fn base(&self) -> &str {
+        self.urls.base.trim_end_matches('/')
+    }
+
     pub fn orgunit_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/orgunit", self.name)
+        format!("{}/identifiers/dhis2/{}/orgunit", self.base(), self.name)
     }
 
     pub fn orgunit_code_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/orgunit-code", self.name)
+        format!(
+            "{}/identifiers/dhis2/{}/orgunit-code",
+            self.base(),
+            self.name
+        )
     }
 
     pub fn indicator_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/indicator", self.name)
+        format!("{}/identifiers/dhis2/{}/indicator", self.base(), self.name)
     }
 
     pub fn indicator_code_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/indicator-code", self.name)
+        format!(
+            "{}/identifiers/dhis2/{}/indicator-code",
+            self.base(),
+            self.name
+        )
     }
 
     pub fn data_element_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/data-element", self.name)
+        format!(
+            "{}/identifiers/dhis2/{}/data-element",
+            self.base(),
+            self.name
+        )
     }
 
     pub fn data_element_code_system(&self) -> String {
         format!(
-            "{ICR_BASE}/identifiers/dhis2/{}/data-element-code",
+            "{}/identifiers/dhis2/{}/data-element-code",
+            self.base(),
             self.name
         )
     }
 
     pub fn data_set_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/data-set", self.name)
+        format!("{}/identifiers/dhis2/{}/data-set", self.base(), self.name)
     }
 
     pub fn data_set_code_system(&self) -> String {
-        format!("{ICR_BASE}/identifiers/dhis2/{}/data-set-code", self.name)
+        format!(
+            "{}/identifiers/dhis2/{}/data-set-code",
+            self.base(),
+            self.name
+        )
     }
 
     /// Code system of a group: `indicator-group`, `data-element-group`, or
     /// `data-element-group-set/<uid>` for the groups of one group set.
     pub fn group_system(&self, kind: &str) -> String {
-        format!("{ICR_BASE}/CodeSystem/dhis2/{}/{kind}", self.name)
+        format!("{}/CodeSystem/dhis2/{}/{kind}", self.base(), self.name)
     }
 
     /// Code system of a breakdown's options: `dimension/<uid>` (a category,
     /// org unit group set or data element group set).
     pub fn dimension_system(&self, dimension: Option<&str>) -> String {
         match dimension {
-            Some(d) => format!("{ICR_BASE}/CodeSystem/dhis2/{}/dimension/{d}", self.name),
-            None => format!("{ICR_BASE}/CodeSystem/dhis2/{}/dimension", self.name),
+            Some(d) => format!(
+                "{}/CodeSystem/dhis2/{}/dimension/{d}",
+                self.base(),
+                self.name
+            ),
+            None => format!("{}/CodeSystem/dhis2/{}/dimension", self.base(), self.name),
         }
     }
 
@@ -128,11 +175,11 @@ impl Instance {
     }
 
     pub fn measure_url(&self, indicator: &str) -> String {
-        format!("{ICR_BASE}/Measure/{}", self.measure_id(indicator))
+        format!("{}/Measure/{}", self.base(), self.measure_id(indicator))
     }
 
     pub fn tag(&self) -> Value {
-        json!({"system": PROJECT_TAG_SYSTEM, "code": self.name})
+        json!({"system": self.urls.project_tag_system, "code": self.name})
     }
 }
 
@@ -322,16 +369,19 @@ mod tests {
 
     #[test]
     fn instance_names_are_short_and_plain() {
-        assert!(Instance::new("sl-demo").is_ok());
-        assert!(Instance::new("").is_err());
-        assert!(Instance::new("sl demo").is_err());
-        assert!(Instance::new("sl_demo").is_err());
-        assert!(Instance::new("a-very-long-instance-name").is_err());
+        assert!(Instance::new("sl-demo", &crate::profile::icr_example()).is_ok());
+        assert!(Instance::new("", &crate::profile::icr_example()).is_err());
+        assert!(Instance::new("sl-demo", &crate::profile::Profile::base()).is_err());
+        assert!(Instance::new("sl demo", &crate::profile::icr_example()).is_err());
+        assert!(Instance::new("sl_demo", &crate::profile::icr_example()).is_err());
+        assert!(
+            Instance::new("a-very-long-instance-name", &crate::profile::icr_example()).is_err()
+        );
     }
 
     #[test]
     fn systems_and_ids_carry_the_instance() {
-        let i = Instance::new("sl-demo").unwrap();
+        let i = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         assert_eq!(
             i.orgunit_system(),
             "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit"

@@ -33,6 +33,17 @@ pub const DEFAULT_ANALYTICS_CONCURRENCY: usize = 4;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+    /// Profile: an implementation guide's extra columns, codes and URLs, as a
+    /// TOML file path or an https URL (see docs/profiles.md). Without one, a
+    /// command working from a snapshot uses the profile it was last
+    /// transformed with, and otherwise reads base FHIR only.
+    #[arg(
+        long,
+        global = true,
+        env = "FHIR_PIPES_PROFILE",
+        value_name = "FILE|URL"
+    )]
+    pub profile: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

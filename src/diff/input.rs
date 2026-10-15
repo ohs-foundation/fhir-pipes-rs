@@ -1,5 +1,6 @@
-//! One edited row, whatever file it came from. Only the README's writable
-//! columns are kept; each reader coerces its native types into
+//! One edited row, whatever file it came from. The readers keep the built-in
+//! writable columns and every column that is not built in (a profile column,
+//! or one diff then refuses); each reader coerces its native types into
 //! `ColumnValue` and the rebuild step never sees a file format.
 
 use std::collections::BTreeMap;
@@ -9,7 +10,8 @@ use serde_json::Value;
 
 pub use crate::fhir::location::Identifier;
 
-pub const TEXT_COLUMNS: [&str; 17] = [
+/// Built-in writable text columns. A profile's columns are text too.
+pub const TEXT_COLUMNS: [&str; 7] = [
     "name",
     "status",
     "description",
@@ -17,16 +19,6 @@ pub const TEXT_COLUMNS: [&str; 17] = [
     "physical_type",
     "part_of",
     "managing_organization",
-    "pcode",
-    "gers_id",
-    "settlement_type",
-    "delivery_strategy",
-    "facility_level",
-    "ownership",
-    "nhfr_code",
-    "nhfr_uid",
-    "facility_level_text",
-    "ownership_text",
 ];
 pub const NUMBER_COLUMNS: [&str; 2] = ["position_longitude", "position_latitude"];
 pub const ALIAS_COLUMN: &str = "alias";
@@ -56,11 +48,18 @@ pub struct InputRow {
     pub line: usize,
 }
 
-pub fn is_writable(name: &str) -> bool {
+/// A built-in column diff writes back.
+pub fn is_builtin_writable(name: &str) -> bool {
     TEXT_COLUMNS.contains(&name)
         || NUMBER_COLUMNS.contains(&name)
         || name == ALIAS_COLUMN
         || IDENTIFIER_COLUMNS.contains(&name)
+}
+
+/// A column the readers keep: a built-in writable one, or any column that is
+/// not built in. Built-in derived columns (admin1_name, path, …) are dropped.
+pub fn is_writable(name: &str) -> bool {
+    is_builtin_writable(name) || !crate::write::schema::is_builtin_column(name)
 }
 
 fn text_list(v: &Value) -> Result<ColumnValue, String> {
@@ -124,7 +123,9 @@ pub fn column_from_json(name: &str, v: &Value) -> Result<ColumnValue, String> {
     if v.is_null() {
         return Ok(ColumnValue::Null);
     }
-    if TEXT_COLUMNS.contains(&name) {
+    // Built-in text columns, and every column that is not built in: a
+    // profile's columns are text, and diff refuses the rest by name.
+    if TEXT_COLUMNS.contains(&name) || !crate::write::schema::is_builtin_column(name) {
         return match v {
             Value::String(s) if s.is_empty() => Ok(ColumnValue::Null),
             Value::String(s) => Ok(ColumnValue::Text(s.clone())),

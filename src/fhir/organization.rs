@@ -1,16 +1,13 @@
-//! One FHIR Organization, flattened into the fields fhir-pipes projects onto its
-//! facility's row. The ICR facility pairing (`ICRFacilityOrganization`)
-//! puts the registry codes and the human-readable type labels here.
+//! One FHIR Organization, flattened into the fields fhir-pipes projects onto
+//! the row of the Location that names it as managingOrganization: base FHIR,
+//! plus the profile's Organization columns (ICR puts a facility's registry
+//! codes and type labels there).
 
 use serde_json::Value;
 
-use crate::fhir::location::{
-    FACILITY_TYPE_SYSTEM, Identifier, OWNERSHIP_SYSTEM, coding_code_by_system, str_field,
-};
+use crate::fhir::location::{Identifier, str_field};
 use crate::report::Report;
 
-pub const NHFR_CODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code";
-pub const NHFR_UID_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid";
 pub const ORGANIZATION_TYPE_SYSTEM: &str =
     "http://terminology.hl7.org/CodeSystem/organization-type";
 
@@ -21,12 +18,8 @@ pub struct Organization {
     pub last_updated: Option<String>,
     pub name: Option<String>,
     pub identifier: Vec<Identifier>,
-    pub nhfr_code: Option<String>,
-    pub nhfr_uid: Option<String>,
-    pub facility_level: Option<String>,
-    pub ownership: Option<String>,
-    pub facility_level_text: Option<String>,
-    pub ownership_text: Option<String>,
+    /// The profile's Organization columns, in profile order.
+    pub columns: Vec<Option<String>>,
     /// The resource as JSON, key order preserved, untouched.
     pub fhir_json: String,
 }
@@ -54,9 +47,13 @@ pub fn concept_text_by_system(node: Option<&Value>, system: &str) -> Option<Stri
 }
 
 impl Organization {
-    /// Flatten one resource. Returns None (after reporting) if it has no
-    /// usable id or is not an Organization.
-    pub fn parse(resource: &Value, report: &mut Report) -> Option<Organization> {
+    /// Flatten one resource, with `profile`'s Organization columns. Returns
+    /// None (after reporting) if it has no usable id or is not an Organization.
+    pub fn parse(
+        resource: &Value,
+        profile: &crate::profile::Profile,
+        report: &mut Report,
+    ) -> Option<Organization> {
         let Value::Object(obj) = resource else {
             report.add(
                 "malformed_field",
@@ -103,18 +100,12 @@ impl Organization {
                 }
             }
         }
-        let by_system = |system: &str| {
-            org.identifier
-                .iter()
-                .find(|i| i.system.as_deref() == Some(system))
-                .and_then(|i| i.value.clone())
-        };
-        org.nhfr_code = by_system(NHFR_CODE_SYSTEM);
-        org.nhfr_uid = by_system(NHFR_UID_SYSTEM);
-        org.facility_level = coding_code_by_system(obj.get("type"), FACILITY_TYPE_SYSTEM);
-        org.ownership = coding_code_by_system(obj.get("type"), OWNERSHIP_SYSTEM);
-        org.facility_level_text = concept_text_by_system(obj.get("type"), FACILITY_TYPE_SYSTEM);
-        org.ownership_text = concept_text_by_system(obj.get("type"), OWNERSHIP_SYSTEM);
+        org.columns = profile
+            .organization
+            .columns
+            .iter()
+            .map(|c| c.read(obj, &org.identifier))
+            .collect();
         org.fhir_json = resource.to_string();
         Some(org)
     }
@@ -135,17 +126,26 @@ mod tests {
     #[test]
     fn parses_the_pairing_fields() {
         let mut report = Report::default();
-        let org = Organization::parse(&serde_json::from_str(ORG).unwrap(), &mut report).unwrap();
+        let profile = crate::profile::icr_example();
+        let org = Organization::parse(&serde_json::from_str(ORG).unwrap(), &profile, &mut report)
+            .unwrap();
+        let col = |name: &str| {
+            let i = profile
+                .organization
+                .columns
+                .iter()
+                .position(|c| c.name == name)
+                .unwrap();
+            org.columns[i].as_deref()
+        };
         assert_eq!(org.id, "org-1");
         assert_eq!(org.version_id.as_deref(), Some("7"));
         assert_eq!(org.name.as_deref(), Some("Siyi Health Post"));
         assert_eq!(org.identifier.len(), 2);
-        assert_eq!(org.nhfr_code.as_deref(), Some("05/08/1/1/1/0061"));
-        assert_eq!(org.nhfr_uid.as_deref(), Some("21526030"));
-        assert_eq!(org.facility_level.as_deref(), Some("primary"));
-        assert_eq!(org.ownership.as_deref(), Some("public"));
-        assert_eq!(org.facility_level_text.as_deref(), Some("Health Post"));
-        assert_eq!(org.ownership_text.as_deref(), Some("Local Government"));
+        assert_eq!(col("nhfr_code"), Some("05/08/1/1/1/0061"));
+        assert_eq!(col("nhfr_uid"), Some("21526030"));
+        assert_eq!(col("facility_level_text"), Some("Health Post"));
+        assert_eq!(col("ownership_text"), Some("Local Government"));
         assert!(
             org.fhir_json
                 .starts_with("{\"resourceType\":\"Organization\"")
@@ -159,6 +159,7 @@ mod tests {
         assert!(
             Organization::parse(
                 &serde_json::json!({"resourceType":"Organization"}),
+                &crate::profile::Profile::base(),
                 &mut report
             )
             .is_none()
@@ -167,6 +168,7 @@ mod tests {
         assert!(
             Organization::parse(
                 &serde_json::json!({"resourceType":"Location","id":"x"}),
+                &crate::profile::Profile::base(),
                 &mut report
             )
             .is_none()

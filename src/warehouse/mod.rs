@@ -113,13 +113,14 @@ fn env_secret(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-pub fn run(args: &RefreshArgs) -> Result<()> {
+pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
     let steps = steps(args);
     let (file, base) = config::load(args.config.as_deref())?;
     let s = config::settings(
         file,
         base,
         config::Overrides {
+            profile: profile.map(str::to_string),
             data: args.data.clone(),
             views: args.views.clone(),
             server: args.server.clone(),
@@ -236,6 +237,12 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
             .map_or("-".into(), |p| p.display().to_string())
     );
     println!("threads:    {}", s.threads);
+    println!(
+        "profile:    {}",
+        s.profile
+            .as_deref()
+            .unwrap_or("none (the snapshot's, else base FHIR)")
+    );
     println!(
         "partition:  {} via {}",
         s.partition_column,

@@ -13,6 +13,7 @@ use crate::geometry::{self, GeomKind};
 use crate::index::hierarchy::Hierarchy;
 use crate::index::partition::{Claims, PartitionKey, segment};
 use crate::index::{Index, IndexRecord};
+use crate::profile::Profile;
 use crate::report::Report;
 use crate::snapshot::index::index_by_id;
 use crate::write::parquet::PartitionWriter;
@@ -37,11 +38,15 @@ pub struct WrittenPartition {
 
 /// Re-read and parse one record's line. Diagnostics were reported in pass
 /// one; this parses with a throwaway report so nothing is counted twice.
-fn load_location(lines: &mut LineAccess, rec: &IndexRecord) -> Result<Option<Location>> {
+fn load_location(
+    lines: &mut LineAccess,
+    rec: &IndexRecord,
+    profile: &Profile,
+) -> Result<Option<Location>> {
     let text = lines.read_at(rec.offset, rec.len)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let mut silent = Report::default();
-    Ok(Location::parse(&value, &mut silent))
+    Ok(Location::parse(&value, profile, &mut silent))
 }
 
 /// Bounded cache of parent polygons for the point-outside-parent check,
@@ -56,6 +61,7 @@ impl ParentCache {
         idx: u32,
         records: &[IndexRecord],
         lines: &mut LineAccess,
+        profile: &Profile,
     ) -> Result<Option<&geo::Geometry<f64>>> {
         if !self.polygons.contains_key(&idx) {
             // Eviction is wholesale rather than LRU: access is spatially
@@ -72,7 +78,7 @@ impl ParentCache {
                 self.polygons.clear();
             }
             let mut silent = Report::default();
-            let geom = load_location(lines, &records[idx as usize])?
+            let geom = load_location(lines, &records[idx as usize], profile)?
                 .and_then(|loc| geometry::build(&loc, &mut silent))
                 .filter(|g| g.kind == GeomKind::Polygon)
                 .map(|g| g.geometry);
@@ -124,6 +130,7 @@ fn swap_in(dataset: &Path, backup: &Path, staging: &Path) -> Result<()> {
 
 pub fn write_dataset(
     ndjson: &Path,
+    profile: &Profile,
     index: &mut Index,
     out_dir: &Path,
     keys: &[PartitionKey],
@@ -143,14 +150,21 @@ pub fn write_dataset(
     recover_incomplete_swap(&dataset, &backup, &staging)?;
     std::fs::create_dir(&staging).map_err(|e| PipesError::io(&staging, e))?;
 
-    let written =
-        match write_partitions(ndjson, index, &staging, keys, row_group_size, organizations) {
-            Ok(w) => w,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(e);
-            }
-        };
+    let written = match write_partitions(
+        ndjson,
+        profile,
+        index,
+        &staging,
+        keys,
+        row_group_size,
+        organizations,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
     swap_in(&dataset, &backup, &staging)?;
     // Durability: fsync the directory whose entry (the `locations` rename)
     // just changed, so that change survives a crash right after this
@@ -171,6 +185,7 @@ pub fn write_dataset(
 
 fn write_partitions(
     ndjson: &Path,
+    profile: &Profile,
     index: &mut Index,
     staging: &Path,
     keys: &[PartitionKey],
@@ -186,9 +201,9 @@ fn write_partitions(
         ..
     } = index;
     let schema = if *keep_without_geometry {
-        output_schema_optional_geometry()
+        output_schema_optional_geometry(profile)
     } else {
-        output_schema()
+        output_schema(profile)
     };
     let records: &[IndexRecord] = records;
     let hierarchy: &Hierarchy = hierarchy;
@@ -253,14 +268,14 @@ fn write_partitions(
             .join("part-0.parquet");
         let mut writer =
             PartitionWriter::create_with_schema(&path, row_group_size, schema.clone())?;
-        let mut batch = RowBatch::with_schema(schema.clone());
+        let mut batch = RowBatch::for_profile(profile, *keep_without_geometry);
         let mut geometry_types: Vec<String> = Vec::new();
         let mut rows_without_geometry = 0usize;
 
         for &i in idxs {
             let i = i as usize;
             let rec = &records[i];
-            let Some(loc) = load_location(&mut lines, rec)? else {
+            let Some(loc) = load_location(&mut lines, rec, profile)? else {
                 report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
                 continue;
             };
@@ -288,7 +303,7 @@ fn write_partitions(
                     Some(&(offset, len)) => {
                         let text = access.read_at(offset, len)?;
                         let value: serde_json::Value = serde_json::from_str(&text)?;
-                        Organization::parse(&value, &mut Report::default())
+                        Organization::parse(&value, profile, &mut Report::default())
                     }
                     None => {
                         report.add(
@@ -321,7 +336,7 @@ fn write_partitions(
 
             if let (Some(geom), Some(parent_idx)) =
                 (&geom, nearest_polygon_ancestor(hierarchy, records, i))
-                && let Some(parent) = parent_cache.get(parent_idx, records, &mut lines)?
+                && let Some(parent) = parent_cache.get(parent_idx, records, &mut lines, profile)?
             {
                 let pt = geo::Point::new(geom.lon, geom.lat);
                 if !parent.intersects(&pt) {
@@ -376,16 +391,9 @@ fn write_partitions(
                     .map(|ident| (ident.system, ident.value))
                     .collect(),
                 position: loc.position,
-                pcode: loc.pcode,
-                gers_id: loc.gers_id,
-                settlement_type: loc.settlement_type,
-                delivery_strategy: loc.delivery_strategy,
+                location_columns: loc.columns,
                 quadkey,
                 quadkey_level,
-                facility_level: loc.facility_level,
-                ownership: loc.ownership,
-                nhfr_code: org.as_ref().and_then(|o| o.nhfr_code.clone()),
-                nhfr_uid: org.as_ref().and_then(|o| o.nhfr_uid.clone()),
                 organization_identifier: org
                     .as_ref()
                     .map(|o| {
@@ -395,8 +403,7 @@ fn write_partitions(
                             .collect()
                     })
                     .unwrap_or_default(),
-                facility_level_text: org.as_ref().and_then(|o| o.facility_level_text.clone()),
-                ownership_text: org.as_ref().and_then(|o| o.ownership_text.clone()),
+                organization_columns: org.as_ref().map(|o| o.columns.clone()).unwrap_or_default(),
                 depth: i32::from(info.depth),
                 admin_level: info.admin_level.map(i32::from),
                 tier: rec.tier.clone(),
@@ -470,9 +477,19 @@ mod tests {
     #[test]
     fn writes_one_file_per_partition_and_swaps_atomically() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        let written = write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         let rel: Vec<String> = written
             .iter()
             .map(|w| {
@@ -506,8 +523,18 @@ mod tests {
         assert!(!out.path().join(".locations.bak").exists());
 
         // Second run replaces the dataset and leaves no backup behind.
-        let mut index = build_index(&fixture(), None, false).unwrap();
-        write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         assert!(!out.path().join(".locations.bak").exists());
         assert!(
             out.path()
@@ -519,9 +546,19 @@ mod tests {
     #[test]
     fn keep_without_geometry_writes_ghost_and_remote_with_null_geometry() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None, true).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, true).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        let written = write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         assert_eq!(written.iter().map(|w| w.rows).sum::<usize>(), 10);
         let null = written
             .iter()
@@ -544,9 +581,19 @@ mod tests {
     #[test]
     fn rows_without_geometry_come_last_in_a_shared_partition() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None, true).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, true).unwrap();
         let keys = parse_keys("tier").unwrap();
-        let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 10, None).unwrap();
+        let written = write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            10,
+            None,
+        )
+        .unwrap();
         let tier2 = written.iter().find(|w| w.partition == "tier=2").unwrap();
         assert_eq!((tier2.rows, tier2.rows_without_geometry), (3, 1));
         let file = std::fs::File::open(&tier2.path).unwrap();
@@ -570,9 +617,19 @@ mod tests {
     #[test]
     fn partition_by_tier_groups_non_consecutive_rows() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("tier").unwrap();
-        let written = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        let written = write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         let mut parts: Vec<&str> = written.iter().map(|w| w.partition.as_str()).collect();
         parts.sort();
         assert_eq!(parts, vec!["tier=0", "tier=1", "tier=2", "tier=site"]);
@@ -596,10 +653,19 @@ mod tests {
             b"{\"resourceType\":\"Location\",\"id\":\"x\"}\n",
         )
         .unwrap();
-        let mut index = build_index(snapshot.path(), None, false).unwrap();
+        let mut index =
+            build_index(snapshot.path(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        let written =
-            write_dataset(snapshot.path(), &mut index, out.path(), &keys, 3, None).unwrap();
+        let written = write_dataset(
+            snapshot.path(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         assert!(written.is_empty());
         assert!(out.path().join("locations").is_dir());
     }
@@ -611,9 +677,19 @@ mod tests {
         let backup = out.path().join(".locations.bak");
         std::fs::create_dir_all(backup.join("country=NG")).unwrap();
         std::fs::write(backup.join("country=NG/marker"), b"old").unwrap();
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         assert!(!backup.exists());
         assert!(
             !out.path().join("locations/country=NG/marker").exists(),
@@ -629,19 +705,38 @@ mod tests {
     #[test]
     fn mid_write_failure_leaves_the_live_dataset_untouched() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
         let before = snapshot_files(&out.path().join("locations"));
         assert!(!before.is_empty());
 
         // A record whose recorded offset is now nonsense (as if the ndjson
         // had shrunk out from under it): the seek succeeds but the read
         // fails, so the whole write must abort partway through.
-        let mut broken = build_index(&fixture(), None, false).unwrap();
+        let mut broken =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let last = *broken.order.last().unwrap();
         broken.records[last as usize].offset = 1 << 40;
-        let err = write_dataset(&fixture(), &mut broken, out.path(), &keys, 3, None);
+        let err = write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut broken,
+            out.path(),
+            &keys,
+            3,
+            None,
+        );
         assert!(err.is_err(), "{err:?}");
 
         assert!(!out.path().join(".locations.tmp").exists());
@@ -656,13 +751,33 @@ mod tests {
     #[test]
     fn a_rerun_with_different_keys_leaves_only_its_own_files() {
         let out = tempfile::tempdir().unwrap();
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
 
-        let mut index2 = build_index(&fixture(), None, false).unwrap();
+        let mut index2 =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let tier_keys = parse_keys("tier").unwrap();
-        write_dataset(&fixture(), &mut index2, out.path(), &tier_keys, 3, None).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index2,
+            out.path(),
+            &tier_keys,
+            3,
+            None,
+        )
+        .unwrap();
 
         let dataset = out.path().join("locations");
         let mut saw_any = false;
@@ -686,9 +801,19 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         symlink(&real, out.path().join("locations")).unwrap();
 
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        let err = write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap_err();
+        let err = write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("symlink"), "{err}");
     }
 
@@ -699,9 +824,19 @@ mod tests {
         std::fs::create_dir_all(staging.join("country=STALE")).unwrap();
         std::fs::write(staging.join("country=STALE/junk"), b"stale").unwrap();
 
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
 
         assert!(!out.path().join("locations/country=STALE").exists());
         assert!(!staging.exists());
@@ -717,9 +852,19 @@ mod tests {
         std::fs::create_dir_all(backup.join("country=OLDER")).unwrap();
         std::fs::write(backup.join("country=OLDER/marker"), b"backup").unwrap();
 
-        let mut index = build_index(&fixture(), None, false).unwrap();
+        let mut index =
+            build_index(&fixture(), &crate::profile::icr_example(), None, false).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        write_dataset(&fixture(), &mut index, out.path(), &keys, 3, None).unwrap();
+        write_dataset(
+            &fixture(),
+            &crate::profile::icr_example(),
+            &mut index,
+            out.path(),
+            &keys,
+            3,
+            None,
+        )
+        .unwrap();
 
         assert!(!backup.exists());
         assert!(!dataset.join("country=OLD").exists());

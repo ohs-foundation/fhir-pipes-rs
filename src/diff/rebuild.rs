@@ -9,14 +9,13 @@ use serde_json::{Map, Value, json};
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
 use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow};
 use crate::fhir::location::{
-    BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS, DELIVERY_STRATEGY_EXTENSION_URL,
-    FACILITY_TYPE_SYSTEM, GEOJSON_CONTENT_TYPE, GERS_SYSTEM, OWNERSHIP_SYSTEM, PCODE_SYSTEM,
-    PCODE_SYSTEMS, SETTLEMENT_TYPE_EXTENSION_URL,
+    GEOJSON_CONTENT_TYPE, HL7_BOUNDARY_EXTENSION_URL, is_boundary_extension,
 };
-use crate::fhir::organization::{NHFR_CODE_SYSTEM, NHFR_UID_SYSTEM, ORGANIZATION_TYPE_SYSTEM};
+use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
 use crate::fhir::{Boundary, Location};
 use crate::geometry::{kind_name, parse_boundary, validity};
+use crate::profile::{Column, Kind, Profile};
 use crate::report::Report;
 
 type Object = Map<String, Value>;
@@ -28,6 +27,7 @@ pub fn rebuild(
     base: &Value,
     snapshot: Option<&Location>,
     row: &InputRow,
+    profile: &Profile,
     report: &mut Report,
 ) -> Value {
     let mut obj = base.as_object().cloned().unwrap_or_default();
@@ -36,28 +36,35 @@ pub fn rebuild(
         .and_then(Value::as_str)
         .unwrap_or("<unknown>")
         .to_string();
-    // The whole identifier list first, so pcode / gers_id upsert into it.
+    // The whole identifier list first, so identifier columns upsert into it.
     if let Some(v) = row.columns.get(IDENTIFIER_COLUMN) {
         apply_identifier_list(&mut obj, v);
     }
     for (name, value) in &row.columns {
         apply_column(&mut obj, name, value);
     }
+    for column in &profile.location.columns {
+        if let Some(value) = row.columns.get(&column.name) {
+            apply_profile_column(&mut obj, column, text_of(value), &id, report);
+        }
+    }
     let position_before = position_of(&obj);
     apply_position(&mut obj, row, &id, report);
     let position_after = position_of(&obj);
-    if position_after != position_before {
+    if position_after != position_before
+        && let Some(url) = profile.location.spatial_index_extension.as_deref()
+    {
         // Spatial-index cells are a function of the position: recompute the
         // ones already on the resource, or drop them all if it was cleared.
         match position_after {
             Some((lon, lat)) => {
-                refresh_cells(&mut obj, lon, lat);
+                refresh_cells(&mut obj, url, lon, lat);
             }
-            None => remove_all_cells(&mut obj),
+            None => remove_all_cells(&mut obj, url),
         }
     }
     if let Some(geom) = &row.geometry {
-        apply_geometry(&mut obj, &id, snapshot, geom, report);
+        apply_geometry(&mut obj, &id, snapshot, geom, profile, report);
     }
     Value::Object(obj)
 }
@@ -77,15 +84,6 @@ fn apply_column(obj: &mut Object, name: &str, value: &ColumnValue) {
         "physical_type" => set_physical_type(obj, t),
         "part_of" => set_reference(obj, "partOf", "Location", t),
         "managing_organization" => set_reference(obj, "managingOrganization", "Organization", t),
-        "pcode" => {
-            let system = pcode_system_of(obj);
-            upsert_identifier(obj, system, t)
-        }
-        "gers_id" => upsert_identifier(obj, GERS_SYSTEM, t),
-        "settlement_type" => upsert_extension_code(obj, SETTLEMENT_TYPE_EXTENSION_URL, t),
-        "delivery_strategy" => upsert_extension_code(obj, DELIVERY_STRATEGY_EXTENSION_URL, t),
-        "facility_level" => upsert_type_coding(obj, FACILITY_TYPE_SYSTEM, t),
-        "ownership" => upsert_type_coding(obj, OWNERSHIP_SYSTEM, t),
         "alias" => match value {
             ColumnValue::TextList(items) => {
                 obj.insert("alias".into(), json!(items));
@@ -95,8 +93,39 @@ fn apply_column(obj: &mut Object, name: &str, value: &ColumnValue) {
             }
             _ => {}
         },
-        // identifier and position_* have their own passes in `rebuild`.
+        // identifier and position_* have their own passes in `rebuild`;
+        // profile columns are applied by `apply_profile_column`.
         _ => {}
+    }
+}
+
+/// Write one profile column's value back where the column reads it from.
+fn apply_profile_column(
+    obj: &mut Object,
+    column: &Column,
+    value: Option<&str>,
+    id: &str,
+    report: &mut Report,
+) {
+    match column.kind {
+        Kind::Identifier => {
+            let system = identifier_system_of(obj, &column.systems);
+            upsert_identifier(obj, &system, value)
+        }
+        Kind::ExtensionCode => {
+            upsert_extension_code(obj, column.url.as_deref().unwrap_or_default(), value)
+        }
+        Kind::TypeCoding => {
+            upsert_type_coding(obj, column.system.as_deref().unwrap_or_default(), value)
+        }
+        Kind::TypeText => set_concept_text(
+            obj,
+            column.system.as_deref().unwrap_or_default(),
+            value,
+            id,
+            &column.name,
+            report,
+        ),
     }
 }
 
@@ -205,15 +234,17 @@ fn set_reference(obj: &mut Object, key: &str, default_type: &str, id: Option<&st
     object_mut(obj, key).insert("reference".into(), Value::String(reference));
 }
 
-/// The identifier system the row's `pcode` was promoted from, so an edit
-/// goes back to the same entry; the pcode system when there is none yet.
-fn pcode_system_of(obj: &Object) -> &'static str {
+/// The system an identifier column's value was read from, so an edit goes
+/// back to the same entry: the first of `systems` the resource has, else the
+/// first of `systems`.
+fn identifier_system_of(obj: &Object, systems: &[String]) -> String {
     let list = obj.get("identifier").and_then(Value::as_array);
-    PCODE_SYSTEMS
+    systems
         .iter()
-        .copied()
         .find(|system| list.is_some_and(|l| l.iter().any(|i| system_is(i, system))))
-        .unwrap_or(PCODE_SYSTEM)
+        .or(systems.first())
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn system_is(entry: &Value, system: &str) -> bool {
@@ -394,19 +425,28 @@ pub fn boundary_attachment(geom: &Geometry<f64>) -> Value {
     })
 }
 
-fn replace_boundary(obj: &mut Object, geom: &Geometry<f64>) {
+/// Replace the boundary attachment, or add one under the profile's first
+/// boundary extension (the HL7 one without a profile).
+fn replace_boundary(obj: &mut Object, geom: &Geometry<f64>, profile: &Profile) {
     let attachment = boundary_attachment(geom);
+    let extra = &profile.location.boundary_extensions;
     let exts = array_mut(obj, "extension");
     let existing = exts.iter_mut().find(|e| {
         e.get("url")
             .and_then(Value::as_str)
-            .is_some_and(|u| BOUNDARY_EXTENSION_URLS.contains(&u))
+            .is_some_and(|u| is_boundary_extension(u, extra))
     });
     match existing {
         Some(Value::Object(e)) => {
             e.insert("valueAttachment".into(), attachment);
         }
-        _ => exts.push(json!({"url": BOUNDARY_EXTENSION_URL, "valueAttachment": attachment})),
+        _ => {
+            let url = extra
+                .first()
+                .map(String::as_str)
+                .unwrap_or(HL7_BOUNDARY_EXTENSION_URL);
+            exts.push(json!({"url": url, "valueAttachment": attachment}))
+        }
     }
 }
 
@@ -423,6 +463,7 @@ fn apply_geometry(
     id: &str,
     snapshot: Option<&Location>,
     geom: &Geometry<f64>,
+    profile: &Profile,
     report: &mut Report,
 ) {
     let is_point = matches!(geom, Geometry::Point(_));
@@ -452,12 +493,12 @@ fn apply_geometry(
             return;
         }
         check_validity(geom, id, report);
-        replace_boundary(obj, geom);
+        replace_boundary(obj, geom, profile);
         return;
     }
     if is_polygon {
         check_validity(geom, id, report);
-        replace_boundary(obj, geom);
+        replace_boundary(obj, geom, profile);
         return;
     }
     let Geometry::Point(p) = geom else {
@@ -538,14 +579,16 @@ fn set_concept_text(
     }
 }
 
-/// The Organization half of a facility row. `name`, `status`, facility
-/// level and ownership mirror from the Location columns when edited (or
-/// always, for a create); the NHFR codes, the type labels and the whole
-/// `organization_identifier` list are Organization-only and apply as given.
+/// The Organization half of a facility row. `name`, `status` and the
+/// profile's `mirror_to_organization` columns mirror from the Location when
+/// edited (or always, for a create); the profile's Organization columns and
+/// the whole `organization_identifier` list are Organization-only and apply
+/// as given.
 pub fn rebuild_organization(
     base: &Value,
     row: &InputRow,
     snapshot: Option<&Location>,
+    profile: &Profile,
     report: &mut Report,
 ) -> Value {
     let mut obj = base.as_object().cloned().unwrap_or_default();
@@ -570,24 +613,21 @@ pub fn rebuild_organization(
                     obj.insert("active".into(), Value::Bool(s == "active"));
                 }
             }
-            "facility_level"
-                if mirror(
-                    "facility_level",
-                    snapshot.and_then(|l| l.facility_level.as_deref()),
-                ) =>
-            {
-                upsert_type_coding(&mut obj, FACILITY_TYPE_SYSTEM, t)
-            }
-            "ownership" if mirror("ownership", snapshot.and_then(|l| l.ownership.as_deref())) => {
-                upsert_type_coding(&mut obj, OWNERSHIP_SYSTEM, t)
-            }
-            "facility_level_text" => {
-                set_concept_text(&mut obj, FACILITY_TYPE_SYSTEM, t, &id, name, report)
-            }
-            "ownership_text" => set_concept_text(&mut obj, OWNERSHIP_SYSTEM, t, &id, name, report),
-            "nhfr_code" => upsert_identifier(&mut obj, NHFR_CODE_SYSTEM, t),
-            "nhfr_uid" => upsert_identifier(&mut obj, NHFR_UID_SYSTEM, t),
             _ => {}
+        }
+    }
+    for (i, column) in profile.location.columns.iter().enumerate() {
+        let Some(value) = row.columns.get(&column.name) else {
+            continue;
+        };
+        let current = snapshot.and_then(|l| l.columns.get(i)?.as_deref());
+        if column.mirror_to_organization && mirror(&column.name, current) {
+            apply_profile_column(&mut obj, column, text_of(value), &id, report);
+        }
+    }
+    for column in &profile.organization.columns {
+        if let Some(value) = row.columns.get(&column.name) {
+            apply_profile_column(&mut obj, column, text_of(value), &id, report);
         }
     }
     Value::Object(obj)
@@ -595,14 +635,19 @@ pub fn rebuild_organization(
 
 /// The Organization for a new facility row: the pairing shape bake used,
 /// then the row's columns on top.
-pub fn new_organization(org_id: &str, row: &InputRow, report: &mut Report) -> Value {
+pub fn new_organization(
+    org_id: &str,
+    row: &InputRow,
+    profile: &Profile,
+    report: &mut Report,
+) -> Value {
     let base = json!({
         "resourceType": "Organization",
         "id": org_id,
         "active": true,
         "type": [{"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}],
     });
-    rebuild_organization(&base, row, None, report)
+    rebuild_organization(&base, row, None, profile, report)
 }
 
 #[cfg(test)]
@@ -612,7 +657,25 @@ mod tests {
     use geo::{line_string, polygon};
     use serde_json::json;
 
-    use crate::fhir::location::{BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS};
+    // ICR's URLs, as test data: the tests rebuild ICR-shaped resources with
+    // the example ICR profile.
+    const BOUNDARY_EXTENSION_URL: &str =
+        "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
+    const PCODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/pcode";
+    const GERS_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/overture-gers";
+    const NHFR_CODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code";
+    const NHFR_UID_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid";
+    const FACILITY_TYPE_SYSTEM: &str =
+        "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs";
+    const OWNERSHIP_SYSTEM: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs";
+    const SETTLEMENT_TYPE_EXTENSION_URL: &str =
+        "https://icr.healthcampaigns.org/StructureDefinition/settlement-type";
+    const DELIVERY_STRATEGY_EXTENSION_URL: &str =
+        "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy";
+
+    fn icr() -> Profile {
+        crate::profile::icr_example()
+    }
 
     fn org_base() -> Value {
         json!({"resourceType":"Organization","id":"org-a","active":true,"name":"A","meta":{"versionId":"9"},
@@ -624,6 +687,7 @@ mod tests {
     fn snapshot_location() -> Location {
         Location::parse(
             &json!({"resourceType":"Location","id":"a","name":"A","status":"active","managingOrganization":{"reference":"Organization/org-a"}}),
+            &icr(),
             &mut Report::default(),
         )
         .unwrap()
@@ -640,12 +704,12 @@ mod tests {
             ("facility_level", ColumnValue::Null),
         ]);
         assert_eq!(
-            rebuild_organization(&org_base(), &same, Some(&loc), &mut report),
+            rebuild_organization(&org_base(), &same, Some(&loc), &icr(), &mut report),
             org_base()
         );
         // Edited name and status.
         let edited = row(&[("name", text("B")), ("status", text("inactive"))]);
-        let out = rebuild_organization(&org_base(), &edited, Some(&loc), &mut report);
+        let out = rebuild_organization(&org_base(), &edited, Some(&loc), &icr(), &mut report);
         assert_eq!(out["name"], "B");
         assert_eq!(out["active"], false);
         assert_eq!(out["meta"]["versionId"], "9");
@@ -654,6 +718,7 @@ mod tests {
             &org_base(),
             &row(&[("facility_level", text("secondary"))]),
             Some(&loc),
+            &icr(),
             &mut report,
         );
         assert_eq!(out["type"][1]["coding"][0]["code"], "secondary");
@@ -673,7 +738,7 @@ mod tests {
             ("facility_level_text", text("Clinic")),
             ("ownership_text", text("Private")),
         ]);
-        let out = rebuild_organization(&org_base(), &r, Some(&loc), &mut report);
+        let out = rebuild_organization(&org_base(), &r, Some(&loc), &icr(), &mut report);
         assert_eq!(
             out["identifier"],
             json!([{"system":NHFR_CODE_SYSTEM,"value":"05/08/2"},{"system":NHFR_UID_SYSTEM,"value":"999"}])
@@ -688,6 +753,7 @@ mod tests {
             &org_base(),
             &row(&[("facility_level_text", ColumnValue::Null)]),
             Some(&loc),
+            &icr(),
             &mut report,
         );
         assert!(out["type"][1].get("text").is_none());
@@ -701,6 +767,7 @@ mod tests {
                 }]),
             )]),
             Some(&loc),
+            &icr(),
             &mut report,
         );
         assert_eq!(out["identifier"], json!([{"system":"s","value":"v"}]));
@@ -715,7 +782,7 @@ mod tests {
             ("facility_level_text", text("Health Post")),
             ("nhfr_code", text("05/09")),
         ]);
-        let out = new_organization("org-new", &r, &mut report);
+        let out = new_organization("org-new", &r, &icr(), &mut report);
         assert_eq!(out["resourceType"], "Organization");
         assert_eq!(out["id"], "org-new");
         assert_eq!(out["active"], true);
@@ -750,8 +817,8 @@ mod tests {
 
     fn apply(base: Value, cols: &[(&str, ColumnValue)]) -> Value {
         let mut report = Report::default();
-        let loc = Location::parse(&base, &mut report);
-        rebuild(&base, loc.as_ref(), &row(cols), &mut report)
+        let loc = Location::parse(&base, &icr(), &mut report);
+        rebuild(&base, loc.as_ref(), &row(cols), &icr(), &mut report)
     }
 
     #[test]
@@ -1004,6 +1071,7 @@ mod tests {
             &bare,
             None,
             &row(&[("position_longitude", ColumnValue::Number(1.0))]),
+            &icr(),
             &mut report,
         );
         assert!(out.get("position").is_none());
@@ -1015,6 +1083,7 @@ mod tests {
                 ("position_longitude", ColumnValue::Number(1.0)),
                 ("position_latitude", ColumnValue::Number(2.0)),
             ]),
+            &icr(),
             &mut report,
         );
         assert_eq!(out["position"], json!({"longitude":1.0,"latitude":2.0}));
@@ -1034,7 +1103,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|e| BOUNDARY_EXTENSION_URLS.contains(&e["url"].as_str().unwrap()))
+            .find(|e| is_boundary_extension(e["url"].as_str().unwrap(), &[]))
             .unwrap();
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(ext["valueAttachment"]["data"].as_str().unwrap())
@@ -1055,8 +1124,8 @@ mod tests {
     }
 
     fn apply_geom(base: Value, r: &InputRow, report: &mut Report) -> Value {
-        let loc = Location::parse(&base, &mut Report::default());
-        rebuild(&base, loc.as_ref(), r, report)
+        let loc = Location::parse(&base, &icr(), &mut Report::default());
+        rebuild(&base, loc.as_ref(), r, &icr(), report)
     }
 
     #[test]

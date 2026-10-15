@@ -1,38 +1,29 @@
 //! One FHIR Location, flattened into the fields fhir-pipes models as columns, plus
 //! the untouched resource JSON for the lossless `fhir_json` column.
 //!
-//! Everything ICR-profile-specific (extension URLs, identifier systems, code
-//! systems) is a constant in this file. Supporting another profile means
-//! editing this file and nothing else.
+//! The fields are base FHIR. An implementation guide's extra columns, overlays
+//! and spatial index come from the profile (crate::profile).
 
 use base64::Engine;
 use serde_json::Value;
 
 use crate::report::Report;
 
-pub const BOUNDARY_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
 pub const HL7_BOUNDARY_EXTENSION_URL: &str =
     "http://hl7.org/fhir/StructureDefinition/location-boundary-geojson";
-pub const BOUNDARY_EXTENSION_URLS: [&str; 2] = [BOUNDARY_EXTENSION_URL, HL7_BOUNDARY_EXTENSION_URL];
-pub const OVERLAYS_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit";
-pub const SETTLEMENT_TYPE_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/settlement-type";
-pub const DELIVERY_STRATEGY_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy";
-pub const PCODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/pcode";
-pub const NATIONAL_ADMIN_CODE_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/identifiers/national-admin-code";
-/// Identifier systems that carry the administrative code promoted to the
-/// `pcode` column and used for the country, in order of preference.
-pub const PCODE_SYSTEMS: [&str; 2] = [PCODE_SYSTEM, NATIONAL_ADMIN_CODE_SYSTEM];
-pub const GERS_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/overture-gers";
-pub const FACILITY_TYPE_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs";
-pub const OWNERSHIP_SYSTEM: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs";
+/// The name an implementation guide gives its own copy of the boundary
+/// extension, as ICR's `…/StructureDefinition/location-boundary-geojson` does.
+const BOUNDARY_EXTENSION_SUFFIX: &str = "/StructureDefinition/location-boundary-geojson";
 pub const GEOJSON_CONTENT_TYPE: &str = "application/geo+json";
-pub const ADMIN_UNIT_TYPE: &str = "admin-unit";
+
+/// A boundary attachment extension: the HL7 one, one a profile names
+/// (`extra`), or any IG's extension named `…/location-boundary-geojson`.
+/// extract and the snapshot merge have no profile and pass none.
+pub fn is_boundary_extension(url: &str, extra: &[String]) -> bool {
+    url == HL7_BOUNDARY_EXTENSION_URL
+        || url.ends_with(BOUNDARY_EXTENSION_SUFFIX)
+        || extra.iter().any(|e| e == url)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identifier {
@@ -62,15 +53,14 @@ pub struct Location {
     pub part_of: Option<String>,
     pub managing_organization: Option<String>,
     pub identifier: Vec<Identifier>,
-    pub pcode: Option<String>,
-    pub gers_id: Option<String>,
-    pub settlement_type: Option<String>,
-    pub delivery_strategy: Option<String>,
-    pub facility_level: Option<String>,
-    pub ownership: Option<String>,
+    /// The profile's Location columns, in profile order.
+    pub columns: Vec<Option<String>>,
+    /// The admin code: the profile's `admin_code_column`, if it has one.
+    pub admin_code: Option<String>,
+    /// From the profile's overlays extension.
     pub overlays_admin_unit_ids: Vec<String>,
     /// Spatial index cells (quadkey / h3 / geohash + level) from the
-    /// spatial-index extension; derived from `position` by fhir-pipes.
+    /// profile's spatial index extension; derived from `position` by fhir-pipes.
     pub spatial_cells: Vec<crate::fhir::spatial::SpatialCell>,
     /// (longitude, latitude), FHIR order.
     pub position: Option<(f64, f64)>,
@@ -207,8 +197,13 @@ fn read_boundary(
 }
 
 impl Location {
-    /// Flatten one resource. Returns None (after reporting) if it has no usable id.
-    pub fn parse(resource: &Value, report: &mut Report) -> Option<Location> {
+    /// Flatten one resource, with `profile`'s columns. Returns None (after
+    /// reporting) if it has no usable id.
+    pub fn parse(
+        resource: &Value,
+        profile: &crate::profile::Profile,
+        report: &mut Report,
+    ) -> Option<Location> {
         let Value::Object(obj) = resource else {
             report.add(
                 "malformed_field",
@@ -269,8 +264,6 @@ impl Location {
         }
         loc.type_code = first_coding_code(obj.get("type"));
         loc.physical_type = first_coding_code(obj.get("physicalType"));
-        loc.facility_level = coding_code_by_system(obj.get("type"), FACILITY_TYPE_SYSTEM);
-        loc.ownership = coding_code_by_system(obj.get("type"), OWNERSHIP_SYSTEM);
         loc.part_of = reference_id(obj, "partOf", &id, report);
         loc.managing_organization = reference_id(obj, "managingOrganization", &id, report);
 
@@ -302,17 +295,15 @@ impl Location {
             }
             Some(_) => report.add("malformed_field", &id, "identifier is not a list"),
         }
-        loc.pcode = PCODE_SYSTEMS.iter().find_map(|system| {
-            loc.identifier
-                .iter()
-                .find(|i| i.system.as_deref() == Some(*system))
-                .and_then(|i| i.value.clone())
-        });
-        loc.gers_id = loc
-            .identifier
+        loc.columns = profile
+            .location
+            .columns
             .iter()
-            .find(|i| i.system.as_deref() == Some(GERS_SYSTEM))
-            .and_then(|i| i.value.clone());
+            .map(|c| c.read(obj, &loc.identifier))
+            .collect();
+        loc.admin_code = profile
+            .admin_code_index()
+            .and_then(|i| loc.columns[i].clone());
 
         if let Some(Value::Object(pos)) = obj.get("position") {
             match (
@@ -343,7 +334,7 @@ impl Location {
                         continue;
                     };
                     let url = e.get("url").and_then(Value::as_str).unwrap_or("");
-                    if BOUNDARY_EXTENSION_URLS.contains(&url) {
+                    if is_boundary_extension(url, &profile.location.boundary_extensions) {
                         if loc.boundary.is_none() {
                             let boundary = read_boundary(e, &id, report);
                             if let Some(Boundary::Inline(_)) = &boundary {
@@ -351,7 +342,7 @@ impl Location {
                             }
                             loc.boundary = boundary;
                         }
-                    } else if url == OVERLAYS_EXTENSION_URL {
+                    } else if Some(url) == profile.location.overlays_extension.as_deref() {
                         match e.get("valueReference") {
                             Some(Value::Object(r)) => {
                                 if let Some(reference) = r.get("reference").and_then(Value::as_str)
@@ -373,12 +364,8 @@ impl Location {
                             ),
                             None => {}
                         }
-                    } else if url == SETTLEMENT_TYPE_EXTENSION_URL {
-                        loc.settlement_type = str_field(e, "valueCode");
-                    } else if url == DELIVERY_STRATEGY_EXTENSION_URL {
-                        loc.delivery_strategy = str_field(e, "valueCode");
-                    } else if url == crate::fhir::spatial::SPATIAL_INDEX_EXTENSION_URL {
-                        match crate::fhir::spatial::cell_from_extension(e) {
+                    } else if Some(url) == profile.location.spatial_index_extension.as_deref() {
+                        match crate::fhir::spatial::cell_from_extension(e, url) {
                             Some(cell) => loc.spatial_cells.push(cell),
                             None => report.add(
                                 "malformed_field",
@@ -415,7 +402,22 @@ mod tests {
     use crate::report::Report;
 
     fn parse_str(s: &str, report: &mut Report) -> Option<Location> {
-        Location::parse(&serde_json::from_str(s).unwrap(), report)
+        Location::parse(
+            &serde_json::from_str(s).unwrap(),
+            &crate::profile::icr_example(),
+            report,
+        )
+    }
+
+    /// A profile column's value by name (ICR example profile).
+    fn col<'a>(loc: &'a Location, name: &str) -> Option<&'a str> {
+        let i = crate::profile::icr_example()
+            .location
+            .columns
+            .iter()
+            .position(|c| c.name == name)
+            .expect("an ICR column");
+        loc.columns[i].as_deref()
     }
 
     #[test]
@@ -443,17 +445,17 @@ mod tests {
         assert_eq!(loc.last_updated.as_deref(), Some("2026-01-02T03:04:05Z"));
         assert_eq!(loc.alias, vec!["GC"]);
         assert_eq!(loc.type_code.as_deref(), Some("facility"));
-        assert_eq!(loc.facility_level.as_deref(), Some("phc"));
-        assert_eq!(loc.ownership.as_deref(), Some("public"));
+        assert_eq!(col(&loc, "facility_level"), Some("phc"));
+        assert_eq!(col(&loc, "ownership"), Some("public"));
         assert_eq!(loc.physical_type.as_deref(), Some("si"));
         assert_eq!(loc.part_of.as_deref(), Some("gama"));
         assert_eq!(loc.managing_organization.as_deref(), Some("org-1"));
-        assert_eq!(loc.pcode.as_deref(), Some("NG1"));
-        assert_eq!(loc.gers_id.as_deref(), Some("g1"));
+        assert_eq!(col(&loc, "pcode"), Some("NG1"));
+        assert_eq!(col(&loc, "gers_id"), Some("g1"));
         assert_eq!(loc.identifier.len(), 2);
         assert_eq!(loc.position, Some((3.25, 6.25)));
-        assert_eq!(loc.settlement_type.as_deref(), Some("urban"));
-        assert_eq!(loc.delivery_strategy.as_deref(), Some("fixed"));
+        assert_eq!(col(&loc, "settlement_type"), Some("urban"));
+        assert_eq!(col(&loc, "delivery_strategy"), Some("fixed"));
         assert_eq!(loc.overlays_admin_unit_ids, vec!["kano"]);
         assert!(loc.boundary.is_none());
         assert_eq!(report.counts().len(), 0);
@@ -468,7 +470,7 @@ mod tests {
             &mut report,
         )
         .unwrap();
-        assert_eq!(loc.pcode.as_deref(), Some("NGA"));
+        assert_eq!(col(&loc, "pcode"), Some("NGA"));
 
         // Both present: the pcode system wins whatever the order.
         let loc = parse_str(
@@ -478,7 +480,7 @@ mod tests {
             &mut report,
         )
         .unwrap();
-        assert_eq!(loc.pcode.as_deref(), Some("PC"));
+        assert_eq!(col(&loc, "pcode"), Some("PC"));
     }
 
     #[test]

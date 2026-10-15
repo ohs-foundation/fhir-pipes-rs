@@ -1,0 +1,136 @@
+# The Integrated Campaign Registry (ICR) profile, as an example.
+#
+# ICR's own copy lives with its implementation guide in recodelabs/icr; this one
+# is a snapshot kept here to show a complete profile and to drive the tests,
+# which check that ICR-shaped data comes out the same. See docs/profiles.md.
+#
+#   fhir-pipes transform locations --profile examples/profiles/icr.toml --snapshot snap --out out
+
+name = "icr"
+
+[location]
+# Boundary attachments. The HL7 location-boundary-geojson extension is always
+# read; these are tried first, and diff writes a new boundary to the first.
+boundary_extensions = [
+    "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+]
+# Admin units an operational area overlaps when it is not in the partOf tree:
+# the overlays_admin_unit_ids column (read only).
+overlays_extension = "https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit"
+# Spatial index cells (quadkey, geohash, h3): the quadkey and quadkey_level
+# columns, `fhir-pipes index`, and the cells diff recomputes after a move.
+spatial_index_extension = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
+# The type code of an administrative unit: admin_level, tier, the adminN
+# columns and country all follow the chain of these.
+admin_unit_type = "admin-unit"
+# The column holding an admin unit's code: adminN_code, country (from the
+# level 0 unit) and the duplicate_admin_code report.
+admin_code_column = "pcode"
+
+# Extra Location columns, in output order. Kinds:
+#   identifier      the first identifier under one of `systems`, in order;
+#                   diff writes to the system the resource already uses, else the first
+#   extension_code  extension[url].valueCode
+#   type_coding     the code under `system` in Location.type
+#   type_text       the text of the Location.type concept holding a coding under `system`
+[[location.column]]
+name = "pcode"
+kind = "identifier"
+systems = [
+    "https://icr.healthcampaigns.org/identifiers/pcode",
+    "https://icr.healthcampaigns.org/identifiers/national-admin-code",
+]
+
+[[location.column]]
+name = "gers_id"
+kind = "identifier"
+systems = ["https://icr.healthcampaigns.org/identifiers/overture-gers"]
+
+[[location.column]]
+name = "settlement_type"
+kind = "extension_code"
+url = "https://icr.healthcampaigns.org/StructureDefinition/settlement-type"
+
+[[location.column]]
+name = "delivery_strategy"
+kind = "extension_code"
+url = "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy"
+
+# facility_level and ownership are codings on the Location's type. A facility's
+# paired Organization carries them too, so diff writes an edit to both.
+[[location.column]]
+name = "facility_level"
+kind = "type_coding"
+system = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs"
+mirror_to_organization = true
+
+[[location.column]]
+name = "ownership"
+kind = "type_coding"
+system = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs"
+mirror_to_organization = true
+
+[organization]
+# A Location of this type that diff creates without a managingOrganization
+# gets a new Organization, with id "<id_prefix><location id>".
+facility_type = "facility"
+id_prefix = "org-"
+
+# Columns read from the Organization a Location names as its
+# managingOrganization. Same kinds, applied to Organization.identifier and
+# Organization.type.
+[[organization.column]]
+name = "nhfr_code"
+kind = "identifier"
+systems = ["https://icr.healthcampaigns.org/identifiers/nga-nhfr-code"]
+
+[[organization.column]]
+name = "nhfr_uid"
+kind = "identifier"
+systems = ["https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid"]
+
+[[organization.column]]
+name = "facility_level_text"
+kind = "type_text"
+system = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs"
+
+[[organization.column]]
+name = "ownership_text"
+kind = "type_text"
+system = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs"
+
+# fhir-pipes dhis2: DHIS2 org units, indicators and values as FHIR.
+[dhis2]
+# Identifier and code systems are minted under this base:
+# <base>/identifiers/dhis2/<instance>/orgunit, <base>/CodeSystem/dhis2/<instance>/…,
+# and Measures get canonical URLs <base>/Measure/<id>.
+base = "https://icr.healthcampaigns.org"
+project_tag_system = "https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs"
+location_profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+facility_organization_profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
+location_type_system = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs"
+# --country-code goes on the top org unit under this system, so it becomes the
+# pcode (the admin code column reads it) and the country.
+country_code_system = "https://icr.healthcampaigns.org/identifiers/national-admin-code"
+period_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period"
+campaign_extension = "https://icr.healthcampaigns.org/StructureDefinition/campaign"
+source_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source"
+indicator_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-indicator"
+
+# fhir-pipes population: population Groups for admin units or catchments.
+[population]
+group_profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRTargetPopulation"
+characteristic_system = "https://icr.healthcampaigns.org/CodeSystem/icr-group-characteristic-cs"
+denominator_source_system = "https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs"
+denominator_source_extension = "https://icr.healthcampaigns.org/StructureDefinition/denominator-source"
+denominator_type_extension = "https://icr.healthcampaigns.org/StructureDefinition/denominator-type"
+estimate_date_extension = "https://icr.healthcampaigns.org/StructureDefinition/estimate-date"
+is_planning_denominator_extension = "https://icr.healthcampaigns.org/StructureDefinition/is-planning-denominator"
+is_calculated_extension = "https://icr.healthcampaigns.org/StructureDefinition/is-calculated"
+# Codes of the denominator source system; --source outside these is warned about.
+known_source_codes = [
+    "census", "census-projection", "microcensus", "worldpop", "grid3", "hmis",
+    "govt-estimate", "unknown", "other",
+]
+# Display text put on the denominator-source coding for these codes.
+source_displays = { worldpop = "WorldPop modelled estimate", grid3 = "GRID3 modelled estimate" }

@@ -51,7 +51,11 @@ pub struct PartitionWriter {
 impl PartitionWriter {
     #[cfg(test)]
     pub fn create(path: &Path, row_group_size: usize) -> Result<Self> {
-        Self::create_with_schema(path, row_group_size, crate::write::schema::output_schema())
+        Self::create_with_schema(
+            path,
+            row_group_size,
+            crate::write::schema::output_schema(&crate::profile::Profile::base()),
+        )
     }
 
     /// As [`create`](Self::create), for a batch schema other than the
@@ -326,9 +330,10 @@ mod tests {
     fn rows_without_geometry_do_not_widen_the_file_bbox() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mixed.parquet");
-        let schema = crate::write::schema::output_schema_optional_geometry();
+        let profile = crate::profile::Profile::base();
+        let schema = crate::write::schema::output_schema_optional_geometry(&profile);
         let mut writer = PartitionWriter::create_with_schema(&path, 10, schema.clone()).unwrap();
-        let mut batch = RowBatch::with_schema(schema);
+        let mut batch = RowBatch::for_profile(&profile, true);
         batch.push(&row("a", 3.0, 6.0));
         batch.push(&row("b", 4.0, 7.0));
         batch.push(&row_without_geometry("ghost"));
@@ -346,9 +351,10 @@ mod tests {
     fn a_file_with_no_geometry_at_all_has_no_bbox_and_no_types() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("none.parquet");
-        let schema = crate::write::schema::output_schema_optional_geometry();
+        let profile = crate::profile::Profile::base();
+        let schema = crate::write::schema::output_schema_optional_geometry(&profile);
         let mut writer = PartitionWriter::create_with_schema(&path, 10, schema.clone()).unwrap();
-        let mut batch = RowBatch::with_schema(schema);
+        let mut batch = RowBatch::for_profile(&profile, true);
         batch.push(&row_without_geometry("ghost"));
         batch.push(&row_without_geometry("remote"));
         writer.write(&mut batch).unwrap();

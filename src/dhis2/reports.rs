@@ -52,14 +52,6 @@ use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::transform::write_report;
 
-pub const PERIOD_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period";
-pub const CAMPAIGN_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/campaign";
-/// Where a report's figures come from: `analytics` (DHIS2 computed them)
-/// or `data-values` (fhir-pipes computed them from raw data values).
-pub const SOURCE_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/dhis2-source";
 /// DHIS2 UIDs are 11 characters.
 const UID_LEN: usize = 11;
 /// FHIR `integer` is a signed 32-bit number.
@@ -295,7 +287,7 @@ pub fn measure_report(
         "resourceType": "MeasureReport",
         "id": id,
         "meta": {"tag": [instance.tag()]},
-        "extension": [{"url": PERIOD_EXTENSION_URL, "valueString": pe}],
+        "extension": [{"url": instance.urls.period_extension, "valueString": pe}],
         "status": "complete",
         "type": "summary",
         "measure": instance.measure_url(&ind.fhir_key()),
@@ -1072,9 +1064,9 @@ impl<'a> Writer<'a> {
                 ) {
                     if let Some(ext) = r["extension"].as_array_mut() {
                         if let Some(c) = self.campaign {
-                            ext.push(json!({"url": CAMPAIGN_EXTENSION_URL, "valueReference": {"reference": c}}));
+                            ext.push(json!({"url": self.instance.urls.campaign_extension, "valueReference": {"reference": c}}));
                         }
-                        ext.push(json!({"url": SOURCE_EXTENSION_URL, "valueCode": self.source}));
+                        ext.push(json!({"url": self.instance.urls.source_extension, "valueCode": self.source}));
                     }
                     out.insert(r["id"].as_str().unwrap_or_default().to_string(), r);
                 }
@@ -1243,7 +1235,7 @@ fn unique<T: Clone + PartialEq>(list: &[T]) -> Vec<T> {
     out
 }
 
-pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
+pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_out(&args.out)?;
     if args.chunk == 0 {
         return Err(PipesError::Usage("--chunk must be at least 1".into()));
@@ -1293,7 +1285,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
             p.display()
         )));
     }
-    let instance = Instance::new(&args.conn.instance)?;
+    let instance = Instance::new(&args.conn.instance, profile)?;
     let ranges = unique(&args.ranges)
         .iter()
         .map(|r| DateRange::parse(r))
@@ -1672,7 +1664,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
             scope.periods.extend(ranges.iter().map(DateRange::label));
             let out = &mut w.out;
             Some(prev.removed(
-                |r| scope.contains(r, PERIOD_EXTENSION_URL),
+                |r| scope.contains(r, &instance.urls.period_extension),
                 |r| {
                     if keep_rest {
                         kept += 1;
@@ -1802,7 +1794,7 @@ mod tests {
     #[test]
     fn a_row_becomes_a_summary_report_with_the_score_as_a_proportion() {
         let t = parse_analytics(&analytics(), None).unwrap();
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
             last_analytics: Some("2026-10-12T02:07:00.052".into()),
@@ -1845,7 +1837,7 @@ mod tests {
 
     #[test]
     fn fractional_and_blank_counts() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let row = AnalyticsRow {
             dx: "tUIlpyeeX9N".into(),
             pe: "202501".into(),
@@ -1893,7 +1885,7 @@ mod tests {
 
     #[test]
     fn a_cohort_reports_the_numerator_as_its_population() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let ind = Indicator::parse(&json!({"id":"dy1a1mseGR7","indicatorType":{"factor":1},"numerator":"#{a}","denominator":"1"})).unwrap();
         let row = AnalyticsRow {
             dx: "dy1a1mseGR7".into(),
@@ -1923,7 +1915,7 @@ mod tests {
 
     #[test]
     fn a_data_element_row_counts_its_value() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let de =
             Indicator::from_data_element(&json!({"id": "s46m5MS0hxu", "name": "BCG doses given"}))
                 .unwrap();
@@ -1958,7 +1950,7 @@ mod tests {
 
     #[test]
     fn a_breakdown_row_is_a_coded_stratum_with_its_own_figures() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let v = json!({
             "headers": [{"name":"dx"},{"name":"fMZEcRHuamy"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
             "metaData": {"items": {"fMZEcRHuamy": {"name": "Location Fixed/Outreach"}, "qkPbeWaFsnU": {"name": "Fixed"}}},
@@ -2148,7 +2140,7 @@ mod tests {
 
     #[test]
     fn a_range_report_carries_the_range_as_its_period() {
-        let instance = Instance::new("bgd-epi-2026").unwrap();
+        let instance = Instance::new("bgd-epi-2026", &crate::profile::icr_example()).unwrap();
         let row = AnalyticsRow {
             dx: "tUIlpyeeX9N".into(),
             pe: "20260405-20260520".into(),

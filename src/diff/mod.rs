@@ -25,6 +25,7 @@ use crate::error::{PipesError, Result};
 use crate::fhir::Location;
 use crate::fhir::location::strip_reference;
 use crate::fhir::ndjson::{LineAccess, Output, is_gz};
+use crate::profile::Profile;
 use crate::report::Report;
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::snapshot::index::index_by_id;
@@ -78,10 +79,37 @@ struct Diff<'a> {
     out_path: &'a Path,
     seen: HashSet<String>,
     stats: DiffStats,
+    profile: Profile,
 }
 
 impl Diff<'_> {
+    /// Refuse a row whose columns are neither built in nor in the profile:
+    /// without the profile that declares them, their edits would be dropped.
+    fn check_columns(&self, row: &InputRow) -> Result<()> {
+        let mut unknown: Vec<&str> = row
+            .columns
+            .keys()
+            .map(String::as_str)
+            .filter(|name| {
+                !crate::diff::input::is_builtin_writable(name)
+                    && !self.profile.column_names().any(|c| c == *name)
+            })
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        unknown.sort();
+        Err(PipesError::Usage(format!(
+            "the edited file has column(s) {} that are neither built-in columns nor in the \
+             profile ({}); pass the profile the dataset was made with (--profile), or remove \
+             the column(s)",
+            unknown.join(", "),
+            self.profile.source
+        )))
+    }
+
     fn process(&mut self, row: InputRow, report: &mut Report) -> Result<()> {
+        self.check_columns(&row)?;
         let (id, generated) = match row.id.clone() {
             Some(id) => (id, false),
             None => (uuid::Uuid::new_v4().to_string(), true),
@@ -99,7 +127,7 @@ impl Diff<'_> {
             Some((offset, len)) => {
                 let text = self.access.read_at(offset, len)?;
                 let base: Value = serde_json::from_str(&text)?;
-                let loc = Location::parse(&base, &mut Report::default());
+                let loc = Location::parse(&base, &self.profile, &mut Report::default());
                 (base, loc)
             }
             None => {
@@ -122,7 +150,7 @@ impl Diff<'_> {
                 (json!({"resourceType": "Location", "id": id}), None)
             }
         };
-        let mut rebuilt = rebuild(&base, snapshot.as_ref(), &row, report);
+        let mut rebuilt = rebuild(&base, snapshot.as_ref(), &row, &self.profile, report);
         let is_create = existing.is_none();
         let mut emitted = 0usize;
 
@@ -138,8 +166,13 @@ impl Diff<'_> {
                     Some(&(offset, len)) => {
                         let text = org_access.read_at(offset, len)?;
                         let org_base: Value = serde_json::from_str(&text)?;
-                        let org_new =
-                            rebuild_organization(&org_base, &row, snapshot.as_ref(), report);
+                        let org_new = rebuild_organization(
+                            &org_base,
+                            &row,
+                            snapshot.as_ref(),
+                            &self.profile,
+                            report,
+                        );
                         if canonical(&org_new) != canonical(&org_base) {
                             writeln!(self.out, "{org_new}")
                                 .map_err(|e| PipesError::io(self.out_path, e))?;
@@ -156,10 +189,12 @@ impl Diff<'_> {
                     ),
                 },
                 None if is_create
-                    && row.columns.get("type") == Some(&ColumnValue::Text("facility".into())) =>
+                    && self.profile.organization.facility_type.as_ref().is_some_and(|t| {
+                        row.columns.get("type") == Some(&ColumnValue::Text(t.clone()))
+                    }) =>
                 {
-                    let org_id = format!("org-{id}");
-                    let org_new = new_organization(&org_id, &row, report);
+                    let org_id = format!("{}{id}", self.profile.organization.id_prefix);
+                    let org_new = new_organization(&org_id, &row, &self.profile, report);
                     writeln!(self.out, "{org_new}").map_err(|e| PipesError::io(self.out_path, e))?;
                     self.stats.organizations += 1;
                     emitted += 1;
@@ -224,7 +259,7 @@ fn finish(out: Output, tmp: &Path, dest: &Path) -> Result<()> {
     std::fs::rename(tmp, dest).map_err(|e| PipesError::io(dest, e))
 }
 
-pub fn run_diff(args: &DiffArgs) -> Result<()> {
+pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
         return Err(PipesError::Usage(format!(
@@ -246,6 +281,8 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
         )));
     }
 
+    let profile = Profile::for_snapshot(profile, &args.snapshot)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
     let mut report = Report::default();
     let index = index_by_id(&ndjson, &mut report, "snapshot_line_unparsed")?;
     eprintln!("indexed {} snapshot resources", index.len());
@@ -272,6 +309,7 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
         out_path: &tmp,
         seen: HashSet::new(),
         stats: DiffStats::default(),
+        profile,
     };
     let read = read_input(format, &args.input, &mut diff, &mut report);
     let Diff { out, stats, .. } = diff;

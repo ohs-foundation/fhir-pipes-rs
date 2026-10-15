@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
-use crate::fhir::location::BOUNDARY_EXTENSION_URLS;
+use crate::fhir::location::is_boundary_extension;
 use crate::report::Report;
 
 pub const PAGE_SIZE: usize = 1000;
@@ -54,7 +54,7 @@ pub fn next_link(bundle: &Value) -> Option<String> {
 pub fn boundary_url(resource: &Value) -> Option<String> {
     for ext in resource.get("extension")?.as_array()? {
         let url = ext.get("url").and_then(Value::as_str).unwrap_or("");
-        if !BOUNDARY_EXTENSION_URLS.contains(&url) {
+        if !is_boundary_extension(url, &[]) {
             continue;
         }
         let Some(att) = ext.get("valueAttachment").and_then(Value::as_object) else {

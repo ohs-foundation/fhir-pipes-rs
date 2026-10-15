@@ -22,27 +22,30 @@ pub fn locations(s: &Settings) -> Result<()> {
         snapshot.display(),
         s.parquet_dir().join("locations").display()
     );
-    crate::run::run(&RunArgs {
-        extract: ExtractArgs {
-            server: s.server.clone(),
-            auth: s.auth.clone(),
-            snapshot,
-            full: s.full,
-            since: None,
-            concurrency: DEFAULT_CONCURRENCY,
-            retries: DEFAULT_RETRIES,
-            max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
-            no_cache: false,
-            refresh: false,
-            cache_dir: None,
-            timeout: DEFAULT_TIMEOUT_SECS,
+    crate::run::run(
+        &RunArgs {
+            extract: ExtractArgs {
+                server: s.server.clone(),
+                auth: s.auth.clone(),
+                snapshot,
+                full: s.full,
+                since: None,
+                concurrency: DEFAULT_CONCURRENCY,
+                retries: DEFAULT_RETRIES,
+                max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                no_cache: false,
+                refresh: false,
+                cache_dir: None,
+                timeout: DEFAULT_TIMEOUT_SECS,
+            },
+            out: s.parquet_dir(),
+            country: None,
+            row_group_size: DEFAULT_ROW_GROUP_SIZE,
+            partition_by: DEFAULT_PARTITION_BY.to_string(),
+            keep_without_geometry: false,
         },
-        out: s.parquet_dir(),
-        country: None,
-        row_group_size: DEFAULT_ROW_GROUP_SIZE,
-        partition_by: DEFAULT_PARTITION_BY.to_string(),
-        keep_without_geometry: false,
-    })?;
+        s.profile.as_deref(),
+    )?;
     Ok(())
 }
 

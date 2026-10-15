@@ -4,8 +4,8 @@
 //! extensions. Population is never a Location attribute in the ICR (the
 //! georegistry rule: Location holds identity and place; revisable
 //! programmatic figures live beside it), so `fhir-pipes population` emits these
-//! and leaves the Location untouched. As with `location.rs`, every
-//! profile-specific URL is a constant here and nowhere else.
+//! and leaves the Location untouched. The profile's `[population]` section
+//! gives every URL and system.
 //!
 //! `estimate-date` is, per the IG, when the estimate was *made*; a modelled
 //! raster only tells us its reference year, so fhir-pipes stamps `YEAR-01-01`
@@ -13,22 +13,7 @@
 
 use serde_json::{Value, json};
 
-pub const TARGET_POPULATION_PROFILE: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/ICRTargetPopulation";
-pub const GROUP_CHARACTERISTIC_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-group-characteristic-cs";
-pub const DENOMINATOR_SOURCE_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs";
-pub const DENOMINATOR_SOURCE_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/denominator-source";
-pub const DENOMINATOR_TYPE_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/denominator-type";
-pub const ESTIMATE_DATE_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/estimate-date";
-pub const IS_PLANNING_DENOMINATOR_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/is-planning-denominator";
-pub const IS_CALCULATED_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/is-calculated";
+use crate::profile::PopulationProfile;
 
 /// FHIR `id` is `[A-Za-z0-9\-\.]{1,64}`.
 pub const MAX_ID_LEN: usize = 64;
@@ -44,29 +29,6 @@ pub fn is_valid_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-}
-
-/// Codes in `icr-denominator-source-cs` (extensible binding, so other codes are
-/// allowed but worth a warning).
-pub const KNOWN_SOURCE_CODES: [&str; 9] = [
-    "census",
-    "census-projection",
-    "microcensus",
-    "worldpop",
-    "grid3",
-    "hmis",
-    "govt-estimate",
-    "unknown",
-    "other",
-];
-
-/// Display text for the `icr-denominator-source-cs` codes fhir-pipes emits.
-pub fn source_display(code: &str) -> Option<&'static str> {
-    match code {
-        "worldpop" => Some("WorldPop modelled estimate"),
-        "grid3" => Some("GRID3 modelled estimate"),
-        _ => None,
-    }
 }
 
 /// `pop-{source}-{year}-{locationId}`: deterministic, so a re-run replaces
@@ -93,34 +55,35 @@ pub struct TargetPopulation<'a> {
     pub planning_denominator: bool,
 }
 
-pub fn target_population_group(p: &TargetPopulation) -> Value {
+/// The Group, with the URLs and systems of the profile's `[population]`.
+pub fn target_population_group(p: &TargetPopulation, pop: &PopulationProfile) -> Value {
     let scope = p.location_name.unwrap_or(p.location_id);
-    let display = source_display(p.source_code);
-    let mut coding = json!({"system": DENOMINATOR_SOURCE_SYSTEM, "code": p.source_code});
+    let display = pop.source_displays.get(p.source_code).map(String::as_str);
+    let mut coding = json!({"system": pop.denominator_source_system, "code": p.source_code});
     if let Some(d) = display {
         coding["display"] = Value::String(d.to_string());
     }
     let group = json!({
         "resourceType": "Group",
         "id": group_id(p.source_code, p.year, p.location_id),
-        "meta": {"profile": [TARGET_POPULATION_PROFILE]},
+        "meta": {"profile": [pop.group_profile]},
         "type": "person",
         "actual": false,
         "name": format!("Total population, {scope}, {} ({})", p.year, display.unwrap_or(p.source_code)),
         "quantity": p.count,
         "characteristic": [{
-            "code": {"coding": [{"system": GROUP_CHARACTERISTIC_SYSTEM, "code": "geography", "display": "Geographic scope"}]},
+            "code": {"coding": [{"system": pop.characteristic_system, "code": "geography", "display": "Geographic scope"}]},
             "valueReference": {"reference": format!("Location/{}", p.location_id), "display": scope},
             "exclude": false
         }],
         "extension": [
-            {"url": DENOMINATOR_SOURCE_EXTENSION_URL,
+            {"url": pop.denominator_source_extension,
              "valueCodeableConcept": {"coding": [coding], "text": p.source_text}},
             // denominator-type is a bare code in the IG (value[x] only code), unlike denominator-source.
-            {"url": DENOMINATOR_TYPE_EXTENSION_URL, "valueCode": "total-population"},
-            {"url": ESTIMATE_DATE_EXTENSION_URL, "valueDate": p.estimate_date},
-            {"url": IS_CALCULATED_EXTENSION_URL, "valueBoolean": p.calculated},
-            {"url": IS_PLANNING_DENOMINATOR_EXTENSION_URL, "valueBoolean": p.planning_denominator},
+            {"url": pop.denominator_type_extension, "valueCode": "total-population"},
+            {"url": pop.estimate_date_extension, "valueDate": p.estimate_date},
+            {"url": pop.is_calculated_extension, "valueBoolean": p.calculated},
+            {"url": pop.is_planning_denominator_extension, "valueBoolean": p.planning_denominator},
         ]
     });
     group
@@ -130,18 +93,25 @@ pub fn target_population_group(p: &TargetPopulation) -> Value {
 mod tests {
     use super::*;
 
+    fn pop() -> PopulationProfile {
+        crate::profile::icr_example().population.unwrap()
+    }
+
     fn sample(planning: bool) -> Value {
-        target_population_group(&TargetPopulation {
-            location_id: "lga-1",
-            location_name: Some("Kano Municipal"),
-            count: 512_345,
-            year: 2026,
-            source_code: "worldpop",
-            source_text: "nga_pop_2026_CN_100m_cog.tif; pixel-centroid zonal sum over admin level 2",
-            estimate_date: "2026-01-01",
-            calculated: false,
-            planning_denominator: planning,
-        })
+        target_population_group(
+            &TargetPopulation {
+                location_id: "lga-1",
+                location_name: Some("Kano Municipal"),
+                count: 512_345,
+                year: 2026,
+                source_code: "worldpop",
+                source_text: "nga_pop_2026_CN_100m_cog.tif; pixel-centroid zonal sum over admin level 2",
+                estimate_date: "2026-01-01",
+                calculated: false,
+                planning_denominator: planning,
+            },
+            &pop(),
+        )
     }
 
     fn ext<'a>(g: &'a Value, url: &str) -> Option<&'a Value> {
@@ -157,7 +127,7 @@ mod tests {
         let g = sample(false);
         assert_eq!(g["resourceType"], "Group");
         assert_eq!(g["id"], "pop-worldpop-2026-lga-1");
-        assert_eq!(g["meta"]["profile"][0], TARGET_POPULATION_PROFILE);
+        assert_eq!(g["meta"]["profile"][0], pop().group_profile.as_str());
         assert_eq!(g["type"], "person");
         assert_eq!(g["actual"], false);
         assert_eq!(g["quantity"], 512_345);
@@ -168,16 +138,16 @@ mod tests {
         let c = &g["characteristic"][0];
         assert_eq!(
             c["code"]["coding"][0]["system"],
-            GROUP_CHARACTERISTIC_SYSTEM
+            pop().characteristic_system.as_str()
         );
         assert_eq!(c["code"]["coding"][0]["code"], "geography");
         assert_eq!(c["valueReference"]["reference"], "Location/lga-1");
         assert_eq!(c["valueReference"]["display"], "Kano Municipal");
         assert_eq!(c["exclude"], false);
-        let src = ext(&g, DENOMINATOR_SOURCE_EXTENSION_URL).unwrap();
+        let src = ext(&g, pop().denominator_source_extension.as_str()).unwrap();
         assert_eq!(
             src["valueCodeableConcept"]["coding"][0]["system"],
-            DENOMINATOR_SOURCE_SYSTEM
+            pop().denominator_source_system.as_str()
         );
         assert_eq!(src["valueCodeableConcept"]["coding"][0]["code"], "worldpop");
         assert_eq!(
@@ -191,25 +161,25 @@ mod tests {
                 .contains("nga_pop_2026")
         );
         assert_eq!(
-            ext(&g, DENOMINATOR_TYPE_EXTENSION_URL).unwrap()["valueCode"],
+            ext(&g, pop().denominator_type_extension.as_str()).unwrap()["valueCode"],
             "total-population"
         );
         assert!(
-            ext(&g, DENOMINATOR_TYPE_EXTENSION_URL)
+            ext(&g, pop().denominator_type_extension.as_str())
                 .unwrap()
                 .get("valueCodeableConcept")
                 .is_none()
         );
         assert_eq!(
-            ext(&g, ESTIMATE_DATE_EXTENSION_URL).unwrap()["valueDate"],
+            ext(&g, pop().estimate_date_extension.as_str()).unwrap()["valueDate"],
             "2026-01-01"
         );
         assert_eq!(
-            ext(&g, IS_CALCULATED_EXTENSION_URL).unwrap()["valueBoolean"],
+            ext(&g, pop().is_calculated_extension.as_str()).unwrap()["valueBoolean"],
             false
         );
         assert_eq!(
-            ext(&g, IS_PLANNING_DENOMINATOR_EXTENSION_URL).unwrap()["valueBoolean"],
+            ext(&g, pop().is_planning_denominator_extension.as_str()).unwrap()["valueBoolean"],
             false
         );
     }
@@ -218,31 +188,37 @@ mod tests {
     fn planning_flag_and_display_lookup() {
         let g = sample(true);
         assert_eq!(
-            ext(&g, IS_PLANNING_DENOMINATOR_EXTENSION_URL).unwrap()["valueBoolean"],
+            ext(&g, pop().is_planning_denominator_extension.as_str()).unwrap()["valueBoolean"],
             true
         );
 
-        let g = target_population_group(&TargetPopulation {
-            location_id: "x",
-            location_name: None,
-            count: 1,
-            year: 2027,
-            source_code: "made-up",
-            source_text: "t",
-            estimate_date: "2027-01-01",
-            calculated: true,
-            planning_denominator: false,
-        });
+        let g = target_population_group(
+            &TargetPopulation {
+                location_id: "x",
+                location_name: None,
+                count: 1,
+                year: 2027,
+                source_code: "made-up",
+                source_text: "t",
+                estimate_date: "2027-01-01",
+                calculated: true,
+                planning_denominator: false,
+            },
+            &pop(),
+        );
         assert_eq!(g["id"], "pop-made-up-2027-x");
         assert_eq!(g["name"], "Total population, x, 2027 (made-up)");
-        let coding = &ext(&g, DENOMINATOR_SOURCE_EXTENSION_URL).unwrap()["valueCodeableConcept"]["coding"]
-            [0];
+        let coding = &ext(&g, pop().denominator_source_extension.as_str()).unwrap()["valueCodeableConcept"]
+            ["coding"][0];
         assert!(coding.get("display").is_none());
         assert_eq!(
-            ext(&g, IS_CALCULATED_EXTENSION_URL).unwrap()["valueBoolean"],
+            ext(&g, pop().is_calculated_extension.as_str()).unwrap()["valueBoolean"],
             true
         );
-        assert_eq!(source_display("grid3"), Some("GRID3 modelled estimate"));
+        assert_eq!(
+            pop().source_displays.get("grid3").map(String::as_str),
+            Some("GRID3 modelled estimate")
+        );
     }
 
     #[test]
@@ -266,17 +242,20 @@ mod tests {
                 && !is_valid_id("a:b")
                 && !is_valid_id(&"x".repeat(65))
         );
-        let g = target_population_group(&TargetPopulation {
-            location_id: "ng.01",
-            location_name: None,
-            count: 7,
-            year: 987,
-            source_code: "worldpop",
-            source_text: "t",
-            estimate_date: "0987-01-01",
-            calculated: false,
-            planning_denominator: false,
-        });
+        let g = target_population_group(
+            &TargetPopulation {
+                location_id: "ng.01",
+                location_name: None,
+                count: 7,
+                year: 987,
+                source_code: "worldpop",
+                source_text: "t",
+                estimate_date: "0987-01-01",
+                calculated: false,
+                planning_denominator: false,
+            },
+            &pop(),
+        );
         assert_eq!(g["id"], "pop-worldpop-987-ng.01");
         assert_eq!(
             g["characteristic"][0]["valueReference"]["reference"],

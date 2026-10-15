@@ -20,6 +20,9 @@ pub struct File {
     /// Where the ViewDefinitions are: a directory of JSON files, such as an IG
     /// build's fsh-generated/resources.
     pub views: Option<PathBuf>,
+    /// The profile for the locations step: a file path (relative to this
+    /// file) or an https URL. See docs/profiles.md.
+    pub profile: Option<String>,
     #[serde(default)]
     pub server: ServerFile,
     #[serde(default)]
@@ -153,6 +156,8 @@ pub struct Settings {
     pub hooks: Vec<Hook>,
     /// The config file's directory, for hook programs given as paths.
     pub base_dir: PathBuf,
+    /// The profile for the locations step: a path or an https URL.
+    pub profile: Option<String>,
     pub threads: usize,
     pub reuse_raw: bool,
     pub full: bool,
@@ -222,6 +227,7 @@ pub fn resolve(base: &Path, p: &Path) -> PathBuf {
 /// Values given on the command line (or through their environment variables).
 #[derive(Debug, Default)]
 pub struct Overrides {
+    pub profile: Option<String>,
     pub data: Option<PathBuf>,
     pub views: Option<PathBuf>,
     pub server: Option<String>,
@@ -297,6 +303,17 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         tile_countries: countries,
         push: file.push,
         hooks: file.hooks,
+        profile: o.profile.or_else(|| {
+            file.profile.map(|p| {
+                if p.starts_with("https://") || p.starts_with("http://") {
+                    p
+                } else {
+                    resolve(&base, std::path::Path::new(&p))
+                        .display()
+                        .to_string()
+                }
+            })
+        }),
         base_dir: base,
         threads,
         reuse_raw: o.reuse_raw,

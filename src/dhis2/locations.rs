@@ -16,22 +16,13 @@ use super::{Instance, check_out, valid_name, write_ndjson};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
-use crate::fhir::location::{
-    ADMIN_UNIT_TYPE, BOUNDARY_EXTENSION_URL, GEOJSON_CONTENT_TYPE, NATIONAL_ADMIN_CODE_SYSTEM,
-};
+use crate::fhir::location::GEOJSON_CONTENT_TYPE;
 use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
 use crate::report::Report;
 use crate::transform::write_report;
 
-pub const LOCATION_PROFILE: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation";
-pub const FACILITY_ORGANIZATION_PROFILE: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization";
-pub const LOCATION_TYPE_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs";
 pub const PHYSICAL_TYPE_SYSTEM: &str =
     "http://terminology.hl7.org/CodeSystem/location-physical-type";
-pub const FACILITY_TYPE: &str = "facility";
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
 
@@ -155,7 +146,7 @@ pub fn resources(
     let mut loc = json!({
         "resourceType": "Location",
         "id": id,
-        "meta": {"profile": [LOCATION_PROFILE], "tag": [opts.instance.tag()]},
+        "meta": {"profile": [opts.instance.urls.location_profile], "tag": [opts.instance.tag()]},
     });
     let mut position = None;
     match unit
@@ -172,7 +163,7 @@ pub fn resources(
                 .map(Value::to_string)
                 .unwrap_or_default();
             loc["extension"] = json!([{
-                "url": BOUNDARY_EXTENSION_URL,
+                "url": opts.instance.boundary_extension,
                 "valueAttachment": {
                     "contentType": GEOJSON_CONTENT_TYPE,
                     "data": base64::engine::general_purpose::STANDARD.encode(geojson),
@@ -206,7 +197,7 @@ pub fn resources(
     }
     let mut ids = identifiers(unit, opts);
     if is_top && let Some(cc) = opts.country_code {
-        ids.push(json!({"system": NATIONAL_ADMIN_CODE_SYSTEM, "value": cc}));
+        ids.push(json!({"system": opts.instance.urls.country_code_system, "value": cc}));
     }
     loc["identifier"] = Value::Array(ids);
     loc["status"] = json!(if unit.closed_date.is_some() {
@@ -218,10 +209,19 @@ pub fn resources(
     if let Some(short) = unit.short_name.as_ref().filter(|s| **s != unit.name) {
         loc["alias"] = json!([short]);
     }
+    // run_locations checked both are in the profile.
     let (type_code, physical, physical_display) = if facility {
-        (FACILITY_TYPE, "si", "Site")
+        (
+            opts.instance.facility_type.as_deref().unwrap_or_default(),
+            "si",
+            "Site",
+        )
     } else {
-        (ADMIN_UNIT_TYPE, "jdn", "Jurisdiction")
+        (
+            opts.instance.admin_unit_type.as_deref().unwrap_or_default(),
+            "jdn",
+            "Jurisdiction",
+        )
     };
     let group_types: Vec<Value> = opts
         .groups
@@ -230,14 +230,16 @@ pub fn resources(
         .flatten()
         .map(|g| g.concept(opts.instance))
         .collect();
-    let mut types = vec![json!({"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]})];
+    let mut types = vec![
+        json!({"coding": [{"system": opts.instance.urls.location_type_system, "code": type_code}]}),
+    ];
     types.extend(group_types.iter().cloned());
     loc["type"] = Value::Array(types);
     loc["physicalType"] = json!({"coding": [{"system": PHYSICAL_TYPE_SYSTEM, "code": physical, "display": physical_display}]});
     if let Some(p) = position {
         loc["position"] = p;
     }
-    let org_id = format!("org-{id}");
+    let org_id = format!("{}{id}", opts.instance.org_id_prefix);
     if facility {
         loc["managingOrganization"] = json!({"reference": format!("Organization/{org_id}")});
     }
@@ -258,7 +260,7 @@ pub fn resources(
         out.push(json!({
             "resourceType": "Organization",
             "id": org_id,
-            "meta": {"profile": [FACILITY_ORGANIZATION_PROFILE], "tag": [opts.instance.tag()]},
+            "meta": {"profile": [opts.instance.urls.facility_organization_profile], "tag": [opts.instance.tag()]},
             "identifier": identifiers(unit, opts),
             "active": unit.closed_date.is_none(),
             "type": std::iter::once(json!({"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}))
@@ -424,9 +426,16 @@ fn add_org_unit_groups(
     Ok(list.len())
 }
 
-pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
+pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_out(&args.out)?;
-    let instance = Instance::new(&args.conn.instance)?;
+    let instance = Instance::new(&args.conn.instance, profile)?;
+    if instance.admin_unit_type.is_none() || instance.facility_type.is_none() {
+        return Err(PipesError::Usage(format!(
+            "dhis2 locations needs [location] admin_unit_type and [organization] facility_type \
+             in the profile, the type codes of admin units and facilities; {} lacks one",
+            profile.source
+        )));
+    }
     let prefix = args
         .id_prefix
         .clone()
@@ -633,7 +642,7 @@ mod tests {
 
     #[test]
     fn levels_become_admin_units_then_facilities_with_organizations() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let poly =
             json!({"type":"Polygon","coordinates":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,0.0]]]});
         let units = vec![
@@ -662,7 +671,9 @@ mod tests {
             .iter()
             .map(|i| i["system"].as_str().unwrap())
             .collect();
-        assert!(systems.contains(&NATIONAL_ADMIN_CODE_SYSTEM));
+        assert!(
+            systems.contains(&"https://icr.healthcampaigns.org/identifiers/national-admin-code")
+        );
         assert_eq!(country["identifier"][0]["use"], "official");
         assert_eq!(country["identifier"][0]["value"], "c");
         assert_eq!(
@@ -673,7 +684,10 @@ mod tests {
         let district = &out[1];
         assert_eq!(district["partOf"]["reference"], "Location/sle-c");
         let ext = &district["extension"][0];
-        assert_eq!(ext["url"], BOUNDARY_EXTENSION_URL);
+        assert_eq!(
+            ext["url"],
+            "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"
+        );
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(ext["valueAttachment"]["data"].as_str().unwrap())
             .unwrap();
@@ -709,7 +723,7 @@ mod tests {
 
     #[test]
     fn closed_units_are_inactive_and_missing_parents_are_reported() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let mut closed = unit("d", 2, Some("gone"), None);
         closed.closed_date = Some("2020-01-01".into());
         let units = vec![unit("c", 1, None, None), closed];
@@ -722,7 +736,7 @@ mod tests {
 
     #[test]
     fn a_subtree_root_has_no_partof_and_no_complaint() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let units = vec![unit("d", 2, Some("c"), None), unit("e", 3, Some("d"), None)];
         let mut report = Report::default();
         let out = build(&units, &opts(&instance), &mut report);
@@ -758,7 +772,7 @@ mod tests {
 
     #[test]
     fn unusable_geometry_is_reported_and_left_out() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let units = vec![
             unit(
                 "c",
