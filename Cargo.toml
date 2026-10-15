@@ -50,7 +50,7 @@ fhir-pipes-sof-lint = { workspace = true }
 # views (formerly the octofhir-sof command-line tool)
 tokio = { workspace = true }
 sqlx-postgres = { workspace = true, optional = true }
-annotate-snippets = "0.11"
+annotate-snippets = "0.12.16"
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -70,11 +70,12 @@ members = ["crates/sof", "crates/sof-lint"]
 [workspace.dependencies]
 fhir-pipes-sof = { path = "crates/sof" }
 fhir-pipes-sof-lint = { path = "crates/sof-lint" }
-octofhir-fhirpath = "0.4.46"
-octofhir-fhirschema = "0.3.19"
-octofhir-canonical-manager = "0.2.2"
-banshee_hir = "0.1.0"
-banshee_parser = "0.1.0"
+# 0.4.56 is the first release without an HTTP client (octofhir/fhirpath-rs#175).
+octofhir-fhirpath = { version = "0.4.56", default-features = false }
+octofhir-fhirschema = "0.3.29"
+octofhir-canonical-manager = "0.2.3"
+banshee_hir = "0.2.3"
+banshee_parser = "0.2.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
@@ -90,9 +91,3 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytes = "1"
 thiserror = "2.0"
 tracing = "0.1"
-
-# octofhir-fhirpath declares an HTTP client (reqwest with rustls, so aws-lc) it
-# never uses. ohs-foundation/fhirpath-rs drops it; this goes once
-# octofhir/fhirpath-rs#175 is in a release.
-[patch.crates-io]
-octofhir-fhirpath = { git = "https://github.com/ohs-foundation/fhirpath-rs", rev = "e7af4aa" }

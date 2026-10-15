@@ -8,7 +8,7 @@
 
 use std::io::IsTerminal;
 
-use annotate_snippets::{Level, Renderer, Snippet};
+use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use fhir_pipes_sof_lint::{Finding, Severity};
 
 /// Whether coloured output should be used: not forced off, `NO_COLOR` unset,
@@ -20,10 +20,10 @@ pub fn use_color(force_no_color: bool) -> bool {
     std::io::stdout().is_terminal()
 }
 
-fn level_of(severity: Severity) -> Level {
+fn level_of(severity: Severity) -> Level<'static> {
     match severity {
-        Severity::Error => Level::Error,
-        Severity::Warning => Level::Warning,
+        Severity::Error => Level::ERROR,
+        Severity::Warning => Level::WARNING,
     }
 }
 
@@ -51,20 +51,20 @@ pub fn render_findings(origin: &str, source: &str, findings: &[Finding], color: 
         let span = f.location.as_deref().and_then(|loc| find_span(source, loc));
         let help = f.help_url.as_ref().map(|u| format!("see {u}"));
 
-        let mut message = level.title(&f.message).id(&f.code);
+        let mut message = Group::with_title(level.primary_title(&f.message).id(&f.code));
         if let Some((start, end)) = span {
             let start = start.min(source.len());
             let end = end.min(source.len()).max(start);
             let snippet = Snippet::source(source)
-                .origin(origin)
+                .path(origin)
                 .fold(true)
-                .annotation(level.span(start..end));
-            message = message.snippet(snippet);
+                .annotation(AnnotationKind::Primary.span(start..end));
+            message = message.element(snippet);
         }
         if let Some(help) = &help {
-            message = message.footer(Level::Help.title(help));
+            message = message.element(Level::HELP.message(help));
         }
-        out.push_str(&renderer.render(message).to_string());
+        out.push_str(&renderer.render(&[message]));
         out.push('\n');
     }
     out
@@ -197,5 +197,45 @@ mod tests {
         assert!(out.contains("FH10"));
         assert!(out.contains("no columns"));
         assert!(!out.contains("^"));
+    }
+
+    #[test]
+    fn warning_with_unicode_location_and_help_is_plain() {
+        let source = r#"{"path":"имя.family"}"#;
+        let finding = Finding {
+            code: "FH01".into(),
+            message: "unknown element".into(),
+            severity: Severity::Warning,
+            location: Some("имя.family".into()),
+            help_url: Some("https://example.com/help".into()),
+        };
+        let out = render_findings("view.json", source, &[finding], false);
+        assert!(out.contains("warning[FH01]"), "{out}");
+        assert!(out.contains("имя.family"));
+        assert!(out.contains("^"));
+        assert!(out.contains("https://example.com/help"));
+        assert!(!out.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn machine_reports_keep_their_public_fields() {
+        let findings = vec![Finding::fhir("FH04", Severity::Error, "array into scalar").at("name")];
+        let json: serde_json::Value =
+            serde_json::from_str(&render_findings_json(&findings)).unwrap();
+        assert_eq!(json[0]["code"], "FH04");
+        assert_eq!(json[0]["severity"], "error");
+        assert_eq!(json[0]["message"], "array into scalar");
+        assert_eq!(json[0]["location"], "name");
+        assert!(json[0]["helpUrl"].as_str().unwrap().contains("fh04"));
+        let sarif: serde_json::Value =
+            serde_json::from_str(&render_findings_sarif("view.json", &findings)).unwrap();
+        assert_eq!(sarif["version"], "2.1.0");
+        let run = &sarif["runs"][0];
+        assert_eq!(run["tool"]["driver"]["rules"][0]["id"], "FH04");
+        assert_eq!(run["results"][0]["level"], "error");
+        assert_eq!(
+            run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "view.json"
+        );
     }
 }
