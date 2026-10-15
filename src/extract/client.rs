@@ -201,6 +201,8 @@ impl std::fmt::Debug for Fetched {
 pub struct FhirClient {
     http: Client,
     retries: usize,
+    /// The per-request timeout the client was built with.
+    timeout: Duration,
     auth: Authorizer,
 }
 
@@ -290,6 +292,7 @@ impl FhirClient {
         let mut client = Self {
             http,
             retries: retries.max(1),
+            timeout,
             auth: Authorizer::None,
         };
         client.auth = match auth {
@@ -381,8 +384,8 @@ impl FhirClient {
     }
 
     /// `exchange`, with every attempt and the waits between them ending by
-    /// `deadline`: a request still open then fails, and no retry starts
-    /// after it.
+    /// `deadline`: each attempt keeps the client's own timeout, cut short
+    /// when less time is left, and no retry starts after the deadline.
     pub fn exchange_by(
         &self,
         method: Method,
@@ -398,7 +401,7 @@ impl FhirClient {
                 if left.is_zero() {
                     break;
                 }
-                request = request.timeout(left);
+                request = request.timeout(self.timeout.min(left));
             }
             if let Some(v) = &auth {
                 request = request.header(AUTHORIZATION, v.clone());

@@ -774,3 +774,28 @@ fn long_operation_outcomes_are_classified_whole() {
     assert!(err.len() < 1500, "{} chars", err.len());
     assert!(state(dir.path()).get("bulk").is_none());
 }
+
+/// The bulk deadline only cuts a status request short; --timeout still
+/// bounds each one when the deadline is further away.
+#[test]
+fn a_status_request_keeps_the_request_timeout() {
+    let server = Server::run();
+    expect_kick_off(&server, "Patient", None, &server.url_str("/status/4"));
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/status/4"))
+            .times(1..)
+            .respond_with(delay_and_then(
+                Duration::from_secs(3),
+                done(&manifest(&server, &[], false)),
+            )),
+    );
+    // With the deadline replacing --timeout, the 3 s answer would arrive
+    // and the run succeed.
+    let dir = tempfile::tempdir().unwrap();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--timeout", "1", "--retries", "1", "--bulk-timeout", "30"])
+        .assert()
+        .failure();
+    let err = stderr(&a);
+    assert!(err.contains("polling"), "{err}");
+}
