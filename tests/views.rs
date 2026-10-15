@@ -192,3 +192,26 @@ fn stdin_takes_formatted_json_and_ndjson_for_ndjson_output() {
         .stdout(contains(r#""id":"p2""#))
         .stderr(contains("2 rows"));
 }
+
+#[test]
+#[cfg(not(feature = "postgres"))]
+fn db_says_how_to_get_postgres_support() {
+    views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .args(["--db", "postgres://localhost/fhir"])
+        .assert()
+        .failure()
+        .stderr(contains("--features postgres"));
+}
+
+#[test]
+#[cfg(not(feature = "fhir-packages"))]
+fn package_lint_says_how_to_get_package_support() {
+    views()
+        .args(["lint", "--package", "hl7.fhir.r4.core"])
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .assert()
+        .failure()
+        .stderr(contains("--features fhir-packages"));
+}

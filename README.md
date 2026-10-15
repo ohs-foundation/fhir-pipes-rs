@@ -18,6 +18,25 @@ tools, kiln and fhir-warehouse, and the octofhir/sof SQL-on-FHIR engine. The
 reasoning and the plan are in
 [docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md](docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md).
 
+## Install
+
+Download the binary for your platform from the
+[releases](https://github.com/ohs-foundation/fhir-pipes-rs/releases): macOS (arm64,
+x86_64), Linux (x86_64, aarch64; static, no runtime dependencies) or Windows (x86_64).
+Each release has a `SHA256SUMS` file to check it against.
+
+```sh
+# macOS on Apple Silicon, for example
+curl -LO https://github.com/ohs-foundation/fhir-pipes-rs/releases/latest/download/fhir-pipes-aarch64-apple-darwin
+chmod +x fhir-pipes-aarch64-apple-darwin && mv fhir-pipes-aarch64-apple-darwin /usr/local/bin/fhir-pipes
+```
+
+Or build it with Rust:
+
+```sh
+cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes
+```
+
 ## Building a SQL-on-FHIR warehouse
 
 `fhir-pipes refresh` downloads the resources a directory of ViewDefinitions
@@ -110,12 +129,15 @@ fhir-pipes views run patient_flat.json --input raw/Patient.ndjson          # CSV
 fhir-pipes views run views/ --input raw/ --output parquet --out tables/   # one file per view
 fhir-pipes views sql patient_flat.json --dialect duckdb                     # the SQL for a view
 fhir-pipes views validate patient_flat.json                                 # structure checks
-fhir-pipes views lint patient_flat.json --package hl7.fhir.r4.core          # selectors against FHIR R4
+fhir-pipes views lint patient_flat.json --shareable                         # the portable FHIRPath subset
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
 
+A directory of views is read as `refresh` reads it. Two options need a build
+with an optional feature (see [Building and testing](#building-and-testing)):
 `views run --db URL` runs against PostgreSQL holding FHIR resources as JSONB
-instead of files. A directory of views is read as `refresh` reads it.
+instead of files (`postgres`), and `views lint --package hl7.fhir.r4.core`
+checks selectors against a FHIR package it downloads (`fhir-packages`).
 
 `export` downloads every resource of each `--type` to `DIR/<TYPE>.ndjson`:
 
@@ -177,8 +199,9 @@ default. Connection errors, 429 and 5xx responses are retried up to
 
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
-- The PostgreSQL and async dependencies that `views run --db` and
-  `views sql` need are always compiled in; they are not yet optional.
+- The `octofhir-fhirpath` crate depends on an HTTP client it does not use,
+  which brings in the `aws-lc` C library and slows builds. Removing it needs
+  a change upstream.
 - `bake` and `bake-points`, which turn GRID3 and CSV files into Locations,
   are still in the Python package under `python/` (named `kiln`); see
   [python/README.md](python/README.md).
@@ -192,6 +215,20 @@ cargo build --release
 ./target/release/fhir-pipes --help
 cargo test --workspace
 ```
+
+Two features are off by default, and the release binaries leave them out:
+
+| Feature | Adds |
+|---|---|
+| `postgres` | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL |
+| `fhir-packages` | `views lint --package`: views checked against a FHIR package, downloaded over HTTP |
+
+```sh
+cargo build --release --features postgres,fhir-packages
+```
+
+Without them the binary is about 5 MB smaller and builds 113 fewer crates, and
+asking for either option says which feature it needs.
 
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
 aarch64, statically linked against musl) and Windows (x86_64), as single files

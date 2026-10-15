@@ -19,8 +19,8 @@ exclude = ["tests/spec/**", "tests/extra/**"]
 octofhir-fhirpath = { workspace = true }
 
 # Database
-sqlx-core = { workspace = true }
-sqlx-postgres = { workspace = true }
+sqlx-core = { workspace = true, optional = true }
+sqlx-postgres = { workspace = true, optional = true }
 
 # Serialization
 serde = { workspace = true }
@@ -47,6 +47,9 @@ tracing = { workspace = true }
 [features]
 default = []
 parquet = ["dep:arrow", "dep:parquet", "dep:chrono"]
+# Run views against FHIR resources stored as JSONB in PostgreSQL (ViewRunner).
+# SQL generation (SqlGenerator, run_with) needs no database driver.
+postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -10,18 +10,23 @@
 //! the FHIR package is present in the canonical-manager store.
 
 mod finding;
+#[cfg(feature = "packages")]
 mod provider;
 mod shareable;
 mod structure;
+#[cfg(feature = "packages")]
 mod view_lint;
 
 pub use finding::{Finding, Severity};
+#[cfg(feature = "packages")]
 pub use provider::FhirSchemaProvider;
 pub use shareable::lint_shareable;
 pub use structure::validate_structure;
+#[cfg(feature = "packages")]
 pub use view_lint::{lint, lint_sql, lint_view};
 
-/// Errors raised while loading a FHIR package into a [`FhirSchemaProvider`].
+/// Errors raised while loading a FHIR package into a `FhirSchemaProvider`.
+#[cfg(feature = "packages")]
 #[derive(Debug, thiserror::Error)]
 pub enum LintError {
     /// The canonical-manager could not be initialised or the package failed to
