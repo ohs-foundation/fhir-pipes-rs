@@ -3,6 +3,9 @@ use std::process::Command;
 
 use assert_cmd::prelude::*;
 
+/// These fixtures are ICR-shaped: run with the example ICR profile.
+const ICR_PROFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml");
+
 fn fixture_snapshot() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot")
 }
@@ -12,6 +15,7 @@ fn transform_writes_dataset_and_report() {
     let out = tempfile::tempdir().unwrap();
     let assert = Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -43,6 +47,7 @@ fn transform_rejects_missing_snapshot_with_exit_2() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args([
             "transform",
             "locations",
@@ -62,6 +67,7 @@ fn transform_rejects_bad_partition_key_with_exit_2() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -80,6 +86,7 @@ fn transform_rejects_an_out_path_that_is_a_file() {
     std::fs::write(&out_file, "not a directory").unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -96,6 +103,7 @@ fn a_stale_report_is_replaced() {
     std::fs::write(out.path().join("_report.json"), "stale").unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -119,6 +127,7 @@ fn a_failed_transform_removes_the_stale_report_and_keeps_the_dataset() {
 
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -143,6 +152,7 @@ fn duckdb_reads_the_output_when_available() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -199,6 +209,7 @@ fn inspect_summarises_a_written_dataset() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -208,6 +219,7 @@ fn inspect_summarises_a_written_dataset() {
         .success();
     let assert = Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["inspect", "--out"])
         .arg(out.path())
         .assert()
@@ -230,6 +242,7 @@ fn inspect_of_an_empty_dir_says_so() {
     std::fs::create_dir_all(out.path().join("locations")).unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["inspect", "--out"])
         .arg(out.path())
         .assert()
@@ -256,6 +269,7 @@ fn inspect_ignores_stale_staging_and_backup_dirs() {
     let out = tempfile::tempdir().unwrap();
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")
@@ -269,6 +283,7 @@ fn inspect_ignores_stale_staging_and_backup_dirs() {
 
     let assert = Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["inspect", "--out"])
         .arg(out.path())
         .assert()
@@ -288,6 +303,7 @@ fn inspect_names_a_corrupt_file() {
 
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["inspect", "--out"])
         .arg(out.path())
         .assert()
@@ -301,6 +317,7 @@ fn inspect_rejects_a_missing_dir_with_exit_2() {
     let missing = out.path().join("nonexistent");
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["inspect", "--out"])
         .arg(&missing)
         .assert()
@@ -358,6 +375,7 @@ fn column(out: &Path, name: &str) -> std::collections::HashMap<String, Option<St
 fn transform_into(snap: &Path, out: &Path) {
     Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(snap)
         .arg("--out")
@@ -505,6 +523,7 @@ fn read_rows(out: &Path) -> std::collections::BTreeMap<String, serde_json::Value
 fn transform(out: &Path, extra: &[&str]) -> String {
     let assert = Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
         .arg(fixture_snapshot())
         .arg("--out")

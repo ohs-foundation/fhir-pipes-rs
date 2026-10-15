@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
-use crate::fhir::location::BOUNDARY_EXTENSION_URLS;
+use crate::fhir::location::is_boundary_extension;
 use crate::report::Report;
 
 pub const PAGE_SIZE: usize = 1000;
@@ -51,10 +51,11 @@ pub fn next_link(bundle: &Value) -> Option<String> {
 }
 
 /// The first boundary extension whose attachment has a `url` and no `data`.
-pub fn boundary_url(resource: &Value) -> Option<String> {
+/// `extra` is the profile's boundary extensions.
+pub fn boundary_url(resource: &Value, extra: &[String]) -> Option<String> {
     for ext in resource.get("extension")?.as_array()? {
         let url = ext.get("url").and_then(Value::as_str).unwrap_or("");
-        if !BOUNDARY_EXTENSION_URLS.contains(&url) {
+        if !is_boundary_extension(url, extra) {
             continue;
         }
         let Some(att) = ext.get("valueAttachment").and_then(Value::as_object) else {
@@ -84,13 +85,23 @@ pub fn page_locations(
     since: Option<&str>,
     incoming: &Path,
     report: &mut Report,
+    boundary_extensions: &[String],
 ) -> Result<PageResult> {
-    page_resources(client, server, "Location", since, incoming, report)
+    page_resources(
+        client,
+        server,
+        "Location",
+        since,
+        incoming,
+        report,
+        boundary_extensions,
+    )
 }
 
 /// Walk `<server>/<resource_type>` with `_count` paging, appending every
 /// resource to `incoming` and noting what the merge needs. Boundary URLs
-/// are noted for any type; only Locations carry them.
+/// are noted for any type; only Locations carry them. `boundary_extensions`
+/// is the profile's, recognized beside the HL7 one.
 pub fn page_resources(
     client: &FhirClient,
     server: &str,
@@ -98,6 +109,7 @@ pub fn page_resources(
     since: Option<&str>,
     incoming: &Path,
     report: &mut Report,
+    boundary_extensions: &[String],
 ) -> Result<PageResult> {
     let base = server.trim_end_matches('/');
     let mut url = Url::parse(&format!("{base}/{resource_type}"))
@@ -179,7 +191,7 @@ pub fn page_resources(
                     .pointer("/meta/lastUpdated")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                boundary_url: boundary_url(resource),
+                boundary_url: boundary_url(resource, boundary_extensions),
             });
             serde_json::to_writer(&mut out, resource).map_err(|e| match e.io_error_kind() {
                 Some(kind) => PipesError::io(incoming, std::io::Error::from(kind)),
@@ -305,6 +317,7 @@ mod tests {
             None,
             &incoming,
             &mut report,
+            &[],
         )
         .unwrap();
         assert_eq!(got.notes.len(), 1);
@@ -375,6 +388,7 @@ mod tests {
             None,
             &out,
             &mut report,
+            &[],
         )
         .unwrap();
         assert_eq!(res.pages, 2);
@@ -424,6 +438,7 @@ mod tests {
             Some("2026-01-01T00:00:00Z"),
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(res.notes.len(), 0);
@@ -436,9 +451,21 @@ mod tests {
     #[test]
     fn a_boundary_with_inline_data_is_not_noted_for_fetching() {
         let r = serde_json::json!({"extension":[{"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson","valueAttachment":{"url":"https://x","data":"abc"}}]});
-        assert_eq!(boundary_url(&r), None);
+        assert_eq!(boundary_url(&r, &[]), None);
         let r = serde_json::json!({"extension":[{"url":"http://hl7.org/fhir/StructureDefinition/location-boundary-geojson","valueAttachment":{"url":"https://x"}}]});
-        assert_eq!(boundary_url(&r).as_deref(), Some("https://x"));
+        assert_eq!(boundary_url(&r, &[]).as_deref(), Some("https://x"));
+    }
+
+    #[test]
+    fn a_profile_boundary_extension_is_noted_only_with_the_profile() {
+        let ext = "https://example.org/StructureDefinition/service-area";
+        let r =
+            serde_json::json!({"extension":[{"url":ext,"valueAttachment":{"url":"https://x"}}]});
+        assert_eq!(boundary_url(&r, &[]), None);
+        assert_eq!(
+            boundary_url(&r, &[ext.to_string()]).as_deref(),
+            Some("https://x")
+        );
     }
 
     #[test]
@@ -457,6 +484,7 @@ mod tests {
             None,
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("cyclic"), "{err}");
@@ -477,6 +505,7 @@ mod tests {
             None,
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 1);
@@ -497,6 +526,7 @@ mod tests {
             None,
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("not JSON"), "{err}");
@@ -518,6 +548,7 @@ mod tests {
             None,
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("expected a Bundle"), "{err}");
@@ -544,6 +575,7 @@ mod tests {
             Some("2026-01-01T00:00:00+01:00"),
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
     }
@@ -577,6 +609,7 @@ mod tests {
             None,
             &dir.path().join("i"),
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(res.pages, 2);
@@ -600,6 +633,7 @@ mod tests {
             None,
             &out,
             &mut Report::default(),
+            &[],
         )
         .unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
@@ -619,6 +653,6 @@ mod tests {
             {"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"},
             {"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson","valueAttachment":{"url":"https://x"}}
         ]});
-        assert_eq!(boundary_url(&r).as_deref(), Some("https://x"));
+        assert_eq!(boundary_url(&r, &[]).as_deref(), Some("https://x"));
     }
 }

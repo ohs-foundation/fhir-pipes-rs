@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
-use crate::fhir::location::ADMIN_UNIT_TYPE;
 use crate::index::IndexRecord;
 use crate::report::Report;
 
@@ -109,20 +108,20 @@ impl Hierarchy {
         let mut out: [Option<String>; ADMIN_COLUMNS] = Default::default();
         if let Some(info) = self.get(i) {
             for (k, slot) in info.admin.iter().enumerate() {
-                out[k] = slot.and_then(|nidx| records[nidx.index()].pcode.clone());
+                out[k] = slot.and_then(|nidx| records[nidx.index()].admin_code.clone());
             }
         }
         out
     }
 
-    /// pcode of the level-0 admin ancestor, if any.
+    /// Admin code of the level-0 admin ancestor, if any.
     pub fn country(&self, records: &[IndexRecord], i: usize) -> Option<String> {
-        self.get(i)?.admin[0].and_then(|n| records[n.index()].pcode.clone())
+        self.get(i)?.admin[0].and_then(|n| records[n.index()].admin_code.clone())
     }
 }
 
 fn is_admin(rec: &IndexRecord) -> bool {
-    rec.type_code.as_deref() == Some(ADMIN_UNIT_TYPE)
+    rec.is_admin
 }
 
 #[derive(Clone, Copy)]
@@ -461,8 +460,9 @@ mod tests {
             id: id.into(),
             part_of: parent.map(str::to_string),
             name: Some(id.to_uppercase()),
-            pcode: pcode.map(str::to_string),
+            admin_code: pcode.map(str::to_string),
             type_code: Some(ty.into()),
+            is_admin: ty == "admin-unit",
             ..Default::default()
         }
     }

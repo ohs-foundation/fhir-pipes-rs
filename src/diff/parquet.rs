@@ -120,13 +120,17 @@ fn row_from_batch(
                 &label,
                 &format!("{name}: unsupported column type {}", col.data_type()),
             );
+            row.unread.push(name.clone());
             continue;
         };
         match column_from_json(name, &json) {
             Ok(v) => {
                 row.columns.insert(name.clone(), v);
             }
-            Err(msg) => report.add("input_column_type", &label, &format!("{name}: {msg}")),
+            Err(msg) => {
+                report.add("input_column_type", &label, &format!("{name}: {msg}"));
+                row.unread.push(name.clone());
+            }
         }
     }
     row

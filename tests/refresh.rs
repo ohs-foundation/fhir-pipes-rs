@@ -64,6 +64,7 @@ fn setup(base: &str, extra_config: &str) -> (tempfile::TempDir, PathBuf) {
             r#"# Literal strings: a Windows path has backslashes.
 data = "data"
 views = '{views}'
+profile = '{profile}'
 
 [server]
 base = "{base}"
@@ -77,7 +78,10 @@ key = "location_id"
 table = "locations"
 table_key = "id"
 {extra_config}"#,
-            views = fixtures().join("views").display()
+            views = fixtures().join("views").display(),
+            profile = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/profiles/icr.toml")
+                .display()
         ),
     )
     .unwrap();
@@ -101,6 +105,7 @@ fn cmd(config: &Path) -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_PROFILE",
     ] {
         c.env_remove(var);
     }

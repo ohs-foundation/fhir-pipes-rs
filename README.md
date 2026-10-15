@@ -93,6 +93,15 @@ file and the rule it breaks.
 
 The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged.
 
+## Profiles
+
+An implementation guide's extra Location and Organization columns, admin
+units and codes, and the URLs `dhis2` and `population` write, come from a
+profile: a TOML file given with `--profile` (a path or an https URL),
+`FHIR_PIPES_PROFILE`, or `profile =` in `fhir-pipes.toml`. Without one, only
+base FHIR is read. [docs/profiles.md](docs/profiles.md) explains the format;
+[examples/profiles/icr.toml](examples/profiles/icr.toml) is ICR's.
+
 ## Commands
 
 | Command | Direction | What it does | Docs |

@@ -19,14 +19,14 @@ use geo::Geometry;
 use crate::cli::PopulationArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::{
-    KNOWN_SOURCE_CODES, MAX_ID_LEN, MAX_QUANTITY, TargetPopulation, group_id, is_valid_id,
-    target_population_group,
+    MAX_ID_LEN, MAX_QUANTITY, TargetPopulation, group_id, is_valid_id, target_population_group,
 };
 use crate::fhir::ndjson::{LineAccess, Output, is_gz, with_suffix};
 use crate::fhir::{Boundary, Location};
 use crate::geometry::parse_boundary;
 use crate::index::hierarchy::Hierarchy;
 use crate::index::{IndexRecord, build_index};
+use crate::profile::Profile;
 use crate::raster::Raster;
 use crate::raster::fetch;
 use crate::raster::geotiff::GeoTiff;
@@ -102,12 +102,13 @@ fn measure(
     lines: &mut LineAccess,
     rec: &IndexRecord,
     raster: &mut impl Raster,
+    profile: &Profile,
     report: &mut Report,
 ) -> Result<Option<ZonalSum>> {
     let text = lines.read_at(rec.offset, rec.len)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let mut scratch = Report::default();
-    let Some(loc) = Location::parse(&value, &mut scratch) else {
+    let Some(loc) = Location::parse(&value, profile, &mut scratch) else {
         report.add(
             "no_boundary",
             &rec.id,
@@ -203,7 +204,7 @@ fn valid_iso_date(s: &str) -> bool {
         })
 }
 
-pub fn run_population(args: &PopulationArgs) -> Result<()> {
+pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()> {
     let snapshot = Snapshot::new(&args.snapshot);
     let ndjson = snapshot.locations();
     if !ndjson.is_file() {
@@ -242,13 +243,21 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("{:04}-01-01", args.year));
 
-    let index = build_index(&ndjson, None, false)?;
+    // Admin levels come from the profile's admin_unit_type; the Groups'
+    // profile, extensions and systems from its [population] section.
+    let profile = Profile::for_snapshot(profile, &args.snapshot)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
+    let pop = profile.population()?.clone();
+    let index = build_index(&ndjson, &profile, None, false)?;
     let mut report = index.report;
-    if !KNOWN_SOURCE_CODES.contains(&args.source.as_str()) {
+    if !pop.known_source_codes.is_empty() && !pop.known_source_codes.contains(&args.source) {
         report.add(
             "unknown_source_code",
             &args.source,
-            "not a code in icr-denominator-source-cs; written as given (extensible binding)",
+            &format!(
+                "not a code in {}; written as given (extensible binding)",
+                pop.denominator_source_system
+            ),
         );
     }
     // What to measure: every admin unit at one level (then rolled up the admin chain), or
@@ -314,7 +323,13 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
     let mut lines = LineAccess::open(&ndjson)?;
     let mut totals: BTreeMap<usize, UnitTotal> = BTreeMap::new();
     for &i in &targets {
-        let measured = measure(&mut lines, &index.records[i], &mut raster, &mut report)?;
+        let measured = measure(
+            &mut lines,
+            &index.records[i],
+            &mut raster,
+            &profile,
+            &mut report,
+        )?;
         // Round once at the leaf so every ancestor's published count is
         // exactly the sum of its published descendants.
         let measured = measured.map(|z| ZonalSum {
@@ -397,17 +412,20 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             );
             continue;
         }
-        let group = target_population_group(&TargetPopulation {
-            location_id: &rec.id,
-            location_name: rec.name.as_deref(),
-            count: count as u64,
-            year: args.year,
-            source_code: &args.source,
-            source_text: &source_text,
-            estimate_date: &estimate_date,
-            calculated: t.calculated,
-            planning_denominator: args.planning_denominator,
-        });
+        let group = target_population_group(
+            &TargetPopulation {
+                location_id: &rec.id,
+                location_name: rec.name.as_deref(),
+                count: count as u64,
+                year: args.year,
+                source_code: &args.source,
+                source_text: &source_text,
+                estimate_date: &estimate_date,
+                calculated: t.calculated,
+                planning_denominator: args.planning_denominator,
+            },
+            &pop,
+        );
         serde_json::to_writer(&mut out, &group)?;
         out.write_all(b"\n").map_err(|e| PipesError::io(&tmp, e))?;
         if t.calculated {
@@ -541,7 +559,14 @@ mod tests {
             let (_tmp, mut lines, records) = index_ndjson(&[loc]);
             let mut raster = crate::raster::MemRaster::fixture();
             let mut report = Report::default();
-            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            let got = measure(
+                &mut lines,
+                &records[0],
+                &mut raster,
+                &crate::profile::icr_example(),
+                &mut report,
+            )
+            .unwrap();
             assert_eq!(
                 got,
                 Some(ZonalSum {
@@ -558,7 +583,14 @@ mod tests {
             let (_tmp, mut lines, records) = index_ndjson(&[loc]);
             let mut raster = crate::raster::MemRaster::fixture();
             let mut report = Report::default();
-            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            let got = measure(
+                &mut lines,
+                &records[0],
+                &mut raster,
+                &crate::profile::icr_example(),
+                &mut report,
+            )
+            .unwrap();
             assert_eq!(got, None);
             assert_eq!(report.count("no_boundary"), 1);
             assert!(
@@ -577,7 +609,14 @@ mod tests {
             let (_tmp, mut lines, records) = index_ndjson(&[loc]);
             let mut raster = crate::raster::MemRaster::fixture();
             let mut report = Report::default();
-            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            let got = measure(
+                &mut lines,
+                &records[0],
+                &mut raster,
+                &crate::profile::icr_example(),
+                &mut report,
+            )
+            .unwrap();
             assert_eq!(got, None);
             assert_eq!(report.count("no_boundary"), 1);
             assert!(
@@ -593,7 +632,14 @@ mod tests {
             let (_tmp, mut lines, records) = index_ndjson(&[loc]);
             let mut raster = crate::raster::MemRaster::fixture();
             let mut report = Report::default();
-            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            let got = measure(
+                &mut lines,
+                &records[0],
+                &mut raster,
+                &crate::profile::icr_example(),
+                &mut report,
+            )
+            .unwrap();
             assert_eq!(got, None);
             assert_eq!(report.count("no_boundary"), 1);
             assert!(
@@ -610,7 +656,14 @@ mod tests {
             let (_tmp, mut lines, records) = index_ndjson(&[loc]);
             let mut raster = crate::raster::MemRaster::fixture();
             let mut report = Report::default();
-            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            let got = measure(
+                &mut lines,
+                &records[0],
+                &mut raster,
+                &crate::profile::icr_example(),
+                &mut report,
+            )
+            .unwrap();
             assert_eq!(got, None);
             assert_eq!(report.count("no_boundary"), 1);
             assert!(
@@ -626,7 +679,14 @@ mod tests {
             let (_tmp, mut lines, records) = index_ndjson(&[org]);
             let mut raster = crate::raster::MemRaster::fixture();
             let mut report = Report::default();
-            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            let got = measure(
+                &mut lines,
+                &records[0],
+                &mut raster,
+                &crate::profile::icr_example(),
+                &mut report,
+            )
+            .unwrap();
             assert_eq!(got, None);
             assert_eq!(report.count("no_boundary"), 1);
             assert!(
@@ -644,6 +704,7 @@ mod tests {
             id: id.to_string(),
             part_of: part_of.map(str::to_string),
             type_code: Some("admin-unit".to_string()),
+            is_admin: true,
             ..IndexRecord::default()
         }
     }

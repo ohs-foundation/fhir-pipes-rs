@@ -42,7 +42,10 @@ pub fn feature_to_row(f: Feature, line: usize, report: &mut Report) -> InputRow 
             Ok(v) => {
                 row.columns.insert(name.clone(), v);
             }
-            Err(msg) => report.add("input_column_type", &label, &format!("{name}: {msg}")),
+            Err(msg) => {
+                report.add("input_column_type", &label, &format!("{name}: {msg}"));
+                row.unread.push(name.clone());
+            }
         }
     }
     if let Some(g) = f.geometry {

@@ -23,6 +23,12 @@ spatial_index_extension = "https://icr.healthcampaigns.org/StructureDefinition/s
 # The type code of an administrative unit: admin_level, tier, the adminN
 # columns and country all follow the chain of these.
 admin_unit_type = "admin-unit"
+# Code systems of the Location type codes (canonical first, then the older URI
+# some data still carries): `population --type` matches codes under these.
+type_systems = [
+    "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
+    "https://icr.healthcampaigns.org/CodeSystem/icr-location-type",
+]
 # The column holding an admin unit's code: adminN_code, country (from the
 # level 0 unit) and the duplicate_admin_code report.
 admin_code_column = "pcode"

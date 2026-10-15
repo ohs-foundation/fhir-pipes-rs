@@ -24,7 +24,10 @@ use crate::transform::write_report;
 ///
 /// Nothing before the merge touches `locations.ndjson` or `state.json`, so a
 /// failure in the page or fetch phase leaves the previous snapshot intact.
-pub fn run_extract(args: &ExtractArgs) -> Result<()> {
+///
+/// `boundary_extensions` are the profile's: boundary attachments under them
+/// are fetched and inlined like those under the HL7 extension.
+pub fn run_extract(args: &ExtractArgs, boundary_extensions: &[String]) -> Result<()> {
     if args.no_cache && (args.refresh || args.cache_dir.is_some()) {
         return Err(PipesError::Usage(
             "--no-cache cannot be combined with --refresh or --cache-dir".into(),
@@ -105,7 +108,13 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     } else {
         None
     };
-    let result = run_phases(args, &snap, since.as_deref(), org_since.as_deref());
+    let result = run_phases(
+        args,
+        &snap,
+        since.as_deref(),
+        org_since.as_deref(),
+        boundary_extensions,
+    );
     if result.is_err() {
         // The incoming files describe a run that never finished. The next
         // run truncates them before paging, so keeping them buys nothing and
@@ -123,6 +132,7 @@ fn run_phases(
     snap: &Snapshot,
     since: Option<&str>,
     org_since: Option<&str>,
+    boundary_extensions: &[String],
 ) -> Result<()> {
     let full = since.is_none();
     let client = FhirClient::new(
@@ -132,7 +142,14 @@ fn run_phases(
     )?;
     let mut report = Report::default();
 
-    let paged = page_locations(&client, &args.server, since, &snap.incoming(), &mut report)?;
+    let paged = page_locations(
+        &client,
+        &args.server,
+        since,
+        &snap.incoming(),
+        &mut report,
+        boundary_extensions,
+    )?;
     // Reported here rather than inside the pager so every phase summary is
     // printed by the orchestrator; the pager returns the moment it is done,
     // so this still lands before the (much longer) fetch phase starts.
@@ -180,6 +197,7 @@ fn run_phases(
         &lookup,
         &summary.failures,
         &mut report,
+        boundary_extensions,
     )?;
 
     // --refresh skips cache reads, so a URL can both fail its refetch and
@@ -221,6 +239,7 @@ fn run_phases(
         org_since,
         &snap.incoming_organizations(),
         &mut report,
+        &[],
     )?;
     eprintln!(
         "paged {} organizations over {} page(s)",
@@ -234,6 +253,7 @@ fn run_phases(
         &|_| None,
         &HashMap::new(),
         &mut report,
+        &[],
     )?;
 
     // Compare the server's count with the merged snapshot's. Incremental

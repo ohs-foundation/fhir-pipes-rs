@@ -18,7 +18,7 @@ use crate::fhir::spatial::{cells_of, compute_cell, parse_scheme_level, upsert_ce
 use crate::report::Report;
 use crate::snapshot::LOCATIONS_FILE;
 
-pub fn run_index(args: &IndexArgs) -> Result<()> {
+pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
     let ndjson = args.snapshot.join(LOCATIONS_FILE);
     if !ndjson.is_file() {
         return Err(PipesError::Usage(format!(
@@ -32,6 +32,10 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
             args.out.display()
         )));
     }
+    // The cells go in the profile's spatial index extension.
+    let profile = crate::profile::Profile::for_snapshot(profile, &args.snapshot)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
+    let url = profile.spatial_index_extension()?.to_string();
     let wanted: Vec<(String, u32)> = args
         .spatial_index
         .iter()
@@ -74,7 +78,7 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
             report.add("no_position", &id, "no position; nothing to index");
             continue;
         };
-        let existing = cells_of(obj);
+        let existing = cells_of(obj, &url);
         let mut changed = false;
         for (scheme, level) in &wanted {
             let present = existing
@@ -86,7 +90,7 @@ pub fn run_index(args: &IndexArgs) -> Result<()> {
             let Some(cell) = compute_cell(scheme, *level, lon, lat) else {
                 continue;
             };
-            if upsert_cell(obj, scheme, *level, &cell) {
+            if upsert_cell(obj, &url, scheme, *level, &cell) {
                 changed = true;
             }
         }

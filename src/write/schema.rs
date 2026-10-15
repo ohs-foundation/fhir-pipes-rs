@@ -1,7 +1,10 @@
 //! The output table: Arrow schema, the row struct pass two fills, and the
 //! column builders that turn rows into a RecordBatch.
 //!
-//! Column names follow the FHIR path they come from. See README "Columns".
+//! Column names follow the FHIR path they come from. See docs/locations.md
+//! "Columns". The built-in columns are base FHIR and what fhir-pipes derives;
+//! a profile adds its Location and Organization columns, and the spatial index
+//! and overlays columns when it names those extensions (see docs/profiles.md).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,6 +16,7 @@ use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 
 use crate::index::ADMIN_COLUMNS;
+use crate::profile::Profile;
 
 pub const GEOMETRY_COLUMN: &str = "geometry";
 pub const BBOX_COLUMN: &str = "bbox";
@@ -60,20 +64,64 @@ pub fn geometry_field() -> Field {
     Field::new(GEOMETRY_COLUMN, DataType::Binary, true).with_metadata(meta)
 }
 
-/// The schema every partition file is written with.
-pub fn output_schema() -> SchemaRef {
-    schema(false)
+/// Built-in column names, always present (the spatial index and overlays
+/// columns only with a profile that names their extensions, but their names
+/// are reserved). A profile column may not reuse one.
+const BUILTIN_COLUMNS: &[&str] = &[
+    "id",
+    "version_id",
+    "last_updated",
+    "name",
+    "alias",
+    "status",
+    "description",
+    "type",
+    "physical_type",
+    "part_of",
+    "managing_organization",
+    "identifier",
+    "position_longitude",
+    "position_latitude",
+    "quadkey",
+    "quadkey_level",
+    "organization_identifier",
+    "depth",
+    "admin_level",
+    "tier",
+    "path",
+    "ancestor_ids",
+    "overlays_admin_unit_ids",
+    "organization_json",
+    "country",
+    "geom_type",
+    "lon",
+    "lat",
+    GEOMETRY_COLUMN,
+    BBOX_COLUMN,
+    "fhir_json",
+];
+
+/// True for a built-in column name, the adminN ones included.
+pub fn is_builtin_column(name: &str) -> bool {
+    BUILTIN_COLUMNS.contains(&name)
+        || (0..ADMIN_COLUMNS)
+            .any(|i| name == format!("admin{i}_name") || name == format!("admin{i}_code"))
+}
+
+/// The schema every partition file is written with, for `profile`.
+pub fn output_schema(profile: &Profile) -> SchemaRef {
+    schema(profile, false)
 }
 
 /// The schema for `fhir-pipes transform locations --keep-without-geometry`: the same
 /// columns, with `geom_type`, `lon`, `lat` and `bbox` nullable so a
 /// Location with no point and no boundary can have a row. `geometry` is
 /// nullable in both.
-pub fn output_schema_optional_geometry() -> SchemaRef {
-    schema(true)
+pub fn output_schema_optional_geometry(profile: &Profile) -> SchemaRef {
+    schema(profile, true)
 }
 
-fn schema(optional_geometry: bool) -> SchemaRef {
+fn schema(profile: &Profile, optional_geometry: bool) -> SchemaRef {
     let mut fields = vec![
         Field::new("id", DataType::Utf8, false),
         utf8("version_id"),
@@ -97,41 +145,39 @@ fn schema(optional_geometry: bool) -> SchemaRef {
         ),
         Field::new("position_longitude", DataType::Float64, true),
         Field::new("position_latitude", DataType::Float64, true),
-        utf8("pcode"),
-        utf8("gers_id"),
-        utf8("settlement_type"),
-        utf8("delivery_strategy"),
-        utf8("quadkey"),
-        Field::new("quadkey_level", DataType::Int32, true),
-        utf8("facility_level"),
-        utf8("ownership"),
-        utf8("nhfr_code"),
-        utf8("nhfr_uid"),
-        Field::new(
-            "organization_identifier",
-            DataType::List(Arc::new(Field::new(
-                "item",
-                DataType::Struct(identifier_fields()),
-                true,
-            ))),
+    ];
+    fields.extend(profile.location.columns.iter().map(|c| utf8(&c.name)));
+    if profile.location.spatial_index_extension.is_some() {
+        fields.push(utf8("quadkey"));
+        fields.push(Field::new("quadkey_level", DataType::Int32, true));
+    }
+    fields.push(Field::new(
+        "organization_identifier",
+        DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Struct(identifier_fields()),
             true,
-        ),
-        utf8("facility_level_text"),
-        utf8("ownership_text"),
+        ))),
+        true,
+    ));
+    fields.extend(profile.organization.columns.iter().map(|c| utf8(&c.name)));
+    fields.extend([
         Field::new("depth", DataType::Int32, false),
         Field::new("admin_level", DataType::Int32, true),
         Field::new("tier", DataType::Utf8, false),
         Field::new("path", DataType::Utf8, false),
         list_utf8("ancestor_ids"),
-    ];
+    ]);
     for i in 0..ADMIN_COLUMNS {
         fields.push(utf8(&format!("admin{i}_name")));
     }
     for i in 0..ADMIN_COLUMNS {
         fields.push(utf8(&format!("admin{i}_code")));
     }
+    if profile.location.overlays_extension.is_some() {
+        fields.push(list_utf8("overlays_admin_unit_ids"));
+    }
     fields.extend([
-        list_utf8("overlays_admin_unit_ids"),
         utf8("organization_json"),
         Field::new("country", DataType::Utf8, false),
         Field::new("geom_type", DataType::Utf8, optional_geometry),
@@ -165,21 +211,15 @@ pub struct OutputRow {
     /// (system, value) pairs; either side may be absent in the source.
     pub identifier: Vec<(Option<String>, Option<String>)>,
     pub position: Option<(f64, f64)>,
-    pub pcode: Option<String>,
-    pub gers_id: Option<String>,
-    pub settlement_type: Option<String>,
-    pub delivery_strategy: Option<String>,
+    /// The profile's Location columns, in profile order.
+    pub location_columns: Vec<Option<String>>,
     /// The deepest quadkey cell on the Location (spatial-index extension);
     /// its prefixes are every coarser tile. Read-only: derived from position.
     pub quadkey: Option<String>,
     pub quadkey_level: Option<i32>,
-    pub facility_level: Option<String>,
-    pub ownership: Option<String>,
-    pub nhfr_code: Option<String>,
-    pub nhfr_uid: Option<String>,
     pub organization_identifier: Vec<(Option<String>, Option<String>)>,
-    pub facility_level_text: Option<String>,
-    pub ownership_text: Option<String>,
+    /// The profile's Organization columns, in profile order.
+    pub organization_columns: Vec<Option<String>>,
     pub depth: i32,
     pub admin_level: Option<i32>,
     pub tier: String,
@@ -218,19 +258,11 @@ pub struct RowBatch {
     identifier: ListBuilder<StructBuilder>,
     position_longitude: Float64Builder,
     position_latitude: Float64Builder,
-    pcode: StringBuilder,
-    gers_id: StringBuilder,
-    settlement_type: StringBuilder,
-    delivery_strategy: StringBuilder,
-    quadkey: StringBuilder,
-    quadkey_level: Int32Builder,
-    facility_level: StringBuilder,
-    ownership: StringBuilder,
-    nhfr_code: StringBuilder,
-    nhfr_uid: StringBuilder,
+    location_columns: Vec<StringBuilder>,
+    /// With a spatial index extension in the profile.
+    quadkey: Option<(StringBuilder, Int32Builder)>,
     organization_identifier: ListBuilder<StructBuilder>,
-    facility_level_text: StringBuilder,
-    ownership_text: StringBuilder,
+    organization_columns: Vec<StringBuilder>,
     depth: Int32Builder,
     admin_level: Int32Builder,
     tier: StringBuilder,
@@ -238,7 +270,8 @@ pub struct RowBatch {
     ancestor_ids: ListBuilder<StringBuilder>,
     admin_names: Vec<StringBuilder>,
     admin_codes: Vec<StringBuilder>,
-    overlays: ListBuilder<StringBuilder>,
+    /// With an overlays extension in the profile.
+    overlays: Option<ListBuilder<StringBuilder>>,
     organization_json: StringBuilder,
     country: StringBuilder,
     geom_type: StringBuilder,
@@ -267,6 +300,13 @@ fn push_identifiers(
     b.append(true);
 }
 
+/// One value per builder; a row with fewer values gets nulls for the rest.
+fn push_columns(builders: &mut [StringBuilder], values: &[Option<String>]) {
+    for (i, b) in builders.iter_mut().enumerate() {
+        b.append_option(values.get(i).and_then(|v| v.as_deref()));
+    }
+}
+
 fn push_list(b: &mut ListBuilder<StringBuilder>, items: &[String]) {
     for item in items {
         b.values().append_value(item);
@@ -275,13 +315,17 @@ fn push_list(b: &mut ListBuilder<StringBuilder>, items: &[String]) {
 }
 
 impl RowBatch {
+    /// Builders for the base output schema (no profile).
+    #[cfg(test)]
     pub fn new() -> Self {
-        Self::with_schema(output_schema())
+        Self::for_profile(&Profile::base(), false)
     }
 
-    /// Builders for `schema`: [`output_schema`] or
-    /// [`output_schema_optional_geometry`].
-    pub fn with_schema(schema: SchemaRef) -> Self {
+    /// Builders for `profile`'s schema: [`output_schema`], or
+    /// [`output_schema_optional_geometry`] when `optional_geometry`.
+    pub fn for_profile(profile: &Profile, optional_geometry: bool) -> Self {
+        let schema = schema(profile, optional_geometry);
+        let strings = |n: usize| (0..n).map(|_| StringBuilder::new()).collect::<Vec<_>>();
         Self {
             schema,
             id: StringBuilder::new(),
@@ -298,22 +342,17 @@ impl RowBatch {
             identifier: ListBuilder::new(StructBuilder::from_fields(identifier_fields(), 0)),
             position_longitude: Float64Builder::new(),
             position_latitude: Float64Builder::new(),
-            pcode: StringBuilder::new(),
-            gers_id: StringBuilder::new(),
-            settlement_type: StringBuilder::new(),
-            delivery_strategy: StringBuilder::new(),
-            quadkey: StringBuilder::new(),
-            quadkey_level: Int32Builder::new(),
-            facility_level: StringBuilder::new(),
-            ownership: StringBuilder::new(),
-            nhfr_code: StringBuilder::new(),
-            nhfr_uid: StringBuilder::new(),
+            location_columns: strings(profile.location.columns.len()),
+            quadkey: profile
+                .location
+                .spatial_index_extension
+                .is_some()
+                .then(|| (StringBuilder::new(), Int32Builder::new())),
             organization_identifier: ListBuilder::new(StructBuilder::from_fields(
                 identifier_fields(),
                 0,
             )),
-            facility_level_text: StringBuilder::new(),
-            ownership_text: StringBuilder::new(),
+            organization_columns: strings(profile.organization.columns.len()),
             depth: Int32Builder::new(),
             admin_level: Int32Builder::new(),
             tier: StringBuilder::new(),
@@ -321,7 +360,11 @@ impl RowBatch {
             ancestor_ids: ListBuilder::new(StringBuilder::new()),
             admin_names: (0..ADMIN_COLUMNS).map(|_| StringBuilder::new()).collect(),
             admin_codes: (0..ADMIN_COLUMNS).map(|_| StringBuilder::new()).collect(),
-            overlays: ListBuilder::new(StringBuilder::new()),
+            overlays: profile
+                .location
+                .overlays_extension
+                .is_some()
+                .then(|| ListBuilder::new(StringBuilder::new())),
             organization_json: StringBuilder::new(),
             country: StringBuilder::new(),
             geom_type: StringBuilder::new(),
@@ -352,27 +395,16 @@ impl RowBatch {
             .append_option(r.position.map(|p| p.0));
         self.position_latitude
             .append_option(r.position.map(|p| p.1));
-        self.pcode.append_option(r.pcode.as_deref());
-        self.gers_id.append_option(r.gers_id.as_deref());
-        self.settlement_type
-            .append_option(r.settlement_type.as_deref());
-        self.delivery_strategy
-            .append_option(r.delivery_strategy.as_deref());
-        self.quadkey.append_option(r.quadkey.as_deref());
-        self.quadkey_level.append_option(r.quadkey_level);
-        self.facility_level
-            .append_option(r.facility_level.as_deref());
-        self.ownership.append_option(r.ownership.as_deref());
-        self.nhfr_code.append_option(r.nhfr_code.as_deref());
-        self.nhfr_uid.append_option(r.nhfr_uid.as_deref());
+        push_columns(&mut self.location_columns, &r.location_columns);
+        if let Some((quadkey, level)) = &mut self.quadkey {
+            quadkey.append_option(r.quadkey.as_deref());
+            level.append_option(r.quadkey_level);
+        }
         push_identifiers(
             &mut self.organization_identifier,
             &r.organization_identifier,
         );
-        self.facility_level_text
-            .append_option(r.facility_level_text.as_deref());
-        self.ownership_text
-            .append_option(r.ownership_text.as_deref());
+        push_columns(&mut self.organization_columns, &r.organization_columns);
         self.depth.append_value(r.depth);
         self.admin_level.append_option(r.admin_level);
         self.tier.append_value(&r.tier);
@@ -387,7 +419,9 @@ impl RowBatch {
             name_builder.append_option(name.as_deref());
             code_builder.append_option(code.as_deref());
         }
-        push_list(&mut self.overlays, &r.overlays_admin_unit_ids);
+        if let Some(overlays) = &mut self.overlays {
+            push_list(overlays, &r.overlays_admin_unit_ids);
+        }
         self.organization_json
             .append_option(r.organization_json.as_deref());
         self.country.append_value(&r.country);
@@ -441,34 +475,36 @@ impl RowBatch {
             Arc::new(self.identifier.finish()),
             Arc::new(self.position_longitude.finish()),
             Arc::new(self.position_latitude.finish()),
-            Arc::new(self.pcode.finish()),
-            Arc::new(self.gers_id.finish()),
-            Arc::new(self.settlement_type.finish()),
-            Arc::new(self.delivery_strategy.finish()),
-            Arc::new(self.quadkey.finish()),
-            Arc::new(self.quadkey_level.finish()),
-            Arc::new(self.facility_level.finish()),
-            Arc::new(self.ownership.finish()),
-            Arc::new(self.nhfr_code.finish()),
-            Arc::new(self.nhfr_uid.finish()),
-            Arc::new(self.organization_identifier.finish()),
-            Arc::new(self.facility_level_text.finish()),
-            Arc::new(self.ownership_text.finish()),
-            Arc::new(self.depth.finish()),
+        ];
+        for b in &mut self.location_columns {
+            cols.push(Arc::new(b.finish()));
+        }
+        if let Some((quadkey, level)) = &mut self.quadkey {
+            cols.push(Arc::new(quadkey.finish()));
+            cols.push(Arc::new(level.finish()));
+        }
+        cols.push(Arc::new(self.organization_identifier.finish()));
+        for b in &mut self.organization_columns {
+            cols.push(Arc::new(b.finish()));
+        }
+        cols.extend([
+            Arc::new(self.depth.finish()) as ArrayRef,
             Arc::new(self.admin_level.finish()),
             Arc::new(self.tier.finish()),
             Arc::new(self.path.finish()),
             Arc::new(self.ancestor_ids.finish()),
-        ];
+        ]);
         for b in &mut self.admin_names {
             cols.push(Arc::new(b.finish()));
         }
         for b in &mut self.admin_codes {
             cols.push(Arc::new(b.finish()));
         }
+        if let Some(overlays) = &mut self.overlays {
+            cols.push(Arc::new(overlays.finish()));
+        }
         cols.extend([
-            Arc::new(self.overlays.finish()) as ArrayRef,
-            Arc::new(self.organization_json.finish()),
+            Arc::new(self.organization_json.finish()) as ArrayRef,
             Arc::new(self.country.finish()),
             Arc::new(self.geom_type.finish()),
             Arc::new(self.lon.finish()),
@@ -482,12 +518,6 @@ impl RowBatch {
     }
 }
 
-impl Default for RowBatch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,7 +525,7 @@ mod tests {
 
     #[test]
     fn schema_has_the_documented_columns_in_order() {
-        let schema = output_schema();
+        let schema = output_schema(&crate::profile::icr_example());
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(&names[..3], &["id", "version_id", "last_updated"]);
         assert!(names.contains(&"part_of"));
@@ -503,10 +533,16 @@ mod tests {
         assert!(names.contains(&"position_longitude"));
         assert!(names.contains(&"admin4_code"));
         let pos = |n: &str| names.iter().position(|x| *x == n).unwrap();
-        assert!(pos("ownership") < pos("nhfr_code"));
+        // The profile's Location columns follow position, in profile order,
+        // then the spatial index; its Organization columns follow
+        // organization_identifier.
+        assert_eq!(pos("pcode"), pos("position_latitude") + 1);
+        assert!(pos("pcode") < pos("ownership"));
+        assert!(pos("ownership") < pos("quadkey"));
+        assert!(pos("quadkey_level") < pos("organization_identifier"));
+        assert!(pos("organization_identifier") < pos("nhfr_code"));
         assert!(pos("nhfr_code") < pos("nhfr_uid"));
-        assert!(pos("nhfr_uid") < pos("organization_identifier"));
-        assert!(pos("organization_identifier") < pos("facility_level_text"));
+        assert!(pos("nhfr_uid") < pos("facility_level_text"));
         assert!(pos("facility_level_text") < pos("ownership_text"));
         assert!(pos("overlays_admin_unit_ids") < pos("organization_json"));
         assert!(pos("organization_json") < pos("country"));
@@ -514,14 +550,25 @@ mod tests {
             &names[names.len() - 3..],
             &["geometry", "bbox", "fhir_json"]
         );
-        let geom = schema.field_with_name("geometry").unwrap();
+        let geom = schema.field_with_name(GEOMETRY_COLUMN).unwrap();
         assert_eq!(geom.metadata()["ARROW:extension:name"], "geoarrow.wkb");
         assert!(geom.metadata()["ARROW:extension:metadata"].contains("OGC:CRS84"));
     }
 
     #[test]
+    fn without_a_profile_there_are_no_profile_columns() {
+        let schema = output_schema(&Profile::base());
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        for absent in ["pcode", "nhfr_code", "quadkey", "overlays_admin_unit_ids"] {
+            assert!(!names.contains(&absent), "{absent}");
+        }
+        assert!(names.iter().all(|n| is_builtin_column(n)), "{names:?}");
+    }
+
+    #[test]
     fn batch_round_trips_a_row() {
-        let mut batch = RowBatch::new();
+        let profile = crate::profile::icr_example();
+        let mut batch = RowBatch::for_profile(&profile, false);
         let row = OutputRow {
             id: "a".into(),
             name: Some("A".into()),
@@ -542,7 +589,7 @@ mod tests {
             wkb: vec![1, 0, 0, 0, 0],
             bbox: Some([1.0, 2.0, 1.0, 2.0]),
             fhir_json: "{}".into(),
-            nhfr_code: Some("05/08".into()),
+            organization_columns: vec![Some("05/08".into())],
             organization_identifier: vec![(Some("s".into()), Some("v".into()))],
             organization_json: Some("{}".into()),
             ..Default::default()
@@ -552,7 +599,10 @@ mod tests {
         let rb = batch.finish().unwrap();
         assert_eq!(batch.rows, 0, "finish resets the batch");
         assert_eq!(rb.num_rows(), 1);
-        assert_eq!(rb.schema().fields().len(), output_schema().fields().len());
+        assert_eq!(
+            rb.schema().fields().len(),
+            output_schema(&profile).fields().len()
+        );
         let text = |name: &str| {
             rb.column_by_name(name)
                 .unwrap()
@@ -626,7 +676,7 @@ mod tests {
 
     #[test]
     fn a_row_without_geometry_has_null_geometry_columns() {
-        let mut batch = RowBatch::with_schema(output_schema_optional_geometry());
+        let mut batch = RowBatch::for_profile(&Profile::base(), true);
         batch.push(&OutputRow {
             id: "ghost".into(),
             country: "NG".into(),
@@ -664,8 +714,9 @@ mod tests {
 
     #[test]
     fn only_the_geometry_columns_differ_between_the_two_schemas() {
-        let required = output_schema();
-        let optional = output_schema_optional_geometry();
+        let profile = crate::profile::icr_example();
+        let required = output_schema(&profile);
+        let optional = output_schema_optional_geometry(&profile);
         assert_eq!(required.fields().len(), optional.fields().len());
         for (a, b) in required.fields().iter().zip(optional.fields()) {
             assert_eq!(a.name(), b.name());
@@ -682,7 +733,7 @@ mod tests {
 
     #[test]
     fn bbox_values_land_in_the_right_slots() {
-        let mut batch = RowBatch::with_schema(output_schema_optional_geometry());
+        let mut batch = RowBatch::for_profile(&Profile::base(), true);
         let row = OutputRow {
             bbox: Some([1.0, 2.0, 3.0, 4.0]),
             ..Default::default()

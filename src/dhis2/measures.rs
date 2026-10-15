@@ -22,8 +22,6 @@ use crate::error::{PipesError, Result};
 use crate::report::Report;
 use crate::transform::write_report;
 
-pub const INDICATOR_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/dhis2-indicator";
 pub const MEASURE_SCORING_SYSTEM: &str = "http://terminology.hl7.org/CodeSystem/measure-scoring";
 pub const MEASURE_POPULATION_SYSTEM: &str =
     "http://terminology.hl7.org/CodeSystem/measure-population";
@@ -281,7 +279,7 @@ pub fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value
         "resourceType": "Measure",
         "id": instance.measure_id(&ind.fhir_key()),
         "meta": {"tag": [instance.tag()]},
-        "extension": [{"url": INDICATOR_EXTENSION_URL, "extension": sub}],
+        "extension": [{"url": instance.urls.indicator_extension, "extension": sub}],
         "url": instance.measure_url(&ind.fhir_key()),
         "identifier": identifier,
         "title": ind.name,
@@ -589,9 +587,9 @@ pub fn fetch_indicators(
     Ok(found)
 }
 
-pub fn run_measures(args: &Dhis2MeasuresArgs) -> Result<()> {
+pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_out(&args.out)?;
-    let instance = Instance::new(&args.conn.instance)?;
+    let instance = Instance::new(&args.conn.instance, profile)?;
     let api = Dhis2::connect(&args.conn)?;
     let indicators = fetch_indicators(&api, &args.select)?;
     let report = Report::default();
@@ -655,7 +653,7 @@ mod tests {
 
     #[test]
     fn a_proportion_measure_carries_both_expressions_and_the_factor() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
             utc: true,
@@ -686,7 +684,7 @@ mod tests {
 
     #[test]
     fn a_data_element_is_a_count_under_its_own_identifier_system() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let ind = Indicator::from_data_element(&json!({"id":"s46m5MS0hxu","code":"DE_359706","name":"BCG doses given",
             "aggregationType":"SUM","dataElementGroups":[{"id":"h9cuJOkOwY2","name":"Immunization"}]}))
         .unwrap();
@@ -718,7 +716,7 @@ mod tests {
 
     #[test]
     fn a_data_set_becomes_its_reporting_rate_under_a_valid_fhir_id() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let rate = Indicator::from_data_set(
             &json!({"id":"QX4ZTUbOt3a","name":"Reproductive Health","periodType":"Monthly"}),
         )
@@ -742,7 +740,7 @@ mod tests {
 
     #[test]
     fn data_element_groups_in_a_group_set_are_coded_by_that_set() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let de = Indicator::from_data_element(&json!({"id":"a","name":"Malaria new",
             "dataElementGroups":[{"id":"TzwKbcw1nUK","name":"Malaria","groupSets":[{"id":"jp826jAJHUc"}]},
                                  {"id":"weRMUzBs8T7","name":"New cases","groupSets":[{"id":"lv8UXn17ZOm"}]}]})).unwrap();
@@ -759,7 +757,7 @@ mod tests {
 
     #[test]
     fn a_number_indicator_is_a_cohort_with_one_population() {
-        let instance = Instance::new("sl-demo").unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let ind = Indicator::parse(&json!({"id":"dy1a1mseGR7","name":"ANC visits total",
             "indicatorType":{"name":"Number (Factor 1)","factor":1,"number":true},
             "numerator":"#{a}+#{b}","denominator":"1"}))

@@ -6,6 +6,7 @@ use crate::cli::TransformArgs;
 use crate::error::{PipesError, Result};
 use crate::index::build_index;
 use crate::index::partition::parse_keys;
+use crate::profile::Profile;
 use crate::report::Report;
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::write::dataset::write_dataset;
@@ -23,7 +24,14 @@ pub fn check_out_dir(out: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_transform(args: &TransformArgs) -> Result<()> {
+pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> Result<()> {
+    let profile = Profile::for_snapshot(profile, &args.snapshot)?;
+    transform_with(args, &profile)
+}
+
+/// `run_transform` with the profile already loaded (`run` loads it once for
+/// both of its steps).
+pub fn transform_with(args: &TransformArgs, profile: &Profile) -> Result<()> {
     check_out_dir(&args.out)?;
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
@@ -39,7 +47,13 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
         ));
     }
 
-    let mut index = build_index(&ndjson, args.country.as_deref(), args.keep_without_geometry)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
+    let mut index = build_index(
+        &ndjson,
+        profile,
+        args.country.as_deref(),
+        args.keep_without_geometry,
+    )?;
     if args.keep_without_geometry {
         let without = index
             .order
@@ -72,6 +86,7 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
     let organizations = organizations.is_file().then_some(organizations.as_path());
     let written = write_dataset(
         &ndjson,
+        profile,
         &mut index,
         &args.out,
         &keys,
@@ -87,6 +102,8 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
         report_json["written_without_geometry"] = without_geometry.into();
     }
     write_json(&report_path, &report_json)?;
+    // diff, index and population read the snapshot with the same profile.
+    profile.save_copy(&args.snapshot);
     let rows: usize = written.iter().map(|w| w.rows).sum();
     println!(
         "Wrote {rows} rows across {} partitions to {}",

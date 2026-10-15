@@ -5,6 +5,9 @@ use std::path::Path;
 use assert_cmd::prelude::*;
 use serde_json::{Value, json};
 
+/// These fixtures are ICR-shaped: run with the example ICR profile.
+const ICR_PROFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml");
+
 const EXT: &str = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
 
 fn cell_ext(scheme: &str, level: u32, cell: &str) -> Value {
@@ -80,6 +83,7 @@ fn index_writes_only_the_positioned_locations_that_lack_a_requested_cell() {
     let report = dir.path().join("report.json");
     let assert = std::process::Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["index", "--snapshot"])
         .arg(dir.path())
         .args(["--spatial-index", "quadkey:18", "--out"])
@@ -147,6 +151,7 @@ fn refresh_recomputes_a_present_cell_and_a_bad_scheme_is_a_usage_error() {
     let out = dir.path().join("changes.ndjson");
     std::process::Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["index", "--snapshot"])
         .arg(dir.path())
         .args(["--spatial-index", "quadkey:18", "--refresh", "--out"])
@@ -166,6 +171,7 @@ fn refresh_recomputes_a_present_cell_and_a_bad_scheme_is_a_usage_error() {
 
     std::process::Command::cargo_bin("fhir-pipes")
         .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["index", "--snapshot"])
         .arg(dir.path())
         .args(["--spatial-index", "s2:9", "--out"])

@@ -14,8 +14,6 @@ use serde_json::{Map, Value, json};
 
 use crate::error::{PipesError, Result};
 
-pub const SPATIAL_INDEX_EXTENSION_URL: &str =
-    "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
 pub const SCHEMES: [&str; 3] = ["quadkey", "h3", "geohash"];
 const MAX_MERCATOR_LAT: f64 = 85.051_128_78;
 const GEOHASH_ALPHABET: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
@@ -141,9 +139,11 @@ pub fn compute_cell(scheme: &str, level: u32, lon: f64, lat: f64) -> Option<Stri
     }
 }
 
-pub fn extension_json(scheme: &str, level: u32, cell: &str) -> Value {
+/// One spatial index extension entry under `url` (the profile's
+/// `spatial_index_extension`).
+pub fn extension_json(url: &str, scheme: &str, level: u32, cell: &str) -> Value {
     json!({
-        "url": SPATIAL_INDEX_EXTENSION_URL,
+        "url": url,
         "extension": [
             {"url": "system", "valueCode": scheme},
             {"url": "level", "valueUnsignedInt": level},
@@ -166,8 +166,8 @@ fn sub(ext: &Object, name: &str) -> Option<Value> {
 }
 
 /// One `spatial-index` extension entry, if `ext` is a well-formed one.
-pub fn cell_from_extension(ext: &Object) -> Option<SpatialCell> {
-    if ext.get("url").and_then(Value::as_str) != Some(SPATIAL_INDEX_EXTENSION_URL) {
+pub fn cell_from_extension(ext: &Object, url: &str) -> Option<SpatialCell> {
+    if ext.get("url").and_then(Value::as_str) != Some(url) {
         return None;
     }
     let scheme = sub(ext, "system")?.as_str()?.to_string();
@@ -181,13 +181,13 @@ pub fn cell_from_extension(ext: &Object) -> Option<SpatialCell> {
 }
 
 /// Every spatial-index cell on a resource object.
-pub fn cells_of(obj: &Object) -> Vec<SpatialCell> {
+pub fn cells_of(obj: &Object, url: &str) -> Vec<SpatialCell> {
     obj.get("extension")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_object)
-        .filter_map(cell_from_extension)
+        .filter_map(|e| cell_from_extension(e, url))
         .collect()
 }
 
@@ -202,7 +202,7 @@ pub fn deepest_quadkey(cells: &[SpatialCell]) -> Option<&SpatialCell> {
 
 /// Set the cell for (scheme, level), replacing an existing entry at the same
 /// scheme and level (the IG allows one per pair). Returns true if anything changed.
-pub fn upsert_cell(obj: &mut Object, scheme: &str, level: u32, cell: &str) -> bool {
+pub fn upsert_cell(obj: &mut Object, url: &str, scheme: &str, level: u32, cell: &str) -> bool {
     let exts = obj
         .entry("extension")
         .or_insert_with(|| Value::Array(Vec::new()));
@@ -210,35 +210,35 @@ pub fn upsert_cell(obj: &mut Object, scheme: &str, level: u32, cell: &str) -> bo
         return false;
     };
     for ext in exts.iter_mut() {
-        let Some(existing) = ext.as_object().and_then(cell_from_extension) else {
+        let Some(existing) = ext.as_object().and_then(|e| cell_from_extension(e, url)) else {
             continue;
         };
         if existing.scheme == scheme && existing.level == level {
             if existing.cell == cell {
                 return false;
             }
-            *ext = extension_json(scheme, level, cell);
+            *ext = extension_json(url, scheme, level, cell);
             return true;
         }
     }
-    exts.push(extension_json(scheme, level, cell));
+    exts.push(extension_json(url, scheme, level, cell));
     true
 }
 
 /// Recompute every computable cell already on the resource for a new
 /// position (a position edit must not leave stale cells behind). H3 cells,
 /// which fhir-pipes cannot compute, are dropped rather than left wrong.
-pub fn refresh_cells(obj: &mut Object, lon: f64, lat: f64) -> usize {
+pub fn refresh_cells(obj: &mut Object, url: &str, lon: f64, lat: f64) -> usize {
     let mut changed = 0;
-    for existing in cells_of(obj) {
+    for existing in cells_of(obj, url) {
         match compute_cell(&existing.scheme, existing.level, lon, lat) {
             Some(cell) => {
-                if upsert_cell(obj, &existing.scheme, existing.level, &cell) {
+                if upsert_cell(obj, url, &existing.scheme, existing.level, &cell) {
                     changed += 1;
                 }
             }
             None => {
-                remove_cell(obj, &existing.scheme, existing.level);
+                remove_cell(obj, url, &existing.scheme, existing.level);
                 changed += 1;
             }
         }
@@ -246,11 +246,11 @@ pub fn refresh_cells(obj: &mut Object, lon: f64, lat: f64) -> usize {
     changed
 }
 
-pub fn remove_cell(obj: &mut Object, scheme: &str, level: u32) {
+pub fn remove_cell(obj: &mut Object, url: &str, scheme: &str, level: u32) {
     if let Some(Value::Array(exts)) = obj.get_mut("extension") {
         exts.retain(|e| {
             e.as_object()
-                .and_then(cell_from_extension)
+                .and_then(|e| cell_from_extension(e, url))
                 .is_none_or(|c| !(c.scheme == scheme && c.level == level))
         });
         if exts.is_empty() {
@@ -260,9 +260,13 @@ pub fn remove_cell(obj: &mut Object, scheme: &str, level: u32) {
 }
 
 /// Drop every spatial-index cell (the position was cleared).
-pub fn remove_all_cells(obj: &mut Object) {
+pub fn remove_all_cells(obj: &mut Object, url: &str) {
     if let Some(Value::Array(exts)) = obj.get_mut("extension") {
-        exts.retain(|e| e.as_object().and_then(cell_from_extension).is_none());
+        exts.retain(|e| {
+            e.as_object()
+                .and_then(|e| cell_from_extension(e, url))
+                .is_none()
+        });
         if exts.is_empty() {
             obj.remove("extension");
         }
@@ -272,6 +276,8 @@ pub fn remove_all_cells(obj: &mut Object) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const URL: &str = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
 
     // Independent slippy-map tile arithmetic to cross-check quadkey().
     fn tile(lon: f64, lat: f64, level: u32) -> (u64, u64) {
@@ -352,11 +358,17 @@ mod tests {
     #[test]
     fn cells_round_trip_through_the_extension_and_upsert_replaces_in_place() {
         let mut obj = Object::new();
-        assert!(upsert_cell(&mut obj, "quadkey", 18, "0123"));
-        assert!(!upsert_cell(&mut obj, "quadkey", 18, "0123"), "unchanged");
-        assert!(upsert_cell(&mut obj, "quadkey", 10, "01"));
-        assert!(upsert_cell(&mut obj, "quadkey", 18, "0321"), "replaced");
-        let cells = cells_of(&obj);
+        assert!(upsert_cell(&mut obj, URL, "quadkey", 18, "0123"));
+        assert!(
+            !upsert_cell(&mut obj, URL, "quadkey", 18, "0123"),
+            "unchanged"
+        );
+        assert!(upsert_cell(&mut obj, URL, "quadkey", 10, "01"));
+        assert!(
+            upsert_cell(&mut obj, URL, "quadkey", 18, "0321"),
+            "replaced"
+        );
+        let cells = cells_of(&obj, URL);
         assert_eq!(cells.len(), 2);
         assert_eq!(deepest_quadkey(&cells).unwrap().cell, "0321");
         assert_eq!(obj["extension"].as_array().unwrap().len(), 2);
@@ -365,17 +377,17 @@ mod tests {
     #[test]
     fn refresh_recomputes_existing_cells_for_a_new_position() {
         let mut obj = Object::new();
-        upsert_cell(&mut obj, "quadkey", 18, &quadkey(9.9, 10.5, 18));
-        upsert_cell(&mut obj, "geohash", 6, &geohash(9.9, 10.5, 6));
-        upsert_cell(&mut obj, "h3", 9, "8928308280fffff");
-        assert_eq!(refresh_cells(&mut obj, 3.39, 6.45), 3);
-        let cells = cells_of(&obj);
+        upsert_cell(&mut obj, URL, "quadkey", 18, &quadkey(9.9, 10.5, 18));
+        upsert_cell(&mut obj, URL, "geohash", 6, &geohash(9.9, 10.5, 6));
+        upsert_cell(&mut obj, URL, "h3", 9, "8928308280fffff");
+        assert_eq!(refresh_cells(&mut obj, URL, 3.39, 6.45), 3);
+        let cells = cells_of(&obj, URL);
         assert_eq!(cells.len(), 2, "h3 dropped: fhir-pipes cannot recompute it");
         assert_eq!(
             deepest_quadkey(&cells).unwrap().cell,
             quadkey(3.39, 6.45, 18)
         );
-        remove_all_cells(&mut obj);
+        remove_all_cells(&mut obj, URL);
         assert!(obj.get("extension").is_none());
     }
 }
