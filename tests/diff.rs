@@ -497,7 +497,7 @@ fn geoparquet_written_by_transform_round_trips_unchanged() {
     let dataset = dir.path().join("out");
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--snapshot"])
+        .args(["transform", "locations", "--snapshot"])
         .arg(&snap)
         .arg("--out")
         .arg(&dataset)
@@ -748,7 +748,12 @@ fn geometry_added_to_a_row_written_without_geometry_is_a_geometry_addition() {
     let dataset = dir.path().join("out");
     Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["transform", "--keep-without-geometry", "--snapshot"])
+        .args([
+            "transform",
+            "locations",
+            "--keep-without-geometry",
+            "--snapshot",
+        ])
         .arg(&snap)
         .arg("--out")
         .arg(&dataset)

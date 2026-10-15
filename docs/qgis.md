@@ -5,7 +5,7 @@ settlements file as the example. The same steps work for any partition file,
 for the whole `locations/` directory, or for a subset you export yourself.
 
 ```
-fhir-pipes transform ──▶ out/locations/.../type=settlement/part-0.parquet
+fhir-pipes transform locations ──▶ out/locations/.../type=settlement/part-0.parquet
                         │ open in QGIS, export a GeoJSON working copy
                         ▼
                    settlements-edits.geojson   (edit here)

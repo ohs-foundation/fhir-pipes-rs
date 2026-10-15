@@ -82,8 +82,8 @@ The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged.
 | `views run`, `sql`, `validate`, `lint`, `test` | | Run views over local FHIR files or PostgreSQL, generate their SQL, check them, run SQL-on-FHIR test cases | below |
 | `export` | out | Download every resource of the given types as NDJSON | below |
 | `extract` | out | Copy Locations and Organizations into a local snapshot, incrementally | [locations.md](docs/locations.md) |
-| `transform` | transform | Snapshot → partitioned GeoParquet (the `locations` transform) | [locations.md](docs/locations.md) |
-| `run` | out | `extract` then `transform` | [locations.md](docs/locations.md) |
+| `transform locations` | transform | Snapshot → partitioned GeoParquet, the first transform | [locations.md](docs/locations.md) |
+| `run` | out | `extract` then `transform locations` | [locations.md](docs/locations.md) |
 | `inspect` | | Summarise a GeoParquet dataset | [locations.md](docs/locations.md) |
 | `diff` | in | Edited GeoJSON or GeoParquet → changed FHIR resources | [locations.md](docs/locations.md) |
 | `load` | in | Send NDJSON resources to a FHIR server in transaction bundles, with version checks | [locations.md](docs/locations.md#load) |

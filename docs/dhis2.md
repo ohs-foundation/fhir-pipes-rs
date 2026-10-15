@@ -38,7 +38,7 @@ Point becomes `position`. An admin unit DHIS2 has no geometry for (often
 the country itself) gets the union of its children's polygons, reported as
 `boundary_from_children`, so it still has a boundary and a row in the
 dataset. A closed org unit is `inactive`. `--country-code`
-puts a national admin code on the top org unit, which is what `transform`
+puts a national admin code on the top org unit, which is what `transform locations`
 partitions by (`SLE`, `NGA`, …). `--root UID` exports one subtree.
 `--group-set UID` (repeatable) adds each org unit's group in an org unit
 group set, such as Facility Type, to its Location's `type` (and its

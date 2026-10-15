@@ -1,4 +1,4 @@
-//! `fhir-pipes transform`: pass one, pass two, report.
+//! `fhir-pipes transform locations`: pass one, pass two, report.
 
 use std::path::Path;
 
