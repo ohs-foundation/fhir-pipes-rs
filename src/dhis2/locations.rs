@@ -27,8 +27,7 @@ pub const LOCATION_PROFILE: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation";
 pub const FACILITY_ORGANIZATION_PROFILE: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization";
-pub const LOCATION_TYPE_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs";
+pub const LOCATION_TYPE_SYSTEM: &str = crate::fhir::location::LOCATION_TYPE_SYSTEMS[0];
 pub const PHYSICAL_TYPE_SYSTEM: &str =
     "http://terminology.hl7.org/CodeSystem/location-physical-type";
 pub const FACILITY_TYPE: &str = "facility";

@@ -16,7 +16,7 @@ fn cell_ext(scheme: &str, level: u32, cell: &str) -> Value {
 
 fn loc(id: &str, position: Option<(f64, f64)>, exts: Vec<Value>) -> Value {
     let mut r = json!({"resourceType": "Location", "id": id, "meta": {"versionId": "7"}, "name": id,
-        "type": [{"coding": [{"system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type", "code": "facility"}]}]});
+        "type": [{"coding": [{"system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs", "code": "facility"}]}]});
     if let Some((lon, lat)) = position {
         r["position"] = json!({"longitude": lon, "latitude": lat});
     }
