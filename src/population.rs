@@ -236,6 +236,7 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
     // Admin levels come from the profile's admin_unit_type; the Groups'
     // profile, extensions and systems from its [population] section.
     let profile = Profile::for_snapshot(profile, &args.snapshot)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
     let pop = profile.population()?.clone();
     let index = build_index(&ndjson, &profile, None, false)?;
     let mut report = index.report;

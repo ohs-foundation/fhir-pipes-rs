@@ -34,6 +34,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
     }
     // The cells go in the profile's spatial index extension.
     let profile = crate::profile::Profile::for_snapshot(profile, &args.snapshot)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
     let url = profile.spatial_index_extension()?.to_string();
     let wanted: Vec<(String, u32)> = args
         .spatial_index

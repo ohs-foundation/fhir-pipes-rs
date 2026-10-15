@@ -71,6 +71,7 @@ the file are relative to the file.
 | Flag | Environment | Config | Default |
 |---|---|---|---|
 | `--data` | `FHIR_PIPES_DATA` | `data` | (required) |
+| `--profile` | `FHIR_PIPES_PROFILE` | `profile` | the snapshot's copy, else none (base FHIR); a path relative to the config file, or an https URL. See [profiles.md](profiles.md) |
 | `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
 | `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir` |
 | `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local` |

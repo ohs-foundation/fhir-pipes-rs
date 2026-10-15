@@ -41,6 +41,7 @@ pub const MAX_INSTANCE_LEN: usize = 16;
 /// section (and the Location roles from [location] and [organization]).
 pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> Result<()> {
     let profile = Profile::load(profile)?;
+    eprintln!("profile: {} ({})", profile.name, profile.source);
     profile.dhis2()?;
     match cmd {
         Dhis2Command::Locations(args) => locations::run_locations(args, &profile),

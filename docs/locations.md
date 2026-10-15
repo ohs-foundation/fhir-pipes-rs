@@ -11,6 +11,13 @@ index identifiers and population Groups derived from the registry.
 The command is `fhir-pipes transform locations`, and `fhir-pipes run` extracts
 and transforms in one step. These commands came from kiln.
 
+Most of this document describes the Integrated Campaign Registry (ICR), which
+these commands were written for. ICR's extra columns, admin units, codes and
+URLs come from a profile, not the code: run with
+`--profile examples/profiles/icr.toml` (or ICR's own copy) to get the
+behaviour described here. Without a profile only base FHIR is read. See
+[profiles.md](profiles.md).
+
 ## Why the Location registry needs a GIS projection
 
 Public health campaign systems built on FHIR keep their places, from the
@@ -404,12 +411,10 @@ whether an edit to the column will flow back to FHIR.
 | `identifier` | `Location.identifier`, list of struct `{system, value}` |
 | `position_longitude`, `position_latitude` | `Location.position` |
 | `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
-| `pcode`, `gers_id` | promoted from `identifier` by system, for convenience; `pcode` comes from the ICR pcode system, or failing that the `national-admin-code` system |
-| `settlement_type`, `delivery_strategy`, `facility_level`, `ownership` | the ICR profile extensions |
-| `quadkey`, `quadkey_level` | the deepest quadkey spatial-index cell on the Location and its zoom; every prefix is the containing tile at a coarser zoom. Derived from `position` by fhir-pipes; read-only in the round trip |
-| `nhfr_code`, `nhfr_uid` | promoted from the paired Organization's `identifier` by system |
+| *the profile's Location columns* | ICR: `pcode` and `gers_id` from `identifier` by system (`pcode` from the pcode system, or failing that `national-admin-code`), `settlement_type` and `delivery_strategy` from extensions, `facility_level` and `ownership` from `type` codings. See [profiles.md](profiles.md#column-kinds) |
+| `quadkey`, `quadkey_level` | with a profile that names a spatial index extension: the deepest quadkey cell on the Location and its zoom; every prefix is the containing tile at a coarser zoom. Derived from `position` by fhir-pipes; read-only in the round trip |
 | `organization_identifier` | the paired Organization's `identifier`, list of struct `{system, value}` |
-| `facility_level_text`, `ownership_text` | the `text` of the paired Organization's `type` concepts holding those codings |
+| *the profile's Organization columns* | ICR: `nhfr_code` and `nhfr_uid` from the paired Organization's `identifier` by system, `facility_level_text` and `ownership_text` from the `text` of its `type` concepts holding those codings |
 
 A facility in the ICR registry is a Location paired with an Organization
 (`org-<location id>`) that carries the registry codes and the institution's
@@ -431,9 +436,9 @@ geometry, and the position is kept in its own columns.
 | `tier` | the admin level as text for admin units (`0` upward, in practice `0` to `4`), `site` for everything else |
 | `path` | `/ng/kano/nassarawa/gama/clinic` |
 | `ancestor_ids` | list of ids from the root down |
-| `admin0_name` … `admin4_name`, `admin0_code` … `admin4_code` | nearest admin ancestor at each level; an admin unit deeper than level 4 is reported as `admin_level_beyond_columns` and does not appear in these columns |
-| `overlays_admin_unit_ids` | admin units this operational area overlaps, when it is not in the tree |
-| `country` | ISO code, from the level 0 ancestor |
+| `admin0_name` … `admin4_name`, `admin0_code` … `admin4_code` | nearest admin ancestor at each level (admin units and their codes come from the profile's `admin_unit_type` and `admin_code_column`); an admin unit deeper than level 4 is reported as `admin_level_beyond_columns` and does not appear in these columns |
+| `overlays_admin_unit_ids` | with a profile that names an overlays extension: admin units this operational area overlaps, when it is not in the tree |
+| `country` | the admin code of the level 0 ancestor (for ICR, the ISO code); `unknown` without a profile and without `--country` |
 | `geom_type` | `polygon` or `point`; null for a row without geometry |
 | `lon`, `lat` | the FHIR position when the resource has one, otherwise a point inside the geometry; a position that falls outside its own boundary is reported as `position_outside_boundary` and is written as given. Null for a row without geometry |
 | `bbox` | struct of `xmin, ymin, xmax, ymax`; null for a row without geometry |
@@ -825,7 +830,9 @@ stored; the next extract brings the snapshot up to date.
 
 ### What is writable
 
-Only FHIR content is writable: the columns in the second group above. The
+Only FHIR content is writable: the columns in the second group above,
+including the profile's columns. `diff` refuses an edited file with a column
+that is neither built in nor in the profile. The
 hierarchy columns are computed and there is nothing to write them to. To move
 a facility to a different district, change `part_of`. To rename a state,
 change `name` on the state's row; every descendant's `admin1_name` will follow

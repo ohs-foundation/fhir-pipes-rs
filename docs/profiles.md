@@ -1,0 +1,275 @@
+# Profiles
+
+A profile tells fhir-pipes about an implementation guide (IG): the extra
+Location and Organization columns to write, the type codes and extensions that
+have a special role, and the URLs the `dhis2` and `population` commands put on
+the resources they create. It is a TOML file.
+
+Without a profile, fhir-pipes reads base FHIR R4 only. The Location commands
+still work, but the output has only the built-in columns, and nothing carries
+an admin hierarchy or a country.
+
+[examples/profiles/icr.toml](../examples/profiles/icr.toml) is a complete
+profile, for the Integrated Campaign Registry (ICR). ICR's own copy lives with
+its IG in recodelabs/icr; the one here is a snapshot used as the example and by
+the tests.
+
+## Contents
+
+- [Choosing a profile](#choosing-a-profile)
+- [What a profile changes](#what-a-profile-changes)
+- [The file](#the-file)
+- [Column kinds](#column-kinds)
+- [Editing and diff](#editing-and-diff)
+- [Writing a profile for your IG](#writing-a-profile-for-your-ig)
+- [Error messages](#error-messages)
+
+## Choosing a profile
+
+Give the profile as a file path or an https URL:
+
+```sh
+fhir-pipes transform locations --profile examples/profiles/icr.toml --snapshot snap --out out
+fhir-pipes run --profile https://example.org/my-ig/fhir-pipes-profile.toml --server … --snapshot snap --out out
+```
+
+The ways to give it, in order of precedence:
+
+1. `--profile FILE|URL` on the command line.
+2. The `FHIR_PIPES_PROFILE` environment variable.
+3. For `refresh`, `profile = "…"` in `fhir-pipes.toml`. A relative path is
+   resolved against the config file.
+4. For a command that works from a snapshot, the copy described below.
+
+A URL must be https. The file is fetched with the same timeout and retries as
+any other request.
+
+### The copy beside the snapshot
+
+`transform locations` and `run` keep a copy of the profile in the snapshot
+directory, as `profile.toml`. When `diff`, `index`, `population` or another
+`transform locations` runs on that snapshot without `--profile`, it uses the
+copy. So the profile only needs to be given once, and a URL that later
+changes or becomes unreachable does not change what `diff` does.
+
+If you give `--profile` and it differs from the copy, the command uses
+`--profile` and warns that the snapshot was last transformed with something
+else. A fresh snapshot with no copy and no `--profile` uses base FHIR.
+
+Every command that uses a profile prints which one on its first line, for
+example `profile: icr (examples/profiles/icr.toml)`.
+
+## What a profile changes
+
+| Command | Without a profile | With a profile |
+|---|---|---|
+| `transform locations`, `run` | Built-in columns only. `country` is `unknown` unless `--country` is given. No admin levels. | Adds the profile's Location and Organization columns, and the `quadkey` and `overlays_admin_unit_ids` columns when it names those extensions. Admin levels, `adminN_*` and `country` follow its admin units and admin code. |
+| `diff` | Writes back the built-in columns. Refuses an edited file with any other column. | Also writes back the profile's columns. |
+| `index` | Refuses: it needs the spatial index extension. | Writes cells under `[location] spatial_index_extension`. |
+| `population` | Refuses: it needs `[population]`. | Writes Groups with that section's profile and extensions. |
+| `dhis2 …` | Refuses: it needs `[dhis2]`. | Mints systems under its base and writes its profiles and extensions. |
+| `refresh` | As `run` for the locations step. | As `run` for the locations step. Views and tiles do not use the profile. |
+| `extract`, `export`, `load`, `views` | Not used. | Not used. |
+
+The tiles step of `refresh` expects ICR-shaped columns (`pcode`,
+`facility_level_text` and so on) and ICR type codes. With another profile, use
+`--skip tiles`.
+
+## The file
+
+Every key is optional unless a command that needs it is run. Unknown keys are
+refused, so a typo is an error, not a silent no-op.
+
+```toml
+name = "my-ig"            # shown in messages
+```
+
+### [location]
+
+| Key | Used by | Meaning |
+|---|---|---|
+| `boundary_extensions` | transform, diff, dhis2 | Boundary attachment extensions to read before the HL7 one. A new boundary written by `diff` or `dhis2` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
+| `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. |
+| `spatial_index_extension` | transform, diff, index | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
+| `admin_unit_type` | transform, population, dhis2 | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
+| `admin_code_column` | transform | The name of a `[[location.column]]` holding an admin unit's code. It fills `adminN_code`, gives `country` (from the level 0 unit), and is checked for duplicates (`duplicate_<column>` in the report). |
+| `[[location.column]]` | transform, diff | An extra column; see [Column kinds](#column-kinds). Columns appear in this order, after `position_latitude`. |
+
+### [organization]
+
+The Organization a Location names as its `managingOrganization` is projected
+onto the Location's row.
+
+| Key | Used by | Meaning |
+|---|---|---|
+| `facility_type` | diff, dhis2 | A Location of this type that `diff` creates without a `managingOrganization` gets a new Organization. `dhis2 locations` gives facilities this type. |
+| `id_prefix` | diff, dhis2 | The id of such an Organization: `<id_prefix><location id>`. Default `org-`. |
+| `[[organization.column]]` | transform, diff | An extra column read from the Organization, after `organization_identifier`. |
+
+### [dhis2]
+
+All required for `fhir-pipes dhis2`.
+
+| Key | Meaning |
+|---|---|
+| `base` | Systems are minted under it: `<base>/identifiers/dhis2/<instance>/orgunit`, `<base>/CodeSystem/dhis2/<instance>/…`, and Measure URLs `<base>/Measure/<id>`. |
+| `project_tag_system` | The `meta.tag` system marking every resource with its instance. |
+| `location_profile`, `facility_organization_profile` | `meta.profile` of the Locations and facility Organizations written. |
+| `location_type_system` | The system of the Location type codes written (`admin_unit_type`, `facility_type`). |
+| `country_code_system` | The identifier system `--country-code` is written under on the top org unit. Make it one the admin code column reads, so it becomes the country. |
+| `period_extension`, `campaign_extension`, `source_extension` | Extensions on the MeasureReports written. |
+| `indicator_extension` | The extension on the Measures written. |
+
+`dhis2 locations` also needs `[location] admin_unit_type` and
+`[organization] facility_type`.
+
+### [population]
+
+All required for `fhir-pipes population`, except the last two.
+
+| Key | Meaning |
+|---|---|
+| `group_profile` | `meta.profile` of the Groups written. |
+| `characteristic_system` | The system of the `geography` characteristic code. |
+| `denominator_source_system` | The system of the `--source` code. |
+| `denominator_source_extension`, `denominator_type_extension`, `estimate_date_extension`, `is_planning_denominator_extension`, `is_calculated_extension` | The extensions on each Group. |
+| `known_source_codes` | Codes of the source system. A `--source` outside them is reported as `unknown_source_code` and written anyway. |
+| `source_displays` | Display text for source codes, for example `{ worldpop = "WorldPop modelled estimate" }`. |
+
+## Column kinds
+
+Each `[[location.column]]` and `[[organization.column]]` has a `name` (lower
+case letters, digits and `_`, and not a built-in column name), a `kind`, and
+the keys its kind needs. The value is always text.
+
+### identifier
+
+The value of the first identifier under one of `systems`, tried in order.
+
+```toml
+[[location.column]]
+name = "pcode"
+kind = "identifier"
+systems = ["https://example.org/ids/pcode", "https://example.org/ids/national-admin-code"]
+```
+
+`identifier: [{system: …/national-admin-code, value: "NG"}]` → `pcode = "NG"`.
+
+**diff** writes an edit to the system the resource already uses, else to the
+first of `systems`, and removes that identifier when the value is cleared.
+The whole `identifier` list column, if also edited, is applied first.
+
+### extension_code
+
+`valueCode` of the extension with `url`.
+
+```toml
+[[location.column]]
+name = "settlement_type"
+kind = "extension_code"
+url = "https://example.org/fhir/StructureDefinition/settlement-type"
+```
+
+`extension: [{url: …/settlement-type, valueCode: "urban"}]` →
+`settlement_type = "urban"`.
+
+**diff** sets `valueCode` on that extension, adds the extension if missing,
+and removes it when the value is cleared.
+
+### type_coding
+
+The code of the coding under `system` anywhere in `type` (a list of
+CodeableConcepts).
+
+```toml
+[[location.column]]
+name = "ownership"
+kind = "type_coding"
+system = "https://example.org/fhir/CodeSystem/ownership"
+mirror_to_organization = true
+```
+
+`type: [{coding: [{system: …/ownership, code: "public"}]}]` →
+`ownership = "public"`.
+
+**diff** sets that coding's code, adds a concept holding it if missing, and
+removes the coding when cleared. With `mirror_to_organization = true`, an
+edit is also written to the paired Organization's type: always for a new
+row, and for an existing one only when the value was edited.
+
+### type_text
+
+The `text` of the concept in `type` that holds a coding under `system`, such
+as a human-readable label next to a code.
+
+```toml
+[[organization.column]]
+name = "ownership_text"
+kind = "type_text"
+system = "https://example.org/fhir/CodeSystem/ownership"
+```
+
+**diff** sets or clears that concept's `text`. It cannot create the coding:
+an edit to a resource without one is reported as `input_column_type` and
+ignored.
+
+## Editing and diff
+
+`diff` turns an edited GeoJSON or GeoParquet file back into FHIR. It writes
+the built-in writable columns and the profile's columns, and ignores the
+built-in derived ones (`admin1_name`, `path`, `country` and so on).
+
+An edited file with a column that is neither built in nor in the profile is
+refused, naming the columns:
+
+```
+the edited file has column(s) pcode that are neither built-in columns nor in the
+profile (no profile); pass the profile the dataset was made with (--profile), or
+remove the column(s)
+```
+
+Without that check, editing ICR's `pcode` with no profile would silently
+change nothing. Use the profile the dataset was made with (normally the
+snapshot's copy is enough), or remove a column you added yourself.
+
+## Writing a profile for your IG
+
+1. **Start from base.** Run `fhir-pipes transform locations` without a
+   profile and look at `fhir_json` for a few Locations, for example with
+   `fhir-pipes inspect` or DuckDB.
+2. **List what your IG adds to Location and Organization**: identifier
+   systems, extensions with a `valueCode`, and codings in `type`. Each one you
+   want as a column becomes a `[[location.column]]` or
+   `[[organization.column]]` of the matching kind. Anything else stays in
+   `fhir_json`, which is lossless.
+3. **Name the roles.** If your Locations form an admin hierarchy through
+   `partOf`, set `admin_unit_type` to the type code of an admin unit, and
+   `admin_code_column` to the column holding its code, to get admin levels and
+   countries. Add `boundary_extensions` only if your boundary extension's URL
+   does not end in `/StructureDefinition/location-boundary-geojson`.
+4. **Transform and check.** Run with `--profile` and check the columns, the
+   `country=` partitions and the report. `duplicate_<column>` and
+   `no_country` point at data or profile problems.
+5. **Round trip one edit per column.** Edit a value in QGIS or DuckDB, run
+   `diff`, and check the resource in the changes file has it where your IG
+   expects it. Then `load --dry-run`.
+6. **Add `[dhis2]` or `[population]`** only if you use those commands; copy
+   the ICR example's keys and replace the URLs with your IG's.
+7. **Publish it** next to your IG, for example at a stable https URL, so
+   others can pass `--profile https://…`.
+
+## Error messages
+
+| Message | Meaning |
+|---|---|
+| `profile …: unknown field …` | A key that does not exist, often a typo. |
+| `profile …: unknown variant …` | A `kind` that is not one of the four. |
+| `column … needs systems / url / system` | The column's kind needs that key. |
+| `column … has a key that kind does not use` | For example `url` on an `identifier` column. |
+| `… is a built-in column` | Choose another name; built-in names are reserved. |
+| `admin_code_column … is not a [[location.column]]` | Declare the column, or fix the name. |
+| `profiles are fetched over https only` | Use an https URL, or download the file. |
+| `the edited file has column(s) …` | See [Editing and diff](#editing-and-diff). |
+| `… needs a profile with a [dhis2] / [population] section` | Pass a profile that has it. |
+| `index needs a profile that names … spatial_index_extension` | Pass a profile that names it. |
+| `warning: --profile … differs from …/profile.toml` | The snapshot was last transformed with a different profile. `diff` uses `--profile`; re-run `transform locations` if the dataset should change too. |
