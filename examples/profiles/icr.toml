@@ -14,9 +14,6 @@ name = "icr"
 boundary_extensions = [
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
 ]
-# Admin units an operational area overlaps when it is not in the partOf tree:
-# the overlays_admin_unit_ids column (read only).
-overlays_extension = "https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit"
 # Spatial index cells (quadkey, geohash, h3): the quadkey and quadkey_level
 # columns, `fhir-pipes index`, and the cells diff recomputes after a move.
 spatial_index_extension = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
@@ -36,7 +33,8 @@ admin_code_column = "pcode"
 # Extra Location columns, in output order. Kinds:
 #   identifier      the first identifier under one of `systems`, in order;
 #                   diff writes to the system the resource already uses, else the first
-#   extension_code  extension[url].valueCode
+#   extension_code  extension[url].valueCode, or with `system` the code under
+#                   that system in extension[url].valueCodeableConcept
 #   type_coding     the code under `system` in Location.type
 #   type_text       the text of the Location.type concept holding a coding under `system`
 [[location.column]]
@@ -52,15 +50,12 @@ name = "gers_id"
 kind = "identifier"
 systems = ["https://icr.healthcampaigns.org/identifiers/overture-gers"]
 
+# The settlement-type extension's value is a CodeableConcept (ICRSettlementTypeVS).
 [[location.column]]
 name = "settlement_type"
 kind = "extension_code"
 url = "https://icr.healthcampaigns.org/StructureDefinition/settlement-type"
-
-[[location.column]]
-name = "delivery_strategy"
-kind = "extension_code"
-url = "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy"
+system = "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs"
 
 # facility_level and ownership are codings on the Location's type. A facility's
 # paired Organization carries them too, so diff writes an edit to both.

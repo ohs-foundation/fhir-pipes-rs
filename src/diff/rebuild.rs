@@ -112,9 +112,12 @@ fn apply_profile_column(
             let system = identifier_system_of(obj, &column.systems);
             upsert_identifier(obj, &system, value)
         }
-        Kind::ExtensionCode => {
-            upsert_extension_code(obj, column.url.as_deref().unwrap_or_default(), value)
-        }
+        Kind::ExtensionCode => upsert_extension_code(
+            obj,
+            column.url.as_deref().unwrap_or_default(),
+            column.system.as_deref(),
+            value,
+        ),
         Kind::TypeCoding => {
             upsert_type_coding(obj, column.system.as_deref().unwrap_or_default(), value)
         }
@@ -295,15 +298,28 @@ fn url_is(entry: &Value, url: &str) -> bool {
     entry.get("url").and_then(Value::as_str) == Some(url)
 }
 
-fn upsert_extension_code(obj: &mut Object, url: &str, code: Option<&str>) {
+/// Set the extension's `valueCode`, or with `system` its
+/// `valueCodeableConcept` (one coding under `system`; a stale display or
+/// text goes with the old code). Clearing removes the extension.
+fn upsert_extension_code(obj: &mut Object, url: &str, system: Option<&str>, code: Option<&str>) {
     let exts = array_mut(obj, "extension");
     match code {
-        Some(c) => match exts.iter_mut().find(|e| url_is(e, url)) {
-            Some(Value::Object(e)) => {
-                e.insert("valueCode".into(), Value::String(c.to_string()));
+        Some(c) => {
+            let (key, value) = match system {
+                Some(s) => (
+                    "valueCodeableConcept",
+                    json!({"coding": [{"system": s, "code": c}]}),
+                ),
+                None => ("valueCode", Value::String(c.to_string())),
+            };
+            match exts.iter_mut().find(|e| url_is(e, url)) {
+                Some(Value::Object(e)) => {
+                    e.retain(|k, _| !k.starts_with("value"));
+                    e.insert(key.into(), value);
+                }
+                _ => exts.push(json!({"url": url, key: value})),
             }
-            _ => exts.push(json!({"url": url, "valueCode": c})),
-        },
+        }
         None => exts.retain(|e| !url_is(e, url)),
     }
     if exts.is_empty() {
@@ -670,11 +686,12 @@ mod tests {
     const OWNERSHIP_SYSTEM: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs";
     const SETTLEMENT_TYPE_EXTENSION_URL: &str =
         "https://icr.healthcampaigns.org/StructureDefinition/settlement-type";
-    const DELIVERY_STRATEGY_EXTENSION_URL: &str =
-        "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy";
+    const SETTLEMENT_TYPE_SYSTEM: &str =
+        "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs";
+    const DELIVERY_STRATEGY_EXTENSION_URL: &str = crate::profile::TEST_DELIVERY_STRATEGY_EXTENSION;
 
     fn icr() -> Profile {
-        crate::profile::icr_example()
+        crate::profile::test_profile()
     }
 
     fn org_base() -> Value {
@@ -982,7 +999,12 @@ mod tests {
 
     #[test]
     fn profile_extensions_upsert_by_url_and_clear() {
-        let base = json!({"resourceType":"Location","id":"a","extension":[{"url":"https://example.org/keep","valueString":"k"},{"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCode":"rural"}]});
+        // settlement_type is a CodeableConcept extension (ICR's IG);
+        // delivery_strategy a plain valueCode one (the test profile).
+        let base = json!({"resourceType":"Location","id":"a","extension":[
+            {"url":"https://example.org/keep","valueString":"k"},
+            {"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+                "coding":[{"system":SETTLEMENT_TYPE_SYSTEM,"code":"rural","display":"Rural"}]}}]});
         let out = apply(
             base,
             &[
@@ -990,10 +1012,24 @@ mod tests {
                 ("delivery_strategy", text("fixed")),
             ],
         );
-        assert_eq!(out["extension"][1]["valueCode"], "urban");
+        // The stale display goes with the old code.
+        assert_eq!(
+            out["extension"][1],
+            json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+                "coding":[{"system":SETTLEMENT_TYPE_SYSTEM,"code":"urban"}]}})
+        );
         assert_eq!(
             out["extension"][2],
             json!({"url":DELIVERY_STRATEGY_EXTENSION_URL,"valueCode":"fixed"})
+        );
+        // A valueCode written by an older tool becomes the IG's shape.
+        let old = json!({"resourceType":"Location","id":"a","extension":[
+            {"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCode":"rural"}]});
+        let out2 = apply(old, &[("settlement_type", text("urban"))]);
+        assert_eq!(
+            out2["extension"][0],
+            json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+                "coding":[{"system":SETTLEMENT_TYPE_SYSTEM,"code":"urban"}]}})
         );
         let out = apply(
             out,

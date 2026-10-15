@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn schema_has_the_documented_columns_in_order() {
-        let schema = output_schema(&crate::profile::icr_example());
+        let schema = output_schema(&crate::profile::test_profile());
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(&names[..3], &["id", "version_id", "last_updated"]);
         assert!(names.contains(&"part_of"));
