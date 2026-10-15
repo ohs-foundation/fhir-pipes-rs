@@ -1,0 +1,30 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRGroupCharacteristicCS",
+  "id": "icr-group-characteristic-cs",
+  "title": "ICR Group Characteristic",
+  "description": "Characteristic codes for ICR Group profiles — the geographic-scope characteristic that links a target-population estimate to its Location, making estimates computably joinable to the location hierarchy (working doc §7.6), plus the age-band characteristic used to scope age-specific denominator Groups (espen-forms).",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-group-characteristic-cs",
+  "concept": [
+    {
+      "code": "geography",
+      "display": "Geographic scope",
+      "definition": "The Location (admin unit, settlement, or operational area) this target-population estimate is scoped to."
+    },
+    {
+      "code": "age-band",
+      "display": "Age band",
+      "definition": "The age band (e.g. 1-4, 5-14, 15+ years) this target-population estimate is scoped to."
+    },
+    {
+      "code": "travel-time",
+      "display": "Travel time to service point",
+      "definition": "The travel-time band to the nearest (or the catchment's own) health facility this estimate is scoped to — an accessibility stratum of the geography's population (ICRTravelTimeBandVS: walking / driving, under 1 h, 1–4 h, over 4 h). Pairs with the geography characteristic: 'people in this catchment more than 4 hours' walk from the facility' (catchments round, Sep 2026)."
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 3
+}

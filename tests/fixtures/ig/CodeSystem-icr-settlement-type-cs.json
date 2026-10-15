@@ -1,0 +1,70 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRSettlementTypeCS",
+  "id": "icr-settlement-type-cs",
+  "title": "ICR Settlement / Special-population Type",
+  "description": "The settlement or special-population classification of a place — the recurring 'type of settlement' axis on the polio SIA monitoring/tally forms (urban / rural / slum / refugee-IDP / nomad-pastoralist / security-compromised / hard-to-reach / cross-border / immigrant). A vulnerability/equity attribute of a Location, carried by the settlement-type extension; drives hard-to-reach-area (HTRA) targeting and equity disaggregation (forms-v1 / jul3-form-analysis §Aggregate #5). Bound extensible — countries add local codes.",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs",
+  "concept": [
+    {
+      "code": "ordinary",
+      "display": "Ordinary / general population",
+      "definition": "Standard resident population, no special classification."
+    },
+    {
+      "code": "urban",
+      "display": "Urban",
+      "definition": "Urban settlement."
+    },
+    {
+      "code": "rural",
+      "display": "Rural",
+      "definition": "Rural settlement."
+    },
+    {
+      "code": "urban-slum",
+      "display": "Urban slum / informal settlement",
+      "definition": "Dense informal urban settlement."
+    },
+    {
+      "code": "refugee-idp",
+      "display": "Refugee / IDP",
+      "definition": "Refugee or internally-displaced-person population/camp."
+    },
+    {
+      "code": "nomad-pastoralist",
+      "display": "Nomadic / pastoralist",
+      "definition": "Mobile nomadic or pastoralist population."
+    },
+    {
+      "code": "security-compromised",
+      "display": "Security-compromised",
+      "definition": "Area with insecurity / access constraints."
+    },
+    {
+      "code": "hard-to-reach",
+      "display": "Hard-to-reach",
+      "definition": "Area hard to reach for terrain, distance or seasonal reasons (HTRA)."
+    },
+    {
+      "code": "cross-border",
+      "display": "Cross-border",
+      "definition": "Cross-border / border-crossing population."
+    },
+    {
+      "code": "immigrant",
+      "display": "Immigrant",
+      "definition": "Immigrant population."
+    },
+    {
+      "code": "other",
+      "display": "Other",
+      "definition": "Other settlement/special-population type — record detail in text."
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 11
+}

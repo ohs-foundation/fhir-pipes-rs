@@ -1,0 +1,158 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "spatial-index",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/spatial-index",
+  "name": "SpatialIndex",
+  "title": "Spatial Index Cell",
+  "status": "draft",
+  "experimental": false,
+  "description": "A spatial index cell derived from the Location's position: which tiling scheme (quadkey | h3 | geohash), at what level (quadkey zoom / H3 resolution / geohash precision), and the cell key. Repeatable — a point carries at most one cell per scheme and level (ICRLocation invariant icr-loc-spatial-one-per-level); several schemes and levels may coexist. Quadkey and geohash cells are prefix-hierarchical, so a FHIR string search on the cell (Location?quadkey=0313…) answers 'every point inside this coarser tile' with no geometry engine; H3 cells join on exact match. Derived data: written by the loader (kiln) at import or as a backfill edit, recomputed whenever the position changes, never hand-entered. Not an identifier — many places share a cell (spatial-index round, Sep 2026).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Location",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Spatial Index Cell",
+        "definition": "A spatial index cell derived from the Location's position: which tiling scheme (quadkey | h3 | geohash), at what level (quadkey zoom / H3 resolution / geohash precision), and the cell key. Repeatable — a point carries at most one cell per scheme and level (ICRLocation invariant icr-loc-spatial-one-per-level); several schemes and levels may coexist. Quadkey and geohash cells are prefix-hierarchical, so a FHIR string search on the cell (Location?quadkey=0313…) answers 'every point inside this coarser tile' with no geometry engine; H3 cells join on exact match. Derived data: written by the loader (kiln) at import or as a backfill edit, recomputed whenever the position changes, never hand-entered. Not an identifier — many places share a cell (spatial-index round, Sep 2026).",
+        "constraint": [
+          {
+            "key": "icr-spatial-quadkey",
+            "severity": "error",
+            "human": "A quadkey cell is base-4 digits, exactly level characters long, level 1–23.",
+            "expression": "extension.where(url = 'system').value = 'quadkey' implies (extension.where(url = 'cell').value.matches('^[0-3]+$') and extension.where(url = 'cell').value.length() = extension.where(url = 'level').value and extension.where(url = 'level').value >= 1 and extension.where(url = 'level').value <= 23)",
+            "source": "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
+          },
+          {
+            "key": "icr-spatial-h3",
+            "severity": "error",
+            "human": "An H3 cell is a 15-hex-character index, level (resolution) 0–15.",
+            "expression": "extension.where(url = 'system').value = 'h3' implies (extension.where(url = 'cell').value.matches('^[0-9a-f]{15}$') and extension.where(url = 'level').value <= 15)",
+            "source": "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
+          },
+          {
+            "key": "icr-spatial-geohash",
+            "severity": "error",
+            "human": "A geohash cell is base-32 characters, exactly level characters long, level 1–12.",
+            "expression": "extension.where(url = 'system').value = 'geohash' implies (extension.where(url = 'cell').value.matches('^[0-9b-hjkmnp-z]+$') and extension.where(url = 'cell').value.length() = extension.where(url = 'level').value and extension.where(url = 'level').value >= 1 and extension.where(url = 'level').value <= 12)",
+            "source": "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "min": 3
+      },
+      {
+        "id": "Extension.extension:system",
+        "path": "Extension.extension",
+        "sliceName": "system",
+        "short": "quadkey | h3 | geohash",
+        "min": 1,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Extension.extension:system.extension",
+        "path": "Extension.extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.extension:system.url",
+        "path": "Extension.extension.url",
+        "fixedUri": "system"
+      },
+      {
+        "id": "Extension.extension:system.value[x]",
+        "path": "Extension.extension.value[x]",
+        "type": [
+          {
+            "code": "code"
+          }
+        ],
+        "binding": {
+          "strength": "required",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-spatial-index"
+        }
+      },
+      {
+        "id": "Extension.extension:level",
+        "path": "Extension.extension",
+        "sliceName": "level",
+        "short": "Quadkey zoom (1–23), H3 resolution (0–15), geohash precision (1–12) — explicit even where recoverable from the cell, so 'every point indexed at level 18' is a plain query",
+        "min": 1,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Extension.extension:level.extension",
+        "path": "Extension.extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.extension:level.url",
+        "path": "Extension.extension.url",
+        "fixedUri": "level"
+      },
+      {
+        "id": "Extension.extension:level.value[x]",
+        "path": "Extension.extension.value[x]",
+        "type": [
+          {
+            "code": "unsignedInt"
+          }
+        ]
+      },
+      {
+        "id": "Extension.extension:cell",
+        "path": "Extension.extension",
+        "sliceName": "cell",
+        "short": "The cell key in the scheme's canonical string form (quadkey: base-4 digits; h3: 15 hex chars; geohash: base-32)",
+        "min": 1,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Extension.extension:cell.extension",
+        "path": "Extension.extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.extension:cell.url",
+        "path": "Extension.extension.url",
+        "fixedUri": "cell"
+      },
+      {
+        "id": "Extension.extension:cell.value[x]",
+        "path": "Extension.extension.value[x]",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "max": "0"
+      }
+    ]
+  }
+}

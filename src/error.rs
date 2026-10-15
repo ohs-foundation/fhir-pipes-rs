@@ -27,6 +27,9 @@ pub enum PipesError {
     },
     #[error("{0}")]
     Environment(String),
+    /// A check ran and found problems it has already printed.
+    #[error("{0}")]
+    Findings(String),
 }
 
 impl PipesError {

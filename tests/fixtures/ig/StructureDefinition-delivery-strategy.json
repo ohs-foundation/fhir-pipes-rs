@@ -1,0 +1,63 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "delivery-strategy",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy",
+  "name": "DeliveryStrategy",
+  "title": "Delivery Strategy",
+  "status": "draft",
+  "experimental": false,
+  "description": "How this activity/task reaches its target population. First-class and coded because a single campaign routinely mixes strategies, and the strategy governs which data elements exist. The protocol lists the options (1..*), the Task records the choice (1..1), the activity is an optional pin — the strategy is campaign programme state and deliberately does NOT live on Location: per the georegistry rule a site's durable kind is Location.type (facility, temporary-post, school…), and which strategy a site serves in a given campaign belongs to that campaign's Tasks (working doc §3).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "PlanDefinition",
+      "type": "element"
+    },
+    {
+      "expression": "ActivityDefinition",
+      "type": "element"
+    },
+    {
+      "expression": "Task",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Delivery Strategy",
+        "definition": "How this activity/task reaches its target population. First-class and coded because a single campaign routinely mixes strategies, and the strategy governs which data elements exist. The protocol lists the options (1..*), the Task records the choice (1..1), the activity is an optional pin — the strategy is campaign programme state and deliberately does NOT live on Location: per the georegistry rule a site's durable kind is Location.type (facility, temporary-post, school…), and which strategy a site serves in a given campaign belongs to that campaign's Tasks (working doc §3)."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "CodeableConcept"
+          }
+        ],
+        "binding": {
+          "strength": "required",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-delivery-strategy"
+        }
+      }
+    ]
+  }
+}

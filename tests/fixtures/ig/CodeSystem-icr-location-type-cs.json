@@ -1,0 +1,70 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRLocationTypeCS",
+  "id": "icr-location-type-cs",
+  "title": "ICR Location Type",
+  "description": "Campaign-relevant location types. Type — not tree position — is what distinguishes official administrative units from operational geography: every Location lives in the single partOf containment tree, and administrative rollups filter on type = admin-unit (working doc §9).",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
+  "concept": [
+    {
+      "code": "admin-unit",
+      "display": "Administrative unit",
+      "definition": "A unit of the administrative hierarchy: country, region, district, ward."
+    },
+    {
+      "code": "settlement",
+      "display": "Settlement",
+      "definition": "A settlement or village — operational geography below the formal admin hierarchy."
+    },
+    {
+      "code": "facility",
+      "display": "Health facility",
+      "definition": "A permanent health facility."
+    },
+    {
+      "code": "school",
+      "display": "School",
+      "definition": "A school used as a delivery site."
+    },
+    {
+      "code": "community-distribution-point",
+      "display": "Community distribution point",
+      "definition": "A community focal point used for distribution (market, place of worship, transit point)."
+    },
+    {
+      "code": "temporary-post",
+      "display": "Temporary post",
+      "definition": "A temporary or outreach vaccination/delivery post."
+    },
+    {
+      "code": "household",
+      "display": "Household dwelling",
+      "definition": "The physical dwelling of a household."
+    },
+    {
+      "code": "supervisory-area",
+      "display": "Supervisory area",
+      "definition": "An operational supervision area — a group of settlements or sites under one supervisor. Not an admin unit: it attaches via partOf at the lowest admin unit that fully contains it (its district; region/state if it spans districts)."
+    },
+    {
+      "code": "operational-area",
+      "display": "Operational area",
+      "definition": "An operational planning area that does not match an admin unit (e.g. polio operational boundaries differing from RI catchments). Not an admin unit: it attaches via partOf at the lowest admin unit that fully contains it."
+    },
+    {
+      "code": "facility-catchment",
+      "display": "Facility catchment",
+      "definition": "The service (catchment) area of one health facility — the polygon of territory whose population that facility serves, e.g. a ward-bounded Voronoi or travel-time catchment. A separate Location from the facility itself: physicalType area, boundary polygon, catchment-of → the facility Location, partOf the lowest admin unit that fully contains it. Population denominators, access and distance attributes for the facility's service area are scoped to this Location, not to the facility site."
+    },
+    {
+      "code": "settlement-catchment",
+      "display": "Settlement catchment",
+      "definition": "The area (built-up footprint or catchment) of one settlement, bounded by and partOf the facility catchment it is assigned to. A separate Location from the settlement point: physicalType area, boundary polygon, catchment-of → the settlement Location. Carries the settlement-level population and accessibility attributes."
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 11
+}

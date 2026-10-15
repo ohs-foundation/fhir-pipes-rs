@@ -1,0 +1,51 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "estimate-date",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/estimate-date",
+  "name": "EstimateDate",
+  "title": "Estimate Date",
+  "status": "draft",
+  "experimental": false,
+  "description": "When this population estimate was made. Denominators decay fast (1–3 years); a stale denominator silently reused produces confident, wrong coverage.",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Group",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Estimate Date",
+        "definition": "When this population estimate was made. Denominators decay fast (1–3 years); a stale denominator silently reused produces confident, wrong coverage."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/estimate-date"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "date"
+          }
+        ]
+      }
+    ]
+  }
+}

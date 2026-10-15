@@ -1,0 +1,66 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "campaign",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
+  "name": "Campaign",
+  "title": "Campaign",
+  "status": "draft",
+  "experimental": false,
+  "description": "The campaign round — the ICRCampaign CarePlan — this record belongs to. The uniform record→campaign join: delivery events (Immunization, MedicationAdministration, SupplyDelivery) and coverage reports (MeasureReport) all point AT their campaign, in the same direction as Task.basedOn — the CarePlan itself is never rewritten as records accumulate. Replaces the core event-basedOn extension previously used on the delivery profiles: its R4 context is Condition-only, so every use on a delivery resource was context-invalid, and MeasureReport needs the same link (a coverage report otherwise has no computable path back to its campaign).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Immunization",
+      "type": "element"
+    },
+    {
+      "expression": "MedicationAdministration",
+      "type": "element"
+    },
+    {
+      "expression": "SupplyDelivery",
+      "type": "element"
+    },
+    {
+      "expression": "MeasureReport",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Campaign",
+        "definition": "The campaign round — the ICRCampaign CarePlan — this record belongs to. The uniform record→campaign join: delivery events (Immunization, MedicationAdministration, SupplyDelivery) and coverage reports (MeasureReport) all point AT their campaign, in the same direction as Task.basedOn — the CarePlan itself is never rewritten as records accumulate. Replaces the core event-basedOn extension previously used on the delivery profiles: its R4 context is Condition-only, so every use on a delivery resource was context-invalid, and MeasureReport needs the same link (a coverage report otherwise has no computable path back to its campaign)."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/campaign"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "Reference",
+            "targetProfile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/ICRCampaign"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

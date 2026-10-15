@@ -1,0 +1,287 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "ICRLocation",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation",
+  "name": "ICRLocation",
+  "title": "ICR Location",
+  "status": "draft",
+  "experimental": false,
+  "description": "The most-customized ICR resource — the ICR's georegistry layer, covering the WHO IDHC administrative boundary, health facility and school master lists: a single partOf containment tree (6+ levels in campaign countries) holding admin units and operational geography alike, distinguished by type — not tree position; GeoJSON boundaries; and multi-system geospatial identity — Overture Maps GERS IDs (building / place / division) as the preferred cross-campaign join key, with P-codes and national codes as coequal aliases. Per the IDHC georegistry rule, this layer holds only identify/classify/locate/contact data; programmatic data references it but never lives in it (working doc §7.7, §9).",
+  "fhirVersion": "4.0.1",
+  "kind": "resource",
+  "abstract": false,
+  "type": "Location",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Location",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Location",
+        "path": "Location",
+        "constraint": [
+          {
+            "key": "icr-loc-admin-id",
+            "severity": "error",
+            "human": "An administrative unit must carry at least one identifier (any system — P-code, GERS, ISO, or the country's own code); without one it cannot be joined to any other system or campaign.",
+            "expression": "type.coding.where(system = 'https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs' and code = 'admin-unit').exists() implies identifier.exists()",
+            "source": "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+          },
+          {
+            "key": "icr-loc-admin-official",
+            "severity": "warning",
+            "human": "An administrative unit should mark its authoritative country code with identifier.use = 'official' — the uniform cross-country join key. Warning in v0.x; expected to be promoted to error at v1.0.",
+            "expression": "type.coding.where(system = 'https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs' and code = 'admin-unit').exists() implies identifier.where(use = 'official').exists()",
+            "source": "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+          },
+          {
+            "key": "icr-loc-spatial-one-per-level",
+            "severity": "error",
+            "human": "A Location carries at most one spatial-index cell per scheme and level — the cell is a function of the position, so two would mean one is stale.",
+            "expression": "extension.where(url = 'https://icr.healthcampaigns.org/StructureDefinition/spatial-index').select(extension.where(url = 'system').value.toString() & ':' & extension.where(url = 'level').value.toString()).isDistinct()",
+            "source": "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+          }
+        ]
+      },
+      {
+        "id": "Location.extension",
+        "path": "Location.extension",
+        "slicing": {
+          "discriminator": [
+            {
+              "type": "value",
+              "path": "url"
+            }
+          ],
+          "ordered": false,
+          "rules": "open"
+        }
+      },
+      {
+        "id": "Location.extension:boundary",
+        "path": "Location.extension",
+        "sliceName": "boundary",
+        "short": "District polygon, settlement area, or catchment zone (GeoJSON)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Location.extension:settlementType",
+        "path": "Location.extension",
+        "sliceName": "settlementType",
+        "short": "Settlement / special-population type (urban-slum, refugee-IDP, nomad-pastoralist, security-compromised, hard-to-reach…) — vulnerability/equity attribute for HTRA targeting (v0.21.0)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/settlement-type"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Location.extension:spatialIndex",
+        "path": "Location.extension",
+        "sliceName": "spatialIndex",
+        "short": "Spatial index cell(s) derived from position — scheme + level + cell (quadkey 18 first; h3 later). One per scheme and level. Searchable: Location?quadkey=<prefix> (tile containment), Location?h3=<cell> (spatial-index round)",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/spatial-index"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Location.extension:catchmentOf",
+        "path": "Location.extension",
+        "sliceName": "catchmentOf",
+        "short": "On a facility-catchment / settlement-catchment Location: the facility or settlement site this area belongs to. Searchable: Location?catchment-of=Location/<site-id>",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/catchment-of"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Location.extension:buildingCount",
+        "path": "Location.extension",
+        "sliceName": "buildingCount",
+        "short": "Building footprints inside the boundary, one entry per source dataset (+ confidence threshold) and date",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/building-count"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Location.identifier",
+        "path": "Location.identifier",
+        "slicing": {
+          "discriminator": [
+            {
+              "type": "value",
+              "path": "system"
+            }
+          ],
+          "rules": "open"
+        },
+        "short": "Multi-system identity, all slices optional: GERS (preferred cross-campaign join key), P-code, ISO 3166. The country's own admin code rides the open list under the country's system URI, marked use = official — the uniform join key: identifier.where(use = 'official')",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.identifier:gers",
+        "path": "Location.identifier",
+        "sliceName": "gers",
+        "short": "Overture Maps GERS ID (building / place / division). Record the Overture release version alongside (working doc §9.1).",
+        "min": 0,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.identifier:gers.system",
+        "path": "Location.identifier.system",
+        "min": 1,
+        "patternUri": "https://icr.healthcampaigns.org/identifiers/overture-gers"
+      },
+      {
+        "id": "Location.identifier:pcode",
+        "path": "Location.identifier",
+        "sliceName": "pcode",
+        "short": "OCHA P-code for administrative units",
+        "min": 0,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.identifier:pcode.system",
+        "path": "Location.identifier.system",
+        "min": 1,
+        "patternUri": "https://icr.healthcampaigns.org/identifiers/pcode"
+      },
+      {
+        "id": "Location.identifier:isoCountry",
+        "path": "Location.identifier",
+        "sliceName": "isoCountry",
+        "short": "ISO 3166-1 country code (admin level 0) — FHIR-designated system URI",
+        "min": 0,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.identifier:isoCountry.system",
+        "path": "Location.identifier.system",
+        "min": 1,
+        "patternUri": "urn:iso:std:iso:3166"
+      },
+      {
+        "id": "Location.identifier:isoSubdivision",
+        "path": "Location.identifier",
+        "sliceName": "isoSubdivision",
+        "short": "ISO 3166-2 subdivision code (first-level subdivisions) — FHIR-designated system URI",
+        "min": 0,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.identifier:isoSubdivision.system",
+        "path": "Location.identifier.system",
+        "min": 1,
+        "patternUri": "urn:iso:std:iso:3166:-2"
+      },
+      {
+        "id": "Location.status",
+        "path": "Location.status",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.name",
+        "path": "Location.name",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.type",
+        "path": "Location.type",
+        "short": "admin-unit / settlement / facility / school / community-distribution-point / temporary-post / household / supervisory-area / operational-area / facility-catchment / settlement-catchment",
+        "mustSupport": true,
+        "binding": {
+          "strength": "extensible",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-location-type"
+        }
+      },
+      {
+        "id": "Location.physicalType",
+        "path": "Location.physicalType",
+        "short": "jurisdiction / site / building / household",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.position",
+        "path": "Location.position",
+        "short": "GPS point (longitude/latitude/altitude)",
+        "mustSupport": true
+      },
+      {
+        "id": "Location.managingOrganization",
+        "path": "Location.managingOrganization",
+        "short": "For facilities: the accountable facility Organization (mCSD pairing) — carries the registry codes, national classification, and ownership; this Location carries only the physical place. Absent on admin units and other non-facility places.",
+        "type": [
+          {
+            "code": "Reference",
+            "targetProfile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Location.partOf",
+        "path": "Location.partOf",
+        "short": "Single containment tree: the one parent that fully contains this Location. Admin units chain upward (country → region → district → ward); settlements, facilities, and operational areas attach at the lowest admin unit that fully contains them — a supervisory area inside one district is partOf that district; one spanning districts attaches at region/state level",
+        "type": [
+          {
+            "code": "Reference",
+            "targetProfile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+            ],
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/StructureDefinition/structuredefinition-hierarchy",
+                "valueBoolean": true
+              }
+            ]
+          }
+        ],
+        "mustSupport": true
+      }
+    ]
+  }
+}

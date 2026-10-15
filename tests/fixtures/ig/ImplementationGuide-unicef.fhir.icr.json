@@ -1,0 +1,14 @@
+{
+  "resourceType": "ImplementationGuide",
+  "id": "unicef.fhir.icr",
+  "url": "https://icr.healthcampaigns.org/ImplementationGuide/unicef.fhir.icr",
+  "version": "0.1.0",
+  "name": "ICR",
+  "title": "Integrated Campaign Registry (ICR) Implementation Guide",
+  "status": "draft",
+  "packageId": "unicef.fhir.icr",
+  "license": "Apache-2.0",
+  "fhirVersion": [
+    "4.0.1"
+  ]
+}

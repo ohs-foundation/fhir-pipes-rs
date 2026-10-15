@@ -1,0 +1,59 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRFacilityTypeCS",
+  "id": "icr-facility-type-cs",
+  "title": "ICR Facility Type",
+  "description": "National facility-classification tiers for the mCSD-style facility Organization (working doc §5.3 facility pairing). The authoritative classification axis lives on Organization.type — not Location.type — because facility level is an administrative designation (funding, staffing norms, reporting), which is an Organization concern. Codes are the broad tiers shared across national MFLs; the country-specific kind (e.g. Nigeria NHFR 'Primary Health Center' vs 'Health Post') travels as the coding display/text or a country localization system.",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs",
+  "concept": [
+    {
+      "code": "primary",
+      "display": "Primary care facility",
+      "definition": "First-contact care: health posts, dispensaries, primary health clinics and centres.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Établissement de soins primaires"
+        }
+      ]
+    },
+    {
+      "code": "secondary",
+      "display": "Secondary care facility",
+      "definition": "Referral care: general/district hospitals.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Établissement de soins secondaires"
+        }
+      ]
+    },
+    {
+      "code": "tertiary",
+      "display": "Tertiary care facility",
+      "definition": "Specialized referral care: teaching, specialist and federal medical centres.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Établissement de soins tertiaires"
+        }
+      ]
+    },
+    {
+      "code": "unknown",
+      "display": "Unknown level",
+      "definition": "The national registry does not record or know the facility's tier — the low-precision escape so unclassified facilities aren't blocked.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Niveau inconnu"
+        }
+      ]
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 4
+}

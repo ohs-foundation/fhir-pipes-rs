@@ -1,0 +1,59 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "denominator-type",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/denominator-type",
+  "name": "DenominatorType",
+  "title": "Denominator Type",
+  "status": "draft",
+  "experimental": false,
+  "description": "Whether the denominator is the TOTAL population or the AT-RISK/eligible subset — programme vs epidemiological coverage in NTD MDA. On a coverage MeasureReport it qualifies the figure; on an ICRTargetPopulation it labels the estimate (espen-v3 / §17.2 B1).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "MeasureReport",
+      "type": "element"
+    },
+    {
+      "expression": "Group",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Denominator Type",
+        "definition": "Whether the denominator is the TOTAL population or the AT-RISK/eligible subset — programme vs epidemiological coverage in NTD MDA. On a coverage MeasureReport it qualifies the figure; on an ICRTargetPopulation it labels the estimate (espen-v3 / §17.2 B1)."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/denominator-type"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "code"
+          }
+        ],
+        "binding": {
+          "strength": "required",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-denominator-type"
+        }
+      }
+    ]
+  }
+}

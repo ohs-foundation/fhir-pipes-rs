@@ -477,5 +477,9 @@ Some things the IG has are not in the profile on purpose:
 - **`catchment-of` and `building-count`:** structured extensions that do not
   reduce to one code. They stay in `fhir_json`.
 
+`fhir-pipes profile check` compares the profile with the IG and reports an
+entry that no longer matches. See
+[Checking a profile against its IG](profiles.md#checking-a-profile-against-its-ig).
+
 A profile for another IG follows the same steps. See
 [Writing a profile for your IG](profiles.md#writing-a-profile-for-your-ig).

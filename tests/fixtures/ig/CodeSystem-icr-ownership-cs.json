@@ -1,0 +1,81 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICROwnershipCS",
+  "id": "icr-ownership-cs",
+  "title": "ICR Facility Ownership",
+  "description": "Ownership / managing-authority classification for the facility Organization — a second Organization.type axis (base FHIR Organization has no ownership element; carrying it as a type coding is the mCSD/OpenHIE convention). The governmental tier detail (local/state/federal) travels as display/text or a country localization.",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs",
+  "concept": [
+    {
+      "code": "public",
+      "display": "Public",
+      "definition": "Government-owned at any tier (local, state/regional, federal/national).",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Public"
+        }
+      ]
+    },
+    {
+      "code": "private-for-profit",
+      "display": "Private for-profit",
+      "definition": "Privately owned, operated for profit.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Privé à but lucratif"
+        }
+      ]
+    },
+    {
+      "code": "private-not-for-profit",
+      "display": "Private not-for-profit",
+      "definition": "Privately owned, operated not for profit (NGO, community).",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Privé à but non lucratif"
+        }
+      ]
+    },
+    {
+      "code": "faith-based",
+      "display": "Faith-based",
+      "definition": "Owned or operated by a religious organization or faith-based network.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Confessionnel"
+        }
+      ]
+    },
+    {
+      "code": "military",
+      "display": "Military / paramilitary",
+      "definition": "Owned by military or paramilitary formations.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Militaire / paramilitaire"
+        }
+      ]
+    },
+    {
+      "code": "unknown",
+      "display": "Unknown ownership",
+      "definition": "The national registry does not record or know the owner — the low-precision escape.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Propriété inconnue"
+        }
+      ]
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 6
+}

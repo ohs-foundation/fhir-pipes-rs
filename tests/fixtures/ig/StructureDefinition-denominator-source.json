@@ -1,0 +1,59 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "denominator-source",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/denominator-source",
+  "name": "DenominatorSource",
+  "title": "Denominator Source",
+  "status": "draft",
+  "experimental": false,
+  "description": "The method/source behind this population estimate (census, microcensus, WorldPop, GRID3…). Reuse is only safe with provenance (working doc §2.3, §4.2).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Group",
+      "type": "element"
+    },
+    {
+      "expression": "MeasureReport",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Denominator Source",
+        "definition": "The method/source behind this population estimate (census, microcensus, WorldPop, GRID3…). Reuse is only safe with provenance (working doc §2.3, §4.2)."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/denominator-source"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "CodeableConcept"
+          }
+        ],
+        "binding": {
+          "strength": "extensible",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-denominator-source"
+        }
+      }
+    ]
+  }
+}

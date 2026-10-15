@@ -76,6 +76,24 @@ pub enum Command {
     /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `fhir-pipes load`
     #[command(subcommand)]
     Dhis2(Box<Dhis2Command>),
+    /// Work with the profile given by --profile
+    #[command(subcommand)]
+    Profile(ProfileCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileCommand {
+    /// Compare the profile with its implementation guide: extensions, code
+    /// systems, profiles and identifier systems it names. Exits 1 on errors
+    Check(ProfileCheckArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ProfileCheckArgs {
+    /// The IG: a FHIR package (package.tgz, a path or an https URL) or a
+    /// directory of JSON resources such as SUSHI's fsh-generated/resources
+    #[arg(long)]
+    pub ig: String,
 }
 
 #[derive(Subcommand, Debug)]
