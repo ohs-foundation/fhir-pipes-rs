@@ -132,7 +132,7 @@ linting.
 |---|---|---|---|
 | Timestamped snapshots | Every run writes `<dwhRootPrefix>_TIMESTAMP_<time>/`; complete when `timestamp_end.txt` exists; queries go through Hive views that point at the latest | One current warehouse, updated table by table (see Failed runs); `manifest.json` records the run | Missing (by design so far) |
 | Retention | `purgeSchedule` and `numOfDwhSnapshotsToRetain`; `DELETE /dwh?snapshotId=` | n/a | Missing |
-| Failed runs | `error.log` in the snapshot, downloadable from the controller; the incomplete snapshot is not used | Exit code and stderr. Each table is replaced only once its new files are written, but tables are replaced one at a time: a run that fails after some tables (or in the catalog, hooks or push) leaves those tables updated and the rest from the previous run | Partial |
+| Failed runs | `error.log` in the snapshot, downloadable from the controller; the incomplete snapshot is not used | Exit code and stderr. Each table is replaced only once its new files are written, but tables are replaced one at a time: a run that fails after some tables (or in the catalog, hooks or push) leaves those tables updated and the rest from the previous run (#35) | Partial |
 
 ## 8. Running it: controller, scheduling, monitoring
 
@@ -200,32 +200,34 @@ linting.
 ## Potential features
 
 Grouped by how much they matter for moving existing fhir-data-pipes sites
-over. Each is a candidate for ROADMAP once agreed.
+over. Each has an issue where one is filed; the rest are candidates for
+ROADMAP once agreed.
 
 ### Needed to replace the Java pipeline at existing sites
 
-| Feature | Why | Size |
-|---|---|---|
-| Write view tables into PostgreSQL | The single-machine setup and its dashboards read view tables from PostgreSQL. Upsert by resource id, as the Java sink does, or replace each table | Medium |
-| HTTP Basic auth | OpenMRS and many HAPI deployments use it | Small |
-| Bulk Data `$export` source | Second fetch mode in the Java pipeline; faster for large servers that support it. Use `deleted[]`, which the Java pipeline ignores | Medium |
-| Copy to a second FHIR server | FHIR-to-FHIR sync (Shared Health Record use case): `load` without `If-Match`, or a `sync` command; forward deletions | Small to medium |
-| Docker image and a compose example | How existing sites deploy | Small |
-| Nested Parquet-on-FHIR | Existing queries and Spark tables read it. On hold until a site needs it | Large |
-| Test against OpenMRS FHIR2 | The main community; it caps `_count` at 100 and has quirks the Java pipeline works around | Small |
+| Feature | Why | Size | Issue |
+|---|---|---|---|
+| Write view tables into PostgreSQL | The single-machine setup and its dashboards read view tables from PostgreSQL. Upsert by resource id, as the Java sink does, or replace each table | Medium | #25 |
+| HTTP Basic auth | OpenMRS and many HAPI deployments use it | Small | #26 |
+| Bulk Data `$export` source | Second fetch mode in the Java pipeline; faster for large servers that support it. Use `deleted[]`, which the Java pipeline ignores | Medium | #27 |
+| Copy to a second FHIR server | FHIR-to-FHIR sync (Shared Health Record use case): `load` without `If-Match`, or a `sync` command; forward deletions | Small to medium | #28 |
+| Docker image and a compose example | How existing sites deploy | Small |  |
+| Nested Parquet-on-FHIR | Existing queries and Spark tables read it. On hold until a site needs it | Large |  |
+| Test against OpenMRS FHIR2 | The main community; it caps `_count` at 100 and has quirks the Java pipeline works around | Small | #29 |
 
 ### Useful, not blocking
 
-| Feature | Why | Size |
-|---|---|---|
-| Parallel page fetching | Faster first loads on big servers. HAPI's `_getpagesoffset` as the Java pipeline does it, or several types at once | Medium |
-| Spark or Hive table definitions | Sites with a Spark Thrift server could keep it: write a `CREATE TABLE … USING PARQUET` file next to `catalog.sql` | Small |
-| Snapshots and retention | Lets a run be rolled back and queries read a consistent set. Could be timestamped directories with the catalog pointing at the latest | Medium |
-| A schedule and status endpoint | For sites that want a long-running service instead of cron: a `serve` mode with a schedule, `/status`, `/run` and Prometheus metrics | Medium to large |
-| `refresh` from files | Run the warehouse from NDJSON or Bundle files (exports, Synthea) without a server | Small |
-| STU3 | Only if a site still runs STU3 | Medium |
-| HAPI database source | Faster than search for very large HAPI servers, and sees deletions. Ties fhir-pipes to HAPI's schema | Medium |
-| Google Cloud FHIR store sink | Only for GCP sites | Small to medium |
+| Feature | Why | Size | Issue |
+|---|---|---|---|
+| Parallel page fetching | Faster first loads on big servers. HAPI's `_getpagesoffset` as the Java pipeline does it, or several types at once | Medium | #30 |
+| Spark or Hive table definitions | Sites with a Spark Thrift server could keep it: write a `CREATE TABLE … USING PARQUET` file next to `catalog.sql` | Small | #31 |
+| Make a refresh all-or-nothing | A failed run can leave tables from two runs (section 7). Stage every table and swap them in at the end | Small | #35 (option 1) |
+| Snapshots and retention | Lets a run be rolled back and queries read a consistent set. Could be timestamped directories with the catalog pointing at the latest | Medium | #35 (option 2) |
+| A schedule and status endpoint | For sites that want a long-running service instead of cron: a `serve` mode with a schedule, `/status`, `/run` and Prometheus metrics | Medium to large |  |
+| `refresh` from files | Run the warehouse from NDJSON or Bundle files (exports, Synthea) without a server | Small | #32 |
+| STU3 | Only if a site still runs STU3 | Medium |  |
+| HAPI database source | Faster than search for very large HAPI servers, and sees deletions. Ties fhir-pipes to HAPI's schema | Medium | #33 |
+| Google Cloud FHIR store sink | Only for GCP sites | Small to medium | #34 |
 
 ### Not needed
 
