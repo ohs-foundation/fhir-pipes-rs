@@ -43,8 +43,9 @@ pub enum Command {
     /// Run, check and test SQL-on-FHIR ViewDefinitions directly: run, sql,
     /// validate, lint, test
     Views(crate::views::ViewsArgs),
-    /// Convert a snapshot into a partitioned GeoParquet dataset (offline)
-    Transform(TransformArgs),
+    /// Turn a snapshot of FHIR resources into a dataset for another tool (offline)
+    #[command(subcommand)]
+    Transform(TransformCommand),
     /// Summarise a written dataset
     Inspect(InspectArgs),
     /// Fetch Locations from a FHIR server into a snapshot (incremental)
@@ -64,6 +65,13 @@ pub enum Command {
     /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `fhir-pipes load`
     #[command(subcommand)]
     Dhis2(Box<Dhis2Command>),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TransformCommand {
+    /// The Location registry as a partitioned GeoParquet dataset, with its
+    /// hierarchy and geometry, for GIS tools
+    Locations(TransformArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -143,7 +151,7 @@ pub struct Dhis2LocationsArgs {
     /// Prefix of the Location ids (PREFIX-<uid>); defaults to the instance name
     #[arg(long)]
     pub id_prefix: Option<String>,
-    /// Country code put on the top org unit as its national admin code (e.g. SLE); fhir-pipes transform partitions by it
+    /// Country code put on the top org unit as its national admin code (e.g. SLE); fhir-pipes transform locations partitions by it
     #[arg(long)]
     pub country_code: Option<String>,
     /// DHIS2 level whose org units are facilities (a Location plus an Organization); defaults to the deepest level

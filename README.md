@@ -18,6 +18,25 @@ tools, kiln and fhir-warehouse, and the octofhir/sof SQL-on-FHIR engine. The
 reasoning and the plan are in
 [docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md](docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md).
 
+## Install
+
+Download the binary for your platform from the
+[releases](https://github.com/ohs-foundation/fhir-pipes-rs/releases): macOS (arm64,
+x86_64), Linux (x86_64, aarch64; static, no runtime dependencies) or Windows (x86_64).
+Each release has a `SHA256SUMS` file to check it against.
+
+```sh
+# macOS on Apple Silicon, for example
+curl -LO https://github.com/ohs-foundation/fhir-pipes-rs/releases/latest/download/fhir-pipes-aarch64-apple-darwin
+chmod +x fhir-pipes-aarch64-apple-darwin && mv fhir-pipes-aarch64-apple-darwin /usr/local/bin/fhir-pipes
+```
+
+Or build it with Rust:
+
+```sh
+cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes
+```
+
 ## Building a SQL-on-FHIR warehouse
 
 `fhir-pipes refresh` downloads the resources a directory of ViewDefinitions
@@ -82,8 +101,8 @@ The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged.
 | `views run`, `sql`, `validate`, `lint`, `test` | | Run views over local FHIR files or PostgreSQL, generate their SQL, check them, run SQL-on-FHIR test cases | below |
 | `export` | out | Download every resource of the given types as NDJSON | below |
 | `extract` | out | Copy Locations and Organizations into a local snapshot, incrementally | [locations.md](docs/locations.md) |
-| `transform` | transform | Snapshot → partitioned GeoParquet (the `locations` transform) | [locations.md](docs/locations.md) |
-| `run` | out | `extract` then `transform` | [locations.md](docs/locations.md) |
+| `transform locations` | transform | Snapshot → partitioned GeoParquet, the first transform | [locations.md](docs/locations.md) |
+| `run` | out | `extract` then `transform locations` | [locations.md](docs/locations.md) |
 | `inspect` | | Summarise a GeoParquet dataset | [locations.md](docs/locations.md) |
 | `diff` | in | Edited GeoJSON or GeoParquet → changed FHIR resources | [locations.md](docs/locations.md) |
 | `load` | in | Send NDJSON resources to a FHIR server in transaction bundles, with version checks | [locations.md](docs/locations.md#load) |
