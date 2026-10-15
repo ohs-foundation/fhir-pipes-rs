@@ -16,6 +16,8 @@ pub struct IndexRecord {
     pub type_code: Option<String>,
     /// The type code is the profile's admin_unit_type.
     pub is_admin: bool,
+    /// Codes under the ICR location-type system, from any coding in `type`.
+    pub location_types: Vec<String>,
     pub managing_organization: Option<String>,
     /// Byte offset and length of the resource's line in locations.ndjson.
     pub offset: u64,

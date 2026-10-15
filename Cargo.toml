@@ -90,3 +90,9 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytes = "1"
 thiserror = "2.0"
 tracing = "0.1"
+
+# octofhir-fhirpath declares an HTTP client (reqwest with rustls, so aws-lc) it
+# never uses. ohs-foundation/fhirpath-rs drops it; this goes once
+# octofhir/fhirpath-rs#175 is in a release.
+[patch.crates-io]
+octofhir-fhirpath = { git = "https://github.com/ohs-foundation/fhirpath-rs", rev = "e7af4aa" }

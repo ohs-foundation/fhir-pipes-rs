@@ -92,6 +92,7 @@ name = "my-ig"            # shown in messages
 | `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. |
 | `spatial_index_extension` | transform, diff, index | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
 | `admin_unit_type` | transform, population, dhis2 | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
+| `type_systems` | population | Code systems of the Location type codes. `population --type CODE` selects Locations with that code under any of these, wherever the coding sits in `type`. Empty or absent: a code under any system. |
 | `admin_code_column` | transform | The name of a `[[location.column]]` holding an admin unit's code. It fills `adminN_code`, gives `country` (from the level 0 unit), and is checked for duplicates (`duplicate_<column>` in the report). |
 | `[[location.column]]` | transform, diff | An extra column; see [Column kinds](#column-kinds). Columns appear in this order, after `position_latitude`. |
 

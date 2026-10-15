@@ -65,6 +65,10 @@ pub struct LocationProfile {
     pub spatial_index_extension: Option<String>,
     /// The Location type code of an administrative unit.
     pub admin_unit_type: Option<String>,
+    /// Code systems of the Location type codes: `population --type` matches a
+    /// code under any of them, wherever it sits in `type`. Empty: any system.
+    #[serde(default)]
+    pub type_systems: Vec<String>,
     /// The Location column holding an admin unit's code.
     pub admin_code_column: Option<String>,
     #[serde(default, rename = "column")]

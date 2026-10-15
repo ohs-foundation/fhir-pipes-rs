@@ -100,6 +100,7 @@ pub fn build_index(
             is_admin: loc.type_code.is_some()
                 && loc.type_code.as_deref() == profile.location.admin_unit_type.as_deref(),
             type_code: loc.type_code,
+            location_types: loc.location_types,
             managing_organization: loc.managing_organization,
             offset: line.offset,
             len: line.len,
