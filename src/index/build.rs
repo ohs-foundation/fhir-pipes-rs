@@ -96,6 +96,7 @@ pub fn build_index(
             name: loc.name,
             pcode: loc.pcode,
             type_code: loc.type_code,
+            location_types: loc.location_types,
             managing_organization: loc.managing_organization,
             offset: line.offset,
             len: line.len,

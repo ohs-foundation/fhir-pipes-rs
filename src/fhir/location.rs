@@ -33,6 +33,12 @@ pub const FACILITY_TYPE_SYSTEM: &str =
 pub const OWNERSHIP_SYSTEM: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs";
 pub const GEOJSON_CONTENT_TYPE: &str = "application/geo+json";
 pub const ADMIN_UNIT_TYPE: &str = "admin-unit";
+/// The ICR location-type code system: its canonical URI, then the older one
+/// some data still carries. `location_types` reads codes under either.
+pub const LOCATION_TYPE_SYSTEMS: [&str; 2] = [
+    "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
+    "https://icr.healthcampaigns.org/CodeSystem/icr-location-type",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identifier {
@@ -58,6 +64,9 @@ pub struct Location {
     pub status: Option<String>,
     pub description: Option<String>,
     pub type_code: Option<String>,
+    /// Every code under the ICR location-type system, from any concept and
+    /// coding in `type`, whatever their order.
+    pub location_types: Vec<String>,
     pub physical_type: Option<String>,
     pub part_of: Option<String>,
     pub managing_organization: Option<String>,
@@ -134,6 +143,28 @@ fn first_coding_code(node: Option<&Value>) -> Option<String> {
         .get("code")?
         .as_str()
         .map(str::to_string)
+}
+
+/// Every coding.code under one of `systems`, across a CodeableConcept or a
+/// list of them, in document order.
+pub(crate) fn codes_in_systems(node: Option<&Value>, systems: &[&str]) -> Vec<String> {
+    let concepts: Vec<&Value> = match node {
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(other) => vec![other],
+        None => Vec::new(),
+    };
+    concepts
+        .into_iter()
+        .filter_map(|c| c.get("coding")?.as_array())
+        .flatten()
+        .filter(|coding| {
+            coding
+                .get("system")
+                .and_then(Value::as_str)
+                .is_some_and(|s| systems.contains(&s))
+        })
+        .filter_map(|coding| coding.get("code")?.as_str().map(str::to_string))
+        .collect()
 }
 
 /// First coding under `system` across a CodeableConcept or list of them.
@@ -268,6 +299,7 @@ impl Location {
             Some(_) => report.add("malformed_field", &id, "alias is not a list"),
         }
         loc.type_code = first_coding_code(obj.get("type"));
+        loc.location_types = codes_in_systems(obj.get("type"), &LOCATION_TYPE_SYSTEMS);
         loc.physical_type = first_coding_code(obj.get("physicalType"));
         loc.facility_level = coding_code_by_system(obj.get("type"), FACILITY_TYPE_SYSTEM);
         loc.ownership = coding_code_by_system(obj.get("type"), OWNERSHIP_SYSTEM);
@@ -411,6 +443,24 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn location_types_are_read_from_any_coding_under_the_icr_systems() {
+        let v = serde_json::json!([
+            {"coding": [{"system": "https://example.test/local", "code": "zone"}]},
+            {"coding": [
+                {"system": "https://example.test/local", "code": "facility-catchment"},
+                {"system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs", "code": "settlement-catchment"}
+            ]},
+            {"coding": [{"system": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type", "code": "school"}]}
+        ]);
+        assert_eq!(
+            codes_in_systems(Some(&v), &LOCATION_TYPE_SYSTEMS),
+            ["settlement-catchment", "school"]
+        );
+        assert!(codes_in_systems(None, &LOCATION_TYPE_SYSTEMS).is_empty());
+    }
+
     use super::*;
     use crate::report::Report;
 

@@ -280,7 +280,9 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             Selector::Level(level) => {
                 index.hierarchy.get(i).and_then(|f| f.admin_level) == Some(*level)
             }
-            Selector::Type(t) => index.records[i].type_code.as_deref() == Some(t.as_str()),
+            // Any coding under the ICR location-type system, not just the
+            // first coding: a Location may list a local concept first.
+            Selector::Type(t) => index.records[i].location_types.iter().any(|c| c == t),
         })
         .collect();
     if targets.is_empty() {

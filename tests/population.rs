@@ -586,3 +586,48 @@ fn type_mode_measures_each_polygon_and_never_rolls_up() {
     .failure()
     .code(2);
 }
+
+/// `--type` matches the ICR location-type coding wherever it sits in `type`, and
+/// ignores the same code under another system.
+#[test]
+fn type_mode_matches_the_icr_coding_not_the_first_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut resources = two_state_country(Some(&rect(5.0, 4.0, 7.0, 7.0)));
+    let icr = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs";
+    let legacy = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type";
+    let local = "https://example.test/local-types";
+    for (id, b, types) in [
+        // A local concept listed before the ICR one.
+        (
+            "c1",
+            rect(3.0, 4.0, 4.0, 7.0),
+            json!([
+                {"coding": [{"system": local, "code": "zone"}]},
+                {"coding": [{"system": icr, "code": "facility-catchment"}]}
+            ]),
+        ),
+        // The older ICR system URI.
+        (
+            "c2",
+            rect(4.0, 4.0, 5.0, 7.0),
+            json!([{"coding": [{"system": legacy, "code": "facility-catchment"}]}]),
+        ),
+        // The same code in an unrelated system: not an ICR catchment.
+        (
+            "c3",
+            rect(3.0, 4.0, 5.0, 7.0),
+            json!([{"coding": [{"system": local, "code": "facility-catchment"}]}]),
+        ),
+    ] {
+        let mut c = admin(id, id, Some("west"), Some(&b));
+        c["type"] = types;
+        resources.push(c);
+    }
+    write_snapshot(dir.path(), &resources);
+    run(dir.path(), FIXTURE, &["--type", "facility-catchment"]).success();
+    let ids: Vec<String> = groups(dir.path())
+        .iter()
+        .map(|g| g["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["pop-worldpop-2026-c1", "pop-worldpop-2026-c2"]);
+}
