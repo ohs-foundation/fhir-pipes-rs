@@ -82,6 +82,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "annotate-snippets"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "710e8eae58854cdc1790fcb56cca04d712a17be849eeb81da2a724bf4bae2bc4"
+dependencies = [
+ "anstyle",
+ "unicode-width",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1329,6 +1339,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "fhir-pipes"
 version = "0.3.0"
 dependencies = [
+ "annotate-snippets",
  "anyhow",
  "arrow",
  "arrow-array",
@@ -1352,9 +1363,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx-postgres",
  "tempfile",
  "thiserror 2.0.20",
  "tiff",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
  "url",
  "uuid",

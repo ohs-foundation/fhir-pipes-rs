@@ -16,6 +16,7 @@ mod report;
 mod run;
 mod snapshot;
 mod transform;
+mod views;
 mod warehouse;
 mod write;
 
@@ -31,6 +32,16 @@ fn main() {
         }
         return;
     }
+    if let cli::Command::Views(args) = &cli.command {
+        if let Err(err) = views::run(args) {
+            // validate, lint and test have already printed their findings.
+            if !err.is::<views::Failed>() {
+                eprintln!("fhir-pipes: {err:#}");
+            }
+            std::process::exit(1);
+        }
+        return;
+    }
     let result: error::Result<()> = match cli.command {
         cli::Command::Transform(args) => transform::run_transform(&args),
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
@@ -42,7 +53,7 @@ fn main() {
         cli::Command::Index(args) => cells::run_index(&args),
         cli::Command::Population(args) => population::run_population(&args),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd),
-        cli::Command::Refresh(_) => unreachable!("handled above"),
+        cli::Command::Refresh(_) | cli::Command::Views(_) => unreachable!("handled above"),
     };
     if let Err(err) = result {
         eprintln!("fhir-pipes: {err}");
