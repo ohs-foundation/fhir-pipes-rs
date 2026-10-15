@@ -18,6 +18,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_USERNAME",
+        "FHIR_PIPES_PASSWORD",
     ] {
         c.env_remove(var);
     }
@@ -690,4 +692,85 @@ fn bulk_timeout_needs_bulk() {
         .assert()
         .code(2);
     assert!(stderr(&a).contains("--bulk"), "{}", stderr(&a));
+}
+
+/// A status request that hangs past --bulk-timeout ends as a timeout, which
+/// cancels the export, not as a transport error that leaves it saved.
+#[test]
+fn a_status_request_that_hangs_past_the_deadline_cancels_the_export() {
+    let server = Server::run();
+    expect_kick_off(&server, "Patient", None, &server.url_str("/status/7"));
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/status/7"))
+            .times(1..)
+            .respond_with(delay_and_then(
+                Duration::from_secs(5),
+                status_code(202).insert_header("Retry-After", "1"),
+            )),
+    );
+    expect_delete(&server, "/status/7");
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--bulk-timeout", "1", "--timeout", "30"])
+        .assert()
+        .failure();
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    let err = stderr(&a);
+    assert!(err.contains("cancelled it"), "{err}");
+    assert!(state(dir.path()).get("bulk").is_none());
+}
+
+/// An OperationOutcome longer than the shown error text is still read whole:
+/// a transient one is waited out, a permanent one fails with a cut text.
+#[test]
+fn long_operation_outcomes_are_classified_whole() {
+    let outcome = |code: &str| {
+        json!({"resourceType": "OperationOutcome", "issue": [
+            {"severity": "error", "code": code, "diagnostics": "x".repeat(2000)}]})
+        .to_string()
+    };
+    let server = Server::run();
+    expect_kick_off(&server, "Patient", None, &server.url_str("/status/6"));
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/status/6"))
+            .times(2)
+            .respond_with(cycle![
+                status_code(500)
+                    .insert_header("Retry-After", "0")
+                    .body(outcome("transient")),
+                done(&manifest(&server, &[("Patient", "/files/p.ndjson")], false)),
+            ]),
+    );
+    expect_file(
+        &server,
+        "/files/p.ndjson",
+        ndjson(&[patient("p1", "2026-10-15T07:00:00Z")]),
+    );
+    expect_delete(&server, "/status/6");
+    let dir = tempfile::tempdir().unwrap();
+    export_bulk(&server, dir.path(), &["Patient"])
+        .assert()
+        .success();
+    assert_eq!(ids(&dir.path().join("Patient.ndjson")), ["p1"]);
+
+    let server = Server::run();
+    expect_kick_off(&server, "Patient", None, &server.url_str("/status/5"));
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/status/5"))
+            .times(1)
+            .respond_with(status_code(400).body(outcome("processing"))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .assert()
+        .failure();
+    let err = stderr(&a);
+    assert!(err.contains("HTTP 400: error processing: xxx"), "{err}");
+    assert!(err.len() < 1500, "{} chars", err.len());
+    assert!(state(dir.path()).get("bulk").is_none());
 }

@@ -14,6 +14,9 @@ use url::Url;
 use crate::error::{PipesError, Result};
 use crate::extract::client::{Exchange, FetchError, FhirClient, parse_retry_after};
 
+/// The longest failure text shown from a status response.
+const DISPLAY_CAP: usize = 500;
+
 /// The first wait when the status URL gives no Retry-After; it doubles up to
 /// POLL_MAX on each answer without one.
 const POLL_FIRST: Duration = Duration::from_secs(1);
@@ -132,9 +135,20 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
     let mut backoff = POLL_FIRST;
     let mut progress: Option<String> = None;
     loop {
-        let got = client
-            .exchange(Method::GET, status_url)
-            .map_err(|e| PipesError::Environment(format!("polling {status_url}: {e}")))?;
+        if Instant::now() >= deadline {
+            return Ok(Polled::TimedOut);
+        }
+        // Bounded by the deadline: a status request still open then is a
+        // timeout, which cancels the export, not a transport error.
+        let got = match client.exchange_by(Method::GET, status_url, Some(deadline)) {
+            Ok(got) => got,
+            Err(_) if Instant::now() >= deadline => return Ok(Polled::TimedOut),
+            Err(e) => {
+                return Err(PipesError::Environment(format!(
+                    "polling {status_url}: {e}"
+                )));
+            }
+        };
         let retry_after = match got.status {
             200 => return manifest(&got, status_url).map(Polled::Done),
             202 | 429 => {
@@ -148,19 +162,29 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
             }
             404 | 410 => return Ok(Polled::Gone),
             status => {
-                let found = serde_json::from_slice::<Value>(&got.body)
-                    .map(|v| issues(&v))
-                    .unwrap_or_default();
+                // A body cut at the limit is not parsed: it is not one
+                // OperationOutcome the poller can trust.
+                let found = if got.truncated {
+                    Vec::new()
+                } else {
+                    serde_json::from_slice::<Value>(&got.body)
+                        .map(|v| issues(&v))
+                        .unwrap_or_default()
+                };
                 let transient = !found.is_empty() && found.iter().all(|i| i.code == "transient");
                 // A 5xx that is not an OperationOutcome is a gateway's, not
                 // the export's.
                 let gateway = found.is_empty() && status >= 500;
                 if !(transient || gateway) {
-                    let text = if found.is_empty() {
+                    // Cut for display only, after the body was classified.
+                    let text: String = if found.is_empty() {
                         String::from_utf8_lossy(&got.body).into_owned()
                     } else {
                         join_issues(&found)
-                    };
+                    }
+                    .chars()
+                    .take(DISPLAY_CAP)
+                    .collect();
                     return Ok(Polled::Failed(format!("HTTP {status}: {text}")));
                 }
                 retry_after(&got)
@@ -177,6 +201,7 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
         if now >= deadline {
             return Ok(Polled::TimedOut);
         }
+        // The loop checks the deadline again before the next poll.
         std::thread::sleep(delay.min(deadline - now));
     }
 }

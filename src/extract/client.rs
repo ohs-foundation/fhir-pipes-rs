@@ -32,6 +32,10 @@ const ERROR_BODY_CAP: usize = 500;
 /// Never read more than this much of an error body off the wire; we only
 /// keep the first ERROR_BODY_CAP chars of it anyway.
 const ERROR_BODY_READ_LIMIT: u64 = 8192;
+/// How much of a non-2xx body `exchange` keeps whole, for a caller that
+/// parses it (a Bulk Data OperationOutcome). Beyond it the body is cut and
+/// `truncated` set.
+const EXCHANGE_BODY_LIMIT: u64 = 1 << 20;
 /// Assumed token lifetime, in seconds, when a token response omits `expires_in`.
 const DEFAULT_TOKEN_LIFETIME: u64 = 300;
 
@@ -122,8 +126,11 @@ pub struct Fetched {
 pub struct Exchange {
     pub status: u16,
     pub headers: HeaderMap,
-    /// The whole body of a 2xx; at most ERROR_BODY_CAP chars of any other.
+    /// The whole body of a 2xx; of any other, at most EXCHANGE_BODY_LIMIT
+    /// bytes, uncapped, so the caller can parse it.
     pub body: Vec<u8>,
+    /// A non-2xx body was longer than EXCHANGE_BODY_LIMIT and was cut.
+    pub truncated: bool,
 }
 
 impl Exchange {
@@ -163,17 +170,25 @@ fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
 fn exchanged(resp: Response) -> std::result::Result<Exchange, FetchError> {
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();
+    let mut truncated = false;
     let body = if (200..300).contains(&status) {
         resp.bytes()
             .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?
             .to_vec()
     } else {
-        read_error_body(resp).into_bytes()
+        let mut buf = Vec::new();
+        let _ = resp.take(EXCHANGE_BODY_LIMIT + 1).read_to_end(&mut buf);
+        if buf.len() as u64 > EXCHANGE_BODY_LIMIT {
+            buf.truncate(EXCHANGE_BODY_LIMIT as usize);
+            truncated = true;
+        }
+        buf
     };
     Ok(Exchange {
         status,
         headers,
         body,
+        truncated,
     })
 }
 
@@ -362,10 +377,29 @@ impl FhirClient {
     /// A Bulk Data status URL answers 202 or 429 while the export runs, and
     /// the caller does the waiting.
     pub fn exchange(&self, method: Method, url: &str) -> std::result::Result<Exchange, FetchError> {
+        self.exchange_by(method, url, None)
+    }
+
+    /// `exchange`, with every attempt and the waits between them ending by
+    /// `deadline`: a request still open then fails, and no retry starts
+    /// after it.
+    pub fn exchange_by(
+        &self,
+        method: Method,
+        url: &str,
+        deadline: Option<Instant>,
+    ) -> std::result::Result<Exchange, FetchError> {
         let auth = self.authorization()?;
+        let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let mut last = None;
         for attempt in 1..=self.retries {
             let mut request = self.http.request(method.clone(), url);
+            if let Some(left) = left() {
+                if left.is_zero() {
+                    break;
+                }
+                request = request.timeout(left);
+            }
             if let Some(v) = &auth {
                 request = request.header(AUTHORIZATION, v.clone());
             }
@@ -374,12 +408,13 @@ impl FhirClient {
                 Err(e) => {
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
-                        std::thread::sleep(jittered(backoff_delay(attempt, None)));
+                        let wait = jittered(backoff_delay(attempt, None));
+                        std::thread::sleep(left().map_or(wait, |l| wait.min(l)));
                     }
                 }
             }
         }
-        Err(last.unwrap_or_else(|| FetchError::Transport("no attempts made".to_string())))
+        Err(last.unwrap_or_else(|| FetchError::Transport("the deadline passed".to_string())))
     }
 
     /// GET an NDJSON file and hand its body to `read` as it arrives, with the
