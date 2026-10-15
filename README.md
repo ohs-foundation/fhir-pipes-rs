@@ -228,7 +228,7 @@ Any FHIR R4 server that supports standard search with `_lastUpdated`,
 on any vendor's extensions. `export --bulk` also needs the server's
 system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
-A server that needs authentication gets one of two kinds:
+A server that needs authentication gets one of three kinds:
 
 - `--token` (or `FHIR_PIPES_TOKEN`) is sent as a fixed bearer token. Getting
   it is up to you, and a run that outlasts it fails with a 401.
@@ -240,9 +240,14 @@ A server that needs authentication gets one of two kinds:
   expires, so a long run does not outlive its token. A wrong secret or token
   URL fails before any FHIR request. `refresh` reads the client ID and secret
   only from the environment.
+- `--username` and `--password` (or `FHIR_PIPES_USERNAME`,
+  `FHIR_PIPES_PASSWORD`) are sent as HTTP Basic auth, as OpenMRS and many
+  HAPI servers expect. Use HTTPS: Basic sends the password with every request.
+  `refresh` takes the username from `--username` or `server.username`, and
+  reads the password only from the environment.
 
-The two are mutually exclusive; with neither, requests carry no
-Authorization header.
+They are mutually exclusive; with none, requests carry no Authorization
+header.
 
 ```sh
 export FHIR_PIPES_CLIENT_SECRET=...          # keep the secret out of shell history

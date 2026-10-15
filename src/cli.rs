@@ -418,8 +418,9 @@ pub struct InspectArgs {
     pub out: PathBuf,
 }
 
-/// How extract and load authenticate: no header, a fixed bearer token, or an
-/// OAuth client id and secret that fhir-pipes trades for tokens itself.
+/// How the FHIR commands authenticate: no header, a fixed bearer token, HTTP
+/// Basic, or an OAuth client id and secret that fhir-pipes trades for tokens
+/// itself.
 #[derive(clap::Args, Debug, Clone)]
 pub struct AuthArgs {
     /// Bearer token; falls back to $FHIR_PIPES_TOKEN
@@ -444,6 +445,22 @@ pub struct AuthArgs {
     /// OAuth token endpoint the client id and secret are sent to; falls back to $FHIR_PIPES_TOKEN_URL
     #[arg(long, env = "FHIR_PIPES_TOKEN_URL", requires = "client_id")]
     pub token_url: Option<String>,
+    /// Username for HTTP Basic auth; falls back to $FHIR_PIPES_USERNAME
+    #[arg(
+        long,
+        env = "FHIR_PIPES_USERNAME",
+        requires = "password",
+        conflicts_with_all = ["token", "client_id"]
+    )]
+    pub username: Option<String>,
+    /// Password for HTTP Basic auth; falls back to $FHIR_PIPES_PASSWORD
+    #[arg(
+        long,
+        env = "FHIR_PIPES_PASSWORD",
+        hide_env_values = true,
+        requires = "username"
+    )]
+    pub password: Option<String>,
 }
 
 impl AuthArgs {
@@ -454,7 +471,10 @@ impl AuthArgs {
                 client_id: id.clone(),
                 client_secret: secret.clone(),
             },
-            _ => self.token.clone().map_or(Auth::None, Auth::Token),
+            _ => match (&self.username, &self.password) {
+                (Some(user), Some(password)) => Auth::basic(user, password),
+                _ => self.token.clone().map_or(Auth::None, Auth::Token),
+            },
         }
     }
 }

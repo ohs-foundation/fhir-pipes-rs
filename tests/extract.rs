@@ -65,6 +65,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_USERNAME",
+        "FHIR_PIPES_PASSWORD",
     ] {
         c.env_remove(var);
     }

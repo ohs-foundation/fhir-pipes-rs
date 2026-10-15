@@ -57,6 +57,10 @@ pub struct RefreshArgs {
     /// FHIR_PIPES_CLIENT_SECRET, which are read only from the environment.
     #[arg(long, env = "FHIR_PIPES_TOKEN_URL")]
     token_url: Option<String>,
+    /// Username for HTTP Basic auth, with the password from
+    /// FHIR_PIPES_PASSWORD, which is read only from the environment.
+    #[arg(long, env = "FHIR_PIPES_USERNAME")]
+    username: Option<String>,
     /// Run only these steps (comma-separated). The manifest is added when a
     /// data step is among them.
     #[arg(long, value_delimiter = ',')]
@@ -133,6 +137,8 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
             client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
             client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
             token_url: args.token_url.clone(),
+            username: args.username.clone(),
+            password: env_secret("FHIR_PIPES_PASSWORD"),
             countries: args.countries.clone(),
             threads: args.threads,
             reuse_raw: args.reuse_raw,

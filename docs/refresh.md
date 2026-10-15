@@ -158,6 +158,8 @@ the file are relative to the file.
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
 | | | `server.fetch` | `search`; `bulk` for `$export` |
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
+| `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
+| | `FHIR_PIPES_PASSWORD` | | |
 | `--countries` | | `tiles.countries` | every country |
 | `--threads` | | | number of CPUs |
 | `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
@@ -166,7 +168,10 @@ the file are relative to the file.
 
 The client ID and secret are read only from the environment, never from flags
 or the file. They are traded for a token with the client-credentials grant,
-and the token is renewed before it expires, as for the other commands.
+and the token is renewed before it expires, as for the other commands. With a
+username, the password is read only from `FHIR_PIPES_PASSWORD` and the two are
+sent as HTTP Basic auth. A token, a client ID and a username are mutually
+exclusive.
 
 ```toml
 data = "../data"

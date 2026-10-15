@@ -15,6 +15,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_USERNAME",
+        "FHIR_PIPES_PASSWORD",
     ] {
         c.env_remove(var);
     }
@@ -463,4 +465,74 @@ fn the_watermark_never_passes_the_servers_clock_at_the_start() {
         .as_str()
         .unwrap();
     assert!(watermark < "2099", "{watermark}");
+}
+
+#[test]
+fn basic_auth_authorises_every_request() {
+    let server = Server::run();
+    let base = server.url_str("/fhir");
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Patient"),
+            request::headers(contains(("authorization", "Basic YWRtaW46QWRtaW4xMjM="))),
+        ])
+        .respond_with(status_code(200).body(bundle(
+            vec![json!({"resourceType": "Patient", "id": "p1"})],
+            None,
+        ))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // The password from the environment, the username as a flag.
+    fhir_pipes()
+        .args([
+            "export",
+            "--server",
+            &base,
+            "--username",
+            "admin",
+            "--type",
+            "Patient",
+        ])
+        .arg("--out")
+        .arg(dir.path())
+        .env("FHIR_PIPES_PASSWORD", "Admin123")
+        .assert()
+        .success();
+    assert_eq!(read_ndjson(&dir.path().join("Patient.ndjson")).len(), 1);
+}
+
+#[test]
+fn basic_auth_needs_a_password_and_no_other_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let export = || {
+        let mut c = fhir_pipes();
+        c.args([
+            "export",
+            "--server",
+            "http://127.0.0.1:9/fhir",
+            "--type",
+            "Patient",
+        ])
+        .arg("--out")
+        .arg(dir.path());
+        c
+    };
+    export()
+        .args(["--username", "admin"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--password"));
+    export()
+        .args(["--username", "admin", "--password", "x", "--token", "tok"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+    export()
+        .args(["--username", "admin", "--password", "x"])
+        .env("FHIR_PIPES_CLIENT_ID", "key-x")
+        .env("FHIR_PIPES_CLIENT_SECRET", "shh")
+        .env("FHIR_PIPES_TOKEN_URL", "http://127.0.0.1:9/token")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
 }
