@@ -215,3 +215,189 @@ fn package_lint_says_how_to_get_package_support() {
         .failure()
         .stderr(contains("--features fhir-packages"));
 }
+
+/// A transaction Bundle refers to its own entries by `urn:uuid` fullUrl. Read
+/// from a file, those references become `Type/id`, as a server stores them,
+/// so `getReferenceKey()` works. A urn whose entry has no id, or that is not
+/// in the Bundle, is left as is.
+#[test]
+fn bundle_urn_references_resolve_to_type_and_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let view = dir.path().join("obs.json");
+    fs::write(
+        &view,
+        r#"{"resourceType": "ViewDefinition", "name": "obs", "resource": "Observation", "status": "active",
+            "select": [{"column": [
+              {"name": "id", "path": "id"},
+              {"name": "patient_id", "path": "subject.getReferenceKey(Patient)"},
+              {"name": "subject", "path": "subject.reference"},
+              {"name": "performer", "path": "performer.first().reference"}]}]}"#,
+    )
+    .unwrap();
+    let bundle = serde_json::json!({
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {"fullUrl": "urn:uuid:aaaa", "resource": {"resourceType": "Patient", "id": "p1"}},
+            {"fullUrl": "urn:uuid:bbbb", "resource": {"resourceType": "Practitioner"}},
+            {"fullUrl": "urn:uuid:cccc", "resource": {"resourceType": "Observation", "id": "o1",
+                "subject": {"reference": "urn:uuid:aaaa"},
+                "performer": [{"reference": "urn:uuid:bbbb"}]}},
+            {"fullUrl": "urn:uuid:dddd", "resource": {"resourceType": "Observation", "id": "o2",
+                "subject": {"reference": "urn:uuid:not-in-bundle"}}}
+        ]
+    });
+    let json = dir.path().join("bundle.json");
+    fs::write(&json, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+    // The same Bundle on one NDJSON line goes through the streaming reader.
+    let ndjson = dir.path().join("bundle.ndjson");
+    fs::write(&ndjson, format!("{bundle}\n")).unwrap();
+
+    for input in [&json, &ndjson] {
+        let a = views()
+            .arg("run")
+            .arg(&view)
+            .arg("--input")
+            .arg(input)
+            .args(["--output", "ndjson"])
+            .assert()
+            .success();
+        let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&a.get_output().stdout)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                serde_json::json!({"id": "o1", "patient_id": "p1", "subject": "Patient/p1",
+                                   "performer": "urn:uuid:bbbb"}),
+                serde_json::json!({"id": "o2", "subject": "urn:uuid:not-in-bundle"}),
+            ],
+            "{}",
+            input.display()
+        );
+    }
+}
+
+/// A directory is read with its subdirectories, as fhir-data-pipes'
+/// `synthea-hiv/sample_data_segments/segment_*` are laid out; hidden files
+/// such as `.export-state.json` are skipped.
+#[test]
+fn input_directories_are_read_recursively_without_hidden_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    fs::create_dir_all(input.join("segment_1/deeper")).unwrap();
+    fs::create_dir_all(input.join(".hidden")).unwrap();
+    let patient = |id: &str| format!(r#"{{"resourceType": "Patient", "id": "{id}"}}"#);
+    fs::write(input.join("top.json"), patient("p1")).unwrap();
+    fs::write(input.join("segment_1/a.json"), patient("p2")).unwrap();
+    fs::write(
+        input.join("segment_1/deeper/b.ndjson"),
+        patient("p3") + "\n",
+    )
+    .unwrap();
+    fs::write(input.join(".hidden/c.json"), patient("hidden1")).unwrap();
+    fs::write(
+        input.join(".export-state.json"),
+        r#"{"Patient": "2026-01-01"}"#,
+    )
+    .unwrap();
+    let view = fixtures().join("views/Binary-IcrPatient.json");
+    let a = views()
+        .arg("run")
+        .arg(&view)
+        .arg("--input")
+        .arg(&input)
+        .args(["--output", "ndjson"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+    for id in ["p1", "p2", "p3"] {
+        assert!(out.contains(&format!(r#""id":"{id}""#)), "{out}");
+    }
+    assert!(!out.contains("hidden1"), "{out}");
+    assert_eq!(out.lines().count(), 3, "{out}");
+}
+
+/// A Bundle that is an entry of another resolves its own urns: wrapping it
+/// in an outer Bundle that maps the same urn elsewhere changes nothing.
+#[test]
+fn a_nested_bundle_resolves_its_own_urns() {
+    let dir = tempfile::tempdir().unwrap();
+    let view = dir.path().join("obs.json");
+    fs::write(
+        &view,
+        r#"{"resourceType": "ViewDefinition", "name": "obs", "resource": "Observation", "status": "active",
+            "select": [{"column": [
+              {"name": "id", "path": "id"},
+              {"name": "patient_id", "path": "subject.getReferenceKey(Patient)"}]}]}"#,
+    )
+    .unwrap();
+    let inner = serde_json::json!({
+        "resourceType": "Bundle", "type": "collection",
+        "entry": [
+            {"fullUrl": "urn:uuid:p", "resource": {"resourceType": "Patient", "id": "inner-p"}},
+            {"fullUrl": "urn:uuid:o", "resource": {"resourceType": "Observation", "id": "o1",
+                "subject": {"reference": "urn:uuid:p"}}}
+        ]
+    });
+    let outer = serde_json::json!({
+        "resourceType": "Bundle", "type": "collection",
+        "entry": [
+            {"fullUrl": "urn:uuid:p", "resource": {"resourceType": "Patient", "id": "outer-p"}},
+            {"fullUrl": "urn:uuid:inner", "resource": inner}
+        ]
+    });
+    let json = dir.path().join("outer.json");
+    fs::write(&json, outer.to_string()).unwrap();
+    let ndjson = dir.path().join("outer.ndjson");
+    fs::write(&ndjson, format!("{outer}\n")).unwrap();
+    for input in [&json, &ndjson] {
+        views()
+            .arg("run")
+            .arg(&view)
+            .arg("--input")
+            .arg(input)
+            .args(["--output", "ndjson"])
+            .assert()
+            .success()
+            .stdout(r#"{"id":"o1","patient_id":"inner-p"}"#.to_string() + "\n");
+    }
+}
+
+/// A symlink to a directory is not followed, so a link back up the tree does
+/// not read the same files again; a symlinked file is read.
+#[test]
+#[cfg(unix)]
+fn input_directories_skip_symlinked_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(
+        input.join("p.json"),
+        r#"{"resourceType": "Patient", "id": "p1"}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("elsewhere.json"),
+        r#"{"resourceType": "Patient", "id": "p2"}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&input, input.join("again")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("elsewhere.json"), input.join("linked.json"))
+        .unwrap();
+    let a = views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrPatient.json"))
+        .arg("--input")
+        .arg(&input)
+        .args(["--output", "ndjson"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(
+        out.contains(r#""id":"p1""#) && out.contains(r#""id":"p2""#),
+        "{out}"
+    );
+}

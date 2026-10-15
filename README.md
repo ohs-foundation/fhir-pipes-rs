@@ -94,7 +94,10 @@ of 144 cases). [crates/sof-lint](crates/sof-lint) checks each view's
 structure before anything runs, so a broken view stops the refresh with the
 file and the rule it breaks.
 
-The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged.
+The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged, and
+give the same rows on its Synthea sample Bundles
+(`synthea-hiv/sample_data_segments`) read directly as on the same resources
+flattened to NDJSON.
 
 ## Profiles
 
@@ -139,7 +142,11 @@ fhir-pipes views lint patient_flat.json --shareable                         # th
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
 
-A directory of views is read as `refresh` reads it. Two options need a build
+A directory of views is read as `refresh` reads it. An `--input` directory is
+read with its subdirectories, skipping hidden files. In a Bundle, a reference
+to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
+Synthea have, is rewritten to that entry's `Type/id`, as a FHIR server would
+store it, so `getReferenceKey()` and joins work on Bundle files. Two options need a build
 with an optional feature (see [Building and testing](#building-and-testing)):
 `views run --db URL` runs against PostgreSQL holding FHIR resources as JSONB
 instead of files (`postgres`), and `views lint --package hl7.fhir.r4.core`
