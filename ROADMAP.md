@@ -73,7 +73,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Port `bake` and `bake-points` (GRID3 and CSV → Locations) from Python | Planned | Still in `python/` |
 | Move the FHIR client, paging, snapshot merge and loader into their own crate | Planned | Step 1 of the consolidation plan |
 | Put geo, rasters and DHIS2 behind Cargo features | Planned | So an analytics-only build stays small; only `postgres` and `fhir-packages` are optional today |
-| Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | If needed | Only for compatibility with existing fhir-data-pipes warehouses. Build it on a schema from StructureDefinitions, with a full-resource JSON column as the fallback |
+| Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR reads only view tables, and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
 | FHIR Bulk Data `$export` client | Not started | `export` uses search paging |
 | Write view tables straight into PostgreSQL | Not started | `views sql` generates the SQL; there is no loader |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
