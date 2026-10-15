@@ -47,8 +47,9 @@ The gaps that matter for replacing the Java pipeline at existing sites:
 5. **FHIR-to-FHIR sync.** The Java pipeline can copy resources to a second
    FHIR server or a Google Cloud FHIR store. fhir-pipes' `load` checks
    versions against the same server, so it cannot copy to another.
-6. **Running on a schedule with an API.** The Java controller runs full and
-   incremental runs on cron schedules, keeps timestamped snapshots, and has a
+6. **Running on a schedule with an API.** The Java controller runs
+   incremental runs and snapshot purges on cron schedules (full runs are
+   started from its web page or API), keeps timestamped snapshots, and has a
    web page, a REST API and Prometheus metrics. fhir-pipes runs from cron or CI
    and keeps one current warehouse.
 7. **A Docker image.** Existing sites deploy the Java pipeline as an image and
@@ -59,8 +60,8 @@ smaller gap: both servers work over FHIR search, which fhir-pipes supports.
 
 fhir-pipes does several things the Java pipeline does not: writing back to
 FHIR (GIS edits, DHIS2, population), geospatial outputs, profiles checked
-against an IG, a DuckDB catalog, release binaries for five platforms, and the
-official SQL-on-FHIR test suite.
+against an IG, a DuckDB catalog, release binaries for five platforms, and view
+linting.
 
 ## 1. Sources
 
@@ -68,8 +69,8 @@ official SQL-on-FHIR test suite.
 |---|---|---|---|
 | FHIR search | `FHIR_SEARCH` (default). First query with `_total=accurate`, `_count=batchSize` (default 100), `_summary=data`; pages fetched in parallel by generating `_getpagesoffset` segments, which only works on HAPI (`FhirSearchUtil`) | `export`, `extract`, `refresh`. Follows `next` links with `_count=1000`, so it works on any server that pages with links; pages of one type are fetched one after another | Same, slower on large servers |
 | Resource types | `resourceList` (default `Patient,Encounter,Observation`) | `export --type`; `refresh` downloads the types its views read | Same |
-| Incremental fetch | `--since` → `_lastUpdated=ge` (search), `_since` (bulk), `res_updated >` (HAPI JDBC). The controller reads `since` from the last snapshot | Watermark per type in `.export-state.json`, `_lastUpdated=ge`, merged by id; never later than the server's clock less five minutes | Same |
-| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, reads the NDJSON output with the same auth, keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | None | Missing |
+| Incremental fetch | `--since` → `_lastUpdated=ge` (search), `_since` (bulk), `res_updated >` (HAPI JDBC). The controller reads `since` from the last snapshot | Watermark per type in `.export-state.json`, `_lastUpdated=ge`, merged by id. When the first response has an HTTP `Date`, the watermark is never later than that time less five minutes; without one, it is the greatest `meta.lastUpdated` seen | Same |
+| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | None | Missing |
 | HAPI database | `HAPI_JDBC`: reads `hfj_resource`/`hfj_res_ver` in PostgreSQL (or MySQL) directly, in chunks; rebuilds `meta` from the tag tables; the only mode that sees deletions | None | Missing |
 | OpenMRS database | `OPENMRS_JDBC`: reads uuids from OpenMRS MySQL tables, then fetches them from the FHIR2 module with `_id=` searches. No incremental mode | None. OpenMRS works through FHIR search (`/openmrs/ws/fhir2/R4`), untested | Missing (search untested) |
 | `--activePeriod` | Fetches resources in a date range, then each matched patient's history. Marked in the code as possibly to be removed | None | Not needed |
@@ -94,7 +95,7 @@ official SQL-on-FHIR test suite.
 |---|---|---|---|
 | R4 | Yes (default) | Yes | Same |
 | STU3 | Yes: Bunsen schemas, bulk export parameters, controller config | Nothing in fhir-pipes is tested on STU3 data | Missing (untested) |
-| R4B, R5 | Only in the ViewDefinition engine (HAPI FHIRPath per version) | Not tested | Same (neither really supports them) |
+| R4B, R5 | Only in the ViewDefinition engine (HAPI FHIRPath per version) | The view engine has an R5 test case (`crates/sof/tests/extra/multi_version_r5.json`, an R5 MedicationRequest); nothing else is tested on R4B or R5 data | Same: views only, in both |
 
 ## 4. Nested Parquet-on-FHIR
 
@@ -108,14 +109,14 @@ official SQL-on-FHIR test suite.
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
-| Engine | HAPI FHIRPath per FHIR version | `crates/sof` on `octofhir-fhirpath`; passes the official SQL-on-FHIR v2.1 test suite (144 of 144) in memory, and the suite runs in CI | Same; fhir-pipes runs the official tests |
+| Engine | HAPI FHIRPath per FHIR version. Runs a copy of the official SQL-on-FHIR v2 tests in CI (`SQLonFHIRv2Test`), skipping 5 cases (`join()` with no separator, date `lowBoundary`/`highBoundary`, one validation case) and with `fn_reference_keys.json` adapted; listed in the spec's implementations registry | `crates/sof` on `octofhir-fhirpath`; passes all 144 cases of the v2.1 suite in memory, with no skips, in CI | Same; fhir-pipes has no skipped cases |
 | Constructs | `select`, `column`, `forEach`, `forEachOrNull`, `unionAll`, `where`, `constant`, `getResourceKey()`, `getReferenceKey()` | The same, as the spec's test cases cover them | Same |
 | Views to Parquet | `outputParquetViewPath` / `createParquetViews`: one directory per view in each snapshot | `refresh`: one Hive-partitioned table per view (partition looked up through another table), dates and times as Parquet date and timestamp types | Same, different layout |
-| Views to a database | `sinkDbConfigPath`: `CREATE TABLE` per view, rows upserted by resource id (delete then insert), `--recreateSinkTables`; PostgreSQL and MySQL. Without views, one `(id, datab JSONB)` table per type | `views sql --ddl` writes `CREATE TABLE` (ANSI, PostgreSQL, DuckDB types); `views run --db` reads FHIR from PostgreSQL JSONB. Nothing writes rows to a database | Missing |
+| Views to a database | `sinkDbConfigPath`: `CREATE TABLE` per view, rows upserted by resource id (delete then insert), `--recreateSinkTables`. The docs name PostgreSQL and MySQL, but the SQL is PostgreSQL's (`CREATE INDEX IF NOT EXISTS`, `TIMESTAMP WITH TIME ZONE`, `JSONB`, `ON CONFLICT`) with no MySQL variant. Without views, one `(id, datab JSONB)` table per type | `views sql --ddl` writes `CREATE TABLE` (ANSI, PostgreSQL, DuckDB types); `views run --db` reads FHIR from PostgreSQL JSONB. Nothing writes rows to a database | Missing |
 | Regenerate views without fetching | Controller `VIEWS` run: from the current snapshot into a new `VIEWS_TIMESTAMP_*` directory, sink tables recreated | `refresh --only views --reuse-raw` | Same |
 | Try a view on one resource | `POST /test-view` and a web editor | `views run view.json --input resource.json` (CSV to the terminal); `views validate`, `views lint` | Same, without a web page |
 | Predefined views | 12 views in `docker/config/views/`, plus Spark SQL versions (`*_flat.sql`) | The same 12 run unchanged; used as an acceptance test | Same |
-| View checks | Name pattern; `id` column required for the database sink | `views validate` (structure), `views lint` (portable FHIRPath, `--package` against a FHIR package), checked before every refresh | fhir-pipes does more |
+| View checks | Structural checks when a view is loaded (`ViewDefinition.validateAndSetUp`): resource present, valid view, constant and column names, no empty paths, no duplicate columns, matching `unionAll` branch columns; an `id` column for the database sink | Structural checks before every refresh and in `views validate`; also `views lint` (the portable FHIRPath subset, and `--package` to check paths against a FHIR package) | Same structural checks; fhir-pipes adds linting |
 
 ## 6. Incremental runs and deletions
 
@@ -129,16 +130,16 @@ official SQL-on-FHIR test suite.
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
-| Timestamped snapshots | Every run writes `<dwhRootPrefix>_TIMESTAMP_<time>/`; complete when `timestamp_end.txt` exists; queries go through Hive views that point at the latest | One current warehouse. A table is replaced only once all its new files are written; `manifest.json` records the run | Missing (by design so far) |
+| Timestamped snapshots | Every run writes `<dwhRootPrefix>_TIMESTAMP_<time>/`; complete when `timestamp_end.txt` exists; queries go through Hive views that point at the latest | One current warehouse, updated table by table (see Failed runs); `manifest.json` records the run | Missing (by design so far) |
 | Retention | `purgeSchedule` and `numOfDwhSnapshotsToRetain`; `DELETE /dwh?snapshotId=` | n/a | Missing |
-| Failed runs | `error.log` in the snapshot, downloadable from the controller | Exit code and stderr; the previous tables stay in place | Partial |
+| Failed runs | `error.log` in the snapshot, downloadable from the controller; the incomplete snapshot is not used | Exit code and stderr. Each table is replaced only once its new files are written, but tables are replaced one at a time: a run that fails after some tables (or in the catalog, hooks or push) leaves those tables updated and the rest from the previous run | Partial |
 
 ## 8. Running it: controller, scheduling, monitoring
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Long-running service | Spring Boot controller: one pipeline at a time, embedded Flink | None; a command run from cron, CI or a container's schedule | Missing |
-| Schedules | `incrementalSchedule`, `purgeSchedule` (Spring cron) | External cron | Missing (external) |
+| Schedules | `incrementalSchedule` and `purgeSchedule` (Spring cron). Only incremental runs and purges are scheduled; the first, full run is started from the web page or `POST /run?runMode=FULL`, and no incremental run is scheduled before it (`PipelineManager.checkSchedule`) | External cron | Missing (external) |
 | Web page | Run full, incremental or views; create Hive tables; metrics; config; snapshots; view editor. No authentication | None | Missing |
 | REST API and CLI | `/run`, `/status`, `/tables`, `/dwh`, `/config`, `/next`, `/download-error-log`; Python `controller` CLI over it | The CLI is the interface; `refresh --check` shows settings and tools | Not needed if run from cron |
 | Metrics | Actuator health and Prometheus, Beam counters per resource type (fetched, parse errors, times) | Step timings in `raw/<server>/last-refresh.json`; row counts in `manifest.json`; per-type export reports (`--report`) | Partial |
@@ -149,7 +150,7 @@ official SQL-on-FHIR test suite.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Engine | Apache Beam: DirectRunner, Flink (local or cluster), Dataflow and Spark (Maven profiles). The controller uses local Flink only | One process, all CPUs (rayon); each resource type read once for all its views | Not needed (different design) |
-| Memory | Docs give about 6.7 GB JVM for 48 cores and 32 MB row groups; the image defaults to `-Xmx6g` | On the 46,497-resource Synthea sample, the 12 views ran in 0.79 s with 0.87 GB peak (2026-10-14 notes); the ICR warehouse (349k Locations, 164k MeasureReports) rebuilds in about 25 s from data already downloaded | fhir-pipes lighter |
+| Memory | Sizing guidance, not a measurement: `docker/.env` gives about 6.7 GB of JVM for 48 cores and 32 MB row groups; the image defaults to `-Xms6g -Xmx6g` | Measured: on the 46,497-resource Synthea sample, the 12 views ran in 0.79 s with 0.87 GB peak (2026-10-14 notes); the ICR warehouse (349k Locations, 164k MeasureReports) rebuilds in about 25 s from data already downloaded | Not compared: the two have not been run on the same workload |
 | Very large data | Distributed runners | One machine; each type's resources are held in memory while its views run | Partial: a limit for very large types |
 | Parallel fetching | Parallel page segments on HAPI | Sequential pages | Missing (performance) |
 
@@ -177,7 +178,7 @@ official SQL-on-FHIR test suite.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Distribution | Docker image (`us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main`), jars, compose files for HAPI, OpenMRS, Spark, OpenHIM | Release binaries for macOS, Linux and Windows with checksums; `cargo install` | Missing: no image or compose files |
-| Tests | JUnit and Mockito; end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 639 tests on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite and a fake FHIR server; no end-to-end tests against a real HAPI or OpenMRS | Partial |
+| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 639 tests on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite and a fake FHIR server; no end-to-end tests against a real HAPI or OpenMRS | Partial |
 | Docs | mkdocs site: concepts, installation (Docker, controller, pipeline), tutorials (single machine, test servers, Superset, GCP), schema | README, ROADMAP, `docs/` per command, profile walkthrough | Partial: no install-with-Docker or dashboard tutorials |
 | Licence | Apache-2.0, Google CLA | Apache-2.0 (sof crates MIT OR Apache-2.0) | Same; CLA needed to contribute |
 
@@ -189,7 +190,8 @@ official SQL-on-FHIR test suite.
 - Geospatial outputs: the Location registry as GeoParquet with the admin
   hierarchy, PMTiles map tiles, QGIS round trip.
 - Profiles for an IG, and `profile check` against the IG.
-- View linting and the official SQL-on-FHIR test suite.
+- View linting (the portable FHIRPath subset, paths checked against a FHIR
+  package), and the official SQL-on-FHIR suite passed without skips.
 - Hive-partitioned view tables with a partition looked up through another
   table.
 - A DuckDB catalog of the warehouse.
