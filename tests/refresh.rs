@@ -729,6 +729,65 @@ fn setup_with_raw(extra_config: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, config)
 }
 
+/// The fixture views plus Patient views named `names` (each with an `id`
+/// column), and, if `empty`, a Patient view that selects nothing.
+fn views_with(dir: &Path, names: &[&str], empty: bool) -> PathBuf {
+    let views = dir.join("more-views");
+    fs::create_dir_all(&views).unwrap();
+    for f in fs::read_dir(fixtures().join("views")).unwrap() {
+        let f = f.unwrap().path();
+        fs::copy(&f, views.join(f.file_name().unwrap())).unwrap();
+    }
+    let view = |name: &str, filter: &str| {
+        format!(
+            r#"{{"resourceType": "ViewDefinition", "name": "{name}", "status": "active", "resource": "Patient",{filter}
+                "select": [{{"column": [{{"name": "id", "path": "getResourceKey()", "type": "id"}},
+                                         {{"name": "born", "path": "birthDate", "type": "date"}}]}}]}}"#
+        )
+    };
+    for n in names {
+        fs::write(views.join(format!("{n}.json")), view(n, "")).unwrap();
+    }
+    if empty {
+        fs::write(
+            views.join("IcrEmpty.json"),
+            view("IcrEmpty", r#" "where": [{"path": "false"}],"#),
+        )
+        .unwrap();
+    }
+    views
+}
+
+/// A view that selects nothing still writes its columns, as one empty file.
+#[test]
+fn an_empty_view_writes_an_empty_file() {
+    let (dir, config) = setup_with_raw("\n[catalog]\n");
+    let views = views_with(dir.path(), &[], true);
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&views)
+        .assert()
+        .success()
+        .stdout(has("IcrEmpty (Patient) → parquet/empty (0 rows)"));
+    let file = dir
+        .path()
+        .join("data/parquet/empty/country=__HIVE_DEFAULT_PARTITION__/part-0.parquet");
+    let reader = SerializedFileReader::new(fs::File::open(&file).unwrap()).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 0);
+    let fields: Vec<String> = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(fields, ["id", "born", "country"]);
+    // The catalog has a view for it.
+    let sql = fs::read_to_string(dir.path().join("data/catalog.sql")).unwrap();
+    assert!(sql.contains("CREATE OR REPLACE VIEW \"empty\""), "{sql}");
+}
+
 #[test]
 #[cfg(not(feature = "postgres"))]
 fn the_database_step_needs_the_postgres_feature() {
@@ -892,6 +951,98 @@ mod database {
             )),
             "0"
         );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// A missing or unreadable warehouse fails before the database changes.
+    #[test]
+    fn a_missing_warehouse_leaves_the_database_alone() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("missing");
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success();
+        cmd(&config)
+            .args(["--only", "database", "--data"])
+            .arg(dir.path().join("nowhere"))
+            .assert()
+            .failure()
+            .stderr(has("the database was not changed"));
+        assert_eq!(one(&format!("SELECT count(*)::text FROM \"{s}\".obs")), "3");
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// An empty view gets its table; tables named t and t_id do not clash
+    /// over index names.
+    #[test]
+    fn empty_and_similarly_named_tables_load() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("names");
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        let views = views_with(dir.path(), &["IcrAlpha", "IcrAlphaId"], true);
+        for _ in 0..2 {
+            cmd(&config)
+                .args(["--only", "views", "--reuse-raw", "--views"])
+                .arg(&views)
+                .assert()
+                .success()
+                .stdout(has(format!("empty → {s}.empty (0 rows)")))
+                .stdout(has(format!("alpha_id → {s}.alpha_id (2 rows)")));
+        }
+        assert_eq!(
+            one(&format!("SELECT count(*)::text FROM \"{s}\".empty")),
+            "0"
+        );
+        assert_eq!(
+            one(&format!("SELECT count(*)::text FROM \"{s}\".alpha")),
+            "2"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// Two loads at once: the second waits for the first, so the rows are
+    /// there once.
+    #[test]
+    fn overlapping_loads_do_not_duplicate_rows() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("overlap");
+        let (_dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success();
+        let run = || {
+            let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_fhir-pipes"));
+            c.current_dir(config.parent().unwrap())
+                .args(["refresh", "--config"])
+                .arg(&config)
+                .args(["--only", "database"])
+                .env_remove("FHIR_PIPES_DATA")
+                .env_remove("FHIR_PIPES_VIEWS")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        for _ in 0..3 {
+            let mut a = run();
+            let mut b = run();
+            assert!(a.wait().unwrap().success() && b.wait().unwrap().success());
+            assert_eq!(one(&format!("SELECT count(*)::text FROM \"{s}\".obs")), "3");
+        }
         sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
     }
 

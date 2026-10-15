@@ -9,7 +9,7 @@
 //! unless their columns change. Column types come from the Parquet files.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use arrow::array::{Array, AsArray, RecordBatch};
@@ -25,7 +25,6 @@ use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::PgConnection;
 
 use super::config::{Database, Settings};
-use super::partition::table_files;
 
 /// Rows sent to COPY per message.
 const COPY_ROWS: usize = 4096;
@@ -56,12 +55,14 @@ pub fn load(s: &Settings, d: &Database, tables: &[String]) -> Result<()> {
 struct Plan {
     table: String,
     columns: Vec<(String, &'static str)>,
-    files: Vec<std::path::PathBuf>,
+    files: Vec<PathBuf>,
 }
 
 /// A table's columns, from its Parquet files, which must all agree.
 fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
-    let files = table_files(dir, partition_column);
+    let files = parquet_files(dir, partition_column).with_context(|| {
+        format!("{table}: cannot read its Parquet; the database was not changed")
+    })?;
     let mut columns: Option<Vec<(String, &'static str)>> = None;
     for f in &files {
         let reader = ParquetRecordBatchReaderBuilder::try_new(
@@ -100,6 +101,45 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
     })
 }
 
+/// A table's Parquet files: those under its `<column>=` directories, as the
+/// views step writes them. Unlike `partition::table_files`, a missing or
+/// unreadable directory is an error, not an empty table, so a wrong `--data`
+/// or a missing mount cannot empty the database.
+fn parquet_files(dir: &Path, column: &str) -> Result<Vec<PathBuf>> {
+    fn entries(dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut paths = fs::read_dir(dir)
+            .and_then(|it| {
+                it.map(|e| e.map(|e| e.path()))
+                    .collect::<std::io::Result<Vec<_>>>()
+            })
+            .with_context(|| format!("reading {}", dir.display()))?;
+        paths.sort();
+        Ok(paths)
+    }
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        for p in entries(dir)? {
+            if p.is_dir() {
+                walk(&p, out)?;
+            } else if p.extension().is_some_and(|x| x == "parquet") {
+                out.push(p);
+            }
+        }
+        Ok(())
+    }
+    let prefix = format!("{column}=");
+    let mut files = Vec::new();
+    for part in entries(dir)? {
+        if part.is_dir()
+            && part
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        {
+            walk(&part, &mut files)?;
+        }
+    }
+    Ok(files)
+}
+
 /// The PostgreSQL type for a column the views step writes, as
 /// information_schema names it.
 fn pg_type(t: &DataType) -> Option<&'static str> {
@@ -122,6 +162,13 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
         .await
         .context("connecting to the database")?;
     let mut tx = conn.begin().await.context("starting a transaction")?;
+    // One load into a schema at a time: a second waits here until the first
+    // commits, so two overlapping refreshes cannot both delete and both copy.
+    sqlx_core::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("fhir-pipes database {schema}"))
+        .execute(&mut *tx)
+        .await
+        .context("waiting for another load into this schema")?;
     exec(
         &mut tx,
         &format!("CREATE SCHEMA IF NOT EXISTS {}", ident(schema)),
@@ -130,11 +177,17 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
     for p in plans {
         let name = format!("{}.{}", ident(schema), ident(&p.table));
         if p.files.is_empty() {
-            // A view with no rows wrote no files: keep the table, empty.
+            // A table written before empty results got an empty file has no
+            // columns to create it from: empty it if it exists.
             if table_exists(&mut tx, schema, &p.table).await? {
                 exec(&mut tx, &format!("DELETE FROM {name}")).await?;
+                println!("   {} → {schema}.{} (0 rows)", p.table, p.table);
+            } else {
+                println!(
+                    "   {}: no files to take its columns from, not created; run the views step",
+                    p.table
+                );
             }
-            println!("   {} → {schema}.{} (0 rows)", p.table, p.table);
             continue;
         }
         let existing = existing_columns(&mut tx, schema, &p.table).await?;
@@ -164,19 +217,14 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
                 &format!("CREATE TABLE {name} ({})", cols.join(", ")),
             )
             .await?;
+            // Unnamed, so PostgreSQL picks a name no other relation has; made
+            // with the table, so later runs find it in place.
+            if p.columns.iter().any(|(n, _)| n == "id") {
+                exec(&mut tx, &format!("CREATE INDEX ON {name} (id)")).await?;
+            }
         }
         exec(&mut tx, &format!("DELETE FROM {name}")).await?;
         let rows = copy(&mut tx, &name, p).await?;
-        if p.columns.iter().any(|(n, _)| n == "id") {
-            exec(
-                &mut tx,
-                &format!(
-                    "CREATE INDEX IF NOT EXISTS {} ON {name} (id)",
-                    ident(&format!("{}_id", p.table))
-                ),
-            )
-            .await?;
-        }
         println!("   {} → {schema}.{} ({rows} rows)", p.table, p.table);
     }
     tx.commit().await.context("committing")?;

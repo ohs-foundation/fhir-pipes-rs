@@ -140,6 +140,11 @@ pub fn write(
     for row in result.data {
         groups.entry(partition_of(&row)).or_default().push(row);
     }
+    // No rows: one empty file in the null partition, so the table still has
+    // its columns for whatever reads it (the catalog, the database step).
+    if groups.is_empty() {
+        groups.insert(None, Vec::new());
+    }
     let parent = table_dir
         .parent()
         .context("table directory has no parent")?;

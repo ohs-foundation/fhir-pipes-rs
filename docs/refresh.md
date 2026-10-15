@@ -58,7 +58,8 @@ Every row gets a partition column (default `country`), looked up through
 another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
 goes to the null partition, `__HIVE_DEFAULT_PARTITION__`, as hive and DuckDB
-name it. Tables other views look up in are written first. A table is replaced
+name it. A view with no rows writes one empty file there, so the table keeps
+its columns. Tables other views look up in are written first. A table is replaced
 only once all of its new files are written.
 
 The views directory can be any directory of JSON files: files whose
@@ -149,7 +150,11 @@ rows until the commit, then all of the new run's, never a mix. Views and grants
 built on the tables survive, since a table is dropped and recreated only when
 its columns change; if something depends on it then, the step stops and says
 so, and the database keeps the previous run. A table with an `id` column gets
-an index on it.
+an index on it when it is created.
+
+A table whose Parquet cannot be read (a wrong `--data`, a missing mount) stops
+the step before anything in the database changes. Two refreshes loading into
+the same schema at once take turns: the second waits for the first to commit.
 
 Every run reloads every table. On the ICR warehouse (10 view tables, 229,082
 rows, 161,216 in the largest) that takes about half a second.
