@@ -21,6 +21,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
+| Load the view tables into PostgreSQL, all in one transaction (`postgres` feature; #25) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 
@@ -77,7 +78,6 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Put geo, rasters and DHIS2 behind Cargo features | Planned | So an analytics-only build stays small; only `postgres` and `fhir-packages` are optional today |
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
 | FHIR Bulk Data `$export` client | Not started | `export` uses search paging |
-| Write view tables straight into PostgreSQL | Not started | `views sql` generates the SQL; there is no loader |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
 
 ## Moving into fhir-data-pipes
@@ -122,7 +122,7 @@ on its own outstanding list, next to fhir-pipes.
 | # | RFC outstanding item | fhir-pipes |
 |---|---|---|
 | 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, except a Bulk Data `$export` client |
-| 2 | Direct relational database sinks (PostgreSQL) | Not done. `views sql` generates the SQL, and `views run --db` reads FHIR from PostgreSQL, but nothing writes view rows into a database |
+| 2 | Direct relational database sinks (PostgreSQL) | `refresh` with `[database]` loads the view tables into PostgreSQL (next release; `postgres` feature) |
 | 3 | Schema from StructureDefinitions, including IG profiles | Not needed for the flat tables, which take their columns from the views. Would be the basis of nested output. `profile check` already reads an IG's StructureDefinitions |
 | 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done for views evaluated in memory (`views run --input`, `refresh`): `octofhir-fhirpath`, 144 of 144. Generated SQL (`views sql`, and `views run --db`, which uses it) supports fewer functions; `substring()`, for one, is refused |
 | 5 | Partitioned merging for large warehouses | Partly. Downloads are incremental and output is partitioned, but each refresh rewrites every view table from the whole download |
@@ -134,7 +134,7 @@ on its own outstanding list, next to fhir-pipes.
 | RFC question | fhir-pipes answer |
 |---|---|
 | A single CLI run by cron, Airflow or CI instead of the Spring Boot and Flink controller? | Yes. `refresh` is one command with a TOML config, meant to be run that way |
-| Query Parquet with DuckDB or PostgreSQL instead of Spark Thrift and Hive? | Yes, for Parquet. PostgreSQL output is item 2 above |
+| Query Parquet with DuckDB or PostgreSQL instead of Spark Thrift and Hive? | Yes: Parquet with DuckDB, and the view tables in PostgreSQL (item 2) |
 
 ## Decided against for now
 

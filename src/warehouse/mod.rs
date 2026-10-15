@@ -10,11 +10,15 @@
 //!   tiles      the registry → PMTiles (duckdb + tippecanoe); runs beside views
 //!   manifest   manifest.json: row counts, views, the extract state
 //!   catalog    catalog.sql: a DuckDB view per table; only with [catalog]
+//!   database   the view tables into PostgreSQL; only with [database] and a
+//!              build with the postgres feature
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 
 mod catalog;
 mod config;
+#[cfg(feature = "postgres")]
+mod database;
 mod fhir;
 mod manifest;
 mod partition;
@@ -95,6 +99,7 @@ pub enum Step {
     Tiles,
     Manifest,
     Catalog,
+    Database,
     Hooks,
     Push,
 }
@@ -107,6 +112,7 @@ impl Step {
             Step::Tiles => "tiles",
             Step::Manifest => "manifest",
             Step::Catalog => "catalog",
+            Step::Database => "database",
             Step::Hooks => "hooks",
             Step::Push => "push",
         }
@@ -148,6 +154,18 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
         }
         steps.remove(&Step::Catalog);
     }
+    // The database step likewise, with a [database] section.
+    if s.database.is_none() {
+        if args.only.contains(&Step::Database) {
+            bail!("--only database needs a [database] section in the config");
+        }
+        steps.remove(&Step::Database);
+    } else if steps.contains(&Step::Database) && !cfg!(feature = "postgres") {
+        bail!(
+            "[database] needs PostgreSQL support, which this fhir-pipes was built without; \
+             build it with `--features postgres`, or --skip database"
+        );
+    }
     let needed = required_tools(&s, &steps)?;
     if args.check {
         check(&s, &steps, &needed);
@@ -170,6 +188,7 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
             Step::Tiles,
             Step::Manifest,
             Step::Catalog,
+            Step::Database,
             Step::Hooks,
         ]
         .into()
@@ -181,6 +200,7 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
         {
             only.insert(Step::Manifest);
             only.insert(Step::Catalog);
+            only.insert(Step::Database);
         }
         only
     };
@@ -273,6 +293,18 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
                 .collect()
         )
     );
+    if let Some(d) = &s.database {
+        println!(
+            "database:   ${} → schema {}{}",
+            d.url_env,
+            d.schema,
+            if cfg!(feature = "postgres") {
+                ""
+            } else {
+                " (NOT AVAILABLE: built without the postgres feature)"
+            }
+        );
+    }
     if let Some(c) = &s.catalog {
         println!(
             "catalog:    {}{}",
@@ -351,6 +383,16 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         ran.insert(Step::Catalog);
     }
 
+    #[cfg(feature = "postgres")]
+    if steps.contains(&Step::Database)
+        && let Some(d) = &s.database
+    {
+        let t = Instant::now();
+        database::load(s, d, &database_tables(s, d)?)?;
+        timings.push(("database", t.elapsed().as_secs_f64()));
+        ran.insert(Step::Database);
+    }
+
     if steps.contains(&Step::Hooks) {
         let t = Instant::now();
         for h in &s.hooks {
@@ -392,6 +434,32 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         serde_json::to_string_pretty(&report)?,
     )?;
     Ok(())
+}
+
+/// The view tables [database] loads: every table a view writes, or those
+/// `tables` names, each of which must be one.
+#[cfg(feature = "postgres")]
+fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
+    let dir = s
+        .views
+        .as_ref()
+        .context("[database] loads the view tables, so it needs the views directory")?;
+    let all: BTreeSet<String> = views::discover(dir, &s.strip_prefix)?
+        .into_iter()
+        .map(|v| v.table)
+        .collect();
+    match &d.tables {
+        None => Ok(all.into_iter().collect()),
+        Some(names) => {
+            if let Some(bad) = names.iter().find(|n| !all.contains(*n)) {
+                bail!(
+                    "[database] tables: `{bad}` is not a view table ({})",
+                    all.iter().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            Ok(names.clone())
+        }
+    }
 }
 
 /// Download each resource type the views read, run each type's views on one

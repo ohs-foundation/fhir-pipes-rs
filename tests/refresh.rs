@@ -710,3 +710,205 @@ fn a_listed_catalog_duckdb_is_pushed_when_fhir_pipes_does_not_build_it() {
     );
     assert!(mirror.join("catalog.sql").is_file());
 }
+
+/// A warehouse with the fixture downloads in raw/, so `--reuse-raw` runs the
+/// views without a server.
+fn setup_with_raw(extra_config: &str) -> (tempfile::TempDir, PathBuf) {
+    let (dir, config) = setup(NOWHERE, extra_config);
+    let raw = dir.path().join("data/raw/test");
+    fs::create_dir_all(&raw).unwrap();
+    for t in ["Observation", "Patient"] {
+        fs::copy(
+            fixtures().join(format!("raw/{t}.ndjson")),
+            raw.join(format!("{t}.ndjson")),
+        )
+        .unwrap();
+    }
+    (dir, config)
+}
+
+#[test]
+#[cfg(not(feature = "postgres"))]
+fn the_database_step_needs_the_postgres_feature() {
+    let (_dir, config) = setup_with_raw("\n[database]\n");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .failure()
+        .stderr(has("--features postgres"));
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--skip", "database"])
+        .assert()
+        .success();
+}
+
+/// Runs against the PostgreSQL in $FHIR_PIPES_TEST_DATABASE_URL, each test in
+/// a schema of its own; skipped without it.
+#[cfg(feature = "postgres")]
+mod database {
+    use super::*;
+    use sqlx_core::connection::Connection;
+    use sqlx_core::row::Row;
+    use sqlx_core::sql_str::AssertSqlSafe;
+
+    const URL: &str = "FHIR_PIPES_TEST_DATABASE_URL";
+
+    fn url() -> Option<String> {
+        std::env::var(URL).ok().filter(|u| !u.is_empty())
+    }
+
+    /// A schema name no other test uses.
+    fn schema(test: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("t_{test}_{}_{nanos}", std::process::id())
+    }
+
+    /// Run SQL statements; the rows of the last one, every value as text.
+    fn sql(statements: &[&str]) -> Vec<Vec<Option<String>>> {
+        let url = url().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut conn = sqlx_postgres::PgConnection::connect(&url).await.unwrap();
+                let mut rows = Vec::new();
+                for s in statements {
+                    rows = sqlx_core::query::query(AssertSqlSafe(s.to_string()))
+                        .fetch_all(&mut conn)
+                        .await
+                        .unwrap_or_else(|e| panic!("{s}: {e}"));
+                }
+                rows.iter()
+                    .map(|r| {
+                        (0..r.len())
+                            .map(|i| r.try_get::<Option<String>, _>(i).unwrap())
+                            .collect()
+                    })
+                    .collect()
+            })
+    }
+
+    fn one(statement: &str) -> String {
+        sql(&[statement])[0][0].clone().unwrap_or_default()
+    }
+
+    #[test]
+    fn view_tables_are_loaded_and_replaced() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("load");
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success()
+            .stdout(has(format!("obs → {s}.obs (3 rows)")))
+            .stdout(has(format!("patient → {s}.patient (2 rows)")));
+        // Only view tables: not locations.
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(table_name::text, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema = '{s}'"
+            )),
+            "obs,patient"
+        );
+        // Types from the Parquet files, values as written.
+        assert_eq!(
+            one(&format!(
+                "SELECT data_type::text FROM information_schema.columns WHERE table_schema = '{s}' AND table_name = 'patient' AND column_name = 'born'"
+            )),
+            "date"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id || '=' || born::text || '@' || coalesce(country, 'null'), ',' ORDER BY id) FROM \"{s}\".patient"
+            )),
+            "p1=2020-05-01@null,p2=2021-01-01@null"
+        );
+
+        // A view someone built on a table survives the next run, which
+        // replaces the rows.
+        sql(&[&format!(
+            "CREATE VIEW \"{s}\".patient_ids AS SELECT id FROM \"{s}\".patient"
+        )]);
+        let raw = dir.path().join("data/raw/test/Patient.ndjson");
+        let first = fs::read_to_string(&raw)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        fs::write(&raw, format!("{first}\n")).unwrap();
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success()
+            .stdout(has(format!("patient → {s}.patient (1 rows)")));
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',') FROM \"{s}\".patient_ids"
+            )),
+            "p1"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    #[test]
+    fn a_table_with_other_columns_is_recreated() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("recreate");
+        sql(&[
+            &format!("CREATE SCHEMA \"{s}\""),
+            &format!("CREATE TABLE \"{s}\".obs (stale text)"),
+        ]);
+        let (_dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\ntables = [\"obs\"]\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success();
+        assert_eq!(one(&format!("SELECT count(*)::text FROM \"{s}\".obs")), "3");
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*)::text FROM information_schema.columns WHERE table_schema = '{s}' AND table_name = 'obs' AND column_name = 'stale'"
+            )),
+            "0"
+        );
+        // `tables` limited the load to obs.
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*)::text FROM information_schema.tables WHERE table_schema = '{s}' AND table_name = 'patient'"
+            )),
+            "0"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    #[test]
+    fn database_settings_are_checked() {
+        let (_dir, config) = setup_with_raw(
+            "\n[database]\nurl_env = \"FHIR_PIPES_NO_SUCH_URL\"\ntables = [\"nope\"]\n",
+        );
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .failure()
+            .stderr(has("`nope` is not a view table (obs, patient)"));
+        let (_dir, config) = setup_with_raw("\n[database]\nurl_env = \"FHIR_PIPES_NO_SUCH_URL\"\n");
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .env_remove("FHIR_PIPES_NO_SUCH_URL")
+            .assert()
+            .failure()
+            .stderr(has("$FHIR_PIPES_NO_SUCH_URL"));
+    }
+}

@@ -35,6 +35,7 @@ pub struct File {
     pub tiles: TilesFile,
     pub push: Option<PushFile>,
     pub catalog: Option<CatalogFile>,
+    pub database: Option<DatabaseFile>,
     #[serde(default)]
     pub hooks: Vec<Hook>,
 }
@@ -153,6 +154,29 @@ pub struct Catalog {
     pub duckdb_setup: Option<PathBuf>,
 }
 
+/// `[database]`: load the view tables into PostgreSQL (see database.rs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseFile {
+    /// The environment variable holding the connection string
+    /// (default FHIR_PIPES_DATABASE_URL); it is never read from this file.
+    pub url_env: Option<String>,
+    /// The schema the tables go in (default `public`).
+    pub schema: Option<String>,
+    /// The view tables to load (default: all of them).
+    pub tables: Option<Vec<String>>,
+}
+
+/// `[database]`, with its defaults.
+#[derive(Debug, Clone)]
+pub struct Database {
+    pub url_env: String,
+    pub schema: String,
+    // Read only by the database step, which needs the postgres feature.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    pub tables: Option<Vec<String>>,
+}
+
 /// An external command run after the manifest is written.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,6 +207,7 @@ pub struct Settings {
     pub tile_countries: Vec<String>,
     pub push: Option<PushFile>,
     pub catalog: Option<Catalog>,
+    pub database: Option<Database>,
     pub hooks: Vec<Hook>,
     /// The config file's directory, for hook programs given as paths.
     pub base_dir: PathBuf,
@@ -337,6 +362,13 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             extra: c.extra.map(|p| resolve(&base, &p)),
             duckdb_file: c.duckdb_file,
             duckdb_setup: c.duckdb_setup.map(|p| resolve(&base, &p)),
+        }),
+        database: file.database.map(|d| Database {
+            url_env: d
+                .url_env
+                .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into()),
+            schema: d.schema.unwrap_or_else(|| "public".into()),
+            tables: d.tables,
         }),
         hooks: file.hooks,
         profile: o.profile.or_else(|| {

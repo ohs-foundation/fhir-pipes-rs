@@ -80,8 +80,9 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 
 A full refresh can also extract and transform the Location registry, build
 map tiles, write a DuckDB catalog (a view per table, which a dashboard can
-attach by URL), run your own commands afterwards, and push the warehouse to
-object storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
+attach by URL), load the view tables into PostgreSQL (with the `postgres`
+feature), run your own commands afterwards, and push the warehouse to object
+storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
 partitioning and hooks.
 
 ### How the views run
@@ -233,7 +234,7 @@ Two features are off by default, and the release binaries leave them out:
 
 | Feature | Adds |
 |---|---|
-| `postgres` | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL |
+| `postgres` | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL; `refresh` with `[database]`: the view tables into PostgreSQL |
 | `fhir-packages` | `views lint --package`: views checked against a FHIR package, downloaded over HTTP |
 
 ```sh
