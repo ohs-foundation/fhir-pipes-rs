@@ -108,6 +108,30 @@ pub fn later(current: Option<&str>, candidate: &str) -> Option<String> {
     }
 }
 
+/// How far before the server's clock at the start of a search a watermark is
+/// set, to absorb skew between the HTTP front end that dates the response and
+/// the database that stamps meta.lastUpdated.
+pub const WATERMARK_MARGIN_SECS: u64 = 300;
+
+/// A watermark that cannot skip an update made while a search was being
+/// paged: the greatest meta.lastUpdated seen, but no later than the server's
+/// clock when paging began (an HTTP `Date`) less a margin. Resources stamped
+/// after that are fetched again by the next run, and the merge by id makes
+/// that harmless. Without a usable `Date` the greatest seen is kept.
+pub fn capped_watermark(seen: Option<String>, started: Option<&str>) -> Option<String> {
+    let cap = started
+        .and_then(|d| httpdate::parse_http_date(d).ok())
+        .and_then(|t| t.checked_sub(std::time::Duration::from_secs(WATERMARK_MARGIN_SECS)))
+        .map(format_utc);
+    match (seen, cap) {
+        (Some(s), Some(c)) => match (parse_instant(&s), parse_instant(&c)) {
+            (Some(sp), Some(cp)) if cp < sp => Some(c),
+            _ => Some(s),
+        },
+        (seen, _) => seen,
+    }
+}
+
 /// Formats `t` as a FHIR `instant` in UTC. This is meant for "now"
 /// timestamps only: a time before the Unix epoch is clamped to
 /// `1970-01-01T00:00:00Z` rather than producing a negative date.
@@ -129,6 +153,34 @@ pub fn format_utc(t: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn watermark_is_capped_at_the_search_start_less_the_margin() {
+        let date = Some("Wed, 14 Oct 2026 23:00:00 GMT");
+        // Seen after the search began: an update made while paging. The
+        // watermark goes back to the start, less five minutes.
+        assert_eq!(
+            capped_watermark(Some("2026-10-14T23:03:00.123+00:00".into()), date).as_deref(),
+            Some("2026-10-14T22:55:00Z")
+        );
+        // Seen well before the start: kept as is.
+        assert_eq!(
+            capped_watermark(Some("2026-10-14T20:00:00Z".into()), date).as_deref(),
+            Some("2026-10-14T20:00:00Z")
+        );
+        // No Date header, or one that does not parse: the greatest seen.
+        assert_eq!(
+            capped_watermark(Some("2026-10-14T23:03:00Z".into()), None).as_deref(),
+            Some("2026-10-14T23:03:00Z")
+        );
+        assert_eq!(
+            capped_watermark(Some("2026-10-14T23:03:00Z".into()), Some("yesterday")).as_deref(),
+            Some("2026-10-14T23:03:00Z")
+        );
+        // Nothing seen: nothing to cap.
+        assert_eq!(capped_watermark(None, date), None);
+    }
+
     use super::*;
 
     #[test]

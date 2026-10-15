@@ -122,8 +122,21 @@ fn export_follows_next_links_and_writes_one_file_per_type() {
         .collect();
     assert_eq!(ids, ["a", "b", "c"]);
     assert_eq!(read_ndjson(&out.join("Measure.ndjson")).len(), 1);
-    // Nothing but the two files: the temporary file was renamed into place.
-    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 2);
+    // The two files and the export state: the temporary file was renamed
+    // into place.
+    let mut names: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ".export-state.json",
+            "Measure.ndjson",
+            "MeasureReport.ndjson"
+        ]
+    );
     let r: Value = serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
     assert_eq!(r["counts"], json!({}));
 }
@@ -218,4 +231,236 @@ fn a_type_that_is_not_a_resource_name_is_refused() {
         "{}",
         stderr(&a)
     );
+}
+
+fn updated(id: &str, at: &str, status: &str) -> Value {
+    json!({"resourceType": "MeasureReport", "id": id, "status": status, "meta": {"lastUpdated": at}})
+}
+
+fn count_reply(server: &Server, n: u64) {
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains(("_summary", "count")))),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200).body(
+                json!({"resourceType": "Bundle", "type": "searchset", "total": n}).to_string(),
+            ),
+        ),
+    );
+}
+
+fn export_incremental(server: &Server, out: &Path) -> Assert {
+    fhir_pipes()
+        .args([
+            "export",
+            "--incremental",
+            "--type",
+            "MeasureReport",
+            "--server",
+        ])
+        .arg(server.url_str("/fhir"))
+        .arg("--out")
+        .arg(out)
+        .assert()
+        .success()
+}
+
+#[test]
+fn incremental_export_merges_what_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+
+    // First run: no state yet, so a full download that records the watermark.
+    let mut server = Server::run();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(
+            vec![
+                updated("a", "2026-10-01T00:00:00Z", "complete"),
+                updated("b", "2026-10-02T00:00:00Z", "complete"),
+            ],
+            None,
+        ))),
+    );
+    let a = export_incremental(&server, &out);
+    assert!(
+        stdout(&a).contains("MeasureReport: 2 resources"),
+        "{}",
+        stdout(&a)
+    );
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join(".export-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        state["types"]["MeasureReport"]["watermark"],
+        "2026-10-02T00:00:00Z"
+    );
+    server.verify_and_clear();
+
+    // Second run: only what changed since the watermark, merged by id. b is
+    // refetched (ge) and updated, c is new, a is kept from the file.
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains((
+                "_lastUpdated",
+                "ge2026-10-02T00:00:00Z"
+            )))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(
+            vec![
+                updated("b", "2026-10-03T00:00:00Z", "error"),
+                updated("c", "2026-10-03T00:00:00Z", "complete"),
+            ],
+            None,
+        ))),
+    );
+    count_reply(&server, 3);
+    let a = export_incremental(&server, &out);
+    assert!(
+        stdout(&a).contains(
+            "MeasureReport: 1 new, 1 updated or fetched again since 2026-10-02T00:00:00Z, 3 in all"
+        ),
+        "{}",
+        stdout(&a)
+    );
+    let rows = read_ndjson(&out.join("MeasureReport.ndjson"));
+    let by_id = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(by_id("a")["status"], "complete");
+    assert_eq!(by_id("b")["status"], "error");
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join(".export-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        state["types"]["MeasureReport"]["watermark"],
+        "2026-10-03T00:00:00Z"
+    );
+    assert_eq!(state["types"]["MeasureReport"]["count"], 3);
+}
+
+#[test]
+fn a_count_mismatch_after_an_incremental_merge_downloads_in_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        out.join("MeasureReport.ndjson"),
+        format!(
+            "{}\n{}\n",
+            updated("a", "2026-10-01T00:00:00Z", "complete"),
+            updated("gone", "2026-10-01T00:00:00Z", "complete")
+        ),
+    )
+    .unwrap();
+    let server = Server::run();
+    std::fs::write(
+        out.join(".export-state.json"),
+        json!({"server": server.url_str("/fhir"), "types": {"MeasureReport": {
+            "watermark": "2026-10-01T00:00:00Z", "count": 2,
+            "completed_at": "2026-10-01T00:00:00Z", "fhir_pipes_version": "0.3.0"}}})
+        .to_string(),
+    )
+    .unwrap();
+
+    // Nothing changed, but `gone` was deleted on the server: 1, not 2.
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains(key("_lastUpdated")))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(
+            vec![updated("a", "2026-10-01T00:00:00Z", "complete")],
+            None,
+        ))),
+    );
+    count_reply(&server, 1);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+            request::query(url_decoded(not(contains(key("_summary"))))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(
+            vec![updated("a", "2026-10-01T00:00:00Z", "complete")],
+            None,
+        ))),
+    );
+    let a = export_incremental(&server, &out);
+    assert!(stdout(&a).contains("downloading in full"), "{}", stdout(&a));
+    let rows = read_ndjson(&out.join("MeasureReport.ndjson"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "a");
+}
+
+#[test]
+fn state_from_another_server_is_not_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        out.join("MeasureReport.ndjson"),
+        format!("{}\n", updated("old", "2026-10-01T00:00:00Z", "complete")),
+    )
+    .unwrap();
+    std::fs::write(
+        out.join(".export-state.json"),
+        json!({"server": "http://elsewhere.test/fhir", "types": {"MeasureReport": {
+            "watermark": "2026-10-01T00:00:00Z", "count": 1,
+            "completed_at": "2026-10-01T00:00:00Z", "fhir_pipes_version": "0.3.0"}}})
+        .to_string(),
+    )
+    .unwrap();
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(
+            vec![updated("new", "2026-10-05T00:00:00Z", "complete")],
+            None,
+        ))),
+    );
+    export_incremental(&server, &out);
+    let rows = read_ndjson(&out.join("MeasureReport.ndjson"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "new");
+}
+
+#[test]
+fn the_watermark_never_passes_the_servers_clock_at_the_start() {
+    // A resource stamped after the search began (here, absurdly, in 2099)
+    // must not push the watermark past the server's clock: an update made
+    // while paging would be skipped by every later run.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/MeasureReport"))
+            .times(1)
+            .respond_with(status_code(200).body(bundle(
+                vec![updated("a", "2099-01-01T00:00:00Z", "complete")],
+                None,
+            ))),
+    );
+    export_incremental(&server, &out);
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join(".export-state.json")).unwrap())
+            .unwrap();
+    let watermark = state["types"]["MeasureReport"]["watermark"]
+        .as_str()
+        .unwrap();
+    assert!(watermark < "2099", "{watermark}");
 }
