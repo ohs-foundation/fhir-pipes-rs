@@ -46,8 +46,8 @@ pub fn locations(s: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// `fhir-pipes export`: every resource of each type to
-/// raw/<server>/<Type>.ndjson.
+/// `fhir-pipes export --incremental`: each type to raw/<server>/<Type>.ndjson,
+/// downloading only what changed since the last refresh unless `full`.
 pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
     if types.is_empty() {
         return Ok(());
@@ -58,6 +58,7 @@ pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
         auth: s.auth.clone(),
         types: types.iter().map(|t| t.to_string()).collect(),
         out: s.raw_dir(),
+        incremental: !s.full,
         report: None,
         retries: DEFAULT_RETRIES,
         timeout: DEFAULT_TIMEOUT_SECS,

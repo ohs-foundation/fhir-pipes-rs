@@ -27,7 +27,7 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | Step | What it does | Needs |
 |---|---|---|
 | `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations` | |
-| `views` | download every resource type the views read, as `fhir-pipes export` does, run each type's views on one read of it, write each view's table | |
+| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh), run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
 | `hooks` | the config's commands, in order | the commands |
@@ -80,7 +80,7 @@ the file are relative to the file.
 | `--countries` | | `tiles.countries` | every country |
 | `--threads` | | | number of CPUs |
 | `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
-| `--full` | | | incremental |
+| `--full` | | | only what changed (Locations and the views' resource types) |
 | `--dry-run` | | | (push only) |
 
 The client ID and secret are read only from the environment, never from flags

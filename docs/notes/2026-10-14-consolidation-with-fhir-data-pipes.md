@@ -197,5 +197,8 @@ kiln, fhir-warehouse and the sof fork.
 - The 12 fhir-data-pipes views run through `refresh` on the Synthea sample
   with the row counts above.
 
-Gaps 1 (incremental views), 4 (nested Parquet-on-FHIR) and 5 (porting
-`bake`) are still open. Gaps 2 and 3 are done.
+Gaps 4 (nested Parquet-on-FHIR) and 5 (porting `bake`) are still open.
+Gaps 2 and 3 are done. Gap 1 is done through `export --incremental`, which
+`refresh` uses: each type keeps a watermark in `raw/<server>/.export-state.json`,
+changes are merged by id, and a type whose count then differs from the
+server's is downloaded in full, which is how deletions are picked up.

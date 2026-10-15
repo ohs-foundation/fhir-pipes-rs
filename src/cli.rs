@@ -462,6 +462,11 @@ pub struct ExportArgs {
     /// Output directory; each type is written to OUT/<TYPE>.ndjson
     #[arg(long)]
     pub out: PathBuf,
+    /// Download only what changed since the last export into OUT (by
+    /// meta.lastUpdated) and merge it by id; a type whose count then differs
+    /// from the server's is downloaded in full
+    #[arg(long)]
+    pub incremental: bool,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,
