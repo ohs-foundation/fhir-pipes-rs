@@ -85,10 +85,12 @@ struct Diff<'a> {
 impl Diff<'_> {
     /// Refuse a row whose columns are neither built in nor in the profile:
     /// without the profile that declares them, their edits would be dropped.
+    /// Columns whose value could not be read count too.
     fn check_columns(&self, row: &InputRow) -> Result<()> {
         let mut unknown: Vec<&str> = row
             .columns
             .keys()
+            .chain(&row.unread)
             .map(String::as_str)
             .filter(|name| {
                 !crate::diff::input::is_builtin_writable(name)
@@ -99,6 +101,7 @@ impl Diff<'_> {
             return Ok(());
         }
         unknown.sort();
+        unknown.dedup();
         Err(PipesError::Usage(format!(
             "the edited file has column(s) {} that are neither built-in columns nor in the \
              profile ({}); pass the profile the dataset was made with (--profile), or remove \

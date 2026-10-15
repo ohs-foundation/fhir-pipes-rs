@@ -808,6 +808,7 @@ mod tests {
                 .collect(),
             geometry: None,
             line: 1,
+            unread: Vec::new(),
         }
     }
 

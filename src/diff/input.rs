@@ -42,6 +42,11 @@ pub struct InputRow {
     pub id: Option<String>,
     /// Only writable columns, keyed by README column name. Absent means untouched.
     pub columns: BTreeMap<String, ColumnValue>,
+    /// Writable columns whose value could not be read (reported as
+    /// input_column_type and left out of `columns`). diff still checks their
+    /// names against the profile, so a number cannot slip an undeclared
+    /// column past it.
+    pub unread: Vec<String>,
     /// 2D, unrounded; `None` means no geometry edit.
     pub geometry: Option<Geometry<f64>>,
     /// 1-based feature or row index, for messages.

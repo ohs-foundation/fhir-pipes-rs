@@ -298,3 +298,51 @@ fn a_bad_profile_is_refused_before_anything_runs() {
         .failure()
         .stderr(contains("https only"));
 }
+
+#[test]
+fn diff_refuses_undeclared_columns_whatever_their_value() {
+    let snap = snapshot_copy();
+    let work = tempfile::tempdir().unwrap();
+    let changes = work.path().join("changes.ndjson");
+    // A number or boolean is not read as text, but the column is still
+    // undeclared: the file is refused rather than the edit dropped.
+    for value in [json!(42), json!(true)] {
+        let input = edits(
+            work.path(),
+            json!({"id": "kano", "name": "Edited", "undeclared": value}),
+        );
+        diff(snap.path(), &input, &changes, None)
+            .failure()
+            .stderr(contains("undeclared"));
+        assert!(!changes.exists());
+    }
+
+    // The same through the Parquet reader.
+    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use std::sync::Arc;
+    let batch = RecordBatch::try_from_iter([
+        ("id", Arc::new(StringArray::from(vec!["kano"])) as ArrayRef),
+        (
+            "name",
+            Arc::new(StringArray::from(vec!["Edited"])) as ArrayRef,
+        ),
+        (
+            "undeclared",
+            Arc::new(Int64Array::from(vec![42])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let input = work.path().join("edits.parquet");
+    let mut w = parquet::arrow::ArrowWriter::try_new(
+        fs::File::create(&input).unwrap(),
+        batch.schema(),
+        None,
+    )
+    .unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    diff(snap.path(), &input, &changes, None)
+        .failure()
+        .stderr(contains("undeclared"));
+    assert!(!changes.exists());
+}
