@@ -9,7 +9,7 @@ use crate::cli::{
     DEFAULT_ROW_GROUP_SIZE, DEFAULT_TIMEOUT_SECS, ExportArgs, ExtractArgs, RunArgs,
 };
 
-use super::config::Settings;
+use super::config::{Fetch, Settings};
 
 /// `fhir-pipes run`: incremental extract into raw/<server>/locations, transform
 /// into parquet/locations. `full` re-extracts every Location (the incremental
@@ -50,18 +50,27 @@ pub fn locations(s: &Settings) -> Result<()> {
 }
 
 /// `fhir-pipes export --incremental`: each type to raw/<server>/<Type>.ndjson,
-/// downloading only what changed since the last refresh unless `full`.
+/// downloading only what changed since the last refresh unless `full`. With
+/// `fetch = "bulk"`, through a Bulk Data `$export` (`export --bulk`).
 pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
     if types.is_empty() {
         return Ok(());
     }
-    println!("   export {} → {}", types.join(", "), s.raw_dir().display());
+    let bulk = s.fetch == Fetch::Bulk;
+    println!(
+        "   export {}{} → {}",
+        types.join(", "),
+        if bulk { " ($export)" } else { "" },
+        s.raw_dir().display()
+    );
     crate::export::run_export(&ExportArgs {
         server: s.server.clone(),
         auth: s.auth.clone(),
         types: types.iter().map(|t| t.to_string()).collect(),
         out: s.raw_dir(),
         incremental: !s.full,
+        bulk,
+        bulk_timeout: s.bulk_timeout,
         report: None,
         retries: DEFAULT_RETRIES,
         timeout: DEFAULT_TIMEOUT_SECS,

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::cli::AuthArgs;
+use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS};
 
 /// The config file (`fhir-pipes.toml`). Every field is optional.
 #[derive(Debug, Default, Deserialize)]
@@ -45,6 +45,31 @@ pub struct ServerFile {
     pub base: Option<String>,
     pub name: Option<String>,
     pub token_url: Option<String>,
+    /// How the views step downloads resources (default `search`).
+    pub fetch: Option<Fetch>,
+    /// With `fetch = "bulk"`: seconds to wait for an export before cancelling
+    /// it.
+    pub bulk_timeout: Option<u64>,
+}
+
+/// How resources are downloaded from the FHIR server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Fetch {
+    /// Paged searches (`export`).
+    #[default]
+    Search,
+    /// A Bulk Data `$export` (`export --bulk`).
+    Bulk,
+}
+
+impl Fetch {
+    pub fn name(self) -> &'static str {
+        match self {
+            Fetch::Search => "search",
+            Fetch::Bulk => "bulk",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -174,6 +199,8 @@ pub struct Settings {
     pub server_name: String,
     /// How to authenticate to the FHIR server, as the other commands take it.
     pub auth: AuthArgs,
+    pub fetch: Fetch,
+    pub bulk_timeout: u64,
     pub duckdb: String,
     pub tippecanoe: String,
     pub rclone: String,
@@ -324,6 +351,11 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             .or(file.server.name)
             .unwrap_or_else(|| "hapi-local".into()),
         auth,
+        fetch: file.server.fetch.unwrap_or_default(),
+        bulk_timeout: file
+            .server
+            .bulk_timeout
+            .unwrap_or(DEFAULT_BULK_TIMEOUT_SECS),
         duckdb: file.tools.duckdb.unwrap_or_else(|| "duckdb".into()),
         tippecanoe: file.tools.tippecanoe.unwrap_or_else(|| "tippecanoe".into()),
         rclone: file.tools.rclone.unwrap_or_else(|| "rclone".into()),
@@ -393,6 +425,21 @@ mod tests {
             ..Default::default()
         };
         assert!(settings(file, PathBuf::from("/b"), o).is_err());
+    }
+
+    #[test]
+    fn fetch_is_search_unless_the_file_says_bulk() {
+        let s = |text: &str| {
+            let file: File = toml::from_str(text).unwrap();
+            settings(file, PathBuf::from("/b"), Overrides::default()).unwrap()
+        };
+        let search = s("data = \"d\"");
+        assert_eq!(search.fetch, Fetch::Search);
+        assert_eq!(search.bulk_timeout, DEFAULT_BULK_TIMEOUT_SECS);
+        let bulk = s("data = \"d\"\n[server]\nfetch = \"bulk\"\nbulk_timeout = 60");
+        assert_eq!(bulk.fetch, Fetch::Bulk);
+        assert_eq!(bulk.bulk_timeout, 60);
+        assert!(toml::from_str::<File>("[server]\nfetch = \"jdbc\"").is_err());
     }
 
     #[test]

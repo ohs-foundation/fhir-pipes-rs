@@ -16,6 +16,9 @@ pub const DEFAULT_BATCH_SIZE: usize = 100;
 /// A country raster is 100–200 MB; the FHIR-paging default would cut a slow
 /// download off after five minutes. Total per-request deadline, in seconds.
 pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
+/// A Bulk Data export of a large server can take hours. How long a run waits
+/// for one, in seconds, before cancelling it.
+pub const DEFAULT_BULK_TIMEOUT_SECS: u64 = 4 * 3600;
 pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
 /// Rows fhir-pipes aims to keep one analytics request under; DHIS2's own default
 /// limit is 50,000.
@@ -513,6 +516,15 @@ pub struct ExportArgs {
     /// from the server's is downloaded in full
     #[arg(long)]
     pub incremental: bool,
+    /// Download with a Bulk Data $export (system level) instead of searches;
+    /// with --incremental, `_since` the last export's transactionTime, and
+    /// resources the export lists as deleted are removed
+    #[arg(long)]
+    pub bulk: bool,
+    /// With --bulk: how long to wait for the server's export, in seconds,
+    /// before cancelling it; also the time allowed for each file's download
+    #[arg(long, default_value_t = DEFAULT_BULK_TIMEOUT_SECS, requires = "bulk")]
+    pub bulk_timeout: u64,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,

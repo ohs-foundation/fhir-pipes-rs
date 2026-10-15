@@ -11,11 +11,15 @@
 //!
 //! `fhir-pipes dhis2` uses the same client against the DHIS2 Web API, with a
 //! complete Authorization value (`ApiToken …` or `Basic …`) and plain JSON.
+//!
+//! `export --bulk` uses it for the Bulk Data kick-off, the status URL (whose
+//! 202 and 429 the caller reads itself) and the output files.
 
 use std::io::Read as _;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use reqwest::Method;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
@@ -101,6 +105,65 @@ pub struct Fetched {
     pub body: Vec<u8>,
     /// The response's HTTP `Date` header: the server's clock when it answered.
     pub date: Option<String>,
+}
+
+/// A response whose status and headers the caller reads.
+pub struct Exchange {
+    pub status: u16,
+    pub headers: HeaderMap,
+    /// The whole body of a 2xx; at most ERROR_BODY_CAP chars of any other.
+    pub body: Vec<u8>,
+}
+
+impl Exchange {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).and_then(|v| v.to_str().ok())
+    }
+}
+
+impl std::fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Exchange {{ status: {}, body: <{} bytes> }}",
+            self.status,
+            self.body.len()
+        )
+    }
+}
+
+/// A 2xx response's body and `Date`.
+fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
+    let date = resp
+        .headers()
+        .get(reqwest::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    match resp.bytes() {
+        Ok(b) => Ok(Fetched {
+            body: b.to_vec(),
+            date,
+        }),
+        Err(e) => Err(FetchError::Transport(format!("reading body: {e}"))),
+    }
+}
+
+/// Any response, with its status and headers.
+fn exchanged(resp: Response) -> std::result::Result<Exchange, FetchError> {
+    let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
+    let body = if (200..300).contains(&status) {
+        resp.bytes()
+            .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?
+            .to_vec()
+    } else {
+        read_error_body(resp).into_bytes()
+    };
+    Ok(Exchange {
+        status,
+        headers,
+        body,
+    })
 }
 
 impl std::fmt::Debug for Fetched {
@@ -242,30 +305,99 @@ impl FhirClient {
 
     /// GET with the retry policy. Sleeps between attempts.
     pub fn get(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
-        self.send(|| self.http.get(url))
+        self.send(|| self.http.get(url), fetched)
     }
 
     /// GET a plain JSON API (DHIS2) with the retry policy. `no-cache` because
     /// DHIS2 marks analytics responses cacheable for up to two weeks, and a
     /// proxy could otherwise answer from before the last analytics run.
     pub fn get_json(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
-        self.send(|| {
-            self.http
-                .get(url)
-                .header(ACCEPT, "application/json")
-                .header(CACHE_CONTROL, "no-cache")
-        })
+        self.send(
+            || {
+                self.http
+                    .get(url)
+                    .header(ACCEPT, "application/json")
+                    .header(CACHE_CONTROL, "no-cache")
+            },
+            fetched,
+        )
     }
 
     /// POST a FHIR JSON body with the same retry policy. The body is cloned
     /// per attempt; bundles are small next to a boundary fetch.
     pub fn post_json(&self, url: &str, body: Vec<u8>) -> std::result::Result<Fetched, FetchError> {
-        self.send(|| {
+        self.send(
+            || {
+                self.http
+                    .post(url)
+                    .header(CONTENT_TYPE, "application/fhir+json")
+                    .body(body.clone())
+            },
+            fetched,
+        )
+    }
+
+    /// GET with `Prefer: respond-async`, the Bulk Data kick-off. Retried as
+    /// `get` is; the 202 comes back with its headers, for `Content-Location`.
+    pub fn get_async(&self, url: &str) -> std::result::Result<Exchange, FetchError> {
+        self.send(
+            || self.http.get(url).header("prefer", "respond-async"),
+            exchanged,
+        )
+    }
+
+    /// One request whose status the caller interprets: only connection
+    /// errors are retried, and any response comes back, whatever its status.
+    /// A Bulk Data status URL answers 202 or 429 while the export runs, and
+    /// the caller does the waiting.
+    pub fn exchange(&self, method: Method, url: &str) -> std::result::Result<Exchange, FetchError> {
+        let auth = self.authorization()?;
+        let mut last = None;
+        for attempt in 1..=self.retries {
+            let mut request = self.http.request(method.clone(), url);
+            if let Some(v) = &auth {
+                request = request.header(AUTHORIZATION, v.clone());
+            }
+            match request.send() {
+                Ok(resp) => return exchanged(resp),
+                Err(e) => {
+                    last = Some(FetchError::Transport(e.to_string()));
+                    if attempt < self.retries {
+                        std::thread::sleep(jittered(backoff_delay(attempt, None)));
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| FetchError::Transport("no attempts made".to_string())))
+    }
+
+    /// GET an NDJSON file and hand its body to `read` as it arrives, with the
+    /// retry policy. A failure while reading is not retried, since `read` may
+    /// have written part of the file. The Authorization header is sent only
+    /// when `authorize`: a Bulk Data output kept elsewhere (a signed storage
+    /// URL) must not get the server's token. `timeout` replaces the client's,
+    /// for a file that takes longer than a search page should.
+    pub fn download<T>(
+        &self,
+        url: &str,
+        authorize: bool,
+        timeout: Duration,
+        mut read: impl FnMut(&mut dyn std::io::Read) -> std::io::Result<T>,
+    ) -> std::result::Result<T, FetchError> {
+        let request = || {
             self.http
-                .post(url)
-                .header(CONTENT_TYPE, "application/fhir+json")
-                .body(body.clone())
-        })
+                .get(url)
+                .header(ACCEPT, "application/fhir+ndjson")
+                .timeout(timeout)
+        };
+        let body = |mut resp: Response| {
+            read(&mut resp).map_err(|e| FetchError::Transport(format!("reading body: {e}")))
+        };
+        if authorize {
+            self.send(request, body)
+        } else {
+            self.retrying(request, body)
+        }
     }
 
     /// One client-credentials token request, with the retry policy. Returns
@@ -277,13 +409,16 @@ impl FhirClient {
         form: &str,
     ) -> std::result::Result<(HeaderValue, Instant), FetchError> {
         let started = Instant::now();
-        let got = self.retrying(|| {
-            self.http
-                .post(url)
-                .header(ACCEPT, "application/json")
-                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(form.to_owned())
-        })?;
+        let got = self.retrying(
+            || {
+                self.http
+                    .post(url)
+                    .header(ACCEPT, "application/json")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(form.to_owned())
+            },
+            fetched,
+        )?;
         let body: Value = serde_json::from_slice(&got.body)
             .map_err(|e| FetchError::Transport(format!("token response is not JSON: {e}")))?;
         let header = body
@@ -320,24 +455,29 @@ impl FhirClient {
 
     /// The retry loop with the Authorization header added. The header is
     /// chosen once per call, so every attempt carries the same token.
-    fn send(
+    fn send<T>(
         &self,
         request: impl Fn() -> RequestBuilder,
-    ) -> std::result::Result<Fetched, FetchError> {
+        success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
+    ) -> std::result::Result<T, FetchError> {
         let auth = self.authorization()?;
-        self.retrying(|| match &auth {
-            Some(v) => request().header(AUTHORIZATION, v.clone()),
-            None => request(),
-        })
+        self.retrying(
+            || match &auth {
+                Some(v) => request().header(AUTHORIZATION, v.clone()),
+                None => request(),
+            },
+            success,
+        )
     }
 
-    /// The retry loop. Any 2xx is a success; 429 and 5xx retry with backoff
-    /// (a numeric Retry-After replaces the computed delay); any other status
-    /// is final on the first response.
-    fn retrying(
+    /// The retry loop. Any 2xx is a success, handed to `success`; 429 and
+    /// 5xx retry with backoff (a numeric Retry-After replaces the computed
+    /// delay); any other status is final on the first response.
+    fn retrying<T>(
         &self,
         request: impl Fn() -> RequestBuilder,
-    ) -> std::result::Result<Fetched, FetchError> {
+        success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
+    ) -> std::result::Result<T, FetchError> {
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
             match request().send() {
@@ -370,18 +510,7 @@ impl FhirClient {
                             body: read_error_body(resp),
                         });
                     } else {
-                        let date = resp
-                            .headers()
-                            .get(reqwest::header::DATE)
-                            .and_then(|v| v.to_str().ok())
-                            .map(str::to_string);
-                        return match resp.bytes() {
-                            Ok(b) => Ok(Fetched {
-                                body: b.to_vec(),
-                                date,
-                            }),
-                            Err(e) => Err(FetchError::Transport(format!("reading body: {e}"))),
-                        };
+                        return success(resp);
                     }
                 }
             }
