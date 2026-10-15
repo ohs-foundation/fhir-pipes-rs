@@ -171,19 +171,31 @@ impl Ig {
     }
 
     /// Identifier systems sliced in the IG's profiles of `resource_type`.
+    /// Identifier systems sliced in the IG's profiles of `resource_type`:
+    /// a pattern or fixed `system` on the slice's `system` element, or a
+    /// patternIdentifier / fixedIdentifier on the slice itself.
     fn identifier_systems(&self, resource_type: &str) -> BTreeSet<String> {
         let prefix = format!("{resource_type}.identifier:");
         self.profiles_of(resource_type)
             .flat_map(elements)
-            .filter(|e| {
-                e.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id.starts_with(&prefix) && id.ends_with(".system"))
-            })
             .filter_map(|e| {
-                ["patternUri", "fixedUri"]
-                    .iter()
-                    .find_map(|k| e.get(*k).and_then(Value::as_str))
+                let id = e.get("id").and_then(Value::as_str)?;
+                let slice = id.strip_prefix(&prefix)?;
+                if !slice.contains('.') {
+                    ["patternIdentifier", "fixedIdentifier"]
+                        .iter()
+                        .find_map(|k| {
+                            e.get(*k)
+                                .and_then(|i| i.get("system"))
+                                .and_then(Value::as_str)
+                        })
+                } else if slice.ends_with(".system") {
+                    ["patternUri", "fixedUri"]
+                        .iter()
+                        .find_map(|k| e.get(*k).and_then(Value::as_str))
+                } else {
+                    None
+                }
             })
             .map(str::to_string)
             .collect()
@@ -335,25 +347,43 @@ impl Checker<'_> {
             self.finding(Severity::Error, place, format!("{url} is not an extension"));
             return;
         }
-        let contexts: Vec<&str> = sd
+        let contexts: Vec<(&str, &str)> = sd
             .get("context")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|c| c.get("expression").and_then(Value::as_str))
+            .filter_map(|c| {
+                let expr = c.get("expression").and_then(Value::as_str)?;
+                Some((
+                    c.get("type").and_then(Value::as_str).unwrap_or("element"),
+                    expr,
+                ))
+            })
             .collect();
-        let applies = contexts.is_empty()
-            || contexts.iter().any(|c| {
-                matches!(*c, "Element" | "Resource" | "DomainResource")
-                    || on.iter().any(|r| c == r || c.starts_with(&format!("{r}.")))
-            });
-        if !applies {
+        // fhir-pipes reads and writes the extension on the resource itself
+        // (Location.extension), so the context must allow the resource root.
+        let mut applies = contexts.is_empty();
+        let mut unknown = Vec::new();
+        for (kind, expr) in &contexts {
+            match context_allows(kind, expr, on) {
+                Some(true) => applies = true,
+                Some(false) => {}
+                None => unknown.push(*expr),
+            }
+        }
+        let shown_contexts: Vec<&str> = contexts.iter().map(|(_, e)| *e).collect();
+        if !applies && !unknown.is_empty() {
+            self.out.not_checked.insert(
+                url.to_string(),
+                format!("context {} is a FHIRPath expression", unknown.join(", ")),
+            );
+        } else if !applies {
             self.finding(
                 Severity::Error,
                 place,
                 format!(
                     "{url} applies to {}, not {}",
-                    contexts.join(", "),
+                    shown_contexts.join(", "),
                     on.join(" or ")
                 ),
             );
@@ -386,14 +416,14 @@ impl Checker<'_> {
         } else {
             types.join(" or ")
         };
-        let concept = types
-            .iter()
-            .any(|t| matches!(*t, "CodeableConcept" | "Coding"));
+        // fhir-pipes reads and writes valueCodeableConcept, not valueCoding.
+        let concept = types.contains(&"CodeableConcept");
         let bound = self.bound_systems(value);
         match want {
             Expect::Any => {}
             Expect::Code if !types.contains(&"code") => {
-                let hint = match (concept, bound.first()) {
+                let first = bound.as_ref().and_then(|b| b.iter().next());
+                let hint = match (concept, first) {
                     (true, Some(s)) => format!("; add system = \"{s}\""),
                     (true, None) => "; add the code system as `system`".into(),
                     _ => String::new(),
@@ -409,6 +439,8 @@ impl Checker<'_> {
                 if !concept {
                     let hint = if types.contains(&"code") {
                         "; remove `system`"
+                    } else if types.contains(&"Coding") {
+                        "; fhir-pipes reads valueCodeableConcept, not valueCoding"
                     } else {
                         ""
                     };
@@ -417,13 +449,17 @@ impl Checker<'_> {
                         place,
                         format!("{url} has value {shown}, not CodeableConcept{hint}"),
                     );
-                } else if !bound.is_empty() && !bound.iter().any(|s| s == system) {
+                } else if let Some(bound) = &bound
+                    && !bound.is_empty()
+                    && !bound.contains(system)
+                {
+                    let listed: Vec<&str> = bound.iter().map(String::as_str).collect();
                     self.finding(
                         Severity::Warning,
                         place,
                         format!(
                             "{system} is not in the ValueSet {url} is bound to ({})",
-                            bound.join(", ")
+                            listed.join(", ")
                         ),
                     );
                 }
@@ -443,26 +479,55 @@ impl Checker<'_> {
     }
 
     /// The code systems of the IG ValueSet an element is bound to.
-    fn bound_systems(&self, element: &Value) -> Vec<String> {
-        let Some(vs) = element
+    /// The code systems of the ValueSet an element is bound to, following the
+    /// IG's ValueSets it imports. `None` when the binding is absent or leads
+    /// to a ValueSet the IG does not contain: then nothing is known.
+    fn bound_systems(&self, element: &Value) -> Option<BTreeSet<String>> {
+        let vs = element
             .get("binding")
             .and_then(|b| b.get("valueSet"))
-            .and_then(Value::as_str)
-        else {
-            return Vec::new();
+            .and_then(Value::as_str)?;
+        let mut out = BTreeSet::new();
+        self.value_set_systems(vs, &mut BTreeSet::new(), &mut out)
+            .then_some(out)
+    }
+
+    /// Add `url`'s code systems to `out`; false if any part is not in the IG.
+    fn value_set_systems(
+        &self,
+        url: &str,
+        seen: &mut BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) -> bool {
+        let url = url.split('|').next().unwrap_or(url);
+        if !seen.insert(url.to_string()) {
+            return true;
+        }
+        let Some(vs) = self.ig.value_sets.get(url) else {
+            return false;
         };
-        let vs = vs.split('|').next().unwrap_or(vs);
-        self.ig
-            .value_sets
-            .get(vs)
-            .and_then(|v| v.get("compose"))
+        let includes = vs
+            .get("compose")
             .and_then(|c| c.get("include"))
             .and_then(Value::as_array)
             .into_iter()
-            .flatten()
-            .filter_map(|i| i.get("system").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect()
+            .flatten();
+        let mut known = true;
+        for include in includes {
+            if let Some(system) = include.get("system").and_then(Value::as_str) {
+                out.insert(system.to_string());
+            }
+            for import in include
+                .get("valueSet")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                known &= self.value_set_systems(import, seen, out);
+            }
+        }
+        known
     }
 
     /// A code system the profile names, and the codes it says are in it.
@@ -559,6 +624,28 @@ impl Checker<'_> {
                 self.code_system(&place, system, &[], Severity::Error);
             }
         }
+    }
+}
+
+/// Whether an extension context lets it sit on the root of one of `on`.
+/// `None`: a FHIRPath context this cannot evaluate.
+fn context_allows(kind: &str, expr: &str, on: &[&str]) -> Option<bool> {
+    let root = |name: &str| {
+        matches!(name, "Element" | "Resource" | "DomainResource") || on.contains(&name)
+    };
+    match kind {
+        "element" => Some(root(expr)),
+        // On another extension, not on a resource.
+        "extension" => Some(false),
+        "fhirpath" => {
+            // Only a union of type names, such as `Location | Organization`.
+            let names: Vec<&str> = expr.split('|').map(str::trim).collect();
+            names
+                .iter()
+                .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric()))
+                .then(|| names.iter().any(|n| root(n)))
+        }
+        _ => None,
     }
 }
 
@@ -847,6 +934,176 @@ mod tests {
         );
         assert!(ig.owns("https://example.org/StructureDefinition/x"));
         assert!(!ig.owns("http://hl7.org/fhir/StructureDefinition/x"));
+    }
+
+    const C: &str = "https://example.org";
+
+    /// An IG with canonical https://example.org and `resources`.
+    fn ig(resources: &[Value]) -> Ig {
+        let mut ig = Ig {
+            canonical: Some(C.into()),
+            ..Ig::default()
+        };
+        for r in resources {
+            ig.add("r.json", &r.to_string());
+        }
+        ig
+    }
+
+    fn extension(id: &str, context: Value, value: Value) -> Value {
+        serde_json::json!({
+            "resourceType": "StructureDefinition",
+            "url": format!("{C}/StructureDefinition/{id}"),
+            "type": "Extension",
+            "derivation": "constraint",
+            "context": context,
+            "differential": {"element": [
+                {"id": "Extension"},
+                serde_json::json!({"id": "Extension.value[x]"}).as_object().unwrap().clone()
+                    .into_iter().chain(value.as_object().unwrap().clone()).collect::<serde_json::Map<_, _>>()
+            ]}
+        })
+    }
+
+    fn column_profile(system: Option<&str>) -> Profile {
+        let system = system
+            .map(|s| format!("system = \"{s}\"\n"))
+            .unwrap_or_default();
+        Profile::parse(
+            &format!(
+                "[[location.column]]\nname = \"x\"\nkind = \"extension_code\"\nurl = \"{C}/StructureDefinition/x\"\n{system}"
+            ),
+            "t.toml",
+        )
+        .unwrap()
+    }
+
+    fn messages(r: &CheckResult) -> Vec<String> {
+        r.findings.iter().map(|f| f.message.clone()).collect()
+    }
+
+    #[test]
+    fn the_context_must_allow_the_resource_root() {
+        let code = serde_json::json!({"type": [{"code": "code"}]});
+        let run = |context: Value| {
+            check(
+                &column_profile(None),
+                &ig(&[extension("x", context, code.clone())]),
+            )
+        };
+        // An element below the root is not where fhir-pipes reads it.
+        let r = run(serde_json::json!([{"type": "element", "expression": "Location.position"}]));
+        assert!(messages(&r)[0].contains("applies to Location.position, not Location"));
+        for ok in [
+            serde_json::json!([{"type": "element", "expression": "Location"}]),
+            serde_json::json!([{"type": "element", "expression": "DomainResource"}]),
+            serde_json::json!([{"type": "fhirpath", "expression": "Location | Organization"}]),
+        ] {
+            let r = run(ok.clone());
+            assert!(r.findings.is_empty(), "{ok}: {:?}", messages(&r));
+        }
+        let r =
+            run(serde_json::json!([{"type": "extension", "expression": "https://example.org/e"}]));
+        assert_eq!(r.errors(), 1);
+        // A FHIRPath beyond a list of types is not judged.
+        let r = run(
+            serde_json::json!([{"type": "fhirpath", "expression": "Location.where(status = 'active')"}]),
+        );
+        assert!(r.findings.is_empty());
+        assert!(r.not_checked[&format!("{C}/StructureDefinition/x")].contains("FHIRPath"));
+    }
+
+    #[test]
+    fn a_coding_value_is_not_a_codeable_concept() {
+        let r = check(
+            &column_profile(Some("https://example.org/cs")),
+            &ig(&[extension(
+                "x",
+                serde_json::json!([{"type": "element", "expression": "Location"}]),
+                serde_json::json!({"type": [{"code": "Coding"}]}),
+            )]),
+        );
+        assert!(
+            messages(&r)[0].contains("not CodeableConcept; fhir-pipes reads valueCodeableConcept"),
+            "{:?}",
+            messages(&r)
+        );
+    }
+
+    #[test]
+    fn imported_value_sets_are_followed() {
+        let ext = extension(
+            "x",
+            serde_json::json!([{"type": "element", "expression": "Location"}]),
+            serde_json::json!({"type": [{"code": "CodeableConcept"}],
+                "binding": {"strength": "extensible", "valueSet": format!("{C}/ValueSet/outer")}}),
+        );
+        let vs = |id: &str, include: Value| {
+            serde_json::json!({"resourceType": "ValueSet", "url": format!("{C}/ValueSet/{id}"),
+                "compose": {"include": include}})
+        };
+        let outer = vs(
+            "outer",
+            serde_json::json!([{"valueSet": [format!("{C}/ValueSet/inner")]},
+                               {"system": "https://example.org/b"}]),
+        );
+        let inner = vs(
+            "inner",
+            serde_json::json!([{"system": "https://example.org/a"},
+            {"valueSet": [format!("{C}/ValueSet/outer")]}]),
+        );
+        let the_ig = ig(&[ext.clone(), outer, inner]);
+        // Only the binding is looked at here; the code systems themselves are
+        // not in this IG.
+        let binding = |r: &CheckResult| {
+            messages(r)
+                .into_iter()
+                .filter(|m| m.contains("ValueSet"))
+                .collect::<Vec<_>>()
+        };
+        // A system from the imported ValueSet is in the binding.
+        let r = check(&column_profile(Some("https://example.org/a")), &the_ig);
+        assert!(binding(&r).is_empty(), "{:?}", messages(&r));
+        let r = check(&column_profile(Some("https://example.org/c")), &the_ig);
+        assert_eq!(binding(&r).len(), 1, "{:?}", messages(&r));
+        // An import the IG does not have: nothing is known, nothing said.
+        let partial = vs(
+            "outer",
+            serde_json::json!([{"valueSet": ["https://elsewhere.org/ValueSet/v"]},
+            {"system": "https://example.org/b"}]),
+        );
+        let r = check(
+            &column_profile(Some("https://example.org/c")),
+            &ig(&[ext, partial]),
+        );
+        assert!(binding(&r).is_empty(), "{:?}", messages(&r));
+    }
+
+    #[test]
+    fn identifier_slices_with_a_pattern_identifier_count() {
+        let profile = serde_json::json!({
+            "resourceType": "StructureDefinition",
+            "url": format!("{C}/StructureDefinition/Loc"),
+            "type": "Location",
+            "derivation": "constraint",
+            "differential": {"element": [
+                {"id": "Location.identifier:pcode",
+                 "patternIdentifier": {"system": "https://example.org/ids/pcode"}},
+                {"id": "Location.identifier:gers.system",
+                 "patternUri": "https://example.org/ids/gers"}
+            ]}
+        });
+        let the_ig = ig(&[profile]);
+        assert_eq!(
+            the_ig
+                .identifier_systems("Location")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [
+                "https://example.org/ids/gers",
+                "https://example.org/ids/pcode"
+            ]
+        );
     }
 
     #[test]

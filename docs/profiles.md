@@ -303,13 +303,13 @@ For each URL under the IG's canonical, the check reports:
 | Problem | Severity |
 |---|---|
 | An extension the profile names is not in the IG | error |
-| An extension does not apply to the resource it is read from (its `context` is, say, Task, not Location) | error |
-| An `extension_code` column without `system` on an extension whose value is a CodeableConcept, or with `system` on a `code` one | error |
-| An `extension_code` column's `system` is not in the ValueSet the extension is bound to | warning |
+| An extension cannot sit on the resource it is read from: its `context` is, say, Task, or an element below the root such as `Location.position`. A FHIRPath context other than a list of types (`Location \| Organization`) is listed as not checked | error |
+| An `extension_code` column without `system` on an extension whose value is a CodeableConcept, or with `system` on one whose value is a `code` or a `Coding` (fhir-pipes reads `valueCodeableConcept`, not `valueCoding`) | error |
+| An `extension_code` column's `system` is not in the ValueSet the extension is bound to, following the IG's ValueSets it imports. A binding that leads outside the IG is not judged | warning |
 | A code system the profile names is not in the IG, or `admin_unit_type`, `facility_type` or a `known_source_codes` entry is not a code in it | error |
 | A later `type_systems` entry (an older URI) is not in the IG | warning |
 | A `meta.profile` (`location_profile`, `group_profile` …) is not in the IG, or constrains another type | error |
-| An identifier system is not sliced in any of the IG's profiles of that resource type | warning |
+| An identifier system is not sliced in any of the IG's profiles of that resource type (by a `system` pattern on the slice's `system`, or a `patternIdentifier` on the slice) | warning |
 | The IG's denominator source code system has codes `known_source_codes` lacks | warning |
 
 It then lists what it could not check: URLs outside the IG, and identifier
