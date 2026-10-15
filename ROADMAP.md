@@ -21,6 +21,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
+| A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 
 ### ViewDefinitions
@@ -112,7 +113,7 @@ on its own outstanding list, next to fhir-pipes.
 | Nested Parquet-on-FHIR tables (SQL-on-FHIR v1) | No; see [Next](#next) |
 | Flat view tables in Parquet | Yes, Hive-partitioned, with a manifest |
 | `schema.sql` (`CREATE TABLE` per view) | `views sql --ddl` (ANSI, PostgreSQL or DuckDB types) |
-| `init_duckdb.sql` (a DuckDB view per table) | No; the manifest lists the tables |
+| `init_duckdb.sql` (a DuckDB view per table) | `catalog.sql`, with paths for a bucket URL, and an optional `catalog.duckdb` to attach by URL (next release) |
 | Local SQL studio and dashboards | No |
 | On-device use on Android and iOS (`MOBILE_KMP_RFC.md`) | No |
 

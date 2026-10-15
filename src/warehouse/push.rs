@@ -5,6 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use super::catalog;
 use super::config::{Hook, Settings};
 use super::tools;
 
@@ -70,6 +71,33 @@ pub fn push(s: &Settings) -> Result<()> {
             .arg(format!("{}:{}/{file}", p.remote, p.bucket));
         tools::run(&mut cmd)?;
         println!("   {file}");
+    }
+    // The catalog goes last, once the files its views name are uploaded.
+    // catalog.duckdb pointing at the bucket can only be built now: DuckDB reads
+    // each table's schema from the files when it creates the view.
+    if let Some(c) = &s.catalog {
+        let mut files = vec![catalog::SQL_FILE];
+        if c.duckdb_file {
+            if c.base_url.is_some() && !s.dry_run {
+                catalog::build_duckdb(s, c)?;
+            }
+            files.push(catalog::DUCKDB_FILE);
+        }
+        for file in files {
+            let src = s.data.join(file);
+            if p.files.iter().any(|f| f == file) || !(src.is_file() || s.dry_run) {
+                continue;
+            }
+            let mut cmd = Command::new(&s.rclone);
+            cmd.arg("copyto");
+            if s.dry_run {
+                cmd.arg("--dry-run");
+            }
+            cmd.arg(&src)
+                .arg(format!("{}:{}/{file}", p.remote, p.bucket));
+            tools::run(&mut cmd)?;
+            println!("   {file}");
+        }
     }
     Ok(())
 }

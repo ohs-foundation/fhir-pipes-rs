@@ -9,9 +9,11 @@
 //!              (fhir-pipes-sof), partition each table by a looked-up column
 //!   tiles      the registry → PMTiles (duckdb + tippecanoe); runs beside views
 //!   manifest   manifest.json: row counts, views, the extract state
+//!   catalog    catalog.sql: a DuckDB view per table; only with [catalog]
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 
+mod catalog;
 mod config;
 mod fhir;
 mod manifest;
@@ -92,6 +94,7 @@ pub enum Step {
     Views,
     Tiles,
     Manifest,
+    Catalog,
     Hooks,
     Push,
 }
@@ -103,6 +106,7 @@ impl Step {
             Step::Views => "views",
             Step::Tiles => "tiles",
             Step::Manifest => "manifest",
+            Step::Catalog => "catalog",
             Step::Hooks => "hooks",
             Step::Push => "push",
         }
@@ -136,6 +140,14 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
             dry_run: args.dry_run,
         },
     )?;
+    let mut steps = steps;
+    // The catalog step is in every run with a [catalog] section.
+    if s.catalog.is_none() {
+        if args.only.contains(&Step::Catalog) {
+            bail!("--only catalog needs a [catalog] section in the config");
+        }
+        steps.remove(&Step::Catalog);
+    }
     let needed = required_tools(&s, &steps)?;
     if args.check {
         check(&s, &steps, &needed);
@@ -157,6 +169,7 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
             Step::Views,
             Step::Tiles,
             Step::Manifest,
+            Step::Catalog,
             Step::Hooks,
         ]
         .into()
@@ -167,6 +180,7 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
             .any(|s| matches!(s, Step::Locations | Step::Views | Step::Tiles))
         {
             only.insert(Step::Manifest);
+            only.insert(Step::Catalog);
         }
         only
     };
@@ -198,6 +212,12 @@ fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Vec<(String, S
     if steps.contains(&Step::Tiles) {
         t.push((s.duckdb.clone(), "tiles".into()));
         t.push((s.tippecanoe.clone(), "tiles".into()));
+    }
+    if let Some(c) = &s.catalog
+        && c.duckdb_file
+        && (steps.contains(&Step::Push) || (steps.contains(&Step::Catalog) && c.base_url.is_none()))
+    {
+        t.push((s.duckdb.clone(), "catalog.duckdb".into()));
     }
     if steps.contains(&Step::Push) {
         if s.push.is_none() {
@@ -253,6 +273,17 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
                 .collect()
         )
     );
+    if let Some(c) = &s.catalog {
+        println!(
+            "catalog:    {}{}",
+            c.base_url.as_deref().unwrap_or("relative paths"),
+            if c.duckdb_file {
+                ", with catalog.duckdb"
+            } else {
+                ""
+            }
+        );
+    }
     for (tool, why) in needed {
         let found = tools::find(tool).map_or("NOT FOUND".to_string(), |p| p.display().to_string());
         println!("tool:       {tool} ({why}): {found}");
@@ -309,6 +340,15 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         refreshed_at = manifest::write(s)?;
         timings.push(("manifest", t.elapsed().as_secs_f64()));
         ran.insert(Step::Manifest);
+    }
+
+    if steps.contains(&Step::Catalog)
+        && let Some(c) = &s.catalog
+    {
+        let t = Instant::now();
+        catalog::write(s, c, &refreshed_at)?;
+        timings.push(("catalog", t.elapsed().as_secs_f64()));
+        ran.insert(Step::Catalog);
     }
 
     if steps.contains(&Step::Hooks) {

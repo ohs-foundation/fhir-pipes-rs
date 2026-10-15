@@ -34,6 +34,7 @@ pub struct File {
     #[serde(default)]
     pub tiles: TilesFile,
     pub push: Option<PushFile>,
+    pub catalog: Option<CatalogFile>,
     #[serde(default)]
     pub hooks: Vec<Hook>,
 }
@@ -124,6 +125,34 @@ fn default_push_exclude() -> Vec<String> {
     vec![".DS_Store".into()]
 }
 
+/// `[catalog]`: write catalog.sql, a DuckDB view per table (see catalog.rs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogFile {
+    /// Where the views read the tables from: unset, paths relative to the
+    /// warehouse directory; an http(s) URL, each table's files listed; any
+    /// other prefix DuckDB reads (s3://, r2://, gcs://, a path), globbed.
+    pub base_url: Option<String>,
+    /// SQL appended after the generated views, such as views joining tables
+    /// (relative to this file).
+    pub extra: Option<PathBuf>,
+    /// Also build catalog.duckdb with the duckdb command.
+    #[serde(default)]
+    pub duckdb_file: bool,
+    /// SQL run before the views when building catalog.duckdb, such as a
+    /// `CREATE SECRET` for s3:// (relative to this file).
+    pub duckdb_setup: Option<PathBuf>,
+}
+
+/// `[catalog]`, with its paths resolved.
+#[derive(Debug, Clone)]
+pub struct Catalog {
+    pub base_url: Option<String>,
+    pub extra: Option<PathBuf>,
+    pub duckdb_file: bool,
+    pub duckdb_setup: Option<PathBuf>,
+}
+
 /// An external command run after the manifest is written.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -153,6 +182,7 @@ pub struct Settings {
     pub lookups: Vec<Lookup>,
     pub tile_countries: Vec<String>,
     pub push: Option<PushFile>,
+    pub catalog: Option<Catalog>,
     pub hooks: Vec<Hook>,
     /// The config file's directory, for hook programs given as paths.
     pub base_dir: PathBuf,
@@ -302,6 +332,12 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         lookups: file.partition.lookup,
         tile_countries: countries,
         push: file.push,
+        catalog: file.catalog.map(|c| Catalog {
+            base_url: c.base_url.filter(|b| !b.is_empty()),
+            extra: c.extra.map(|p| resolve(&base, &p)),
+            duckdb_file: c.duckdb_file,
+            duckdb_setup: c.duckdb_setup.map(|p| resolve(&base, &p)),
+        }),
         hooks: file.hooks,
         profile: o.profile.or_else(|| {
             file.profile.map(|p| {
