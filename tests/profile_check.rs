@@ -27,15 +27,9 @@ fn lines(a: &assert_cmd::assert::Assert, prefix: &str) -> Vec<String> {
 }
 
 #[test]
-fn icrs_profile_matches_its_ig_but_for_dhis2_source() {
-    let a = check(Path::new(ICR_PROFILE)).code(1);
-    // The IG has dhis2-period and dhis2-indicator but no dhis2-source.
-    assert_eq!(
-        lines(&a, "error"),
-        [
-            "error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-source is not an extension in the IG"
-        ]
-    );
+fn icrs_profile_matches_its_ig() {
+    let a = check(Path::new(ICR_PROFILE)).success();
+    assert_eq!(lines(&a, "error"), Vec::<String>::new());
     let warnings = lines(&a, "warning");
     assert_eq!(warnings.len(), 3, "{warnings:#?}");
     // The older location-type URI, kept on purpose for old data.
@@ -48,7 +42,7 @@ fn icrs_profile_matches_its_ig_but_for_dhis2_source() {
         "{out}"
     );
     assert!(out.contains("StructureDefinition/catchment-of"), "{out}");
-    assert!(out.contains("1 error(s), 3 warning(s)"), "{out}");
+    assert!(out.contains("0 error(s), 3 warning(s)"), "{out}");
 }
 
 /// The profile as it was before it was brought in line with the IG.
@@ -89,6 +83,50 @@ facility_type = "clinic"
     ] {
         assert!(errors.contains(want), "{want}\n{errors}");
     }
+}
+
+/// The source extension before it was made generic, and a code system
+/// without the codes `dhis2 reports` writes.
+#[test]
+fn the_dhis2_source_extension_and_system_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("p.toml");
+    let icr = std::fs::read_to_string(ICR_PROFILE).unwrap();
+    std::fs::write(
+        &p,
+        icr.replace(
+            "StructureDefinition/report-source",
+            "StructureDefinition/dhis2-source",
+        )
+        .replace("icr-report-source-cs", "icr-denominator-source-cs"),
+    )
+    .unwrap();
+    let a = check(&p).code(1);
+    assert_eq!(
+        lines(&a, "error"),
+        [
+            "error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-source is not an extension in the IG",
+            "error: [dhis2] source_system: `dhis2-analytics` is not a code in https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs",
+            "error: [dhis2] source_system: `dhis2-data-values` is not a code in https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs",
+        ]
+    );
+
+    // An extension whose value is not a CodeableConcept.
+    std::fs::write(
+        &p,
+        icr.replace(
+            "StructureDefinition/report-source",
+            "StructureDefinition/dhis2-period",
+        ),
+    )
+    .unwrap();
+    let a = check(&p).code(1);
+    assert_eq!(
+        lines(&a, "error"),
+        [
+            "error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-period has value string, not CodeableConcept"
+        ]
+    );
 }
 
 #[test]

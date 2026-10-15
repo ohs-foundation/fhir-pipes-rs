@@ -1,0 +1,17 @@
+{
+  "resourceType": "ValueSet",
+  "status": "draft",
+  "name": "ICRReportSourceVS",
+  "id": "icr-report-source",
+  "title": "ICR Report Source",
+  "description": "Sources of MeasureReport figures. Binding: extensible on the report-source extension.",
+  "url": "https://icr.healthcampaigns.org/ValueSet/icr-report-source",
+  "experimental": false,
+  "compose": {
+    "include": [
+      {
+        "system": "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs"
+      }
+    ]
+  }
+}

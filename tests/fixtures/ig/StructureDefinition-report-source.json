@@ -1,0 +1,55 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "report-source",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/report-source",
+  "name": "ReportSource",
+  "title": "Report Source",
+  "status": "draft",
+  "experimental": false,
+  "description": "The system and route a MeasureReport's figures came from, e.g. DHIS2's analytics tables, or DHIS2 raw data values summed by fhir-pipes. Distinct from coverage-source, which says how a coverage figure was measured (administrative tallies vs survey); a report from DHIS2 analytics is still administrative coverage. Binding: extensible — other sources add codes to the ICR code system or use their own.",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "MeasureReport",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Report Source",
+        "definition": "The system and route a MeasureReport's figures came from, e.g. DHIS2's analytics tables, or DHIS2 raw data values summed by fhir-pipes. Distinct from coverage-source, which says how a coverage figure was measured (administrative tallies vs survey); a report from DHIS2 analytics is still administrative coverage. Binding: extensible — other sources add codes to the ICR code system or use their own."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/report-source"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "CodeableConcept"
+          }
+        ],
+        "binding": {
+          "strength": "extensible",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-report-source"
+        }
+      }
+    ]
+  }
+}

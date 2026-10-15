@@ -25,8 +25,10 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use clap::ValueEnum;
 use serde_json::Value;
 
+use crate::cli::ReportSource;
 use crate::error::{PipesError, Result};
 use crate::profile::{Column, Kind, Profile};
 
@@ -743,7 +745,6 @@ pub fn check(profile: &Profile, ig: &Ig) -> CheckResult {
         for (key, url) in [
             ("period_extension", &d.period_extension),
             ("campaign_extension", &d.campaign_extension),
-            ("source_extension", &d.source_extension),
         ] {
             c.extension(
                 &format!("[dhis2] {key}"),
@@ -752,6 +753,22 @@ pub fn check(profile: &Profile, ig: &Ig) -> CheckResult {
                 Expect::Any,
             );
         }
+        c.extension(
+            "[dhis2] source_extension",
+            &d.source_extension,
+            &["MeasureReport"],
+            Expect::Concept(&d.source_system),
+        );
+        let codes: Vec<&str> = ReportSource::value_variants()
+            .iter()
+            .map(|s| s.coding().0)
+            .collect();
+        c.code_system(
+            "[dhis2] source_system",
+            &d.source_system,
+            &codes,
+            Severity::Error,
+        );
         c.extension(
             "[dhis2] indicator_extension",
             &d.indicator_extension,

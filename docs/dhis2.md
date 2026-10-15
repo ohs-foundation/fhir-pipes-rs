@@ -124,12 +124,16 @@ ids would go over FHIR's 64 characters (a reporting rate with an
 range is its own request (split by indicators if DHIS2 calls it too large),
 and breakdowns work the same.
 
-Every report carries where its figures come from, in the
-`https://icr.healthcampaigns.org/StructureDefinition/dhis2-source`
-extension (after `dhis2-period` and the campaign): `valueCode`
-`analytics` or `data-values`. Reports written before this extension
-existed lack it, so a `--previous` comparison against one counts every
-report as changed, once.
+Every report carries where its figures come from, in the profile's
+`source_extension` (after `dhis2-period` and the campaign): a
+`valueCodeableConcept` with one coding under `source_system`, code
+`dhis2-analytics` or `dhis2-data-values`. ICR's profile uses the
+`report-source` extension and the `icr-report-source-cs` code system; other
+sources of MeasureReports can add codes to it. Before v0.4.0 this was a
+`dhis2-source` extension with `valueCode` `analytics` or `data-values`.
+Reports written before the change, or before the extension existed, differ
+from new ones only there, so a `--previous` comparison against one counts
+every report as changed, once.
 
 `--source data-values` reads raw data values (`/api/dataValueSets`,
 `orgUnit` with `children=true`, `startDate`/`endDate`) instead of

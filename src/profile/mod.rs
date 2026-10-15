@@ -106,7 +106,10 @@ pub struct Dhis2Profile {
     pub country_code_system: String,
     pub period_extension: String,
     pub campaign_extension: String,
+    /// Where each MeasureReport came from: a CodeableConcept under
+    /// `source_system`, `dhis2-analytics` or `dhis2-data-values`.
     pub source_extension: String,
+    pub source_system: String,
     pub indicator_extension: String,
 }
 
