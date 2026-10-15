@@ -28,6 +28,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Capability | Command | Since |
 |---|---|---|
 | Run views over NDJSON files, or over FHIR resources stored as JSONB in PostgreSQL (`postgres` feature) | `views run` | 0.3.0 |
+| Read Bundle files directly: `urn:uuid` references between entries resolve to `Type/id`, and input directories are read with their subdirectories | `views run --input` | next release |
 | Generate the SQL for a view (PostgreSQL or DuckDB), or a `CREATE TABLE` for its columns | `views sql` | 0.3.0 |
 | Check a view's structure, and lint it for the portable FHIRPath subset; check selectors against a FHIR package (`fhir-packages` feature) | `views validate`, `views lint` | 0.3.0 |
 | Run the official SQL-on-FHIR v2.1 test cases (144 of 144 pass) | `views test` | 0.3.0 |
@@ -77,7 +78,6 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | FHIR Bulk Data `$export` client | Not started | `export` uses search paging |
 | Write view tables straight into PostgreSQL | Not started | `views sql` generates the SQL; there is no loader |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
-| Resolve `urn:uuid` references when reading transaction and collection Bundles | Not started | The Java pipeline and the RFC prototype do this |
 
 ## Moving into fhir-data-pipes
 
@@ -106,8 +106,8 @@ on its own outstanding list, next to fhir-pipes.
 |---|---|
 | One native binary on arrow-rs and parquet, CLI first, run from cron or CI instead of a Spring Boot and Flink controller | Yes. `refresh` takes the controller's role |
 | Evaluate ViewDefinitions in Rust rather than compiling them to SQL | Yes, in memory (`crates/sof`); SQL generation is also available (`views sql`) |
-| Read `$export` NDJSON, FHIR search Bundles, and local Bundles | NDJSON, Bundles, JSON resources and directories of them (`views run --input`); FHIR search (`export`, `refresh`). No `$export` client |
-| Resolve `urn:uuid` references inside transaction and collection Bundles | No |
+| Read `$export` NDJSON, FHIR search Bundles, and local Bundles | NDJSON, Bundles, JSON resources and directories of them, subdirectories included (`views run --input`); FHIR search (`export`, `refresh`). No `$export` client |
+| Resolve `urn:uuid` references inside transaction and collection Bundles | Yes, for `views run --input` (next release) |
 | Incremental merge by id and `meta.lastUpdated`, dropping deleted resources | Yes, per type, with a `_lastUpdated` watermark; deletions are found when the server's count differs, then the type is downloaded in full |
 | Nested Parquet-on-FHIR tables (SQL-on-FHIR v1) | No; see [Next](#next) |
 | Flat view tables in Parquet | Yes, Hive-partitioned, with a manifest |

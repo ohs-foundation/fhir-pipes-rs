@@ -11,6 +11,7 @@
 
 mod diagnostic;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -42,8 +43,9 @@ enum ViewsCommand {
         /// pass, writing one file per view into the --out directory.
         view: PathBuf,
         /// FHIR resources to run against, with no database: an NDJSON file, a
-        /// Bundle, a JSON resource or array, a directory of such files, or `-`
-        /// to read from stdin.
+        /// Bundle, a JSON resource or array, a directory of such files
+        /// (subdirectories included), or `-` to read from stdin. `urn:uuid`
+        /// references within a Bundle are resolved to Type/id.
         #[arg(long, conflicts_with = "db")]
         input: Option<PathBuf>,
         /// PostgreSQL connection URL, for a database holding FHIR resources as
@@ -281,8 +283,9 @@ fn default_table_name(view: &ViewDefinition) -> String {
         .unwrap_or_else(|| format!("{}_view", view.resource.to_lowercase()))
 }
 
-/// FHIR resources from a file, a directory of files, or `-` for stdin. NDJSON
-/// (`.ndjson`), single resources, arrays of resources and Bundles are read.
+/// FHIR resources from a file, a directory of files (searched recursively), or
+/// `-` for stdin. NDJSON (`.ndjson`), single resources, arrays of resources and
+/// Bundles are read.
 fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>> {
     if path.as_os_str() == "-" {
         let mut text = String::new();
@@ -297,14 +300,11 @@ fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>>
     }
     let mut resources = Vec::new();
     if path.is_dir() {
-        let mut entries: Vec<PathBuf> = fs::read_dir(path)
-            .with_context(|| format!("reading directory {}", path.display()))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "json" || x == "ndjson"))
-            .collect();
-        entries.sort();
-        for entry in entries {
-            load_file(&entry, &mut resources, threads)?;
+        let mut files = Vec::new();
+        collect_resource_files(path, &mut files)?;
+        files.sort();
+        for file in files {
+            load_file(&file, &mut resources, threads)?;
         }
     } else {
         load_file(path, &mut resources, threads)?;
@@ -313,6 +313,33 @@ fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>>
         bail!("no FHIR resources in {}", path.display());
     }
     Ok(resources)
+}
+
+/// The `.json` and `.ndjson` files under `dir`, in subdirectories too.
+/// Hidden files and directories (`.export-state.json`) are skipped.
+fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
+    {
+        let path = entry
+            .with_context(|| format!("reading directory {}", dir.display()))?
+            .path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        if path.is_dir() {
+            collect_resource_files(&path, out)?;
+        } else if path
+            .extension()
+            .is_some_and(|x| x == "json" || x == "ndjson")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn load_file(path: &Path, out: &mut Vec<serde_json::Value>, threads: usize) -> Result<()> {
@@ -474,6 +501,11 @@ fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<(
 
 /// A Bundle becomes its entries' resources, an array its elements, anything
 /// else one resource.
+///
+/// A reference to another entry of the same Bundle by its `urn:` fullUrl
+/// (`urn:uuid:…`, as in a transaction Bundle) is rewritten to that entry's
+/// `Type/id`, as a server would store it, so `getReferenceKey()` and joins
+/// work on Bundle files. An entry without an id is left as is.
 fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
     match value {
         serde_json::Value::Array(items) => {
@@ -481,18 +513,64 @@ fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
                 push_resource(item, out);
             }
         }
-        serde_json::Value::Object(ref map)
+        serde_json::Value::Object(mut map)
             if map.get("resourceType").and_then(|v| v.as_str()) == Some("Bundle") =>
         {
-            if let Some(entries) = map.get("entry").and_then(|e| e.as_array()) {
-                for entry in entries {
-                    if let Some(resource) = entry.get("resource") {
-                        push_resource(resource.clone(), out);
+            let Some(serde_json::Value::Array(entries)) = map.remove("entry") else {
+                return;
+            };
+            let urns = bundle_urns(&entries);
+            for entry in entries {
+                if let serde_json::Value::Object(mut entry) = entry
+                    && let Some(mut resource) = entry.remove("resource")
+                {
+                    if !urns.is_empty() {
+                        resolve_urns(&mut resource, &urns);
                     }
+                    push_resource(resource, out);
                 }
             }
         }
         other => out.push(other),
+    }
+}
+
+/// `urn:` fullUrl → `Type/id` for the entries of a Bundle that have both.
+fn bundle_urns(entries: &[serde_json::Value]) -> HashMap<String, String> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let full_url = entry.get("fullUrl")?.as_str()?;
+            if !full_url.starts_with("urn:") {
+                return None;
+            }
+            let resource = entry.get("resource")?;
+            let ty = resource.get("resourceType")?.as_str()?;
+            let id = resource.get("id")?.as_str()?;
+            Some((full_url.to_string(), format!("{ty}/{id}")))
+        })
+        .collect()
+}
+
+/// Rewrite every `reference` in `value` that is a key of `urns`.
+fn resolve_urns(value: &mut serde_json::Value, urns: &HashMap<String, String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(reference)) = map.get_mut("reference")
+                && let Some(resolved) = urns.get(reference.as_str())
+            {
+                *reference = resolved.clone();
+            }
+            for child in map.values_mut() {
+                resolve_urns(child, urns);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                resolve_urns(item, urns);
+            }
+        }
+        _ => {}
     }
 }
 
