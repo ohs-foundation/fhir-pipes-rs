@@ -28,7 +28,7 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | Step | What it does | Needs |
 |---|---|---|
 | `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations` | |
-| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh), run each type's views on one read of it, write each view's table | |
+| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, or by `$export` with `fetch = "bulk"`), run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
@@ -67,6 +67,28 @@ The views directory can be any directory of JSON files: files whose
 build (`fsh-generated/resources/Binary-*.json`), are views; the rest are
 skipped. Each view is checked against the spec's structure rules before
 anything runs, and a plain copy is saved to `views/<name>.json`.
+
+### Downloading with Bulk Data $export
+
+By default the views step pages FHIR searches. With `fetch = "bulk"` in
+`[server]`, it asks the server for a system-level Bulk Data `$export` of the
+types the views read instead, as `fhir-pipes export --bulk --incremental`
+does (see the [README](../README.md#bulk-data-export)):
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"
+fetch = "bulk"
+bulk_timeout = 14400        # seconds to wait for the export; then it is cancelled
+```
+
+The downloads land in the same `raw/<server>/<TYPE>.ndjson` files, so the
+views and `--reuse-raw` work the same way. The export's `transactionTime` is
+the next refresh's `_since`, and the resources the export lists as deleted
+are removed. A refresh that stops while the server is still exporting polls
+the same export next time. `--full` exports every type without `_since`.
+The `locations` step still uses search. `Group/[id]/$export` and
+`Patient/$export` are not supported yet.
 
 ## Catalog
 
@@ -176,6 +198,8 @@ the file are relative to the file.
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
+| | | `server.fetch` | `search`; `bulk` for `$export` |
+| | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
 | `--countries` | | `tiles.countries` | every country |
@@ -199,6 +223,7 @@ views = "../ig/fsh-generated/resources"
 base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
+fetch = "search"            # or "bulk" for a Bulk Data $export
 
 [tools]            # paths or names on the PATH
 duckdb = "duckdb"

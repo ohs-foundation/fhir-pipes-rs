@@ -176,11 +176,58 @@ clock when the search began (its HTTP `Date`), less five minutes, so a
 resource updated while a run is paging is fetched by the next run. `extract`
 sets its Location and Organization watermarks the same way.
 
+### Bulk Data $export
+
+With `--bulk`, `export` asks the server for a
+[Bulk Data](https://hl7.org/fhir/uv/bulkdata/) `$export` instead of paging
+searches. The files are the same `OUT/<TYPE>.ndjson`, so `refresh` and the
+views read them unchanged.
+
+```sh
+fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
+  --type Patient --type Observation --out raw/
+```
+
+- The kick-off is a system-level `GET [base]/$export?_type=…` with
+  `Prefer: respond-async`. With `--incremental`, the types that have a
+  watermark are exported together with `_since` the earliest of them and
+  merged into their files by id; the types without one are exported in full
+  in a second export.
+- The status URL is polled with the server's `Retry-After`, or a backoff from
+  one second up to a minute without one. 429 is waited out the same way.
+  Each new `X-Progress` is printed.
+- The status URL is saved in `.export-state.json` as soon as the server
+  returns it. A run that stops before the export is done (a crash, a lost
+  connection) polls the same export next time instead of starting another.
+  A saved export for other types or another `_since` is cancelled.
+- `--bulk-timeout` (four hours by default) is how long a run waits. After
+  that it cancels the export with a `DELETE` of the status URL and fails. It
+  is also the time allowed for each file's download.
+- The output files are downloaded with the bearer token only when the
+  manifest says `requiresAccessToken`.
+- Resources in the manifest's `deleted` Bundles are removed from the files,
+  unless the same export also returned them. The server's count is still
+  checked after a merge, as for search, because not every server lists
+  deletions (HAPI does not); a type whose count differs is exported again in
+  full.
+- Every type's watermark becomes the manifest's `transactionTime`.
+- An `OperationOutcome` from the kick-off or the status URL, or an error or
+  fatal issue in the manifest's `error` files, fails the run with its text.
+  Warnings and information go in the report.
+- After the files are read, the status URL gets a `DELETE` so the server can
+  remove them.
+
+Only system-level export is supported. `Group/[id]/$export` and
+`Patient/$export` are not supported yet. Files are downloaded one after
+another. HAPI asks clients to wait two minutes between polls, so even a small
+export from HAPI takes about two minutes.
+
 ## Connecting to a FHIR server
 
 Any FHIR R4 server that supports standard search with `_lastUpdated`,
 `Bundle.link` paging and transaction bundles works. fhir-pipes does not depend
-on any vendor's extensions.
+on any vendor's extensions. `export --bulk` also needs the server's
+system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
 A server that needs authentication gets one of three kinds:
 
@@ -269,7 +316,7 @@ src/
   main.rs, cli.rs, error.rs
   warehouse/      refresh: config, views, partitioning, manifest, tiles, hooks, push
   views/          views: run, sql, validate, lint, test
-  export.rs       export
+  export/         export: search paging, and Bulk Data $export (bulk.rs)
   extract/        FHIR client with retry and OAuth, paging, boundary fetch and cache
   snapshot/       state.json, merge by id
   load/           parents-first ordering, transaction bundles with ifMatch

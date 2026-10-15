@@ -18,6 +18,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Build a SQL-on-FHIR warehouse: download what the ViewDefinitions read, run them, write Hive-partitioned Parquet and a manifest | `refresh` | 0.3.0 |
 | Download only what changed (`_lastUpdated` watermark per type, merged by id); a type whose count differs from the server's is downloaded in full, which picks up deletions | `refresh`, `export --incremental` | 0.3.0 |
 | Download every resource of the given types as NDJSON | `export` | 0.3.0 |
+| Download through a system-level Bulk Data `$export` instead of search: `_since` the last export's `transactionTime`, merged by id, `deleted` resources removed, an interrupted export resumed from its saved status URL, cancelled after `--bulk-timeout`. Group and Patient exports are not supported yet | `export --bulk`, `refresh` (`fetch = "bulk"`) | next release |
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
@@ -78,7 +79,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Move the FHIR client, paging, snapshot merge and loader into their own crate | Planned | Step 1 of the consolidation plan |
 | Put geo, rasters and DHIS2 behind Cargo features | Planned | So an analytics-only build stays small; only `postgres` and `fhir-packages` are optional today |
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
-| FHIR Bulk Data `$export` client | Not started | `export` uses search paging |
+| Bulk Data `Group/[id]/$export` and `Patient/$export` | Not started | `export --bulk` is system level only |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
 
 ## Moving into fhir-data-pipes
@@ -108,9 +109,9 @@ on its own outstanding list, next to fhir-pipes.
 |---|---|
 | One native binary on arrow-rs and parquet, CLI first, run from cron or CI instead of a Spring Boot and Flink controller | Yes. `refresh` takes the controller's role |
 | Evaluate ViewDefinitions in Rust rather than compiling them to SQL | Yes, in memory (`crates/sof`); SQL generation is also available (`views sql`) |
-| Read `$export` NDJSON, FHIR search Bundles, and local Bundles | NDJSON, Bundles, JSON resources and directories of them, subdirectories included (`views run --input`); FHIR search (`export`, `refresh`). No `$export` client |
+| Read `$export` NDJSON, FHIR search Bundles, and local Bundles | NDJSON, Bundles, JSON resources and directories of them, subdirectories included (`views run --input`); FHIR search and system-level `$export` (`export`, `export --bulk`, `refresh`; `$export` in the next release) |
 | Resolve `urn:uuid` references inside transaction and collection Bundles | Yes, for `views run --input` (next release) |
-| Incremental merge by id and `meta.lastUpdated`, dropping deleted resources | Yes, per type, with a `_lastUpdated` watermark; deletions are found when the server's count differs, then the type is downloaded in full |
+| Incremental merge by id and `meta.lastUpdated`, dropping deleted resources | Yes, per type, with a `_lastUpdated` watermark; deletions are found when the server's count differs, then the type is downloaded in full. With `$export`, the manifest's `deleted` resources are removed without a full download (next release) |
 | Nested Parquet-on-FHIR tables (SQL-on-FHIR v1) | No; see [Next](#next) |
 | Flat view tables in Parquet | Yes, Hive-partitioned, with a manifest |
 | `schema.sql` (`CREATE TABLE` per view) | `views sql --ddl` (ANSI, PostgreSQL or DuckDB types) |
@@ -122,7 +123,7 @@ on its own outstanding list, next to fhir-pipes.
 
 | # | RFC outstanding item | fhir-pipes |
 |---|---|---|
-| 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, except a Bulk Data `$export` client |
+| 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, including a system-level Bulk Data `$export` client (next release) |
 | 2 | Direct relational database sinks (PostgreSQL) | `refresh` with `[database]` loads the view tables into PostgreSQL (next release; `postgres` feature) |
 | 3 | Schema from StructureDefinitions, including IG profiles | Not needed for the flat tables, which take their columns from the views. Would be the basis of nested output. `profile check` already reads an IG's StructureDefinitions |
 | 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done for views evaluated in memory (`views run --input`, `refresh`): `octofhir-fhirpath`, 144 of 144. Generated SQL (`views sql`, and `views run --db`, which uses it) supports fewer functions; `substring()`, for one, is refused |
