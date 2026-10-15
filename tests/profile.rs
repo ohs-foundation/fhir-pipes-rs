@@ -428,3 +428,35 @@ fn the_icr_walkthrough_example_behaves_as_documented() {
         })
     );
 }
+
+/// An untouched transform output written back through diff changes nothing,
+/// including the settlement-type CodeableConcept (its display included).
+#[test]
+fn an_unedited_icr_parquet_round_trip_changes_nothing() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/icr/snapshot");
+    let snap = tempfile::tempdir().unwrap();
+    for f in ["locations.ndjson", "organizations.ndjson"] {
+        fs::copy(example.join(f), snap.path().join(f)).unwrap();
+    }
+    let out = tempfile::tempdir().unwrap();
+    transform(snap.path(), out.path(), Some(ICR_PROFILE));
+    let work = tempfile::tempdir().unwrap();
+    let parts: Vec<PathBuf> = walk(&out.path().join("locations"))
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+        .collect();
+    assert_eq!(parts.len(), 4);
+    for (i, part) in parts.iter().enumerate() {
+        let changes = work.path().join(format!("changes-{i}.ndjson"));
+        let run = diff(snap.path(), part, &changes, None).success();
+        let output = run.get_output();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.lines().any(|l| l.starts_with("0 changed,")), "{text}");
+        let written = fs::read_to_string(&changes).unwrap_or_default();
+        assert!(written.trim().is_empty(), "{}: {written}", part.display());
+    }
+}

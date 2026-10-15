@@ -60,14 +60,20 @@ fhir-pipes transform locations --snapshot /tmp/base-snap --out /tmp/base
 ```
 
 ```
-profile: base (/tmp/base-snap/profile.toml)
+profile: base (no profile)
 indexed 6 resources, 6 with geometry and hierarchy
+…
 Wrote 6 rows across 4 partitions to /tmp/base
   locations/country=unknown/geom_type=point/type=settlement/part-0.parquet (1 rows)
   locations/country=unknown/geom_type=point/type=facility/part-0.parquet (1 rows)
   locations/country=unknown/geom_type=polygon/type=admin-unit/part-0.parquet (3 rows)
   locations/country=unknown/geom_type=polygon/type=facility-catchment/part-0.parquet (1 rows)
+Issues found:
+  small_partition: 4
 ```
+
+`small_partition` only says the partitions are small, as they are with six
+rows.
 
 Base FHIR has no notion of an admin unit or a country, so every row is
 `country=unknown` and the admin columns are empty:
@@ -95,11 +101,14 @@ fhir-pipes transform locations --profile examples/profiles/icr.toml \
 ```
 profile: icr (examples/profiles/icr.toml)
 indexed 6 resources, 6 with geometry and hierarchy
+…
 Wrote 6 rows across 4 partitions to /tmp/icr
   locations/country=NGA/geom_type=point/type=settlement/part-0.parquet (1 rows)
   locations/country=NGA/geom_type=point/type=facility/part-0.parquet (1 rows)
   locations/country=NGA/geom_type=polygon/type=admin-unit/part-0.parquet (3 rows)
   locations/country=NGA/geom_type=polygon/type=facility-catchment/part-0.parquet (1 rows)
+Issues found:
+  small_partition: 4
 ```
 
 The rows now sit under `country=NGA`, and these columns are added:
@@ -395,6 +404,11 @@ writes each edit where the column reads it from:
 - **The clinic's Organization:** `facility_level` has
   `mirror_to_organization = true`, so the same coding change is written there
   too. That is why the output has one Organization.
+
+A column whose value was not edited is left as it was. Passing a whole
+untouched Parquet partition back through `diff` reports `0 changed`, and the
+settlement keeps its `display: "Rural"`. Only an edited code rewrites the
+coding.
 
 `changes.ndjson` then goes to the server with `fhir-pipes load`.
 

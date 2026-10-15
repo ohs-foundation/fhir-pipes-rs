@@ -189,10 +189,12 @@ system = "https://example.org/fhir/CodeSystem/settlement-type"
 …/CodeSystem/settlement-type, code: "urban"}]}}]` → `settlement_type =
 "urban"`.
 
-**diff** sets the value on that extension (`valueCode`, or a
-`valueCodeableConcept` with one coding under `system`), adds the extension if
-missing, and removes it when the value is cleared. A display from the old
-value is not kept.
+**diff** leaves the extension alone when the value is unchanged. An edit sets
+`valueCode`, or with `system` replaces the coding under that system in
+`valueCodeableConcept`. It keeps other systems' codings and drops the old
+coding's display and the concept text. A missing extension is added.
+Clearing the value removes the extension; with `system`, it removes that
+system's coding, and the extension once no coding is left.
 
 ### type_coding
 

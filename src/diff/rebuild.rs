@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
 use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow};
 use crate::fhir::location::{
-    GEOJSON_CONTENT_TYPE, HL7_BOUNDARY_EXTENSION_URL, is_boundary_extension,
+    GEOJSON_CONTENT_TYPE, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension,
 };
 use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
@@ -298,29 +298,87 @@ fn url_is(entry: &Value, url: &str) -> bool {
     entry.get("url").and_then(Value::as_str) == Some(url)
 }
 
-/// Set the extension's `valueCode`, or with `system` its
-/// `valueCodeableConcept` (one coding under `system`; a stale display or
-/// text goes with the old code). Clearing removes the extension.
+/// Set the extension's `valueCode`, or with `system` the coding under
+/// `system` in its `valueCodeableConcept`. An unchanged value leaves the
+/// extension as it is, so a round trip of unedited rows keeps displays, text
+/// and other systems' codings. A changed code keeps the concept's other
+/// codings and drops what described the old code (its display and the
+/// concept text). Clearing removes the coding, and the extension once
+/// nothing is left in it.
 fn upsert_extension_code(obj: &mut Object, url: &str, system: Option<&str>, code: Option<&str>) {
+    let current = obj
+        .get("extension")
+        .and_then(Value::as_array)
+        .and_then(|exts| exts.iter().find(|e| url_is(e, url)))
+        .and_then(|ext| match system {
+            Some(s) => coding_code_by_system(ext.get("valueCodeableConcept"), s),
+            None => ext
+                .get("valueCode")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    if current.as_deref() == code {
+        return;
+    }
     let exts = array_mut(obj, "extension");
-    match code {
-        Some(c) => {
-            let (key, value) = match system {
-                Some(s) => (
-                    "valueCodeableConcept",
-                    json!({"coding": [{"system": s, "code": c}]}),
-                ),
-                None => ("valueCode", Value::String(c.to_string())),
-            };
-            match exts.iter_mut().find(|e| url_is(e, url)) {
-                Some(Value::Object(e)) => {
-                    e.retain(|k, _| !k.starts_with("value"));
-                    e.insert(key.into(), value);
+    let pos = exts.iter().position(|e| url_is(e, url));
+    match (code, system) {
+        (Some(c), None) => match pos.and_then(|i| exts[i].as_object_mut()) {
+            Some(e) => {
+                e.retain(|k, _| !k.starts_with("value"));
+                e.insert("valueCode".into(), Value::String(c.to_string()));
+            }
+            None => exts.push(json!({"url": url, "valueCode": c})),
+        },
+        (Some(c), Some(s)) => {
+            let coding = json!({"system": s, "code": c});
+            let concept = pos
+                .and_then(|i| exts[i].as_object_mut())
+                .and_then(|e| e.get_mut("valueCodeableConcept"))
+                .and_then(Value::as_object_mut);
+            match concept {
+                Some(cc) => {
+                    cc.remove("text");
+                    let codings = cc
+                        .entry("coding")
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if !codings.is_array() {
+                        *codings = Value::Array(Vec::new());
+                    }
+                    let codings = codings.as_array_mut().expect("an array");
+                    match codings.iter().position(|x| system_is(x, s)) {
+                        Some(i) => codings[i] = coding,
+                        None => codings.push(coding),
+                    }
                 }
-                _ => exts.push(json!({"url": url, key: value})),
+                None => match pos.and_then(|i| exts[i].as_object_mut()) {
+                    Some(e) => {
+                        e.retain(|k, _| !k.starts_with("value"));
+                        e.insert("valueCodeableConcept".into(), json!({"coding": [coding]}));
+                    }
+                    None => {
+                        exts.push(json!({"url": url, "valueCodeableConcept": {"coding": [coding]}}))
+                    }
+                },
             }
         }
-        None => exts.retain(|e| !url_is(e, url)),
+        (None, None) => exts.retain(|e| !url_is(e, url)),
+        (None, Some(s)) => {
+            if let Some(i) = pos {
+                let left = exts[i]
+                    .get_mut("valueCodeableConcept")
+                    .and_then(|cc| cc.get_mut("coding"))
+                    .and_then(Value::as_array_mut)
+                    .map(|codings| {
+                        codings.retain(|x| !system_is(x, s));
+                        codings.len()
+                    })
+                    .unwrap_or(0);
+                if left == 0 {
+                    exts.remove(i);
+                }
+            }
+        }
     }
     if exts.is_empty() {
         obj.remove("extension");
@@ -999,6 +1057,42 @@ mod tests {
         assert_eq!(out["physicalType"], json!({"coding":[{"code":"si"}]}));
         let out = apply(out, &[("physical_type", ColumnValue::Null)]);
         assert!(out.get("physicalType").is_none());
+    }
+
+    #[test]
+    fn an_unchanged_codeable_concept_extension_is_left_alone() {
+        let ext = json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+            "coding":[{"system":"https://example.org/local","code":"village"},
+                      {"system":SETTLEMENT_TYPE_SYSTEM,"code":"rural","display":"Rural"}],
+            "text":"Rural village"}});
+        let base = json!({"resourceType":"Location","id":"a","extension":[ext.clone()]});
+        // The exported value written back as it was: nothing changes.
+        let out = apply(base.clone(), &[("settlement_type", text("rural"))]);
+        assert_eq!(out["extension"], json!([ext]));
+
+        // Only another system's coding: the column reads null, and a null
+        // written back does not delete the extension.
+        let other = json!({"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCodeableConcept":{
+            "coding":[{"system":"https://example.org/local","code":"village"}]}});
+        let only_other = json!({"resourceType":"Location","id":"a","extension":[other.clone()]});
+        let out = apply(only_other, &[("settlement_type", ColumnValue::Null)]);
+        assert_eq!(out["extension"], json!([other]));
+
+        // A changed code replaces only that system's coding; the text and
+        // display described the old code and go.
+        let out = apply(base.clone(), &[("settlement_type", text("hard-to-reach"))]);
+        assert_eq!(
+            out["extension"][0]["valueCodeableConcept"],
+            json!({"coding":[{"system":"https://example.org/local","code":"village"},
+                             {"system":SETTLEMENT_TYPE_SYSTEM,"code":"hard-to-reach"}]})
+        );
+
+        // Clearing removes that system's coding and keeps the rest.
+        let out = apply(base, &[("settlement_type", ColumnValue::Null)]);
+        assert_eq!(
+            out["extension"][0]["valueCodeableConcept"]["coding"],
+            json!([{"system":"https://example.org/local","code":"village"}])
+        );
     }
 
     #[test]
