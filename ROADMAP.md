@@ -24,6 +24,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Load the view tables into PostgreSQL, all in one transaction (`postgres` feature; #25) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
+| HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `refresh` | next release |
 
 ### ViewDefinitions
 

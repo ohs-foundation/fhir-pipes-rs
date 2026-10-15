@@ -46,6 +46,8 @@ pub struct ServerFile {
     pub base: Option<String>,
     pub name: Option<String>,
     pub token_url: Option<String>,
+    /// HTTP Basic username; the password comes only from FHIR_PIPES_PASSWORD.
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -226,6 +228,8 @@ impl Settings {
             "bearer token"
         } else if self.auth.client_id.is_some() {
             "client credentials"
+        } else if self.auth.username.is_some() {
+            "basic"
         } else {
             "none"
         }
@@ -291,6 +295,8 @@ pub struct Overrides {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub token_url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
     pub countries: Vec<String>,
     pub threads: Option<usize>,
     pub reuse_raw: bool,
@@ -309,24 +315,47 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         }
     };
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
-    let auth = match (o.client_id, o.client_secret) {
-        (Some(_), _) if o.token.is_some() => {
-            bail!("FHIR_PIPES_TOKEN and FHIR_PIPES_CLIENT_ID are mutually exclusive")
-        }
-        (Some(id), Some(secret)) => AuthArgs {
-            token: None,
+    let username = o.username.or(file.server.username);
+    let kinds: Vec<&str> = [
+        (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
+        (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
+        (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
+    ]
+    .into_iter()
+    .filter_map(|(set, what)| set.then_some(what))
+    .collect();
+    if kinds.len() > 1 {
+        bail!("use one way to authenticate, not {}", kinds.join(" and "));
+    }
+    let none = AuthArgs {
+        token: None,
+        client_id: None,
+        client_secret: None,
+        token_url: None,
+        username: None,
+        password: None,
+    };
+    let auth = match (o.client_id, o.client_secret, username, o.password) {
+        (Some(id), Some(secret), _, _) => AuthArgs {
             client_id: Some(id),
             client_secret: Some(secret),
             token_url: Some(o.token_url.or(file.server.token_url).context(
                 "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
             )?),
+            ..none
         },
-        (Some(_), None) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
+        (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
+        (None, _, Some(user), Some(password)) => AuthArgs {
+            username: Some(user),
+            password: Some(password),
+            ..none
+        },
+        (None, _, Some(_), None) => {
+            bail!("a username is set but no password: set FHIR_PIPES_PASSWORD")
+        }
         _ => AuthArgs {
             token: o.token,
-            client_id: None,
-            client_secret: None,
-            token_url: None,
+            ..none
         },
     };
     let threads = o
@@ -425,6 +454,35 @@ mod tests {
             ..Default::default()
         };
         assert!(settings(file, PathBuf::from("/b"), o).is_err());
+    }
+
+    #[test]
+    fn basic_auth_takes_the_password_from_the_overrides() {
+        let file: File = toml::from_str("data = \"d\"\n[server]\nusername = \"admin\"").unwrap();
+        let o = Overrides {
+            password: Some("Admin123".into()),
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert_eq!(s.auth_kind(), "basic");
+        assert_eq!(s.auth.username.as_deref(), Some("admin"));
+
+        let file: File = toml::from_str("data = \"d\"\n[server]\nusername = \"admin\"").unwrap();
+        let err = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap_err();
+        assert!(err.to_string().contains("FHIR_PIPES_PASSWORD"), "{err}");
+
+        let file: File = toml::from_str("data = \"d\"").unwrap();
+        let o = Overrides {
+            token: Some("t".into()),
+            username: Some("u".into()),
+            password: Some("p".into()),
+            ..Default::default()
+        };
+        let err = settings(file, PathBuf::from("/b"), o).unwrap_err();
+        assert!(
+            err.to_string().contains("use one way to authenticate"),
+            "{err}"
+        );
     }
 
     #[test]

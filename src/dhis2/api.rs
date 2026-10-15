@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use base64::Engine;
 use serde_json::Value;
 
 use crate::cli::Dhis2Conn;
@@ -175,10 +174,7 @@ pub fn api_base(url: &str) -> Result<String> {
 pub fn auth(conn: &Dhis2Conn) -> Auth {
     match (&conn.token, &conn.user, &conn.password) {
         (Some(t), _, _) => Auth::Header(format!("ApiToken {t}")),
-        (None, Some(u), Some(p)) => Auth::Header(format!(
-            "Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"))
-        )),
+        (None, Some(u), Some(p)) => Auth::basic(u, p),
         _ => Auth::None,
     }
 }

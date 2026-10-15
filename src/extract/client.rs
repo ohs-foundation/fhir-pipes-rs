@@ -48,6 +48,17 @@ pub enum Auth {
     },
 }
 
+impl Auth {
+    /// HTTP Basic: `Basic base64(user:password)`.
+    pub fn basic(user: &str, password: &str) -> Self {
+        use base64::Engine;
+        Auth::Header(format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+        ))
+    }
+}
+
 /// The current client-credentials token and when to replace it. The lock is
 /// held across a renewal so concurrent boundary workers wait for one new
 /// token instead of each fetching their own.

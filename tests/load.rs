@@ -34,6 +34,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_USERNAME",
+        "FHIR_PIPES_PASSWORD",
     ] {
         c.env_remove(var);
     }
@@ -550,4 +552,32 @@ fn parallel_bundles_still_put_parents_first() {
         "{}",
         stdout(&a)
     );
+}
+
+#[test]
+fn basic_auth_authorises_the_preflight_and_every_bundle() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("state", Some("3"), None)]);
+    let basic = || request::headers(contains(("authorization", "Basic YWRtaW46QWRtaW4xMjM=")));
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/metadata"),
+            basic()
+        ])
+        .times(1)
+        .respond_with(ok(capability(true))),
+    );
+    server.expect(
+        Expectation::matching(all_of![any_bundle(), basic()])
+            .times(1)
+            .respond_with(ok(transaction_response())),
+    );
+    fhir_pipes()
+        .args(["load", "--server", &server.url("/fhir").to_string(), "--in"])
+        .arg(&input)
+        .args(["--username", "admin"])
+        .env("FHIR_PIPES_PASSWORD", "Admin123")
+        .assert()
+        .success();
 }
