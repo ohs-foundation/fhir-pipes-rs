@@ -913,6 +913,8 @@ mod database {
             .failure()
             .stderr(has("$FHIR_PIPES_NO_SUCH_URL"));
     }
+}
+
 /// The username from the config, the password only from the environment.
 #[test]
 fn locations_are_extracted_with_basic_auth() {
