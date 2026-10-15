@@ -978,8 +978,8 @@ mod database {
         sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
     }
 
-    /// An empty view gets its table; tables named t and t_id do not clash
-    /// over index names.
+    /// An empty view gets its table; tables named t, t_id and t_id_idx do
+    /// not clash with the index names PostgreSQL picks.
     #[test]
     fn empty_and_similarly_named_tables_load() {
         if url().is_none() {
@@ -989,7 +989,11 @@ mod database {
         let (dir, config) = setup_with_raw(&format!(
             "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
         ));
-        let views = views_with(dir.path(), &["IcrAlpha", "IcrAlphaId"], true);
+        let views = views_with(
+            dir.path(),
+            &["IcrAlpha", "IcrAlphaId", "IcrAlphaIdIdx"],
+            true,
+        );
         for _ in 0..2 {
             cmd(&config)
                 .args(["--only", "views", "--reuse-raw", "--views"])

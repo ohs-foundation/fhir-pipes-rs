@@ -174,8 +174,51 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
         &format!("CREATE SCHEMA IF NOT EXISTS {}", ident(schema)),
     )
     .await?;
+    let name = |p: &Plan| format!("{}.{}", ident(schema), ident(&p.table));
+    // First every table, so that indexes, which PostgreSQL names to avoid
+    // the relations that exist, cannot take a name a table of this load needs.
+    let mut created = Vec::new();
+    for p in plans.iter().filter(|p| !p.files.is_empty()) {
+        let existing = existing_columns(&mut tx, schema, &p.table).await?;
+        let wanted: Vec<(String, String)> = p
+            .columns
+            .iter()
+            .map(|(n, t)| (n.clone(), (*t).to_string()))
+            .collect();
+        if existing == wanted {
+            continue;
+        }
+        if !existing.is_empty() {
+            exec(&mut tx, &format!("DROP TABLE {}", name(p)))
+                .await
+                .with_context(|| {
+                    format!(
+                        "{} changed columns and must be recreated; drop what depends on it (views) first",
+                        p.table
+                    )
+                })?;
+        }
+        let cols: Vec<String> = p
+            .columns
+            .iter()
+            .map(|(n, t)| format!("{} {t}", ident(n)))
+            .collect();
+        exec(
+            &mut tx,
+            &format!("CREATE TABLE {} ({})", name(p), cols.join(", ")),
+        )
+        .await?;
+        created.push(p);
+    }
+    // Then their indexes: unnamed, made with the table, so later runs find
+    // them in place.
+    for p in created {
+        if p.columns.iter().any(|(n, _)| n == "id") {
+            exec(&mut tx, &format!("CREATE INDEX ON {} (id)", name(p))).await?;
+        }
+    }
     for p in plans {
-        let name = format!("{}.{}", ident(schema), ident(&p.table));
+        let name = name(p);
         if p.files.is_empty() {
             // A table written before empty results got an empty file has no
             // columns to create it from: empty it if it exists.
@@ -189,39 +232,6 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
                 );
             }
             continue;
-        }
-        let existing = existing_columns(&mut tx, schema, &p.table).await?;
-        let wanted: Vec<(String, String)> = p
-            .columns
-            .iter()
-            .map(|(n, t)| (n.clone(), (*t).to_string()))
-            .collect();
-        if !existing.is_empty() && existing != wanted {
-            exec(&mut tx, &format!("DROP TABLE {name}"))
-                .await
-                .with_context(|| {
-                    format!(
-                        "{} changed columns and must be recreated; drop what depends on it (views) first",
-                        p.table
-                    )
-                })?;
-        }
-        if existing != wanted {
-            let cols: Vec<String> = p
-                .columns
-                .iter()
-                .map(|(n, t)| format!("{} {t}", ident(n)))
-                .collect();
-            exec(
-                &mut tx,
-                &format!("CREATE TABLE {name} ({})", cols.join(", ")),
-            )
-            .await?;
-            // Unnamed, so PostgreSQL picks a name no other relation has; made
-            // with the table, so later runs find it in place.
-            if p.columns.iter().any(|(n, _)| n == "id") {
-                exec(&mut tx, &format!("CREATE INDEX ON {name} (id)")).await?;
-            }
         }
         exec(&mut tx, &format!("DELETE FROM {name}")).await?;
         let rows = copy(&mut tx, &name, p).await?;
