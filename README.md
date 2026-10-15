@@ -120,6 +120,7 @@ data to show what each part does.
 | `index` | in | Add spatial index identifiers (quadkey, geohash) to Locations | [locations.md](docs/locations.md#index) |
 | `population` | in | Population Groups for admin units from a raster such as WorldPop | [locations.md](docs/locations.md#population) |
 | `dhis2 locations`, `measures`, `reports` | in | DHIS2 org units, indicators and data → FHIR NDJSON | [dhis2.md](docs/dhis2.md) |
+| `profile check` | | Compare a profile with its IG's extensions, code systems and profiles | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
 
 Run `fhir-pipes <command> --help` for every option. NDJSON paths ending in
 `.gz` are read and written compressed.

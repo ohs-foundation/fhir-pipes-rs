@@ -1,0 +1,56 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "location-boundary-geojson",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+  "name": "LocationBoundaryGeoJson",
+  "title": "Location Boundary (GeoJSON)",
+  "status": "draft",
+  "experimental": false,
+  "description": "Boundary geometry for a Location — district polygons, settlement areas, catchment zones — as a GeoJSON attachment. R4 extension mirroring the R5 standard boundary extension; alignment path is working doc §10 question 6.",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Location",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Location Boundary (GeoJSON)",
+        "definition": "Boundary geometry for a Location — district polygons, settlement areas, catchment zones — as a GeoJSON attachment. R4 extension mirroring the R5 standard boundary extension; alignment path is working doc §10 question 6."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "Attachment"
+          }
+        ]
+      },
+      {
+        "id": "Extension.value[x].contentType",
+        "path": "Extension.value[x].contentType",
+        "patternCode": "application/geo+json"
+      }
+    ]
+  }
+}

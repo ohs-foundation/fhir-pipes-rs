@@ -1,0 +1,51 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "is-planning-denominator",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/is-planning-denominator",
+  "name": "IsPlanningDenominator",
+  "title": "Is Planning Denominator",
+  "status": "draft",
+  "experimental": false,
+  "description": "True when this estimate is the one flagged as the campaign's planning denominator among competing estimates for the same geography.",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Group",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Is Planning Denominator",
+        "definition": "True when this estimate is the one flagged as the campaign's planning denominator among competing estimates for the same geography."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/is-planning-denominator"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "boolean"
+          }
+        ]
+      }
+    ]
+  }
+}

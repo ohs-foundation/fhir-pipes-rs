@@ -1,0 +1,54 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "catchment-of",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/catchment-of",
+  "name": "CatchmentOf",
+  "title": "Catchment Of",
+  "status": "draft",
+  "experimental": false,
+  "description": "On a catchment-area Location (type facility-catchment or settlement-catchment): the site Location — health facility or settlement point — whose service area or footprint this polygon is. The catchment is a separate Location from the site so that its boundary, its place in the containment tree (partOf) and the population / accessibility figures scoped to it stay distinct from the site's own point record. Searchable: Location?catchment-of=Location/<site-id>.",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Location",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Catchment Of",
+        "definition": "On a catchment-area Location (type facility-catchment or settlement-catchment): the site Location — health facility or settlement point — whose service area or footprint this polygon is. The catchment is a separate Location from the site so that its boundary, its place in the containment tree (partOf) and the population / accessibility figures scoped to it stay distinct from the site's own point record. Searchable: Location?catchment-of=Location/<site-id>."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/catchment-of"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "Reference",
+            "targetProfile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

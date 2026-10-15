@@ -1,0 +1,55 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "settlement-type",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/settlement-type",
+  "name": "SettlementType",
+  "title": "Settlement / Special-population Type",
+  "status": "draft",
+  "experimental": false,
+  "description": "The settlement or special-population classification of a place (urban / rural / slum / refugee-IDP / nomad-pastoralist / security-compromised / hard-to-reach / cross-border / immigrant) — the recurring 'type of settlement' axis on the polio SIA monitoring/tally forms. A vulnerability/equity attribute of a Location that drives hard-to-reach-area targeting and equity disaggregation (forms-v1 / jul3-form-analysis §Aggregate #5).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Location",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Settlement / Special-population Type",
+        "definition": "The settlement or special-population classification of a place (urban / rural / slum / refugee-IDP / nomad-pastoralist / security-compromised / hard-to-reach / cross-border / immigrant) — the recurring 'type of settlement' axis on the polio SIA monitoring/tally forms. A vulnerability/equity attribute of a Location that drives hard-to-reach-area targeting and equity disaggregation (forms-v1 / jul3-form-analysis §Aggregate #5)."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/settlement-type"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "CodeableConcept"
+          }
+        ],
+        "binding": {
+          "strength": "extensible",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-settlement-type"
+        }
+      }
+    ]
+  }
+}

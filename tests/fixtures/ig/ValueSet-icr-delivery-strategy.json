@@ -1,0 +1,17 @@
+{
+  "resourceType": "ValueSet",
+  "status": "draft",
+  "name": "ICRDeliveryStrategyVS",
+  "id": "icr-delivery-strategy",
+  "title": "ICR Delivery Strategy",
+  "description": "Delivery strategies. Binding: required on the delivery-strategy extension.",
+  "url": "https://icr.healthcampaigns.org/ValueSet/icr-delivery-strategy",
+  "experimental": false,
+  "compose": {
+    "include": [
+      {
+        "system": "https://icr.healthcampaigns.org/CodeSystem/icr-delivery-strategy-cs"
+      }
+    ]
+  }
+}

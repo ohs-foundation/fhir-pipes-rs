@@ -1,0 +1,243 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "ICRTargetPopulation",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/ICRTargetPopulation",
+  "name": "ICRTargetPopulation",
+  "title": "ICR Target Population",
+  "status": "draft",
+  "experimental": false,
+  "description": "A target-population denominator: a conceptual cohort (actual=false) with a count, eligibility characteristics, and — critically — source and date provenance. Multiple competing estimates per geography are retained; exactly one is flagged as the planning denominator (working doc §7.6, §4.2).",
+  "fhirVersion": "4.0.1",
+  "kind": "resource",
+  "abstract": false,
+  "type": "Group",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Group",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Group.extension",
+        "path": "Group.extension",
+        "slicing": {
+          "discriminator": [
+            {
+              "type": "value",
+              "path": "url"
+            }
+          ],
+          "ordered": false,
+          "rules": "open"
+        },
+        "min": 1
+      },
+      {
+        "id": "Group.extension:denominatorSource",
+        "path": "Group.extension",
+        "sliceName": "denominatorSource",
+        "short": "Required (v0.1): where the estimate came from — govt-estimate / unknown are the low-precision escapes so early or back-loaded estimates aren't blocked",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/denominator-source"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Group.extension:denominatorType",
+        "path": "Group.extension",
+        "sliceName": "denominatorType",
+        "short": "total-population vs at-risk/eligible — lets a campaign retain both a total and an eligible denominator for the same geography (programme vs epidemiological coverage, v0.19.0)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/denominator-type"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Group.extension:estimateDate",
+        "path": "Group.extension",
+        "sliceName": "estimateDate",
+        "short": "Recommended: when the estimate was made — denominators decay fast (1–3 years)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/estimate-date"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Group.extension:isPlanningDenominator",
+        "path": "Group.extension",
+        "sliceName": "isPlanningDenominator",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/is-planning-denominator"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Group.extension:isCalculated",
+        "path": "Group.extension",
+        "sliceName": "isCalculated",
+        "short": "True when this figure aggregates other estimates (ward sums, apportioned shares) rather than being independently sourced — a calculated figure is not independent evidence for its inputs",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/is-calculated"
+            ]
+          }
+        ],
+        "mustSupport": true
+      },
+      {
+        "id": "Group.extension:confidence",
+        "path": "Group.extension",
+        "sliceName": "confidence",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "Extension",
+            "profile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/estimate-confidence"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "Group.type",
+        "path": "Group.type",
+        "patternCode": "person"
+      },
+      {
+        "id": "Group.actual",
+        "path": "Group.actual",
+        "patternBoolean": false
+      },
+      {
+        "id": "Group.quantity",
+        "path": "Group.quantity",
+        "short": "The denominator count",
+        "min": 1,
+        "mustSupport": true
+      },
+      {
+        "id": "Group.characteristic",
+        "path": "Group.characteristic",
+        "slicing": {
+          "discriminator": [
+            {
+              "type": "pattern",
+              "path": "code"
+            }
+          ],
+          "rules": "open"
+        },
+        "short": "Age band, sex, eligibility rule, geography",
+        "mustSupport": true
+      },
+      {
+        "id": "Group.characteristic:geography",
+        "path": "Group.characteristic",
+        "sliceName": "geography",
+        "short": "The Location this estimate is scoped to — any level: country, district, ward, settlement, or operational area. Makes estimates computably joinable to the location hierarchy, and searchable as Group?geography= (SearchParameter icr-target-population-geography, campaign-visibility).",
+        "min": 0,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Group.characteristic:geography.code",
+        "path": "Group.characteristic.code",
+        "patternCodeableConcept": {
+          "coding": [
+            {
+              "code": "geography",
+              "system": "https://icr.healthcampaigns.org/CodeSystem/icr-group-characteristic-cs"
+            }
+          ]
+        }
+      },
+      {
+        "id": "Group.characteristic:geography.value[x]",
+        "path": "Group.characteristic.value[x]",
+        "type": [
+          {
+            "code": "Reference",
+            "targetProfile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "Group.characteristic:geography.exclude",
+        "path": "Group.characteristic.exclude",
+        "patternBoolean": false
+      },
+      {
+        "id": "Group.characteristic:travelTime",
+        "path": "Group.characteristic",
+        "sliceName": "travelTime",
+        "short": "Accessibility stratum: the people of the geography within this travel-time band of the service point (walking / driving; under 1 h, 1–4 h, over 4 h). Absent on an all-of-the-geography estimate.",
+        "min": 0,
+        "max": "1",
+        "mustSupport": true
+      },
+      {
+        "id": "Group.characteristic:travelTime.code",
+        "path": "Group.characteristic.code",
+        "patternCodeableConcept": {
+          "coding": [
+            {
+              "code": "travel-time",
+              "system": "https://icr.healthcampaigns.org/CodeSystem/icr-group-characteristic-cs"
+            }
+          ]
+        }
+      },
+      {
+        "id": "Group.characteristic:travelTime.value[x]",
+        "path": "Group.characteristic.value[x]",
+        "type": [
+          {
+            "code": "CodeableConcept"
+          }
+        ],
+        "binding": {
+          "strength": "required",
+          "valueSet": "https://icr.healthcampaigns.org/ValueSet/icr-travel-time-band"
+        }
+      },
+      {
+        "id": "Group.characteristic:travelTime.exclude",
+        "path": "Group.characteristic.exclude",
+        "patternBoolean": false
+      }
+    ]
+  }
+}

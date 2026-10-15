@@ -1,0 +1,60 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRDenominatorSourceCS",
+  "id": "icr-denominator-source-cs",
+  "title": "ICR Denominator Source",
+  "description": "The method/source behind a target-population estimate. Every estimate carries its source and date — the denominator is the dominant source of error in campaign analytics (working doc §4.2).",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs",
+  "concept": [
+    {
+      "code": "census",
+      "display": "National census",
+      "definition": "Direct census count."
+    },
+    {
+      "code": "census-projection",
+      "display": "Census projection",
+      "definition": "Forward-projected census figure."
+    },
+    {
+      "code": "microcensus",
+      "display": "Microcensus / enumeration",
+      "definition": "Local enumeration from microplanning or household registration."
+    },
+    {
+      "code": "worldpop",
+      "display": "WorldPop modelled estimate",
+      "definition": "Modelled gridded population estimate (WorldPop)."
+    },
+    {
+      "code": "grid3",
+      "display": "GRID3 modelled estimate",
+      "definition": "Modelled gridded population estimate (GRID3)."
+    },
+    {
+      "code": "hmis",
+      "display": "HMIS-derived",
+      "definition": "Derived from routine HMIS targets or registers."
+    },
+    {
+      "code": "govt-estimate",
+      "display": "Government estimate",
+      "definition": "An official government figure whose underlying method is unspecified — the low-precision escape that lets early or administrative estimates declare a source (v0.1: denominator-source is mandatory on every estimate)."
+    },
+    {
+      "code": "unknown",
+      "display": "Unknown",
+      "definition": "Source not recorded — for historical/back-loaded datasets where provenance cannot be reconstructed."
+    },
+    {
+      "code": "other",
+      "display": "Other",
+      "definition": "Other source — record detail in text."
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 9
+}

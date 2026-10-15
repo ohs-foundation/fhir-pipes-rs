@@ -12,6 +12,8 @@
 //! `transform locations` and `run` keep a copy beside the snapshot, which a
 //! later `diff` uses when no profile is given.
 
+pub mod check;
+
 use std::path::Path;
 use std::time::Duration;
 

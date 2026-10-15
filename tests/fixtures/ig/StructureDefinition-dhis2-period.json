@@ -1,0 +1,51 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "dhis2-period",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period",
+  "name": "Dhis2Period",
+  "title": "DHIS2 Period",
+  "status": "draft",
+  "experimental": false,
+  "description": "The DHIS2 period code a MeasureReport's figures were computed for (e.g. 2025, 2025Q1, 202501, 2025W5). The period's dates are in MeasureReport.period; the code keeps the period type, which the dates alone do not say.",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "MeasureReport",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "DHIS2 Period",
+        "definition": "The DHIS2 period code a MeasureReport's figures were computed for (e.g. 2025, 2025Q1, 202501, 2025W5). The period's dates are in MeasureReport.period; the code keeps the period type, which the dates alone do not say."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      }
+    ]
+  }
+}

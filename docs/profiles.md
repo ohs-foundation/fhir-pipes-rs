@@ -23,6 +23,7 @@ data and shows what each part reads and writes.
 - [Column kinds](#column-kinds)
 - [Editing and diff](#editing-and-diff)
 - [Writing a profile for your IG](#writing-a-profile-for-your-ig)
+- [Checking a profile against its IG](#checking-a-profile-against-its-ig)
 - [Error messages](#error-messages)
 
 ## Choosing a profile
@@ -258,7 +259,8 @@ snapshot's copy is enough), or remove a column you added yourself.
    profile and look at `fhir_json` for a few Locations, for example with
    `fhir-pipes inspect` or DuckDB.
 2. **List what your IG adds to Location and Organization**: identifier
-   systems, extensions with a `valueCode`, and codings in `type`. Each one you
+   systems, extensions with a code or CodeableConcept value, and codings in
+   `type`. Each one you
    want as a column becomes a `[[location.column]]` or
    `[[organization.column]]` of the matching kind. Anything else stays in
    `fhir_json`, which is lossless.
@@ -275,8 +277,65 @@ snapshot's copy is enough), or remove a column you added yourself.
    expects it. Then `load --dry-run`.
 6. **Add `[dhis2]` or `[population]`** only if you use those commands; copy
    the ICR example's keys and replace the URLs with your IG's.
-7. **Publish it** next to your IG, for example at a stable https URL, so
+7. **Check it against the IG** with `fhir-pipes profile check` (below), and
+   again whenever the IG changes.
+8. **Publish it** next to your IG, for example at a stable https URL, so
    others can pass `--profile https://…`.
+
+## Checking a profile against its IG
+
+A profile names extensions, code systems and profiles by URL. When the IG
+renames one, changes its value type or drops it, the profile still loads and
+its column comes out empty. `profile check` compares the two:
+
+```sh
+fhir-pipes profile check --profile ig/fhir-pipes-profile.toml --ig ig/fsh-generated/resources
+fhir-pipes profile check --profile examples/profiles/icr.toml --ig https://icr.healthcampaigns.org/package.tgz
+```
+
+`--ig` is a FHIR package (`package.tgz`, as a path or an https URL) or a
+directory of the IG's JSON resources: SUSHI's `fsh-generated/resources`, the
+IG publisher's `output`, or an unpacked package. A published package is only
+as current as the last IG build; SUSHI's output follows the FSH you have.
+
+For each URL under the IG's canonical, the check reports:
+
+| Problem | Severity |
+|---|---|
+| An extension the profile names is not in the IG | error |
+| An extension does not apply to the resource it is read from (its `context` is, say, Task, not Location) | error |
+| An `extension_code` column without `system` on an extension whose value is a CodeableConcept, or with `system` on a `code` one | error |
+| An `extension_code` column's `system` is not in the ValueSet the extension is bound to | warning |
+| A code system the profile names is not in the IG, or `admin_unit_type`, `facility_type` or a `known_source_codes` entry is not a code in it | error |
+| A later `type_systems` entry (an older URI) is not in the IG | warning |
+| A `meta.profile` (`location_profile`, `group_profile` …) is not in the IG, or constrains another type | error |
+| An identifier system is not sliced in any of the IG's profiles of that resource type | warning |
+| The IG's denominator source code system has codes `known_source_codes` lacks | warning |
+
+It then lists what it could not check: URLs outside the IG, and identifier
+systems on a resource type whose profiles slice none. It also lists the
+extensions and identifier systems the IG's Location and Organization
+profiles declare that the profile does not read, which are candidates for
+new columns.
+
+`profile check` exits 1 if there is any error, so it can run in the IG's CI.
+For ICR's profile against its current IG:
+
+```
+error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-source is not an extension in the IG
+warning: [location] type_systems: https://icr.healthcampaigns.org/CodeSystem/icr-location-type is not a CodeSystem in the IG
+warning: [[location.column]] pcode: https://icr.healthcampaigns.org/identifiers/national-admin-code is not an identifier slice in any of the IG's Location profiles
+warning: [dhis2] country_code_system: https://icr.healthcampaigns.org/identifiers/national-admin-code is not an identifier slice in any of the IG's Location profiles
+not checked:
+  https://icr.healthcampaigns.org/identifiers/nga-nhfr-code (the IG's Organization profiles slice no identifier systems)
+  https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid (the IG's Organization profiles slice no identifier systems)
+in the IG's Location profiles but not read by the profile:
+  https://icr.healthcampaigns.org/StructureDefinition/building-count
+  https://icr.healthcampaigns.org/StructureDefinition/catchment-of
+  urn:iso:std:iso:3166
+  urn:iso:std:iso:3166:-2
+1 error(s), 3 warning(s)
+```
 
 ## Error messages
 

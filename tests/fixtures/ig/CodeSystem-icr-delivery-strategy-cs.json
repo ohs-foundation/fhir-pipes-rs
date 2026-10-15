@@ -1,0 +1,92 @@
+{
+  "resourceType": "CodeSystem",
+  "status": "draft",
+  "content": "complete",
+  "name": "ICRDeliveryStrategyCS",
+  "id": "icr-delivery-strategy-cs",
+  "title": "ICR Delivery Strategy",
+  "description": "How a campaign activity reaches its target population. A first-class, coded attribute of every campaign activity, site, and task — campaigns routinely mix strategies, and the available data elements change with the strategy (working doc §3).",
+  "url": "https://icr.healthcampaigns.org/CodeSystem/icr-delivery-strategy-cs",
+  "concept": [
+    {
+      "code": "fixed-post",
+      "display": "Fixed post",
+      "definition": "Delivery at a permanent health facility site; people come to the site.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Poste fixe"
+        }
+      ]
+    },
+    {
+      "code": "temporary-post",
+      "display": "Temporary / outreach post",
+      "definition": "Delivery at a temporary community focal point: market, place of worship, transit point.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Poste temporaire / avancé"
+        }
+      ]
+    },
+    {
+      "code": "mobile",
+      "display": "Mobile team",
+      "definition": "Team deployed to remote areas for a few hours per site.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Équipe mobile"
+        }
+      ]
+    },
+    {
+      "code": "school",
+      "display": "School-based",
+      "definition": "Delivery through schools to enrolled (and catch-up for non-enrolled) school-age children.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "En milieu scolaire"
+        }
+      ]
+    },
+    {
+      "code": "house-to-house",
+      "display": "House-to-house",
+      "definition": "Teams systematically visit every dwelling (door-to-door); the only strategy that natively produces houses-visited, present/absent, and refusal data.",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Porte-à-porte"
+        }
+      ]
+    },
+    {
+      "code": "community-directed",
+      "display": "Community-directed distribution",
+      "definition": "Community-selected drug distributors (CDDs) treat their own communities — the NTD MDA backbone (CDTI).",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Distribution communautaire (TIDC)"
+        }
+      ]
+    },
+    {
+      "code": "outreach",
+      "display": "Outreach / special-strategy site",
+      "definition": "Vaccination at outside-household special-strategy sites (water points, transit/bus stations, border-crossing points, food-distribution points) — the polio SIA 'outside household / special strategy' (OHH/SS) mode, broader than a single temporary post (forms-v1 / jul3-form-analysis §Aggregate #6).",
+      "designation": [
+        {
+          "language": "fr",
+          "value": "Stratégie avancée / site spécial"
+        }
+      ]
+    }
+  ],
+  "caseSensitive": true,
+  "experimental": false,
+  "count": 7
+}

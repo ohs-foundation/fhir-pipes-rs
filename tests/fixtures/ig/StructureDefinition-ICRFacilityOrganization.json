@@ -1,0 +1,72 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "ICRFacilityOrganization",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization",
+  "name": "ICRFacilityOrganization",
+  "title": "ICR Facility Organization",
+  "status": "draft",
+  "experimental": false,
+  "description": "The accountable facility entity — the mCSD-style pairing partner of a facility ICRLocation. A health facility is two things: an Organization (the conceptual/legal entity that owns registry codes, classification, and accountability) and a Location (the physical place where care happens), linked Location.managingOrganization → Organization. Organization.type is the source of truth for the national facility classification (ICRFacilityTypeVS) and ownership (ICROwnershipVS) alongside the generic 'prov' provider coding; Location.type carries the generic 'facility' functional code and MAY additionally carry copies of the classification codings — the mCSD-sanctioned duplication for consumers that only query Locations (geospatial exports, map layers). On any disagreement the Organization is authoritative. Organization.partOf carries the administrative *reporting* hierarchy (facility → LGA/district health office → state agency), which is deliberately distinct from — and need not mirror — the geographic hierarchy on Location.partOf: a facility can report to one authority while sitting in territory that authority does not govern. Per the georegistry rule this profile still holds only identify/classify/contact data (working doc §5.3, §9).",
+  "fhirVersion": "4.0.1",
+  "kind": "resource",
+  "abstract": false,
+  "type": "Organization",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Organization",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Organization.identifier",
+        "path": "Organization.identifier",
+        "short": "The facility-registry identity: national MFL/registry codes (e.g. Nigeria NHFR facility code and uid), GERS place ID. Registry codes identify the entity, so they live here rather than on the paired Location.",
+        "mustSupport": true
+      },
+      {
+        "id": "Organization.active",
+        "path": "Organization.active",
+        "mustSupport": true
+      },
+      {
+        "id": "Organization.type",
+        "path": "Organization.type",
+        "short": "Three coding axes: 'prov' (healthcare provider), the national classification tier (ICRFacilityTypeVS — primary/secondary/tertiary, country kind as display/text), and ownership (ICROwnershipVS). Organization.type — not Location.type — is authoritative for facility classification. Formal per-axis slicing is deferred to the mCSD-alignment pass.",
+        "min": 1,
+        "mustSupport": true
+      },
+      {
+        "id": "Organization.name",
+        "path": "Organization.name",
+        "short": "The facility's registered name",
+        "min": 1,
+        "mustSupport": true
+      },
+      {
+        "id": "Organization.telecom",
+        "path": "Organization.telecom",
+        "short": "Facility contact (phone, email) — contact data belongs to the entity",
+        "mustSupport": true
+      },
+      {
+        "id": "Organization.partOf",
+        "path": "Organization.partOf",
+        "short": "Administrative reporting hierarchy: facility → LGA/district health office → state/national agency. Reporting structure, not geography — it need not mirror the Location partOf chain.",
+        "type": [
+          {
+            "code": "Reference",
+            "targetProfile": [
+              "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization",
+              "http://hl7.org/fhir/StructureDefinition/Organization"
+            ],
+            "extension": [
+              {
+                "url": "http://hl7.org/fhir/StructureDefinition/structuredefinition-hierarchy",
+                "valueBoolean": true
+              }
+            ]
+          }
+        ],
+        "mustSupport": true
+      }
+    ]
+  }
+}

@@ -58,6 +58,9 @@ fn main() {
         cli::Command::Index(args) => cells::run_index(&args, profile),
         cli::Command::Population(args) => population::run_population(&args, profile),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd, profile),
+        cli::Command::Profile(cli::ProfileCommand::Check(args)) => {
+            profile::check::run(&args, profile)
+        }
         cli::Command::Refresh(_) | cli::Command::Views(_) => unreachable!("handled above"),
     };
     if let Err(err) = result {

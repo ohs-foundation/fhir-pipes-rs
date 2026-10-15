@@ -1,0 +1,51 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "is-calculated",
+  "url": "https://icr.healthcampaigns.org/StructureDefinition/is-calculated",
+  "name": "IsCalculated",
+  "title": "Is Calculated",
+  "status": "draft",
+  "experimental": false,
+  "description": "True when this estimate was computed by aggregating other estimates — ward figures summed to a district, or a share apportioned from a parent figure — rather than sourced independently; denominator-source then describes the method of the underlying inputs. A calculated figure is not independent evidence for its inputs (comparing it against them is not corroboration) and goes stale when any input is revised. Absent = not known to be calculated. A future derived-from reference list may carry the actual input estimates; its presence would imply this flag (reviewer proposal, working doc §5.2 c10).",
+  "fhirVersion": "4.0.1",
+  "kind": "complex-type",
+  "abstract": false,
+  "context": [
+    {
+      "expression": "Group",
+      "type": "element"
+    }
+  ],
+  "type": "Extension",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Extension",
+  "derivation": "constraint",
+  "differential": {
+    "element": [
+      {
+        "id": "Extension",
+        "path": "Extension",
+        "short": "Is Calculated",
+        "definition": "True when this estimate was computed by aggregating other estimates — ward figures summed to a district, or a share apportioned from a parent figure — rather than sourced independently; denominator-source then describes the method of the underlying inputs. A calculated figure is not independent evidence for its inputs (comparing it against them is not corroboration) and goes stale when any input is revised. Absent = not known to be calculated. A future derived-from reference list may carry the actual input estimates; its presence would imply this flag (reviewer proposal, working doc §5.2 c10)."
+      },
+      {
+        "id": "Extension.extension",
+        "path": "Extension.extension",
+        "max": "0"
+      },
+      {
+        "id": "Extension.url",
+        "path": "Extension.url",
+        "fixedUri": "https://icr.healthcampaigns.org/StructureDefinition/is-calculated"
+      },
+      {
+        "id": "Extension.value[x]",
+        "path": "Extension.value[x]",
+        "type": [
+          {
+            "code": "boolean"
+          }
+        ]
+      }
+    ]
+  }
+}

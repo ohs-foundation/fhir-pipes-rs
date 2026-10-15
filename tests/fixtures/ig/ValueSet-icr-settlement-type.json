@@ -1,0 +1,17 @@
+{
+  "resourceType": "ValueSet",
+  "status": "draft",
+  "name": "ICRSettlementTypeVS",
+  "id": "icr-settlement-type",
+  "title": "ICR Settlement / Special-population Type",
+  "description": "Settlement / special-population classification of a Location. Binding: extensible on the settlement-type extension — countries add local codes (forms-v1).",
+  "url": "https://icr.healthcampaigns.org/ValueSet/icr-settlement-type",
+  "experimental": false,
+  "compose": {
+    "include": [
+      {
+        "system": "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs"
+      }
+    ]
+  }
+}
