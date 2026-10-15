@@ -21,7 +21,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
-| Authenticate with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors | every command that talks to a server | 0.3.0 |
+| Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 
 ### ViewDefinitions
 
@@ -123,7 +123,7 @@ on its own outstanding list, next to fhir-pipes.
 | 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, except a Bulk Data `$export` client |
 | 2 | Direct relational database sinks (PostgreSQL) | Not done. `views sql` generates the SQL, and `views run --db` reads FHIR from PostgreSQL, but nothing writes view rows into a database |
 | 3 | Schema from StructureDefinitions, including IG profiles | Not needed for the flat tables, which take their columns from the views. Would be the basis of nested output. `profile check` already reads an IG's StructureDefinitions |
-| 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done: `octofhir-fhirpath`, 144 of 144 |
+| 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done for views evaluated in memory (`views run --input`, `refresh`): `octofhir-fhirpath`, 144 of 144. Generated SQL (`views sql`, and `views run --db`, which uses it) supports fewer functions; `substring()`, for one, is refused |
 | 5 | Partitioned merging for large warehouses | Partly. Downloads are incremental and output is partitioned, but each refresh rewrites every view table from the whole download |
 | 6 | Fetch resources a patient compartment references | Not done |
 | 7 | Object storage (S3, GCS, Azure) | Push only, through rclone. No reading from object storage |
