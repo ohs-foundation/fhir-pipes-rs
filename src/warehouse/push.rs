@@ -58,11 +58,12 @@ pub fn push(s: &Settings) -> Result<()> {
         println!("   {dir}/");
     }
     // The catalog's files are uploaded below, after it is built, even when
-    // `files` lists them.
-    let managed: &[&str] = if s.catalog.is_some() {
-        &[catalog::SQL_FILE, catalog::DUCKDB_FILE]
-    } else {
-        &[]
+    // `files` lists them. catalog.duckdb is only fhir-pipes' when it builds it;
+    // otherwise a listed one (from a hook, say) is uploaded here as usual.
+    let managed: &[&str] = match &s.catalog {
+        Some(c) if c.duckdb_file => &[catalog::SQL_FILE, catalog::DUCKDB_FILE],
+        Some(_) => &[catalog::SQL_FILE],
+        None => &[],
     };
     for file in &p.files {
         let src = s.data.join(file);

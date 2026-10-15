@@ -681,3 +681,32 @@ fn the_catalog_takes_a_relative_data_dir_and_keyword_table_names() {
         "2,2"
     );
 }
+
+/// Without duckdb_file, a catalog.duckdb listed in push.files (built by a
+/// hook, say) is uploaded as any other listed file.
+#[test]
+#[cfg(unix)]
+fn a_listed_catalog_duckdb_is_pushed_when_fhir_pipes_does_not_build_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mirror = dir.path().join("mirror");
+    let rclone = fake_rclone(dir.path());
+    let (root, config) = setup(
+        NOWHERE,
+        &format!(
+            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\nfiles = [\"catalog.duckdb\"]\n\n[catalog]\n",
+            rclone.display()
+        ),
+    );
+    fs::write(root.path().join("data/catalog.duckdb"), "built by a hook").unwrap();
+    cmd(&config)
+        .args(["--only", "catalog", "--push"])
+        .env("MIRROR", &mirror)
+        .env("LOG", dir.path().join("rclone.log"))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(mirror.join("catalog.duckdb")).unwrap(),
+        "built by a hook"
+    );
+    assert!(mirror.join("catalog.sql").is_file());
+}
