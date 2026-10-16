@@ -211,12 +211,18 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
         check(&s, &steps, &needed);
         return Ok(());
     }
+    // With a file source, whether the tiles step runs is known only once the
+    // files are read (without Locations it is skipped), so its tools are
+    // checked then.
     let needed: Vec<(&str, &str)> = needed
         .iter()
         .map(|(t, w)| (t.as_str(), w.as_str()))
         .collect();
-    tools::require(&needed)?;
-    refresh(&s, &steps)
+    let (later, now): (Vec<_>, Vec<_>) = needed
+        .into_iter()
+        .partition(|&(_, w)| s.reads_files() && w == "tiles");
+    tools::require(&now)?;
+    refresh(&s, &steps, &later)
 }
 
 /// The steps a run takes, from --only, --skip and --push.
@@ -389,7 +395,9 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
     }
 }
 
-fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
+/// `tiles_tools`: the tiles step's tools, when they are checked only once the
+/// step is known to run.
+fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -> Result<()> {
     let started = Instant::now();
     let mut timings: Vec<(&str, f64)> = Vec::new();
     let mut ran: BTreeSet<Step> = BTreeSet::new();
@@ -425,6 +433,9 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         steps.contains(&Step::Tiles) && !(s.reads_files() && !stage.read("locations").is_dir());
     if steps.contains(&Step::Tiles) && !tiles_wanted {
         println!("== tiles: there is no locations table; skipped");
+    }
+    if tiles_wanted {
+        tools::require(tiles_tools)?;
     }
 
     // Views and tiles both read the location registry and nothing of each

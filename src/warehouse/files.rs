@@ -17,11 +17,13 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::cli::{DEFAULT_PARTITION_BY, DEFAULT_ROW_GROUP_SIZE, TransformArgs};
-use crate::snapshot::instant::{format_utc, later, parse_instant};
-use crate::snapshot::merge::id_and_updated;
+use crate::snapshot::instant::{format_utc, parse_instant};
 use crate::snapshot::{Snapshot, State};
 
 use super::config::Settings;
+
+/// The `server` of a Location snapshot built from files.
+pub const FILES: &str = "files";
 
 /// The files each input names, in order: a file as itself, a directory as
 /// the resource files under it (`views run --input`'s rules: `.json` and
@@ -85,6 +87,10 @@ struct Resources {
 /// `meta.lastUpdated`; on a tie, or when neither has one, the one read later.
 /// A `<Type>.ndjson` left from an earlier run, of a type the files no longer
 /// have, is removed, so the views do not read it.
+///
+/// The directory can hold a server's download (`server.name` names both), so
+/// its export state goes first: the watermarks in it describe the server's
+/// files, not these, and a later server refresh must download in full.
 pub fn split(s: &Settings) -> Result<()> {
     let files = expand(&s.files)?;
     let raw = s.raw_dir();
@@ -129,6 +135,12 @@ pub fn split(s: &Settings) -> Result<()> {
         println!("   {skipped} entries without a valid resourceType skipped");
     }
     fs::create_dir_all(&raw).with_context(|| format!("creating {}", raw.display()))?;
+    let export_state = raw.join(crate::export::STATE_FILE);
+    if export_state.exists() {
+        fs::remove_file(&export_state)
+            .with_context(|| format!("removing {}", export_state.display()))?;
+        println!("   removed the server export's state: the next server refresh downloads in full");
+    }
     for (rtype, t) in &types {
         write_ndjson(&raw, rtype, &t.list)?;
         if t.duplicates > 0 {
@@ -205,7 +217,9 @@ fn raw_types(dir: &Path) -> Result<Vec<String>> {
 /// The locations step from files: raw/<name>/Location.ndjson (and
 /// Organization.ndjson, if there is one) become the snapshot
 /// raw/<name>/locations, with a state.json as an extract writes it, which the
-/// transform turns into `out`/locations as after an extract. Boundaries given
+/// transform turns into `out`/locations as after an extract. The state's
+/// server is `files` and it has no watermark, so a server refresh afterwards
+/// extracts in full (fhir.rs) instead of merging into this. Boundaries given
 /// by URL are not fetched: the transform reports them as unresolved. Returns
 /// false, having done nothing, when the files have no Locations.
 pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
@@ -223,10 +237,10 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
         s.parquet_dir().join("locations").display()
     );
     fs::create_dir_all(&snap.dir).with_context(|| format!("creating {}", snap.dir.display()))?;
-    let (count, watermark) = copy_into(&source, &snap.locations_tmp(), &snap.locations())?;
+    let count = copy_into(&source, &snap.locations_tmp(), &snap.locations())?;
     let organizations = raw.join("Organization.ndjson");
     let organization_count = if organizations.is_file() {
-        let (n, _) = copy_into(
+        let n = copy_into(
             &organizations,
             &snap.organizations_tmp(),
             &snap.organizations(),
@@ -240,8 +254,8 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
         None
     };
     State {
-        server: "files".into(),
-        watermark,
+        server: FILES.into(),
+        watermark: None,
         count,
         organization_watermark: None,
         organization_count,
@@ -267,21 +281,13 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// Copy `from` to `to` through `tmp`. Returns the number of resources and the
-/// latest `meta.lastUpdated` among them.
-fn copy_into(from: &Path, tmp: &Path, to: &Path) -> Result<(usize, Option<String>)> {
+/// Copy `from` to `to` through `tmp`. Returns the number of resources.
+fn copy_into(from: &Path, tmp: &Path, to: &Path) -> Result<usize> {
     let text = fs::read_to_string(from).with_context(|| format!("reading {}", from.display()))?;
-    let mut count = 0;
-    let mut latest: Option<String> = None;
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        count += 1;
-        if let Some((_, Some(updated))) = id_and_updated(line) {
-            latest = later(latest.as_deref(), &updated);
-        }
-    }
+    let count = text.lines().filter(|l| !l.trim().is_empty()).count();
     fs::write(tmp, &text).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(tmp, to).with_context(|| format!("renaming {} into place", to.display()))?;
-    Ok((count, latest))
+    Ok(count)
 }
 
 #[cfg(test)]

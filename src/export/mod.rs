@@ -37,7 +37,7 @@ use crate::snapshot::merge::{MergeFiles, MergeStats, id_and_updated, merge_file}
 use crate::snapshot::same_server;
 use crate::transform::write_report;
 
-const STATE_FILE: &str = ".export-state.json";
+pub(crate) const STATE_FILE: &str = ".export-state.json";
 
 /// What the last export into a directory downloaded, per resource type.
 #[derive(Debug, Default, Serialize, Deserialize)]

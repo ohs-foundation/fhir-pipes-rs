@@ -9,7 +9,7 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde_json::{Map, Value, json};
 
 use super::config::Settings;
-use super::partition::table_files;
+use super::partition::{partition_key, table_files};
 use super::stage::Stage;
 
 /// Write manifest.json into the staging directory, describing the tables as
@@ -77,10 +77,11 @@ pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
     Ok(refreshed_at)
 }
 
-/// A partitioned table's row count, from the parquet footers.
+/// A partitioned table's row count, from the parquet footers. `column` is the
+/// partition column the table has unless its directories name another.
 pub fn rows(table_dir: &Path, column: &str) -> Result<i64> {
     let mut n = 0;
-    for file in table_files(table_dir, column) {
+    for file in table_files(table_dir, &partition_key(table_dir, column)) {
         let f = fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
         n += SerializedFileReader::new(f)
             .with_context(|| format!("reading {}", file.display()))?

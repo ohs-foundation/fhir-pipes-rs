@@ -19,6 +19,34 @@ use super::config::Lookup;
 /// The directory name hive (and DuckDB) give the null partition.
 pub const NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
 
+/// The column a table is partitioned by at its first level, from its directory
+/// names: `country` for `country=SLE/`. Each table is read by its own layout,
+/// since they can differ: the views step partitions by `[partition] column`,
+/// the Location transform always by `country`. `default` when the table has
+/// no `<column>=` directory (yet).
+pub fn partition_key(table_dir: &Path, default: &str) -> String {
+    let Ok(entries) = fs::read_dir(table_dir) else {
+        return default.to_string();
+    };
+    let mut keys: Vec<String> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().into_owned();
+            let (key, _) = name.split_once('=')?;
+            (!key.is_empty() && !key.starts_with('.')).then(|| key.to_string())
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    if keys.iter().any(|k| k == default) {
+        return default.to_string();
+    }
+    keys.into_iter()
+        .next()
+        .unwrap_or_else(|| default.to_string())
+}
+
 /// The parquet files of a partitioned table: those under a `<column>=` directory,
 /// which leaves out metadata kept beside the data (e.g. a catalog's items.parquet).
 pub fn table_files(table_dir: &Path, column: &str) -> Vec<PathBuf> {
@@ -58,9 +86,13 @@ fn collect_parquet(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// key → partition value, read from a warehouse table. Where a key has several
-/// values the first one read wins. A file without the value column takes it
-/// from its `<column>=<value>` directory.
+/// values the first one read wins. The value is the table's own first-level
+/// partition (`partition_key`, `column` by default), which need not be named
+/// `column`: Locations are partitioned by `country` whatever the views use. A
+/// file without that column takes the value from its `<key>=<value>`
+/// directory.
 pub fn read_lookup(table_dir: &Path, key: &str, column: &str) -> Result<HashMap<String, String>> {
+    let column = &partition_key(table_dir, column);
     let mut map = HashMap::new();
     for file in table_files(table_dir, column) {
         let from_path = partition_value_in_path(&file, table_dir, column);
@@ -227,6 +259,20 @@ fn escape(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tables_partition_key_comes_from_its_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path();
+        // No directories yet: the configured column.
+        assert_eq!(partition_key(&t.join("missing"), "part"), "part");
+        fs::create_dir_all(t.join("country=NG/geom_type=point")).unwrap();
+        fs::create_dir_all(t.join(".staging")).unwrap();
+        assert_eq!(partition_key(t, "part"), "country");
+        // The configured column wins where both are there.
+        fs::create_dir_all(t.join("part=x")).unwrap();
+        assert_eq!(partition_key(t, "part"), "part");
+    }
     use serde_json::json;
 
     fn result(cols: &[&str], rows: Vec<Vec<Value>>) -> ViewResult {

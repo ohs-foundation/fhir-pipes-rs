@@ -2036,3 +2036,213 @@ fn a_view_column_named_like_the_partition_column_stops_the_run() {
         ));
     assert!(!dir.path().join("data/parquet/patient_country").exists());
 }
+
+fn snapshot_locations() -> Vec<Value> {
+    read_ndjson(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot/locations.ndjson"),
+    )
+}
+
+#[test]
+fn a_file_run_makes_the_next_server_refresh_download_in_full() {
+    let mut server = Server::run();
+    for t in ["Observation", "Patient"] {
+        server.expect(
+            Expectation::matching(full_search(t))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(stamped(t, "2026-10-01T00:00:00Z")))),
+        );
+    }
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    let root = dir.path();
+    cmd(&config).args(["--only", "views"]).assert().success();
+    server.verify_and_clear();
+    assert!(root.join("data/raw/test/.export-state.json").exists());
+
+    // Older copies from files, into the same raw/test: the server's export
+    // state no longer describes these files.
+    let mut older = stamped("Patient", "2026-09-01T00:00:00Z");
+    older[0]["birthDate"] = json!("1999-01-01");
+    let input = inputs(
+        root,
+        &[
+            ("p.ndjson", lines(&older)),
+            (
+                "o.ndjson",
+                lines(&stamped("Observation", "2026-09-01T00:00:00Z")),
+            ),
+        ],
+    );
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .assert()
+        .success()
+        .stdout(has("removed the server export's state"));
+    assert!(!root.join("data/raw/test/.export-state.json").exists());
+
+    // Back to the server: every type is downloaded in full, so no resource
+    // keeps the files' older copy.
+    for t in ["Observation", "Patient"] {
+        server.expect(
+            Expectation::matching(full_search(t))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(stamped(t, "2026-10-01T00:00:00Z")))),
+        );
+    }
+    cmd(&config).args(["--only", "views"]).assert().success();
+    let patients = read_ndjson(&root.join("data/raw/test/Patient.ndjson"));
+    assert_eq!(patients, stamped("Patient", "2026-10-01T00:00:00Z"));
+}
+
+#[test]
+fn a_snapshot_built_from_files_is_extracted_in_full_from_a_server() {
+    let server = Server::run();
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    let input = inputs(dir.path(), &[("l.ndjson", lines(&snapshot_locations()))]);
+    cmd(&config)
+        .args(["--only", "locations", "--input"])
+        .arg(&input)
+        .assert()
+        .success();
+
+    let locations: Vec<Value> = snapshot_locations()
+        .into_iter()
+        .take(3)
+        .map(|mut l| {
+            l["meta"] = json!({"lastUpdated": "2026-10-01T00:00:00Z"});
+            l
+        })
+        .collect();
+    for (t, body) in [("Location", locations), ("Organization", vec![])] {
+        server.expect(
+            Expectation::matching(full_search(t))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(body))),
+        );
+    }
+    cmd(&config)
+        .args(["--only", "locations"])
+        .assert()
+        .success()
+        .stdout(has("the snapshot was built from files"));
+    let snap = dir.path().join("data/raw/test/locations");
+    // The full extract replaced the files' 12 Locations.
+    assert_eq!(read_ndjson(&snap.join("locations.ndjson")).len(), 3);
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(snap.join("state.json")).unwrap()).unwrap();
+    assert_eq!(
+        state["server"],
+        server.url_str("/fhir").trim_end_matches('/')
+    );
+}
+
+#[test]
+fn locations_are_found_under_another_partition_column() {
+    let (dir, config) = setup(NOWHERE, "\n[partition]\ncolumn = \"part\"\n\n[catalog]\n");
+    let root = dir.path();
+    let mut o = obs("o1", 3, None);
+    o["subject"] = json!({"reference": "Location/kano"});
+    let input = inputs(
+        root,
+        &[
+            ("l.ndjson", lines(&snapshot_locations())),
+            ("o.ndjson", lines(&[o])),
+        ],
+    );
+    cmd(&config)
+        .args(["--only", "locations,views", "--input"])
+        .arg(&input)
+        .assert()
+        .success();
+    // The Locations stay partitioned by country; the view table by `part`,
+    // its value looked up in the Locations' country.
+    assert!(root.join("data/parquet/locations/country=NG").is_dir());
+    let obs_rows = table_rows(&root.join("data/parquet/obs"));
+    assert_eq!(obs_rows.len(), 1);
+    assert_eq!(obs_rows[0].0, "part=NG");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert!(
+        manifest["tables"]["locations"]["rows"].as_i64().unwrap() > 0,
+        "{manifest}"
+    );
+    assert_eq!(manifest["tables"]["obs"]["rows"], 1);
+    let catalog = fs::read_to_string(root.join("data/catalog.sql")).unwrap();
+    assert!(
+        catalog.contains("parquet/locations/country=*/**/*.parquet"),
+        "{catalog}"
+    );
+    assert!(
+        catalog.contains("parquet/obs/part=*/**/*.parquet"),
+        "{catalog}"
+    );
+}
+
+#[test]
+fn a_file_source_needs_no_server_auth() {
+    let (dir, config) = setup(NOWHERE, "");
+    // Basic auth without a password, and Google auth besides.
+    let text = fs::read_to_string(&config).unwrap().replace(
+        "name = \"test\"",
+        "name = \"test\"\nusername = \"reader\"\ngoogle_auth = true",
+    );
+    fs::write(&config, text).unwrap();
+    // A server run stops: two ways to authenticate, and no password.
+    cmd(&config)
+        .args(["--only", "views", "--check"])
+        .assert()
+        .failure()
+        .stderr(has("use one way to authenticate"));
+    let input = inputs(
+        dir.path(),
+        &[(
+            "p.ndjson",
+            lines(&[json!({"resourceType": "Patient", "id": "p1"})]),
+        )],
+    );
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .env("FHIR_PIPES_CLIENT_ID", "unused")
+        .assert()
+        .success()
+        .stdout(has("parquet/patient (1 rows)"));
+}
+
+#[test]
+fn the_tiles_tools_are_needed_only_when_there_are_locations() {
+    let (dir, config) = setup(
+        NOWHERE,
+        "\n[tools]\nduckdb = \"/no/such/duckdb\"\ntippecanoe = \"/no/such/tippecanoe\"\n",
+    );
+    let root = dir.path();
+    fs::remove_dir_all(root.join("data/parquet/locations")).unwrap();
+    let patients = inputs(
+        root,
+        &[(
+            "p.ndjson",
+            lines(&[json!({"resourceType": "Patient", "id": "p1"})]),
+        )],
+    );
+    // No Locations: the tiles step is skipped, and its missing tools do not
+    // matter.
+    cmd(&config)
+        .arg("--input")
+        .arg(&patients)
+        .assert()
+        .success()
+        .stdout(has("== tiles: there is no locations table; skipped"));
+
+    // With Locations the tiles step runs, and stops the run before anything
+    // is published.
+    let locations = inputs(root, &[("l.ndjson", lines(&snapshot_locations()))]);
+    cmd(&config)
+        .arg("--input")
+        .arg(&locations)
+        .assert()
+        .failure()
+        .stderr(has("not found: /no/such/duckdb (for tiles)"));
+    assert!(!root.join("data/parquet/locations").exists());
+}

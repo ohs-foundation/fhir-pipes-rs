@@ -122,7 +122,11 @@ name it. A view with no rows writes one empty file there, so the table keeps
 its columns. A view with a column of the partition column's name stops the
 run, since that column would be lost beside the partition column: set
 `[partition] column` to another name (the fhir-data-pipes views have an
-address `country` column, for one). Tables other views look up in are written first, and are read
+address `country` column, for one). The `locations` table stays partitioned
+by `country` whatever the view tables use. The manifest, the catalog, the
+database step and the partition lookups read each table by its own
+first-level partition directories, so a lookup through `locations` gives the
+Location's country as the row's partition value either way. Tables other views look up in are written first, and are read
 back from staging. Tables are swapped in at the end of the run (see [What a
 failed run leaves behind](#what-a-failed-run-leaves-behind)).
 
@@ -201,6 +205,18 @@ The steps then run as for a server:
 - `manifest`, `catalog`, `database`, `hooks` and `push` are unchanged, and the
   run is staged and swapped in as for a server. The manifest's `server` is
   `null` and its `files` lists the inputs; hooks get an empty `FHIR_BASE`.
+
+With a file source the server's auth settings are not used, so they are not
+checked either: a config with `server.username` runs from files without
+`FHIR_PIPES_PASSWORD`. The tiles step's tools are checked only once the run
+knows the step will run, since files without Locations skip it.
+
+`raw/<name>/` can hold a server's download when the file source uses the
+same name (`server.name`). The split removes the server export's state
+(`.export-state.json`), and a Location snapshot built from files has no
+watermark, so the next refresh from the server downloads every type, and
+extracts every Location, in full, rather than merging the server's changes
+into the files' copies.
 
 `--reuse-raw` reruns on the last split in `raw/<name>/` without reading the
 inputs again. `--check` shows the file source and how many files each input

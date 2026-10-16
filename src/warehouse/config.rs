@@ -429,50 +429,56 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     } else {
         o.input
     };
-    let username = o.username.or(file.server.username);
-    let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
-    let kinds: Vec<&str> = [
-        (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
-        (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
-        (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
-        (
-            google_auth,
-            "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(set, what)| set.then_some(what))
-    .collect();
-    if kinds.len() > 1 {
-        bail!("use one way to authenticate, not {}", kinds.join(" and "));
-    }
-    let none = AuthArgs::none();
-    let auth = match (o.client_id, o.client_secret, username, o.password) {
-        _ if google_auth => AuthArgs {
-            google_auth: true,
-            ..none
-        },
-        (Some(id), Some(secret), _, _) => AuthArgs {
-            client_id: Some(id),
-            client_secret: Some(secret),
-            token_url: Some(o.token_url.or(file.server.token_url).context(
-                "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
-            )?),
-            ..none
-        },
-        (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
-        (None, _, Some(user), Some(password)) => AuthArgs {
-            username: Some(user),
-            password: Some(password),
-            ..none
-        },
-        (None, _, Some(_), None) => {
-            bail!("a username is set but no password: set FHIR_PIPES_PASSWORD")
+    // With a file source no server is contacted, so the server's auth
+    // settings are neither needed nor checked.
+    let auth = if !files.is_empty() {
+        AuthArgs::none()
+    } else {
+        let username = o.username.or(file.server.username);
+        let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
+        let kinds: Vec<&str> = [
+            (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
+            (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
+            (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
+            (
+                google_auth,
+                "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(set, what)| set.then_some(what))
+        .collect();
+        if kinds.len() > 1 {
+            bail!("use one way to authenticate, not {}", kinds.join(" and "));
         }
-        _ => AuthArgs {
-            token: o.token,
-            ..none
-        },
+        let none = AuthArgs::none();
+        match (o.client_id, o.client_secret, username, o.password) {
+            _ if google_auth => AuthArgs {
+                google_auth: true,
+                ..none
+            },
+            (Some(id), Some(secret), _, _) => AuthArgs {
+                client_id: Some(id),
+                client_secret: Some(secret),
+                token_url: Some(o.token_url.or(file.server.token_url).context(
+                    "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
+                )?),
+                ..none
+            },
+            (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
+            (None, _, Some(user), Some(password)) => AuthArgs {
+                username: Some(user),
+                password: Some(password),
+                ..none
+            },
+            (None, _, Some(_), None) => {
+                bail!("a username is set but no password: set FHIR_PIPES_PASSWORD")
+            }
+            _ => AuthArgs {
+                token: o.token,
+                ..none
+            },
+        }
     };
     let threads = o
         .threads
@@ -765,6 +771,18 @@ mod tests {
         let s = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap();
         assert!(!s.reads_files());
         assert_eq!(s.server_name, "hapi-local");
+    }
+
+    #[test]
+    fn a_file_source_leaves_the_server_auth_unchecked() {
+        let text = "data = \"d\"\n[source]\nfiles = [\"x\"]\n[server]\nusername = \"u\"\ngoogle_auth = true";
+        let file: File = toml::from_str(text).unwrap();
+        let o = Overrides {
+            client_id: Some("id".into()),
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert_eq!(s.auth_kind(), "none");
     }
 
     #[test]
