@@ -1,15 +1,16 @@
-//! The few fields of a resource line that indexing, merging and planning a
-//! sync need, read without building a `Value` of the whole line: about four
-//! times faster on MeasureReports. Every other field is skipped, though
-//! still checked as JSON. A field of another JSON type than expected reads
-//! as absent, as `Value::get(..).and_then(Value::as_str)` would have it.
+//! The few fields of a resource line that indexing and planning a sync
+//! need, read without building a `Value` of the whole line: about four
+//! times faster on MeasureReports. The result is what reading the line as a
+//! `Value` gives, for every line: every other field is parsed and dropped
+//! (so a line `Value` rejects, such as one with a number out of range, is
+//! rejected too), a repeated field name keeps its last value, and a field of
+//! another JSON type than expected reads as absent, as
+//! `Value::get(..).and_then(Value::as_str)` would have it.
 
 use std::fmt;
-use std::marker::PhantomData;
 
 use serde::Deserialize;
-use serde::de::value::MapAccessDeserializer;
-use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
 
 /// `resourceType`, `id`, `meta.lastUpdated` and `partOf.reference`, when
 /// each is a string.
@@ -22,60 +23,52 @@ pub struct Head {
 }
 
 impl Head {
-    /// The head of one NDJSON line: an error when the line is not JSON,
-    /// `None` when it is JSON but not an object. A repeated field name is an
-    /// error.
+    /// The head of one NDJSON line: an error when the line is not JSON (as
+    /// `Value` reads it), `None` when it is JSON but not an object.
     pub fn parse(text: &str) -> serde_json::Result<Option<Head>> {
-        let raw: Obj<Raw> = serde_json::from_str(text)?;
-        Ok(raw.0.map(|r| Head {
-            resource_type: r.resource_type.0,
-            id: r.id.0,
-            last_updated: r.meta.0.and_then(|m| m.last_updated.0),
-            part_of: r.part_of.0.and_then(|p| p.reference.0),
-        }))
+        Ok(serde_json::from_str::<Top>(text)?.0)
     }
 }
 
+/// The field names read; any other is `Other`.
 #[derive(Deserialize)]
-struct Raw {
-    #[serde(rename = "resourceType", default)]
-    resource_type: Str,
-    #[serde(default)]
-    id: Str,
-    #[serde(default)]
-    meta: Obj<Meta>,
-    #[serde(rename = "partOf", default)]
-    part_of: Obj<Reference>,
+#[serde(field_identifier)]
+enum Key {
+    #[serde(rename = "resourceType")]
+    ResourceType,
+    #[serde(rename = "id")]
+    Id,
+    #[serde(rename = "meta")]
+    Meta,
+    #[serde(rename = "partOf")]
+    PartOf,
+    #[serde(rename = "lastUpdated")]
+    LastUpdated,
+    #[serde(rename = "reference")]
+    Reference,
+    #[serde(other)]
+    Other,
 }
 
-#[derive(Deserialize)]
-struct Meta {
-    #[serde(rename = "lastUpdated", default)]
-    last_updated: Str,
-}
-
-#[derive(Deserialize)]
-struct Reference {
-    #[serde(default)]
-    reference: Str,
-}
+/// Any JSON value, parsed as `Value` would parse it and dropped.
+struct Skip;
 
 /// A string, or `None` for any other JSON value.
-#[derive(Default)]
 struct Str(Option<String>);
 
-/// An object read as `T`, or `None` for any other JSON value.
-struct Obj<T>(Option<T>);
+/// The line: `None` unless it is an object.
+struct Top(Option<Head>);
 
-impl<T> Default for Obj<T> {
-    fn default() -> Self {
-        Obj(None)
-    }
-}
+/// An object's string field `K` (`meta.lastUpdated`, `partOf.reference`);
+/// `None` for anything else.
+struct Field<const K: u8>(Option<String>);
 
-/// The visits that read a JSON value as absent: scalars, and arrays and
-/// objects skipped whole.
-macro_rules! absent_for_other_values {
+const LAST_UPDATED: u8 = 0;
+const REFERENCE: u8 = 1;
+
+/// The visits every reader here shares: scalars are "not what was asked
+/// for", and arrays are parsed and dropped. Objects are each reader's own.
+macro_rules! other_values {
     ($absent:expr) => {
         fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
             Ok($absent)
@@ -96,10 +89,39 @@ macro_rules! absent_for_other_values {
             Ok($absent)
         }
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            while seq.next_element::<Skip>()?.is_some() {}
             Ok($absent)
         }
     };
+}
+
+/// Parse and drop every entry of an object.
+fn skip_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
+    while map.next_entry::<Skip, Skip>()?.is_some() {}
+    Ok(())
+}
+
+impl<'de> Deserialize<'de> for Skip {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Skip;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Skip, E> {
+                Ok(Skip)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Skip, A::Error> {
+                skip_map(map).map(|()| Skip)
+            }
+            other_values!(Skip);
+        }
+        // `deserialize_any`, not `deserialize_ignored_any`: serde_json skips
+        // an ignored value without checking its numbers' range or its
+        // strings' escapes, which `Value` checks.
+        d.deserialize_any(V)
+    }
 }
 
 impl<'de> Deserialize<'de> for Str {
@@ -116,33 +138,78 @@ impl<'de> Deserialize<'de> for Str {
             fn visit_string<E>(self, v: String) -> Result<Str, E> {
                 Ok(Str(Some(v)))
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Str, A::Error> {
-                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-                Ok(Str(None))
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Str, A::Error> {
+                skip_map(map).map(|()| Str(None))
             }
-            absent_for_other_values!(Str(None));
+            other_values!(Str(None));
         }
         d.deserialize_any(V)
     }
 }
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Obj<T> {
+impl<'de, const K: u8> Deserialize<'de> for Field<K> {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V<T>(PhantomData<T>);
-        impl<'de, T: Deserialize<'de>> Visitor<'de> for V<T> {
-            type Value = Obj<T>;
+        struct V<const K: u8>;
+        impl<'de, const K: u8> Visitor<'de> for V<K> {
+            type Value = Field<K>;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("any JSON value")
             }
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Obj<T>, A::Error> {
-                T::deserialize(MapAccessDeserializer::new(map)).map(|t| Obj(Some(t)))
+            fn visit_str<E>(self, _: &str) -> Result<Field<K>, E> {
+                Ok(Field(None))
             }
-            fn visit_str<E>(self, _: &str) -> Result<Obj<T>, E> {
-                Ok(Obj(None))
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Field<K>, A::Error> {
+                let mut found = None;
+                while let Some(key) = map.next_key::<Key>()? {
+                    match (K, key) {
+                        (LAST_UPDATED, Key::LastUpdated) | (REFERENCE, Key::Reference) => {
+                            found = map.next_value::<Str>()?.0;
+                        }
+                        _ => {
+                            map.next_value::<Skip>()?;
+                        }
+                    }
+                }
+                Ok(Field(found))
             }
-            absent_for_other_values!(Obj(None));
+            other_values!(Field(None));
         }
-        d.deserialize_any(V(PhantomData))
+        d.deserialize_any(V::<K>)
+    }
+}
+
+impl<'de> Deserialize<'de> for Top {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Top;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Top, E> {
+                Ok(Top(None))
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Top, A::Error> {
+                // A repeated name overwrites, as in a `Value` object.
+                let mut head = Head::default();
+                while let Some(key) = map.next_key::<Key>()? {
+                    match key {
+                        Key::ResourceType => head.resource_type = map.next_value::<Str>()?.0,
+                        Key::Id => head.id = map.next_value::<Str>()?.0,
+                        Key::Meta => {
+                            head.last_updated = map.next_value::<Field<LAST_UPDATED>>()?.0;
+                        }
+                        Key::PartOf => head.part_of = map.next_value::<Field<REFERENCE>>()?.0,
+                        _ => {
+                            map.next_value::<Skip>()?;
+                        }
+                    }
+                }
+                Ok(Top(Some(head)))
+            }
+            other_values!(Top(None));
+        }
+        d.deserialize_any(V)
     }
 }
 
@@ -184,6 +251,46 @@ mod tests {
             let got = Head::parse(text).unwrap();
             assert_eq!(got, by_value(text).unwrap(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_repeated_field_keeps_its_last_value_as_in_a_value() {
+        for text in [
+            r#"{"resourceType":"Patient","resourceType":"Patient","id":"a"}"#,
+            r#"{"resourceType":"Patient","id":"a","id":"b"}"#,
+            r#"{"id":"a","id":5}"#,
+            r#"{"id":"a","meta":{"lastUpdated":"b"},"meta":{"lastUpdated":"c"}}"#,
+            r#"{"id":"a","meta":{"lastUpdated":"b"},"meta":{"versionId":"2"}}"#,
+            r#"{"id":"a","meta":{"lastUpdated":"b","lastUpdated":"c"}}"#,
+            r#"{"partOf":{"reference":"Location/x"},"partOf":"y"}"#,
+            r#"{"partOf":{"reference":"a","reference":"b"}}"#,
+        ] {
+            assert_eq!(
+                Head::parse(text).unwrap(),
+                by_value(text).unwrap(),
+                "{text}"
+            );
+        }
+        let head = Head::parse(r#"{"resourceType":"Patient","id":"a","id":"b"}"#).unwrap();
+        assert_eq!(head.unwrap().id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_line_a_value_rejects_is_rejected() {
+        for text in [
+            r#"{"id":"a","x":"\ud800"}"#,
+            r#"{"id":"a","x":{"y":["\udc00x"]}}"#,
+            r#"{"id":"a","x":1e400}"#,
+            r#"{"id":"a","meta":{"tag":[-1e400]}}"#,
+            r#"{"id":"a","\ud800":1}"#,
+            r#"{"id":"\ud800"}"#,
+        ] {
+            assert!(by_value(text).is_err(), "{text}");
+            assert!(Head::parse(text).is_err(), "{text}");
+        }
+        // A surrogate pair is a character.
+        let pair = r#"{"id":"a","x":"\ud83d\ude00"}"#;
+        assert_eq!(Head::parse(pair).unwrap(), by_value(pair).unwrap());
     }
 
     #[test]

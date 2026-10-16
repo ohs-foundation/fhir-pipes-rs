@@ -435,6 +435,35 @@ fn dry_run_sends_nothing_and_prints_the_plan() {
 }
 
 #[test]
+fn repeated_field_names_are_read_as_their_last_value() {
+    // As a `Value` reads them, which is how sync read them before.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Patient.ndjson"),
+        concat!(
+            r#"{"resourceType":"Patient","resourceType":"Patient","id":"a"}"#,
+            "\n",
+            r#"{"resourceType":"Patient","id":"x","id":"b","meta":{"lastUpdated":"2026-01-01T00:00:00Z"},"meta":{"lastUpdated":"2026-02-01T00:00:00Z"}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let mut server = Server::run();
+    expect_metadata(&server);
+    let a = sync(&server, dir.path(), &["--dry-run"]).success();
+    let out = stdout(&a);
+    assert!(out.contains("Patient: 2 to send, 0 unchanged"), "{out}");
+    server.verify_and_clear();
+    expect_metadata(&server);
+    server.expect(
+        Expectation::matching(bundle_is(&["PUT Patient/a", "PUT Patient/b"]))
+            .times(1)
+            .respond_with(ok(transaction_response())),
+    );
+    sync(&server, dir.path(), &[]).success();
+}
+
+#[test]
 fn a_failed_bundle_is_sent_again_by_the_next_run() {
     let dir = tempfile::tempdir().unwrap();
     write_type(

@@ -54,9 +54,14 @@ mod tests {
         writeln!(f, "not json").unwrap();
         writeln!(f, r#"{{"id":"a","n":2}}"#).unwrap();
         writeln!(f, r#"{{"id":"b"}}"#).unwrap();
+        // Repeated field names: the last value, as a `Value` read gives.
+        writeln!(f, r#"{{"resourceType":"X","resourceType":"X","id":"c"}}"#).unwrap();
+        writeln!(f, r#"{{"id":"x","id":"d"}}"#).unwrap();
         let mut report = Report::default();
         let index = index_by_id(f.path(), &mut report, "organization_line_unparsed").unwrap();
-        assert_eq!(index.len(), 2);
+        assert_eq!(index.len(), 4);
+        assert!(index.contains_key("c") && index.contains_key("d"));
+        assert!(!index.contains_key("x"));
         assert_eq!(index["a"], (0, 16));
         assert_eq!(report.count("duplicate_id"), 1);
         assert_eq!(report.count("organization_line_unparsed"), 1);
