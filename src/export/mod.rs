@@ -15,6 +15,8 @@
 //! exported in full in a second export. The export's `deleted` resources are
 //! removed from the files, and every type's watermark becomes the manifest's
 //! `transactionTime`. The count check after a merge is the same as above.
+//! The output files download `--concurrency` at a time, through the same
+//! limit, and each type's are joined in manifest order.
 //!
 //! With `--hapi-db`, the files come from a HAPI FHIR JPA server's PostgreSQL
 //! database instead of its API (see `hapi_db`), with watermarks of their own.

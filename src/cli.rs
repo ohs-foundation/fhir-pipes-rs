@@ -609,7 +609,8 @@ pub struct ExportArgs {
     /// Search requests in flight at once, for all types together: up to this
     /// many types are downloaded side by side, and a full download of a large
     /// type is split into `_lastUpdated` windows paged side by side. 1 pages
-    /// one type at a time, one page at a time. Not used with --bulk or --hapi-db
+    /// one type at a time, one page at a time. With --bulk, the export's
+    /// output files downloaded at once. Not used with --hapi-db
     #[arg(long, default_value_t = DEFAULT_EXPORT_CONCURRENCY)]
     pub concurrency: usize,
     /// Also write the report as JSON to this file

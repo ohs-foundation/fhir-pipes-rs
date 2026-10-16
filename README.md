@@ -215,8 +215,9 @@ server for the type's count (the first page's `total`, else
 Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
 type. The limit covers types and windows together. A `Retry-After` on a 429
 or 5xx holds back every request, not only the one that got it.
-`--concurrency 1` downloads one type at a time, one page at a time.
-`--concurrency` does not apply to `--bulk` or `--hapi-db`.
+`--concurrency 1` downloads one type at a time, one page at a time. With
+`--bulk`, `--concurrency` is the number of the export's output files
+downloaded at once. It does not apply to `--hapi-db`.
 
 The Java pipeline instead pages HAPI in parallel with `_getpagesoffset`.
 fhir-pipes does not, since that relies on HAPI's search cache, which
@@ -258,8 +259,10 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
   merged into their files by id; the types without one are exported in full
   in a second export.
 - The status URL is polled with the server's `Retry-After`, or a backoff from
-  one second up to a minute without one. 429 is waited out the same way.
-  Each new `X-Progress` is printed.
+  one second up to a minute without one. While the export runs (202), the
+  wait is at most 15 seconds, whatever `Retry-After` says: HAPI asks for two
+  minutes on every poll. A 429 or 5xx is waited out for as long as its
+  `Retry-After` asks. Each new `X-Progress` is printed.
 - The status URL is saved in `.export-state.json` as soon as the server
   returns it. A run that stops before the export is done (a crash, a lost
   connection) polls the same export next time instead of starting another.
@@ -267,6 +270,11 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
 - `--bulk-timeout` (four hours by default) is how long a run waits. After
   that it cancels the export with a `DELETE` of the status URL and fails. It
   is also the time allowed for each file's download.
+- The output files are downloaded `--concurrency` at a time (4 by default),
+  each into a part file. Each type's parts are joined in the manifest's
+  order, so the file is the same as one downloaded a file at a time. When a
+  download fails, the parts are removed, no type's file or watermark
+  changes, and the next run reads the same export again.
 - The output files are downloaded with the bearer token only when the
   manifest says `requiresAccessToken`.
 - Resources in the manifest's `deleted` Bundles are removed from the files,
@@ -282,9 +290,7 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
   remove them.
 
 Only system-level export is supported. `Group/[id]/$export` and
-`Patient/$export` are not supported yet. Files are downloaded one after
-another. HAPI asks clients to wait two minutes between polls, so even a small
-export from HAPI takes about two minutes.
+`Patient/$export` are not supported yet.
 
 ### Reading a HAPI server's database
 
