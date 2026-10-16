@@ -502,12 +502,16 @@ cargo build --release --no-default-features        # without PostgreSQL
 `fhir-packages` adds over 100 crates. Asking for an option a build lacks says
 which feature it needs.
 
+The binary uses [mimalloc](https://github.com/microsoft/mimalloc), compiled
+from C source, as its memory allocator in place of the system one.
+
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
-aarch64, statically linked against musl) and Windows (x86_64), as single files
-with no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
+aarch64, statically linked against musl) and Windows (x86_64, with the C
+runtime linked statically, set in `.cargo/config.toml`), as single files with
+no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
 release builds are slow, so they run for a version tag (which publishes them),
 when run by hand from the Actions tab, for a change to `Cargo.toml`,
-`Cargo.lock` or the workflows, and weekly.
+`Cargo.lock`, `.cargo/config.toml` or the workflows, and weekly.
 `cargo audit` checks `Cargo.lock` against the RustSec advisories on every PR
 and weekly; `.cargo/audit.toml` lists what fails the check and the advisories
 ignored, each with its reason.

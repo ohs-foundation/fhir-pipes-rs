@@ -69,6 +69,10 @@ csv = { workspace = true }
 # Slugs fold accents (NFKD) the way kiln's Python slugify did; already in the
 # tree through sqlx-postgres (stringprep).
 unicode-normalization = "0.1"
+# The global allocator (src/main.rs): faster than the system malloc for the
+# many small allocations of view evaluation and the Location transform, most of
+# all musl's on Linux. Built from C source with cc.
+mimalloc = { version = "0.1.52", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
