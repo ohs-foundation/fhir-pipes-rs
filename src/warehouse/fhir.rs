@@ -17,8 +17,14 @@ use super::config::{Fetch, Settings};
 /// into `out`/locations (the run's staging directory; it becomes
 /// parquet/locations when the run is published). `full` re-extracts every
 /// Location (the incremental extract cannot see deletions).
+/// A snapshot built from files (files.rs) is replaced by a full extract.
 pub fn locations(s: &Settings, out: &Path) -> Result<()> {
     let snapshot = s.raw_dir().join("locations");
+    let from_files = crate::snapshot::State::read(&snapshot.join(crate::snapshot::STATE_FILE))?
+        .is_some_and(|st| st.server == super::files::FILES);
+    if from_files && !s.full {
+        println!("   the snapshot was built from files: extracting every Location again");
+    }
     println!(
         "== locations ({} → {} → {})",
         s.server,
@@ -31,7 +37,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<()> {
                 server: s.server.clone(),
                 auth: s.auth.clone(),
                 snapshot,
-                full: s.full,
+                full: s.full || from_files,
                 since: None,
                 concurrency: DEFAULT_CONCURRENCY,
                 retries: DEFAULT_RETRIES,

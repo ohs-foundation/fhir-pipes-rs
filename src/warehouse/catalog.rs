@@ -40,7 +40,7 @@ use arrow::datatypes::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::config::{Catalog, Settings};
-use super::partition::table_files;
+use super::partition::{partition_key, table_files};
 use super::stage::Stage;
 
 pub const SQL_FILE: &str = "catalog.sql";
@@ -179,7 +179,8 @@ fn tables(s: &Settings, stage: &Stage) -> Result<Vec<Table>> {
         .tables()?
         .into_iter()
         .map(|(name, dir)| {
-            let files = table_files(&dir, &s.partition_column)
+            let column = partition_key(&dir, &s.partition_column);
+            let files = table_files(&dir, &column)
                 .iter()
                 .filter_map(|f| f.strip_prefix(&dir).ok())
                 .map(|f| {
@@ -193,7 +194,7 @@ fn tables(s: &Settings, stage: &Stage) -> Result<Vec<Table>> {
                 .collect();
             Table {
                 name,
-                column: s.partition_column.clone(),
+                column,
                 files,
             }
         })

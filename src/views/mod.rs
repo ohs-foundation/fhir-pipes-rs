@@ -300,20 +300,26 @@ fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>>
         return Ok(resources);
     }
     let mut resources = Vec::new();
-    if path.is_dir() {
-        let mut files = Vec::new();
-        collect_resource_files(path, &mut files)?;
-        files.sort();
-        for file in files {
-            load_file(&file, &mut resources, threads)?;
-        }
-    } else {
-        load_file(path, &mut resources, threads)?;
+    for file in resource_files(path)? {
+        load_file(&file, &mut resources, threads)?;
     }
     if resources.is_empty() {
         bail!("no FHIR resources in {}", path.display());
     }
     Ok(resources)
+}
+
+/// The files `path` names: itself if it is a file, else the resource files
+/// under it (`collect_resource_files`), sorted by path. `refresh` reads its
+/// file source through this and `load_file`.
+pub(crate) fn resource_files(path: &Path) -> Result<Vec<PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut files = Vec::new();
+    collect_resource_files(path, &mut files)?;
+    files.sort();
+    Ok(files)
 }
 
 /// The `.json` and `.ndjson` files under `dir`, in subdirectories too.
@@ -349,7 +355,13 @@ fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn load_file(path: &Path, out: &mut Vec<serde_json::Value>, threads: usize) -> Result<()> {
+/// The resources in one file, appended to `out`: NDJSON by its `.ndjson`
+/// extension, otherwise one JSON resource, array or Bundle (`push_resource`).
+pub(crate) fn load_file(
+    path: &Path,
+    out: &mut Vec<serde_json::Value>,
+    threads: usize,
+) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     if path.extension().is_some_and(|x| x == "ndjson") {
         for value in

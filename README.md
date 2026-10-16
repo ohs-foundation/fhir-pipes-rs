@@ -45,7 +45,8 @@ cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhi
 
 `fhir-pipes refresh` downloads the resources a directory of ViewDefinitions
 reads, runs the views, and writes each view as a Hive-partitioned Parquet
-table, with a manifest of what it wrote.
+table, with a manifest of what it wrote. It can also read the resources from
+NDJSON and Bundle files instead of a server.
 
 ```toml
 # fhir-pipes.toml
@@ -61,6 +62,7 @@ name = "prod"
 fhir-pipes refresh --check                    # settings, steps and tools found
 fhir-pipes refresh --only views               # download, run the views, write the tables
 fhir-pipes refresh --only views --reuse-raw   # run the views again on the last download
+fhir-pipes refresh --input exports/           # from NDJSON and Bundle files, no server
 ```
 
 The result:
@@ -83,7 +85,7 @@ A full refresh can also extract and transform the Location registry, build
 map tiles, write a DuckDB catalog (a view per table, which a dashboard can
 attach by URL) and Spark SQL tables for a Spark Thrift server, load the view tables into PostgreSQL, run your own commands afterwards, and push the warehouse to object
 storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
-partitioning and hooks.
+reading from files, partitioning and hooks.
 
 ### How the views run
 
@@ -99,7 +101,8 @@ file and the rule it breaks.
 The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged, and
 give the same rows on its Synthea sample Bundles
 (`synthea-hiv/sample_data_segments`) read directly as on the same resources
-flattened to NDJSON.
+flattened to NDJSON. `refresh` on the same directory as a file source gives
+the same rows again.
 
 ## Profiles
 
