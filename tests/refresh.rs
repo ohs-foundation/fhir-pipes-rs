@@ -863,6 +863,363 @@ fn a_listed_catalog_duckdb_is_pushed_when_fhir_pipes_does_not_build_it() {
     assert!(mirror.join("catalog.sql").is_file());
 }
 
+/// A warehouse with the fixture downloads in raw/, so `--reuse-raw` runs the
+/// views without a server.
+fn setup_with_raw(extra_config: &str) -> (tempfile::TempDir, PathBuf) {
+    let (dir, config) = setup(NOWHERE, extra_config);
+    let raw = dir.path().join("data/raw/test");
+    fs::create_dir_all(&raw).unwrap();
+    for t in ["Observation", "Patient"] {
+        fs::copy(
+            fixtures().join(format!("raw/{t}.ndjson")),
+            raw.join(format!("{t}.ndjson")),
+        )
+        .unwrap();
+    }
+    (dir, config)
+}
+
+/// The fixture views plus Patient views named `names` (each with an `id`
+/// column), and, if `empty`, a Patient view that selects nothing.
+fn views_with(dir: &Path, names: &[&str], empty: bool) -> PathBuf {
+    let views = dir.join("more-views");
+    fs::create_dir_all(&views).unwrap();
+    for f in fs::read_dir(fixtures().join("views")).unwrap() {
+        let f = f.unwrap().path();
+        fs::copy(&f, views.join(f.file_name().unwrap())).unwrap();
+    }
+    let view = |name: &str, filter: &str| {
+        format!(
+            r#"{{"resourceType": "ViewDefinition", "name": "{name}", "status": "active", "resource": "Patient",{filter}
+                "select": [{{"column": [{{"name": "id", "path": "getResourceKey()", "type": "id"}},
+                                         {{"name": "born", "path": "birthDate", "type": "date"}}]}}]}}"#
+        )
+    };
+    for n in names {
+        fs::write(views.join(format!("{n}.json")), view(n, "")).unwrap();
+    }
+    if empty {
+        fs::write(
+            views.join("IcrEmpty.json"),
+            view("IcrEmpty", r#" "where": [{"path": "false"}],"#),
+        )
+        .unwrap();
+    }
+    views
+}
+
+/// A view that selects nothing still writes its columns, as one empty file.
+#[test]
+fn an_empty_view_writes_an_empty_file() {
+    let (dir, config) = setup_with_raw("\n[catalog]\n");
+    let views = views_with(dir.path(), &[], true);
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&views)
+        .assert()
+        .success()
+        .stdout(has("IcrEmpty (Patient) → parquet/empty (0 rows)"));
+    let file = dir
+        .path()
+        .join("data/parquet/empty/country=__HIVE_DEFAULT_PARTITION__/part-0.parquet");
+    let reader = SerializedFileReader::new(fs::File::open(&file).unwrap()).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 0);
+    let fields: Vec<String> = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(fields, ["id", "born", "country"]);
+    // The catalog has a view for it.
+    let sql = fs::read_to_string(dir.path().join("data/catalog.sql")).unwrap();
+    assert!(sql.contains("CREATE OR REPLACE VIEW \"empty\""), "{sql}");
+}
+
+#[test]
+#[cfg(not(feature = "postgres"))]
+fn the_database_step_needs_the_postgres_feature() {
+    let (_dir, config) = setup_with_raw("\n[database]\n");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .failure()
+        .stderr(has("--features postgres"));
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--skip", "database"])
+        .assert()
+        .success();
+}
+
+/// Runs against the PostgreSQL in $FHIR_PIPES_TEST_DATABASE_URL, each test in
+/// a schema of its own; skipped without it.
+#[cfg(feature = "postgres")]
+mod database {
+    use super::*;
+    use sqlx_core::connection::Connection;
+    use sqlx_core::row::Row;
+    use sqlx_core::sql_str::AssertSqlSafe;
+
+    const URL: &str = "FHIR_PIPES_TEST_DATABASE_URL";
+
+    fn url() -> Option<String> {
+        std::env::var(URL).ok().filter(|u| !u.is_empty())
+    }
+
+    /// A schema name no other test uses.
+    fn schema(test: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("t_{test}_{}_{nanos}", std::process::id())
+    }
+
+    /// Run SQL statements; the rows of the last one, every value as text.
+    fn sql(statements: &[&str]) -> Vec<Vec<Option<String>>> {
+        let url = url().unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut conn = sqlx_postgres::PgConnection::connect(&url).await.unwrap();
+                let mut rows = Vec::new();
+                for s in statements {
+                    rows = sqlx_core::query::query(AssertSqlSafe(s.to_string()))
+                        .fetch_all(&mut conn)
+                        .await
+                        .unwrap_or_else(|e| panic!("{s}: {e}"));
+                }
+                rows.iter()
+                    .map(|r| {
+                        (0..r.len())
+                            .map(|i| r.try_get::<Option<String>, _>(i).unwrap())
+                            .collect()
+                    })
+                    .collect()
+            })
+    }
+
+    fn one(statement: &str) -> String {
+        sql(&[statement])[0][0].clone().unwrap_or_default()
+    }
+
+    #[test]
+    fn view_tables_are_loaded_and_replaced() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("load");
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success()
+            .stdout(has(format!("obs → {s}.obs (3 rows)")))
+            .stdout(has(format!("patient → {s}.patient (2 rows)")));
+        // Only view tables: not locations.
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(table_name::text, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema = '{s}'"
+            )),
+            "obs,patient"
+        );
+        // Types from the Parquet files, values as written.
+        assert_eq!(
+            one(&format!(
+                "SELECT data_type::text FROM information_schema.columns WHERE table_schema = '{s}' AND table_name = 'patient' AND column_name = 'born'"
+            )),
+            "date"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id || '=' || born::text || '@' || coalesce(country, 'null'), ',' ORDER BY id) FROM \"{s}\".patient"
+            )),
+            "p1=2020-05-01@null,p2=2021-01-01@null"
+        );
+
+        // A view someone built on a table survives the next run, which
+        // replaces the rows.
+        sql(&[&format!(
+            "CREATE VIEW \"{s}\".patient_ids AS SELECT id FROM \"{s}\".patient"
+        )]);
+        let raw = dir.path().join("data/raw/test/Patient.ndjson");
+        let first = fs::read_to_string(&raw)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_string();
+        fs::write(&raw, format!("{first}\n")).unwrap();
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success()
+            .stdout(has(format!("patient → {s}.patient (1 rows)")));
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',') FROM \"{s}\".patient_ids"
+            )),
+            "p1"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    #[test]
+    fn a_table_with_other_columns_is_recreated() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("recreate");
+        sql(&[
+            &format!("CREATE SCHEMA \"{s}\""),
+            &format!("CREATE TABLE \"{s}\".obs (stale text)"),
+        ]);
+        let (_dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\ntables = [\"obs\"]\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success();
+        assert_eq!(one(&format!("SELECT count(*)::text FROM \"{s}\".obs")), "3");
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*)::text FROM information_schema.columns WHERE table_schema = '{s}' AND table_name = 'obs' AND column_name = 'stale'"
+            )),
+            "0"
+        );
+        // `tables` limited the load to obs.
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*)::text FROM information_schema.tables WHERE table_schema = '{s}' AND table_name = 'patient'"
+            )),
+            "0"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// A missing or unreadable warehouse fails before the database changes.
+    #[test]
+    fn a_missing_warehouse_leaves_the_database_alone() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("missing");
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success();
+        cmd(&config)
+            .args(["--only", "database", "--data"])
+            .arg(dir.path().join("nowhere"))
+            .assert()
+            .failure()
+            .stderr(has("the database was not changed"));
+        assert_eq!(one(&format!("SELECT count(*)::text FROM \"{s}\".obs")), "3");
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// An empty view gets its table; tables named t, t_id and t_id_idx do
+    /// not clash with the index names PostgreSQL picks.
+    #[test]
+    fn empty_and_similarly_named_tables_load() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("names");
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        let views = views_with(
+            dir.path(),
+            &["IcrAlpha", "IcrAlphaId", "IcrAlphaIdIdx"],
+            true,
+        );
+        for _ in 0..2 {
+            cmd(&config)
+                .args(["--only", "views", "--reuse-raw", "--views"])
+                .arg(&views)
+                .assert()
+                .success()
+                .stdout(has(format!("empty → {s}.empty (0 rows)")))
+                .stdout(has(format!("alpha_id → {s}.alpha_id (2 rows)")));
+        }
+        assert_eq!(
+            one(&format!("SELECT count(*)::text FROM \"{s}\".empty")),
+            "0"
+        );
+        assert_eq!(
+            one(&format!("SELECT count(*)::text FROM \"{s}\".alpha")),
+            "2"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// Two loads at once: the second waits for the first, so the rows are
+    /// there once.
+    #[test]
+    fn overlapping_loads_do_not_duplicate_rows() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("overlap");
+        let (_dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .success();
+        let run = || {
+            let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_fhir-pipes"));
+            c.current_dir(config.parent().unwrap())
+                .args(["refresh", "--config"])
+                .arg(&config)
+                .args(["--only", "database"])
+                .env_remove("FHIR_PIPES_DATA")
+                .env_remove("FHIR_PIPES_VIEWS")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        for _ in 0..3 {
+            let mut a = run();
+            let mut b = run();
+            assert!(a.wait().unwrap().success() && b.wait().unwrap().success());
+            assert_eq!(one(&format!("SELECT count(*)::text FROM \"{s}\".obs")), "3");
+        }
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    #[test]
+    fn database_settings_are_checked() {
+        let (_dir, config) = setup_with_raw(
+            "\n[database]\nurl_env = \"FHIR_PIPES_NO_SUCH_URL\"\ntables = [\"nope\"]\n",
+        );
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .assert()
+            .failure()
+            .stderr(has("`nope` is not a view table (obs, patient)"));
+        let (_dir, config) = setup_with_raw("\n[database]\nurl_env = \"FHIR_PIPES_NO_SUCH_URL\"\n");
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw"])
+            .env_remove("FHIR_PIPES_NO_SUCH_URL")
+            .assert()
+            .failure()
+            .stderr(has("$FHIR_PIPES_NO_SUCH_URL"));
+    }
+}
+
 /// The username from the config, the password only from the environment.
 #[test]
 fn locations_are_extracted_with_basic_auth() {

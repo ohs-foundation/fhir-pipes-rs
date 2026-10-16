@@ -12,8 +12,9 @@ path = "src/main.rs"
 # Both off by default: the release binaries leave them out.
 [features]
 default = []
-# `views run --db`: run views against FHIR resources stored as JSONB in PostgreSQL.
-postgres = ["fhir-pipes-sof/postgres", "dep:sqlx-postgres"]
+# `views run --db`: run views against FHIR resources stored as JSONB in PostgreSQL;
+# `refresh` with [database]: load the view tables into PostgreSQL.
+postgres = ["fhir-pipes-sof/postgres", "dep:sqlx-postgres", "dep:sqlx-core"]
 # `views lint --package`: lint views against a FHIR package, downloaded over HTTP.
 fhir-packages = ["fhir-pipes-sof-lint/packages"]
 
@@ -52,6 +53,7 @@ fhir-pipes-sof-lint = { workspace = true }
 # views (formerly the octofhir-sof command-line tool)
 tokio = { workspace = true }
 sqlx-postgres = { workspace = true, optional = true }
+sqlx-core = { workspace = true, optional = true }
 annotate-snippets = "0.12.16"
 
 [dev-dependencies]

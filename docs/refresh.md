@@ -32,16 +32,18 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
+| `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | a build with the `postgres` feature |
 | `hooks` | the config's commands, in order | the commands |
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
 `locations` runs first. `views` and `tiles` then run side by side, since both
-read only the registry. The manifest, the catalog, the hooks and the push
-follow.
+read only the registry. The manifest, the catalog, the database, the hooks
+and the push follow.
 
-By default every step except `push` runs, and `catalog` when the config has a
-`[catalog]` section. `--only views,tiles` picks steps (the manifest and the
-catalog are added when a data step is picked), `--skip tiles` leaves some out,
+By default every step except `push` runs, `catalog` only when the config has a
+`[catalog]` section, and `database` only with `[database]`. `--only
+views,tiles` picks steps (the manifest, the catalog and the database are added
+when a data step is picked), `--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
 
@@ -56,7 +58,8 @@ Every row gets a partition column (default `country`), looked up through
 another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
 goes to the null partition, `__HIVE_DEFAULT_PARTITION__`, as hive and DuckDB
-name it. Tables other views look up in are written first. A table is replaced
+name it. A view with no rows writes one empty file there, so the table keeps
+its columns. Tables other views look up in are written first. A table is replaced
 only once all of its new files are written.
 
 The views directory can be any directory of JSON files: files whose
@@ -138,6 +141,45 @@ is temporary and is not saved in the file.
 A client without `catalog.duckdb` can run `catalog.sql` itself: DuckDB-Wasm
 can fetch the file and run its text, and the duckdb shell can run it with
 `-init` or `.read`.
+
+## Database
+
+With a `[database]` section, each refresh also loads the view tables into
+PostgreSQL, for dashboards and tools that read a database (as the
+fhir-data-pipes single-machine setup does). It needs a fhir-pipes built with
+the `postgres` feature (`cargo build --release --features postgres`); the
+release binaries leave it out, and a refresh with `[database]` on one of them
+stops before it runs (`--skip database` runs the rest).
+
+```toml
+[database]
+url_env = "FHIR_PIPES_DATABASE_URL"   # the variable holding the connection string (the default)
+schema = "public"                      # the default
+tables = ["indicator_value", "coverage"]   # default: every view table
+```
+
+The connection string (`postgres://user:password@host:5432/db`) is read only
+from the environment, never from the file.
+
+Each view table becomes a table of the same name, with the same columns and
+the partition column (`country`), its types taken from the Parquet files:
+`text`, `bigint`, `double precision`, `boolean`, `date`, `timestamp with time
+zone` and `time`. The Location table is not loaded.
+
+All the tables are replaced in one transaction: each is created if missing,
+emptied with `DELETE`, and filled with `COPY`. A reader sees the previous run's
+rows until the commit, then all of the new run's, never a mix. Views and grants
+built on the tables survive, since a table is dropped and recreated only when
+its columns change; if something depends on it then, the step stops and says
+so, and the database keeps the previous run. A table with an `id` column gets
+an index on it when it is created.
+
+A table whose Parquet cannot be read (a wrong `--data`, a missing mount) stops
+the step before anything in the database changes. Two refreshes loading into
+the same schema at once take turns: the second waits for the first to commit.
+
+Every run reloads every table. On the ICR warehouse (10 view tables, 229,082
+rows, 161,216 in the largest) that takes about half a second.
 
 ## Settings
 
