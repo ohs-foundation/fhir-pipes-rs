@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::cli::{DEFAULT_PARTITION_BY, DEFAULT_ROW_GROUP_SIZE, TransformArgs};
+use crate::error::usage;
 use crate::fhir::head::Head;
 use crate::fs::AtomicFile;
 use crate::snapshot::instant::{format_utc, parse_instant};
@@ -47,7 +48,10 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
     let text = input.to_string_lossy();
     if !text.contains(['*', '?', '[']) {
         if !input.exists() {
-            bail!("input {} not found", input.display());
+            return Err(usage(anyhow::anyhow!(
+                "input {} not found",
+                input.display()
+            )));
         }
         return crate::views::resource_files(input);
     }
@@ -57,12 +61,15 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
         ..Default::default()
     };
     let mut matches: Vec<PathBuf> = glob::glob_with(&text, options)
-        .with_context(|| format!("input pattern {text}"))?
+        .with_context(|| format!("input pattern {text}"))
+        .map_err(usage)?
         .collect::<Result<_, _>>()
         .with_context(|| format!("input pattern {text}"))?;
     matches.sort();
     if matches.is_empty() {
-        bail!("input pattern {text} matches nothing");
+        return Err(usage(anyhow::anyhow!(
+            "input pattern {text} matches nothing"
+        )));
     }
     let mut files = Vec::new();
     for m in matches {
@@ -284,7 +291,9 @@ pub fn split(s: &Settings) -> Result<()> {
     let raw = s.raw_dir();
     println!("== files ({} files → {})", files.len(), raw.display());
     if files.is_empty() {
-        bail!("the inputs hold no .json or .ndjson files");
+        return Err(usage(anyhow::anyhow!(
+            "the inputs hold no .json or .ndjson files"
+        )));
     }
     fs::create_dir_all(&raw).with_context(|| format!("creating {}", raw.display()))?;
     let spill_path = raw.join(".files-spill.ndjson.tmp");

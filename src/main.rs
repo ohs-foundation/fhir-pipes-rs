@@ -36,11 +36,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 fn main() {
     let cli = cli::Cli::parse();
     let profile = cli.profile.as_deref();
-    // refresh reports anyhow errors with their context chain.
+    // refresh and views report anyhow errors with their context chain, and
+    // exit as the other commands do: 2 when the operator can fix the error.
     if let cli::Command::Refresh(args) = &cli.command {
         if let Err(err) = warehouse::run(args, profile) {
             eprintln!("fhir-pipes: {err:#}");
-            std::process::exit(1);
+            std::process::exit(error::anyhow_exit_code(&err));
         }
         return;
     }
@@ -50,7 +51,7 @@ fn main() {
             if !err.is::<views::Failed>() {
                 eprintln!("fhir-pipes: {err:#}");
             }
-            std::process::exit(1);
+            std::process::exit(error::anyhow_exit_code(&err));
         }
         return;
     }

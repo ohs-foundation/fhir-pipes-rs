@@ -17,13 +17,14 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use fhir_pipes_sof::output::{
     OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
 };
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_shareable, validate_structure};
 
+use crate::error::usage;
 use crate::warehouse::views::{ViewRows, discover, parse_view};
 
 #[derive(clap::Args, Debug)]
@@ -158,12 +159,16 @@ pub fn run(args: &ViewsArgs) -> Result<()> {
 
 /// Read one ViewDefinition file, returning its text (for diagnostic spans)
 /// and the parsed view.
+/// A view that cannot be read or parsed is a usage error.
 fn read_view(path: &Path) -> Result<(String, ViewDefinition)> {
     let text = fs::read_to_string(path)
-        .with_context(|| format!("reading ViewDefinition {}", path.display()))?;
+        .with_context(|| format!("reading ViewDefinition {}", path.display()))
+        .map_err(usage)?;
     let (_, view) = parse_view(&text)
-        .with_context(|| format!("parsing ViewDefinition {}", path.display()))?
-        .with_context(|| format!("{} is not a ViewDefinition", path.display()))?;
+        .with_context(|| format!("parsing ViewDefinition {}", path.display()))
+        .map_err(usage)?
+        .with_context(|| format!("{} is not a ViewDefinition", path.display()))
+        .map_err(usage)?;
     Ok((text, view))
 }
 
@@ -172,9 +177,12 @@ fn read_view(path: &Path) -> Result<(String, ViewDefinition)> {
 /// accepted, and a view with a structural error stops the run.
 fn load_views(path: &Path) -> Result<Vec<(String, ViewDefinition)>> {
     if path.is_dir() {
-        let views = discover(path, &[])?;
+        let views = discover(path, &[]).map_err(usage)?;
         if views.is_empty() {
-            bail!("no ViewDefinitions in {}", path.display());
+            return Err(usage(anyhow::anyhow!(
+                "no ViewDefinitions in {}",
+                path.display()
+            )));
         }
         Ok(views.into_iter().map(|v| (v.name, v.definition)).collect())
     } else {
@@ -207,10 +215,10 @@ async fn connect(db: &str) -> Result<Source> {
 
 #[cfg(not(feature = "postgres"))]
 async fn connect(_db: &str) -> Result<Source> {
-    bail!(
+    Err(usage(anyhow::anyhow!(
         "--db needs PostgreSQL support, which this fhir-pipes was built without; \
          build it with `--features postgres`"
-    )
+    )))
 }
 
 /// Findings from checking `view`'s selectors and generated SQL against a
@@ -225,10 +233,10 @@ async fn package_findings(
         .await
         .with_context(|| format!("loading package {package}"))?;
     if provider.is_empty() {
-        bail!(
+        return Err(usage(anyhow::anyhow!(
             "package `{package}` has no StructureDefinitions in the store; \
              pass --version to install it"
-        );
+        )));
     }
     Ok(fhir_pipes_sof_lint::lint(view, &provider))
 }
@@ -239,10 +247,10 @@ async fn package_findings(
     _package: &str,
     _version: Option<&str>,
 ) -> Result<Vec<Finding>> {
-    bail!(
+    Err(usage(anyhow::anyhow!(
         "--package needs FHIR package support, which this fhir-pipes was built without; \
          build it with `--features fhir-packages` (--shareable works without it)"
-    )
+    )))
 }
 
 /// View `i`'s rows: from the run over the files, or from the database.
@@ -271,11 +279,14 @@ fn output_extension(format: &str) -> &'static str {
 /// so scripts can pass it unconditionally, but only affects Parquet.
 fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputWriter>> {
     if format.eq_ignore_ascii_case("parquet") {
-        let temporal =
-            TemporalEncoding::parse(parquet_temporal).context("parsing --parquet-temporal")?;
+        let temporal = TemporalEncoding::parse(parquet_temporal)
+            .context("parsing --parquet-temporal")
+            .map_err(usage)?;
         return Ok(Box::new(ParquetWriter::new().with_temporal(temporal)));
     }
-    get_writer(format).context("choosing the output format")
+    get_writer(format)
+        .context("choosing the output format")
+        .map_err(usage)
 }
 
 /// Print, on stderr, the values each view's writer could not write as they
@@ -339,18 +350,27 @@ fn run_on_files(
         io::Read::read_to_string(&mut io::stdin(), &mut text)
             .context("reading FHIR resources from stdin")?;
         let mut resources = Vec::new();
-        parse_resource_text(&text, &mut resources).context("parsing stdin")?;
+        parse_resource_text(&text, &mut resources)
+            .context("parsing stdin")
+            .map_err(usage)?;
         if resources.is_empty() {
-            bail!("no FHIR resources on stdin");
+            return Err(usage(anyhow::anyhow!("no FHIR resources on stdin")));
         }
         let n = resources.len();
         add(resources)?;
         n
     } else {
-        for_each_chunk(&resource_files(path)?, threads, &mut add)?
+        // An --input that is not there is a usage error; its message is the
+        // read's.
+        resource_files(path)
+            .and_then(|files| for_each_chunk(&files, threads, &mut add))
+            .map_err(|e| if path.exists() { e } else { usage(e) })?
     };
     if count == 0 {
-        bail!("no FHIR resources in {}", path.display());
+        return Err(usage(anyhow::anyhow!(
+            "no FHIR resources in {}",
+            path.display()
+        )));
     }
     Ok(rows.finish(threads)?.into_iter().map(Some).collect())
 }
@@ -446,8 +466,9 @@ fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// (`push_resource`), appended to `out`.
 pub(crate) fn load_json_file(path: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parsing {}", path.display()))
+        .map_err(usage)?;
     push_resource(value, out);
     Ok(())
 }
@@ -482,13 +503,15 @@ async fn stream_ndjson(
 ) -> Result<usize> {
     let compiled = fhir_pipes_sof::CompiledView::compile(view)
         .await
-        .context("compiling view")?;
+        .context("compiling view")
+        .map_err(usage)?;
     let names: Vec<String> = compiled.columns().iter().map(|c| c.name.clone()).collect();
     let mut total = 0;
     let mut next = first;
     while let Some((number, line)) = next {
-        let value: serde_json::Value =
-            serde_json::from_str(&line).with_context(|| format!("parsing line {number}"))?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .with_context(|| format!("parsing line {number}"))
+            .map_err(usage)?;
         // A Bundle or array on one line is expanded into its resources.
         let mut resources = Vec::new();
         push_resource(value, &mut resources);
@@ -524,10 +547,10 @@ fn check_out_is_not_input(input: Option<&PathBuf>, out: Option<&PathBuf>) -> Res
         _ => false,
     };
     if same {
-        bail!(
+        return Err(usage(anyhow::anyhow!(
             "--out {} is the --input file; writing it would empty the input",
             out.display()
-        );
+        )));
     }
     Ok(())
 }
@@ -642,9 +665,12 @@ fn resolve_urns(value: &mut serde_json::Value, urns: &HashMap<String, String>) {
 /// `(passed, total)`.
 fn run_test_file(path: &Path, color: bool) -> Result<(usize, usize)> {
     let doc: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+        &fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))
+            .map_err(usage)?,
     )
-    .with_context(|| format!("parsing {}", path.display()))?;
+    .with_context(|| format!("parsing {}", path.display()))
+    .map_err(usage)?;
 
     let resources: Vec<serde_json::Value> = doc
         .get("resources")
@@ -818,12 +844,15 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             table,
         } => {
             let (_, view) = read_view(view)?;
-            let dialect: fhir_pipes_sof::Dialect =
-                dialect.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let dialect: fhir_pipes_sof::Dialect = dialect
+                .parse()
+                .map_err(|e: String| usage(anyhow::anyhow!(e)))?;
+            // A view the generator cannot turn into SQL is the view's fault.
             let generated = SqlGenerator::new()
                 .with_dialect(dialect)
                 .generate(&view)
-                .context("generating SQL")?;
+                .context("generating SQL")
+                .map_err(usage)?;
             if *ddl {
                 let table = table.clone().unwrap_or_else(|| default_table_name(&view));
                 print!(
@@ -893,9 +922,11 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                     .read_to_string(&mut text)
                     .context("reading FHIR resources from stdin")?;
                 let mut resources = Vec::new();
-                parse_resource_text(&text, &mut resources).context("parsing stdin")?;
+                parse_resource_text(&text, &mut resources)
+                    .context("parsing stdin")
+                    .map_err(usage)?;
                 if resources.is_empty() {
-                    bail!("no FHIR resources on stdin");
+                    return Err(usage(anyhow::anyhow!("no FHIR resources on stdin")));
                 }
                 stdin_resources = Some(resources);
             }
@@ -910,7 +941,9 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 })?),
                 (None, Some(db)) => connect(db).await?,
                 (None, None) => {
-                    bail!("pass --input <file|dir|-> to run on files, or --db <url>")
+                    return Err(usage(anyhow::anyhow!(
+                        "pass --input <file|dir|-> to run on files, or --db <url>"
+                    )));
                 }
             };
             let writer = select_writer(output, parquet_temporal)?;
@@ -918,7 +951,8 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             if multi {
                 let out_dir = out
                     .as_ref()
-                    .context("--out <dir> is needed to run a directory of views")?;
+                    .context("--out <dir> is needed to run a directory of views")
+                    .map_err(usage)?;
                 fs::create_dir_all(out_dir)
                     .with_context(|| format!("creating {}", out_dir.display()))?;
                 let ext = output_extension(output);
@@ -995,10 +1029,10 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             sarif,
         } => {
             if package.is_none() && !shareable {
-                bail!(
+                return Err(usage(anyhow::anyhow!(
                     "nothing to lint: pass --package <name> to check selectors against \
                      a FHIR package, and/or --shareable for the portable subset"
-                );
+                )));
             }
             let origin = view.display().to_string();
             let (source, view) = read_view(view)?;
