@@ -938,6 +938,109 @@ fn an_empty_view_writes_an_empty_file() {
     assert!(sql.contains("CREATE OR REPLACE VIEW \"empty\""), "{sql}");
 }
 
+/// With spark = true, catalog.spark.sql has a table for every table, typed
+/// from its files, empty ones and keyword names included.
+#[test]
+fn the_spark_catalog_has_a_table_per_table() {
+    let (dir, config) =
+        setup_with_raw("\n[catalog]\nspark = true\nspark_extra = \"spark-extra.sql\"\n");
+    fs::write(
+        dir.path().join("spark-extra.sql"),
+        "CREATE OR REPLACE VIEW obs_sle AS SELECT * FROM obs WHERE country = 'SLE';\n",
+    )
+    .unwrap();
+    let views = views_with(dir.path(), &["IcrGroup"], true);
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&views)
+        .assert()
+        .success()
+        .stdout(has("catalog.spark.sql: 5 table(s) in database fhir"));
+    let data = dir.path().join("data");
+    let sql = fs::read_to_string(data.join("catalog.spark.sql")).unwrap();
+    assert!(
+        sql.contains("CREATE DATABASE IF NOT EXISTS `fhir`;"),
+        "{sql}"
+    );
+    for table in ["empty", "group", "locations", "obs", "patient"] {
+        assert!(
+            sql.contains(&format!(
+                "DROP TABLE IF EXISTS `fhir`.`{table}`;\nCREATE TABLE `fhir`.`{table}` ("
+            )),
+            "{sql}"
+        );
+    }
+    // The empty view's one empty file still gives its columns.
+    assert!(
+        sql.contains(
+            "CREATE TABLE `fhir`.`empty` (\n  `id` STRING,\n  `born` DATE,\n  `country` STRING\n)"
+        ),
+        "{sql}"
+    );
+    assert!(sql.contains("  `issued` TIMESTAMP,"), "{sql}");
+    // The default location is the warehouse directory (the config's
+    // directory resolved, as `data` is relative to it).
+    #[cfg(unix)]
+    assert!(
+        sql.contains(&format!(
+            "LOCATION 'file://{}/parquet/obs';",
+            data.canonicalize().unwrap().display()
+        )),
+        "{sql}"
+    );
+    assert!(
+        sql.ends_with(
+            "CREATE OR REPLACE VIEW obs_sle AS SELECT * FROM obs WHERE country = 'SLE';\n"
+        ),
+        "{sql}"
+    );
+}
+
+/// catalog.spark.sql is pushed with the other catalog files, after the
+/// tables, once even when push.files lists it.
+#[test]
+#[cfg(unix)]
+fn the_spark_catalog_is_pushed_after_the_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let mirror = dir.path().join("mirror");
+    let rclone = fake_rclone(dir.path());
+    let (_root, config) = setup(
+        NOWHERE,
+        &format!(
+            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\nfiles = [\"manifest.json\", \"catalog.spark.sql\"]\n\n[catalog]\nspark = true\nspark_location = \"s3a://bkt\"\nspark_database = \"analytics\"\n",
+            rclone.display()
+        ),
+    );
+    let log = dir.path().join("rclone.log");
+    cmd(&config)
+        .args(["--only", "catalog", "--push"])
+        .env("MIRROR", &mirror)
+        .env("LOG", &log)
+        .assert()
+        .success()
+        .stdout(has("catalog.spark.sql: 1 table(s) in database analytics"));
+    let calls: Vec<String> = fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let pushed: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.ends_with("r:bkt/catalog.spark.sql"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(pushed.len(), 1, "{calls:#?}");
+    let at = |what: &str| calls.iter().position(|c| c.ends_with(what)).unwrap();
+    assert!(at("r:bkt/parquet") < pushed[0], "{calls:#?}");
+    assert!(at("r:bkt/catalog.sql") < pushed[0], "{calls:#?}");
+    let sql = fs::read_to_string(mirror.join("catalog.spark.sql")).unwrap();
+    assert!(
+        sql.contains("LOCATION 's3a://bkt/parquet/locations';"),
+        "{sql}"
+    );
+}
+
 #[test]
 #[cfg(not(feature = "postgres"))]
 fn the_database_step_needs_the_postgres_feature() {
