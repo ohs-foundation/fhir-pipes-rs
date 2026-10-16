@@ -1,0 +1,116 @@
+{
+  "title": "constant_text",
+  "description": "Constant substitution skips string literals, backtick-quoted names and comments: a % there is not taken for a constant (issue #57).",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "50%off",
+          "given": [
+            "Ann"
+          ]
+        }
+      ],
+      "generalPractitioner": [
+        {
+          "reference": "#c1"
+        },
+        {
+          "reference": "Practitioner/x"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "a percent sign in a string literal is not a constant",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "given",
+                "path": "name.where(family = '50%off').given.first()",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "given": "Ann"
+        }
+      ]
+    },
+    {
+      "title": "a constant inside a string literal is left alone",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "s",
+                "path": "'%greeting'",
+                "type": "string"
+              },
+              {
+                "name": "g",
+                "path": "%greeting",
+                "type": "string"
+              }
+            ]
+          }
+        ],
+        "constant": [
+          {
+            "name": "greeting",
+            "valueString": "hi"
+          }
+        ]
+      },
+      "expect": [
+        {
+          "s": "%greeting",
+          "g": "hi"
+        }
+      ]
+    },
+    {
+      "title": "a percent sign in a comment is not a constant",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id // 100%done",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1"
+        }
+      ]
+    }
+  ]
+}

@@ -35,6 +35,31 @@ All notable changes to this project are documented here. The format follows
   cannot be converted is still null, and is now counted in the
   `WriteSummary`.
 
+### Fixed
+
+- **In-memory FHIRPath cases the view engine got wrong** (found by probes
+  outside the official suite):
+  - Constant substitution tokenizes the path, so a `%` inside a string
+    literal, a backtick-quoted name or a comment is no longer taken for a
+    constant (`name.where(family = '50%off')`). This also applies to the SQL
+    generator. In `run`/`execute`, the environment variables `%resource`,
+    `%rootResource`, `%context`, `%ucum`, `%sct`, `%loinc`, `` %`vs-name` ``
+    and `` %`ext-name` ``, and names bound by `defineVariable()` in the same
+    path, are passed to the engine instead of failing as undefined
+    constants. The SQL generator still rejects them.
+  - `ofType(T)` is joined onto the element name (`value.ofType(Quantity)` →
+    `valueQuantity`) only when `T` is a FHIR datatype, and not inside string
+    literals. `contained.ofType(Practitioner)` is left to the engine and
+    filters by resource type. On an element that is not a choice element,
+    `ofType` with a datatype still finds nothing; see the README's known
+    limitations.
+  - `lowBoundary()` / `highBoundary()` accept any expression as their base,
+    such as `(1.5 + 1).lowBoundary()`.
+  - Inside `forEach`, `forEachOrNull` and `repeat`, the resource stays the
+    root: `%resource` is the resource, and `getReferenceKey()` resolves a `#`
+    reference against the resource's `contained`. `$this` and `%context`
+    are still the element, also inside a lambda such as `where()`.
+
 ## [0.1.2]
 
 ### Added

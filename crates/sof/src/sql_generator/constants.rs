@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::Error;
+use crate::lexer::{Kind, tokens, variable_name};
 use crate::view_definition::{Constant, ViewDefinition};
 
 /// Replace `%name` constant references with their FHIRPath literal text.
@@ -14,33 +15,32 @@ pub(crate) fn substitute_constants(
     path: &str,
     constants: &HashMap<String, String>,
 ) -> Result<String, Error> {
+    substitute_constants_keeping(path, constants, |_| false)
+}
+
+/// [`substitute_constants`], also leaving in place each `%name` that is not a
+/// constant but for which `keep(name)` holds, for the FHIRPath engine to
+/// resolve (environment variables such as `%resource`, or names bound by
+/// `defineVariable()`). A constant takes precedence over a kept name.
+///
+/// The path is tokenized first, so a `%` inside a string literal, a
+/// backtick-quoted name or a comment is left alone.
+pub(crate) fn substitute_constants_keeping(
+    path: &str,
+    constants: &HashMap<String, String>,
+    keep: impl Fn(&str) -> bool,
+) -> Result<String, Error> {
     let mut out = String::with_capacity(path.len());
-    let mut chars = path.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '%' {
-            out.push(c);
+    for token in tokens(path) {
+        let text = &path[token.span];
+        if token.kind != Kind::Variable || !text.starts_with('%') {
+            out.push_str(text);
             continue;
         }
-        let mut name = String::new();
-        while let Some(&nc) = chars.peek() {
-            if nc.is_ascii_alphanumeric() || nc == '_' {
-                name.push(nc);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        if name.is_empty() {
-            out.push('%');
-            continue;
-        }
-        if name == "rowIndex" {
-            out.push('%');
-            out.push_str(&name);
-            continue;
-        }
-        match constants.get(&name) {
+        let name = variable_name(text);
+        match constants.get(name) {
             Some(lit) => out.push_str(lit),
+            None if name == "rowIndex" || keep(name) => out.push_str(text),
             None => {
                 return Err(Error::InvalidViewDefinition(format!(
                     "undefined constant %{name}"
@@ -97,4 +97,42 @@ fn constant_literal(c: &Constant) -> Result<String, Error> {
 /// A FHIRPath single-quoted string literal (backslash-escaped).
 fn fhirpath_string(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn constants() -> HashMap<String, String> {
+        HashMap::from([("off".to_string(), "'x'".to_string())])
+    }
+
+    #[test]
+    fn substitution_skips_literals_quoted_names_and_comments() {
+        let path = "name.where(family = '50%off' or `a%off` = %off) // %off";
+        assert_eq!(
+            substitute_constants(path, &constants()).unwrap(),
+            "name.where(family = '50%off' or `a%off` = 'x') // %off"
+        );
+        assert_eq!(
+            substitute_constants("\"%off\" | %`off` | %rowIndex", &constants()).unwrap(),
+            "\"%off\" | 'x' | %rowIndex"
+        );
+    }
+
+    #[test]
+    fn undefined_names_fail_unless_kept() {
+        let err = substitute_constants("%resource.id", &constants()).unwrap_err();
+        assert!(
+            err.to_string().contains("undefined constant %resource"),
+            "{err}"
+        );
+        let kept =
+            substitute_constants_keeping("%resource.id + %off", &constants(), |n| n == "resource")
+                .unwrap();
+        assert_eq!(kept, "%resource.id + 'x'");
+        // A constant wins over a kept name.
+        let kept = substitute_constants_keeping("%off", &constants(), |_| true).unwrap();
+        assert_eq!(kept, "'x'");
+    }
 }

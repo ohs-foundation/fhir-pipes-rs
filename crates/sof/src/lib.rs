@@ -38,6 +38,7 @@
 
 mod column;
 mod eval;
+mod lexer;
 pub mod output;
 mod runner;
 mod sql_generator;

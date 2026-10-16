@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use fhir_pipes_sof::{ViewDefinition, ViewResult, execute_parallel};
+use fhir_pipes_sof::{CompiledView, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Severity, validate_structure};
 use serde_json::Value;
 
@@ -127,17 +127,24 @@ pub fn save(views: &[View], dir: &Path) -> Result<()> {
 
 /// Several views' rows, run a chunk of resources at a time: each chunk's
 /// rows are appended to what the chunks before it gave, so the rows come in
-/// the order of the resources, as from one run over them all.
+/// the order of the resources, as from one run over them all. Each view is
+/// compiled once, when it first runs, and reused for every chunk.
 pub struct ViewRows<'a> {
     views: Vec<(&'a str, &'a ViewDefinition)>,
+    compiled: Vec<Option<CompiledView>>,
     results: Vec<Option<ViewResult>>,
 }
 
 impl<'a> ViewRows<'a> {
     /// `views`: each view's name (for messages) and definition.
     pub fn new(views: Vec<(&'a str, &'a ViewDefinition)>) -> Self {
+        let compiled = views.iter().map(|_| None).collect();
         let results = views.iter().map(|_| None).collect();
-        Self { views, results }
+        Self {
+            views,
+            compiled,
+            results,
+        }
     }
 
     /// Run every view on `resources` and keep the rows. A view skips the
@@ -156,7 +163,8 @@ impl<'a> ViewRows<'a> {
             if only.is_some_and(|t| t != view.resource) {
                 continue;
             }
-            let r = execute_parallel(view, resources, threads)
+            let r = compiled(&mut self.compiled[i], view)
+                .and_then(|c| c.execute_parallel(resources, threads))
                 .with_context(|| format!("running view {name}"))?;
             match &mut self.results[i] {
                 Some(all) => {
@@ -174,14 +182,27 @@ impl<'a> ViewRows<'a> {
     pub fn finish(self, threads: usize) -> Result<Vec<ViewResult>> {
         self.views
             .iter()
+            .zip(self.compiled)
             .zip(self.results)
-            .map(|((name, view), r)| match r {
+            .map(|(((name, view), mut c), r)| match r {
                 Some(r) => Ok(r),
-                None => execute_parallel(view, &[], threads)
+                None => compiled(&mut c, view)
+                    .and_then(|c| c.execute_parallel(&[], threads))
                     .with_context(|| format!("running view {name}")),
             })
             .collect()
     }
+}
+
+/// The view compiled in `slot`, compiling it on first use.
+fn compiled<'c>(
+    slot: &'c mut Option<CompiledView>,
+    view: &ViewDefinition,
+) -> fhir_pipes_sof::Result<&'c CompiledView> {
+    if slot.is_none() {
+        *slot = Some(CompiledView::compile_blocking(view)?);
+    }
+    Ok(slot.as_ref().expect("just compiled"))
 }
 
 /// Run `views` over the NDJSON file at `path`, a chunk of lines at a time,
@@ -324,7 +345,7 @@ mod tests {
             .collect();
         let whole: Vec<ViewResult> = views
             .iter()
-            .map(|v| execute_parallel(&v.definition, &resources, 1).unwrap())
+            .map(|v| fhir_pipes_sof::execute_parallel(&v.definition, &resources, 1).unwrap())
             .collect();
         for (lines, threads) in [(1, 1), (7, 3), (50, 8), (1000, 2)] {
             let source = ndjson::Lines::new(text.as_bytes(), "x").with_limits(lines, usize::MAX);

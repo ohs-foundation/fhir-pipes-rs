@@ -1,0 +1,66 @@
+{
+  "title": "boundary_expression",
+  "description": "lowBoundary() and highBoundary() on a base that is an expression rather than a path (issue #57).",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "50%off",
+          "given": [
+            "Ann"
+          ]
+        }
+      ],
+      "generalPractitioner": [
+        {
+          "reference": "#c1"
+        },
+        {
+          "reference": "Practitioner/x"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "boundaries of an arithmetic expression",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "low",
+                "path": "(1.5 + 1).lowBoundary()",
+                "type": "decimal"
+              },
+              {
+                "name": "high",
+                "path": "(1.5 + 1).highBoundary()",
+                "type": "decimal"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "low": 2.45,
+          "high": 2.55
+        }
+      ]
+    }
+  ]
+}
