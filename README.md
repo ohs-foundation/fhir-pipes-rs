@@ -417,8 +417,15 @@ fhir-pipes export --server https://gateway.example.org/fhir \
 
 `--timeout` is the total deadline for one HTTP request, 300 seconds by
 default. Connection errors, 429 and 5xx responses are retried up to
-`--retries` times with exponential backoff and jitter, honouring a numeric
-`Retry-After`. Any other 4xx is final.
+`--retries` times with exponential backoff and jitter, honouring a
+`Retry-After` in seconds or as an HTTP-date, up to 30 seconds. Any other 4xx
+is final.
+
+Requests ask for gzip (`Accept-Encoding: gzip`); HAPI's search pages are
+about fifty times smaller compressed. Searches, counts and the Bulk Data
+kick-off and status requests send `Cache-Control: no-cache`, so the server
+runs the search again instead of answering from its search cache, which
+can return stale results and totals for a minute after a change.
 
 ### Google Cloud Healthcare API
 

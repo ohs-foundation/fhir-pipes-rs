@@ -29,10 +29,10 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 
 | Step | What it does | Needs |
 |---|---|---|
-| `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations` | |
+| `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations`; with `--reuse-raw` and a snapshot there, transformed without an extract | |
 | `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
-| `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
+| `manifest` | `manifest.json`: time, server (see below), each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
 | `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | |
 | `hooks` | the config's commands, in order | the commands |
@@ -52,15 +52,22 @@ tool the chosen steps need is installed, and stops if one is missing.
 
 ### What a failed run leaves behind
 
-A run does not change the warehouse's tables, `manifest.json` or `catalog.sql`
-until every step up to and including `database` has succeeded. Until then it
-writes them to staging directories:
+A run does not change the warehouse's tables, `views/`, `tiles/`,
+`manifest.json` or `catalog.sql` until every step up to and including
+`database` has succeeded. Until then it writes them to staging directories:
 
 | Staged at | Swapped in to |
 |---|---|
 | `parquet/.staging/<table>/`, for each table the run writes, `locations` included | `parquet/<table>/` |
 | `parquet/.staging/_report.json` (the Location transform's report) | `parquet/_report.json` |
+| `.staging/views/` (the `views` step's copies of the views) | `views/` |
+| `.staging/tiles/` (the `tiles` step's archives) | `tiles/` |
 | `.staging/manifest.json`, `.staging/catalog.sql` | `manifest.json`, `catalog.sql` |
+
+`views/` and `tiles/` are replaced as a whole when the step that writes them
+ran: `views/` then holds the current views only, and `tiles/` only the
+archives this run built. A step that did not run leaves its directory as it
+is.
 
 While the run goes on, each step reads a table from staging if the run wrote
 it, and from `parquet/` if not: the views look partitions up in the new
@@ -71,20 +78,19 @@ run does not write (`locations` with `--only views`, say) stay as they are and
 are counted and listed as before.
 
 After the `database` step, each staged table is renamed into `parquet/` (the
-old one is renamed aside and then removed), then `manifest.json` and
-`catalog.sql` are renamed into place. A reader can see tables from two runs
-only during those renames. A table is never half-written.
+old one is renamed aside and then removed), then `views/` and `tiles/` the
+same way, then `manifest.json` and `catalog.sql` are renamed into place. A
+reader can see files from two runs only during those renames. A table is
+never half-written.
 
 So a run that fails in `locations`, `views`, `tiles`, `manifest`, `catalog`
-or `database` leaves every table, `manifest.json` and `catalog.sql` exactly as
-the previous successful run left them, and removes its staging. What it does
-change:
+or `database` leaves every table, `views/`, `tiles/`, `manifest.json` and
+`catalog.sql` exactly as the previous successful run left them, and removes
+its staging. What it does change:
 
 - `raw/`: the downloads and the extract state move forward, so the next run
   downloads only what changed since and rebuilds every table from the whole
   download.
-- `views/`: the copies of the views are written by the `views` step.
-- `tiles/`: the archives are written by the `tiles` step. They are not staged.
 - PostgreSQL: the `database` step commits before the swap, so if a rename in
   the swap fails afterwards, the database has the new run's rows.
 
@@ -100,12 +106,12 @@ catalog in place. The push uploads the swapped-in warehouse.
 
 A run that is killed leaves its staging behind; the next run removes it
 before it starts. A run killed between the two renames of a table's swap
-leaves the old table as `parquet/.<table>.old`; the next run renames it
-back. While it runs, a refresh holds a lock on `.refresh.lock` in the
+leaves the old table as `parquet/.<table>.old` (or `.views.old`, `.tiles.old`
+in the warehouse directory); the next run renames it back. While it runs, a refresh holds a lock on `.refresh.lock` in the
 warehouse directory, so a second refresh of the same warehouse waits for the
 first to finish.
 
-Disk use doubles for the tables a run writes, until the swap.
+Disk use doubles for the tables, views and tiles a run writes, until the swap.
 
 ### Tables
 
@@ -144,7 +150,11 @@ Every row gets a partition column (default `country`), looked up through
 another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
 goes to the null partition, `__HIVE_DEFAULT_PARTITION__`, as hive and DuckDB
-name it. A view with no rows writes one empty file there, so the table keeps
+name it. The views step prints a warning with the number of rows that went
+there, for each table with a lookup rule: rows without a key, rows whose key
+is not in the lookup table (a key that is not text is never found, since the
+lookup table's keys are read as text), or every row when the lookup table is
+missing. The run carries on. A view with no rows writes one empty file there, so the table keeps
 its columns. A view with a column of the partition column's name stops the
 run, since that column would be lost beside the partition column: set
 `[partition] column` to another name (the fhir-data-pipes views have an
@@ -160,7 +170,16 @@ The views directory can be any directory of JSON files: files whose
 `resourceType` is `ViewDefinition`, or ends in `/ViewDefinition` as in an IG
 build (`fsh-generated/resources/Binary-*.json`), are views; the rest are
 skipped. Each view is checked against the spec's structure rules before
-anything runs, and a plain copy is saved to `views/<name>.json`.
+anything runs, and a plain copy is saved to `views/<name>.json`; `views/` is
+replaced with the run's copies when the run is published, so a removed view
+leaves it and the manifest.
+
+A view that is removed or renamed leaves its table behind in `parquet/`.
+refresh does not delete it: it is still counted in the manifest, named in
+the catalog and pushed. A run that ran the views step ends with a note
+naming each table in `parquet/` that no current view writes, leaving out
+`locations` and the lookup tables, and `--check` lists them as
+`unwritten:`. Delete a table's directory by hand if it is no longer wanted.
 
 ### Parallel downloads
 
@@ -485,6 +504,13 @@ the same schema at once take turns: the second waits for the first to commit.
 Every run reloads every table. On the ICR warehouse (10 view tables, 229,082
 rows, 161,216 in the largest) that takes about half a second.
 
+The `DELETE` leaves each replaced row as a dead tuple until `VACUUM` reclaims
+its space. PostgreSQL's autovacuum does that in the background, and is on by
+default; keep it on for the schema's tables, or run `VACUUM` on them yourself
+(after the refresh, say from a hook) if it is off. After the commit the step
+runs `ANALYZE` on each table it loaded, so the planner's statistics describe
+the new rows at once rather than after autovacuum's next analyze.
+
 ## Settings
 
 Command-line flags win over their environment variables, which win over the
@@ -511,8 +537,8 @@ the file are relative to the file.
 | | `FHIR_PIPES_PASSWORD` | | |
 | `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
 | `--countries` | | `tiles.countries` | every country |
-| `--threads` | | | number of CPUs |
-| `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
+| `--threads` | | | number of CPUs; at least 1 |
+| `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again; with it, the downloads in `raw/<server>/` and the Location snapshot there are used where present |
 | `--full` | | | only what changed (Locations and the views' resource types) |
 | `--dry-run` | | | (push only) |
 
@@ -580,9 +606,13 @@ after = "locations"         # only when that step ran; leave out to always run
 run = ["./catalog.sh"]      # a path with / is relative to this file
 ```
 
-Hooks run in the config file's directory with `DATA`, `FHIR_BASE` (empty with
-a file source), `SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set,
-after the run's tables, manifest and catalog are swapped in.
+Hooks run in the config file's directory with `DATA` (the warehouse
+directory as an absolute path), `FHIR_BASE` (empty with a file source),
+`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set, after the run's
+tables, manifest and catalog are swapped in. `after` names one of the steps
+before the hooks, in any case: `locations`, `views`, `tiles`, `manifest`,
+`catalog` or `database`. A config whose hook names `hooks`, `push` or an
+unknown step is refused before anything runs.
 
 Each run writes its step timings to `raw/<server>/last-refresh.json`. When
 the views step ran, `type_mismatches` lists, per table and column, the values
@@ -598,6 +628,12 @@ that did not match the column's type ([Tables](#tables)):
 
 Tables and columns without any are left out, so `{}` means every value was
 written as it is.
+
+The manifest's and `last-refresh.json`'s `server` is the configured server
+when the run downloaded from it. A run that downloads nothing (with
+`--reuse-raw`, or `--only manifest`) records the server named in
+`raw/<server>/.export-state.json`, else in the Location snapshot's
+`state.json`, else `null`, rather than a server it did not contact.
 
 ## Development
 
