@@ -10,9 +10,9 @@
 //!
 //! catalog.duckdb holds the same views in a DuckDB database a client can
 //! ATTACH, by URL once pushed. DuckDB reads the files' schemas when it creates
-//! a view, so the file is built where the views can reach the data: in the
-//! catalog step when the paths are relative, otherwise during --push, after
-//! the tables are uploaded. Only that needs the duckdb command.
+//! a view, so the file is built where the views can reach the data: right after
+//! the run's tables are swapped in when the paths are relative, otherwise during
+//! --push, after the tables are uploaded. Only that needs the duckdb command.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -24,15 +24,16 @@ use anyhow::{Context, Result, bail};
 
 use super::config::{Catalog, Settings};
 use super::partition::table_files;
+use super::stage::Stage;
 
 pub const SQL_FILE: &str = "catalog.sql";
 pub const DUCKDB_FILE: &str = "catalog.duckdb";
 
-/// Write data/catalog.sql and, when the views read local files, build
-/// catalog.duckdb from it.
-pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str) -> Result<()> {
+/// Write catalog.sql into the staging directory, naming the tables as they
+/// will be once the run is published.
+pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str, stage: &Stage) -> Result<()> {
     println!("== catalog");
-    let tables = tables(s)?;
+    let tables = tables(s, stage)?;
     let extra = match &c.extra {
         Some(p) => Some((
             p.clone(),
@@ -46,13 +47,10 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str) -> Result<()> {
         extra.as_ref().map(|(p, t)| (p.as_path(), t.as_str())),
         refreshed_at,
     );
-    let path = s.data.join(SQL_FILE);
+    let path = stage.file(SQL_FILE);
     fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
     let listed = tables.iter().filter(|t| !t.files.is_empty()).count();
     println!("   {SQL_FILE}: {listed} table view(s)");
-    if c.duckdb_file && c.base_url.is_none() {
-        build_duckdb(s, c)?;
-    }
     Ok(())
 }
 
@@ -119,28 +117,23 @@ pub struct Table {
     pub files: Vec<String>,
 }
 
-/// The tables under data/parquet, as the manifest counts them.
-fn tables(s: &Settings) -> Result<Vec<Table>> {
-    let parquet = s.parquet_dir();
-    let mut names: Vec<String> = fs::read_dir(&parquet)
-        .with_context(|| format!("reading {}", parquet.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    names.sort();
-    Ok(names
+/// The tables under data/parquet once the run is published, as the manifest
+/// counts them, with each file named where it will be then.
+fn tables(s: &Settings, stage: &Stage) -> Result<Vec<Table>> {
+    Ok(stage
+        .tables()?
         .into_iter()
-        .map(|name| {
-            let files = table_files(&parquet.join(&name), &s.partition_column)
+        .map(|(name, dir)| {
+            let files = table_files(&dir, &s.partition_column)
                 .iter()
-                .filter_map(|f| f.strip_prefix(&s.data).ok())
+                .filter_map(|f| f.strip_prefix(&dir).ok())
                 .map(|f| {
-                    f.components()
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join("/")
+                    let mut path = vec!["parquet".to_string(), name.clone()];
+                    path.extend(
+                        f.components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+                    );
+                    path.join("/")
                 })
                 .collect();
             Table {
