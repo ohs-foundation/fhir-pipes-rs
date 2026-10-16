@@ -686,7 +686,7 @@ fn without_a_catalog_section_there_is_no_catalog() {
 }
 
 #[test]
-fn a_local_catalog_duckdb_is_built_in_the_catalog_step() {
+fn a_local_catalog_duckdb_is_built_once_the_tables_are_in_place() {
     if !have_duckdb() {
         return;
     }
@@ -1263,4 +1263,290 @@ fn locations_are_extracted_with_basic_auth() {
         .assert()
         .failure()
         .stderr(has("FHIR_PIPES_PASSWORD"));
+}
+
+/// Every file of the warehouse but raw/, by path relative to it, with its
+/// contents.
+fn warehouse(data: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, data: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(data).unwrap();
+            if rel.starts_with("raw") {
+                continue;
+            }
+            if p.is_dir() {
+                walk(&p, data, out);
+            } else {
+                let name = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.insert(name, fs::read(&p).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(data, data, &mut out);
+    out
+}
+
+/// The paths of `warehouse`, for assertion messages.
+fn paths(files: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<&str> {
+    files.keys().map(String::as_str).collect()
+}
+
+fn assert_nothing_staged(data: &Path) {
+    assert!(!data.join(".staging").exists());
+    assert!(!data.join("parquet/.staging").exists());
+}
+
+/// Drop the last Observation, so the next run would write a different obs table.
+fn drop_an_observation(root: &Path) {
+    let raw = root.join("data/raw/test/Observation.ndjson");
+    let text = fs::read_to_string(&raw).unwrap();
+    let kept: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    fs::write(&raw, kept[..kept.len() - 1].join("\n") + "\n").unwrap();
+}
+
+/// A view whose table fails to write (here its lookup table cannot be read)
+/// leaves the tables written before it, the manifest and the catalog as the
+/// previous run left them.
+#[test]
+fn a_failing_view_leaves_every_table_as_it_was() {
+    let (dir, config) =
+        setup_with_raw("\n[[partition.lookup]]\nkey = \"id\"\ntable = \"bad\"\n\n[catalog]\n");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    let data = dir.path().join("data");
+    let before = warehouse(&data);
+    assert!(before.contains_key("parquet/obs/country=SLE/part-0.parquet"));
+
+    // obs is written first and would change; patient then looks its partition
+    // up in a table that cannot be read.
+    drop_an_observation(dir.path());
+    fs::create_dir_all(data.join("parquet/bad/country=SLE")).unwrap();
+    fs::write(
+        data.join("parquet/bad/country=SLE/part-0.parquet"),
+        "not parquet",
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .failure()
+        .stdout(has("parquet/obs (2 rows)"))
+        .stderr(has("reading lookup table bad"));
+    let mut after = warehouse(&data);
+    after.remove("parquet/bad/country=SLE/part-0.parquet");
+    assert_eq!(paths(&after), paths(&before));
+    assert!(after == before, "the warehouse changed");
+    assert_nothing_staged(&data);
+}
+
+/// A catalog step that fails (here `extra` names a missing file) leaves the
+/// tables, the manifest and catalog.sql as the previous run left them.
+#[test]
+fn a_failing_catalog_leaves_the_tables_and_manifest_as_they_were() {
+    let (dir, config) = setup_with_raw("\n[catalog]\nextra = \"extra.sql\"\n");
+    let extra = dir.path().join("extra.sql");
+    fs::write(&extra, "CREATE OR REPLACE VIEW one AS SELECT 1;\n").unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    let data = dir.path().join("data");
+    let before = warehouse(&data);
+    assert!(before.contains_key("manifest.json"));
+    assert!(before.contains_key("catalog.sql"));
+
+    drop_an_observation(dir.path());
+    fs::remove_file(&extra).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .failure()
+        .stdout(has("parquet/obs (2 rows)"))
+        .stderr(has("extra.sql"));
+    let after = warehouse(&data);
+    assert_eq!(paths(&after), paths(&before));
+    assert!(after == before, "the warehouse changed");
+    assert_nothing_staged(&data);
+
+    // Once the catalog can be written, the run publishes the new tables.
+    fs::write(&extra, "CREATE OR REPLACE VIEW one AS SELECT 1;\n").unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["tables"]["obs"]["rows"], 2);
+}
+
+/// Hooks run after the swap, on the published warehouse: a hook that fails
+/// stops the run before the push, with the new tables, manifest and catalog
+/// in place.
+#[test]
+#[cfg(unix)]
+fn a_failing_hook_sees_the_published_warehouse_and_stops_the_push() {
+    let tools = tempfile::tempdir().unwrap();
+    let rclone = fake_rclone(tools.path());
+    let log = tools.path().join("rclone.log");
+    let (dir, config) = setup_with_raw(&format!(
+        r#"
+[tools]
+rclone = '{}'
+
+[push]
+remote = "r"
+bucket = "bkt"
+
+[catalog]
+
+[[hooks]]
+name = "fails"
+run = ["sh", "-c", "cp \"$DATA/manifest.json\" seen.json; exit 3"]
+"#,
+        rclone.display()
+    ));
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw", "--push"])
+        .env("MIRROR", tools.path().join("mirror"))
+        .env("LOG", &log)
+        .assert()
+        .failure()
+        .stderr(has("hook fails"));
+    let data = dir.path().join("data");
+    let seen = fs::read_to_string(dir.path().join("seen.json")).unwrap();
+    assert_eq!(
+        seen,
+        fs::read_to_string(data.join("manifest.json")).unwrap()
+    );
+    let manifest: Value = serde_json::from_str(&seen).unwrap();
+    assert_eq!(manifest["tables"]["obs"]["rows"], 3);
+    assert!(
+        data.join("parquet/obs/country=SLE/part-0.parquet")
+            .is_file()
+    );
+    assert!(data.join("catalog.sql").is_file());
+    assert!(!log.exists(), "pushed after a failing hook");
+    assert_nothing_staged(&data);
+}
+
+/// A successful run leaves the files it always did, and nothing staged.
+#[test]
+fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {
+    let server = Server::run();
+    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot");
+    let locations: Vec<Value> = read_ndjson(&snapshot.join("locations.ndjson"))
+        .into_iter()
+        .map(|mut l| {
+            l["meta"] = json!({"lastUpdated": "2026-01-01T00:00:00Z"});
+            l
+        })
+        .collect();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Location"))
+            .times(1)
+            .respond_with(status_code(200).body(bundle(locations))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Organization"))
+            .times(1)
+            .respond_with(status_code(200).body(bundle(vec![]))),
+    );
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(&server.url_str("/fhir"), "\n[catalog]\n");
+    cmd(&config)
+        .args(["--only", "locations,views", "--full"])
+        .assert()
+        .success()
+        .stdout(has("== publish"));
+    let data = dir.path().join("data");
+    let mut files = warehouse(&data);
+    // The one new file: the lock a run holds on the warehouse.
+    assert!(files.remove(".refresh.lock").is_some());
+    let tops: std::collections::BTreeSet<&str> = files
+        .keys()
+        .map(|k| {
+            let mut it = k.split('/');
+            match it.next().unwrap() {
+                "parquet" => k.splitn(3, '/').take(2).last().unwrap(),
+                top => top,
+            }
+        })
+        .collect();
+    assert_eq!(
+        tops.into_iter().collect::<Vec<_>>(),
+        [
+            "_report.json",
+            "catalog.sql",
+            "locations",
+            "manifest.json",
+            "obs",
+            "patient",
+            "views"
+        ],
+        "{:#?}",
+        paths(&files)
+    );
+    assert!(
+        files
+            .keys()
+            .all(|k| !k.split('/').any(|c| c.starts_with('.'))),
+        "{:#?}",
+        paths(&files)
+    );
+    // The fixture's country=SLE table was replaced by the extracted registry.
+    assert!(!data.join("parquet/locations/country=SLE").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
+    let tables: Vec<&String> = manifest["tables"].as_object().unwrap().keys().collect();
+    assert_eq!(tables, ["locations", "obs", "patient"]);
+    assert!(manifest["tables"]["locations"]["rows"].as_i64().unwrap() > 2);
+    let sql = fs::read_to_string(data.join("catalog.sql")).unwrap();
+    assert!(
+        sql.contains("read_parquet('parquet/locations/country=*/**/*.parquet'"),
+        "{sql}"
+    );
+    assert!(!sql.contains(".staging"), "{sql}");
+}
+
+/// What a killed run left behind is cleaned up at the start of the next: its
+/// staging directories, and a table a swap left only as `.<table>.old`.
+#[test]
+fn a_killed_run_is_cleaned_up_by_the_next() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    let junk = data.join("parquet/.staging/obs/country=XXX");
+    fs::create_dir_all(&junk).unwrap();
+    fs::write(junk.join("part-0.parquet"), "half written").unwrap();
+    fs::create_dir_all(data.join(".staging")).unwrap();
+    fs::write(data.join(".staging/manifest.json"), "{}").unwrap();
+    fs::rename(
+        data.join("parquet/locations"),
+        data.join("parquet/.locations.old"),
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has("restored parquet/locations"));
+    assert_nothing_staged(&data);
+    assert!(!data.join("parquet/.locations.old").exists());
+    // The restored registry was there for the views' partition lookups.
+    assert!(
+        data.join("parquet/obs/country=SLE/part-0.parquet")
+            .is_file()
+    );
+    assert!(!data.join("parquet/obs/country=XXX").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["tables"]["locations"]["rows"], 2);
+    assert_eq!(manifest["tables"]["obs"]["rows"], 3);
 }

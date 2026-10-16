@@ -10,30 +10,19 @@ use serde_json::{Map, Value, json};
 
 use super::config::Settings;
 use super::partition::table_files;
+use super::stage::Stage;
 
-/// Write data/manifest.json and return its `refreshed_at`.
-pub fn write(s: &Settings) -> Result<String> {
+/// Write manifest.json into the staging directory, describing the tables as
+/// they will be once the run is published, and return its `refreshed_at`.
+pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
     println!("== manifest");
     let refreshed_at = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string();
 
-    let parquet = s.parquet_dir();
-    let mut names: Vec<String> = fs::read_dir(&parquet)
-        .with_context(|| format!("reading {}", parquet.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        // Dot-directories hold catalog state and staging, not tables.
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    names.sort();
     let mut tables = Map::new();
-    for name in &names {
-        tables.insert(
-            name.clone(),
-            json!({"rows": rows(&parquet.join(name), &s.partition_column)?}),
-        );
+    for (name, dir) in stage.tables()? {
+        tables.insert(name, json!({"rows": rows(&dir, &s.partition_column)?}));
     }
 
     let mut views = Map::new();
@@ -78,7 +67,7 @@ pub fn write(s: &Settings) -> Result<String> {
         "views": views,
         "extract": extract,
     });
-    let path = s.data.join("manifest.json");
+    let path = stage.file("manifest.json");
     fs::write(&path, serde_json::to_string_pretty(&manifest)?)
         .with_context(|| format!("writing {}", path.display()))?;
     println!("   {}", serde_json::to_string(&manifest["tables"])?);
