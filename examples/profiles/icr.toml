@@ -29,6 +29,11 @@ type_systems = [
 # The column holding an admin unit's code: adminN_code, country (from the
 # level 0 unit) and the duplicate_admin_code report.
 admin_code_column = "pcode"
+# `fhir-pipes import` writes meta.profile and admin codes from these. ICR leaves
+# them out: [dhis2] location_profile and country_code_system below give the same
+# values, and a profile with them does not load in fhir-pipes 0.4.0 or earlier.
+# profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+# admin_code_system = "https://icr.healthcampaigns.org/identifiers/national-admin-code"
 
 # Extra Location columns, in output order. Kinds:
 #   identifier      the first identifier under one of `systems`, in order;
@@ -76,6 +81,9 @@ mirror_to_organization = true
 # gets a new Organization, with id "<id_prefix><location id>".
 facility_type = "facility"
 id_prefix = "org-"
+# meta.profile of the facility Organizations `import location-sites` writes;
+# here [dhis2] facility_organization_profile gives it.
+# profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
 
 # Columns read from the Organization a Location names as its
 # managingOrganization. Same kinds, applied to Organization.identifier and

@@ -7,6 +7,7 @@ mod export;
 mod extract;
 mod fhir;
 mod geometry;
+mod import;
 mod index;
 mod inspect;
 mod load;
@@ -63,6 +64,7 @@ fn main() {
         cli::Command::Profile(cli::ProfileCommand::Check(args)) => {
             profile::check::run(&args, profile)
         }
+        cli::Command::Import(cmd) => import::run(&cmd, profile),
         cli::Command::Refresh(_) | cli::Command::Views(_) => unreachable!("handled above"),
     };
     if let Err(err) = result {

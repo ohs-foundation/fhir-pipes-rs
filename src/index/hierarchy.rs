@@ -589,9 +589,8 @@ mod tests {
         // MAX_DEPTH=12: Python's _chain raises _TooDeepError when
         // len(walked) > MAX_DEPTH, so a chain of 13 nodes (n0..n12) is
         // already too deep. The deepest resolvable node is n11 (chain of
-        // 12 nodes, depth 11); n12..n19 (8 nodes) are too_deep. See
-        // python/tests/test_hierarchy.py::test_max_depth_boundary, which
-        // pins this exact boundary.
+        // 12 nodes, depth 11); n12..n19 (8 nodes) are too_deep. kiln's
+        // Python test_max_depth_boundary pinned this exact boundary.
         assert!(h.get(idx(&recs, "n11")).is_some());
         assert!(h.get(idx(&recs, "n12")).is_none());
         assert_eq!(report.count("too_deep"), 8);
