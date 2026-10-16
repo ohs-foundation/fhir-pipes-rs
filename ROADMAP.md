@@ -20,6 +20,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Download every resource of the given types as NDJSON | `export` | 0.3.0 |
 | Download through a system-level Bulk Data `$export` instead of search: `_since` the last export's `transactionTime`, merged by id, `deleted` resources removed, an interrupted export resumed from its saved status URL, cancelled after `--bulk-timeout`. Group and Patient exports are not supported yet | `export --bulk`, `refresh` (`fetch = "bulk"`) | next release |
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
+| A refresh is all-or-nothing: tables, `manifest.json` and `catalog.sql` are staged and swapped in together at the end, so a run that fails leaves the previous run's warehouse as it was (#35) | `refresh` | next release |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
 | Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
@@ -81,6 +82,8 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
 | Bulk Data `Group/[id]/$export` and `Patient/$export` | Not started | `export --bulk` is system level only |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
+| Versioned run directories: each refresh in its own directory, with the manifest and catalog naming the current one, and old runs kept for rollback | Not started | Option 2 of #35, like the Java pipeline's timestamped snapshots. Changes the paths readers use, so it needs a migration. A refresh is already all-or-nothing without it |
+| Stage the tiles and the `views/` copies with the tables | Not started | A failed refresh can still leave new tiles and view copies beside the previous run's tables |
 
 ## Moving into fhir-data-pipes
 
