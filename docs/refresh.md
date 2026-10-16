@@ -28,7 +28,7 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | Step | What it does | Needs |
 |---|---|---|
 | `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations` | |
-| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, or by `$export` with `fetch = "bulk"`), run each type's views on one read of it, write each view's table | |
+| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
@@ -148,6 +148,27 @@ are removed. A refresh that stops while the server is still exporting polls
 the same export next time. `--full` exports every type without `_since`.
 The `locations` step still uses search. `Group/[id]/$export` and
 `Patient/$export` are not supported yet.
+
+### Reading the HAPI server's database
+
+With `fetch = "hapi-db"`, the views step reads the types the views use from
+the PostgreSQL database of a HAPI FHIR JPA server instead of its API, as
+`fhir-pipes export --hapi-db --incremental` does (see the
+[README](../README.md#reading-a-hapi-servers-database)). The connection
+string comes only from `FHIR_PIPES_HAPI_DATABASE_URL`:
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"   # still used by the locations step
+fetch = "hapi-db"
+```
+
+This ties the refresh to HAPI's internal schema, which changes between HAPI
+releases; fhir-pipes checks it before reading and stops on one it does not
+know. The files are the same `raw/<server>/<TYPE>.ndjson`. Deleted resources
+are removed from them on each refresh, and `--full` reads every type again.
+The `locations` step still uses search. `--check` says whether the
+environment variable is set.
 
 ## Catalog
 
@@ -358,7 +379,8 @@ the file are relative to the file.
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
-| | | `server.fetch` | `search`; `bulk` for `$export` |
+| | | `server.fetch` | `search`; `bulk` for `$export`; `hapi-db` for the HAPI server's database |
+| | `FHIR_PIPES_HAPI_DATABASE_URL` | | the HAPI database's connection string, with `fetch = "hapi-db"` |
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
@@ -387,7 +409,7 @@ views = "../ig/fsh-generated/resources"
 base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
-fetch = "search"            # or "bulk" for a Bulk Data $export
+fetch = "search"            # "bulk" for a Bulk Data $export, "hapi-db" for HAPI's database
 # google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
 
 [tools]            # paths or names on the PATH

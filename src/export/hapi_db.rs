@@ -16,12 +16,14 @@
 //!
 //! Every type is read in one read-only, repeatable-read transaction, through
 //! a cursor, FETCH_ROWS rows at a time. The watermark is the greatest
-//! `res_updated` read, as the database has it. An incremental run reads the
-//! rows updated after the watermark less WATERMARK_MARGIN_SECS (a
-//! transaction HAPI had not committed may carry an earlier time), merges the
-//! live ones into the file by id and removes the deleted ones (a delete sets
-//! `res_deleted_at` and `res_updated`). A type whose merged count then
-//! differs from the database's (a resource was expunged) is read in full.
+//! `res_updated` read, as the database has it, but no later than the
+//! database's clock when the transaction began less WATERMARK_MARGIN_SECS:
+//! a row HAPI had not committed then may carry an earlier time, and the next
+//! run reads it. An incremental run reads the rows updated after the
+//! watermark, merges the live ones into the file by id and removes the
+//! deleted ones (a delete sets `res_deleted_at` and `res_updated`). A type
+//! whose merged count then differs from the database's (a resource was
+//! expunged) is read in full.
 //!
 //! `res_updated` has no time zone: HAPI writes it in its JVM's zone, which
 //! is UTC in the HAPI images, and `meta.lastUpdated` is written as UTC.
@@ -211,8 +213,8 @@ impl Layout {
     }
 
     /// The query for one type's rows: `$1` is the type; with `since`, `$2`
-    /// is the watermark and every row updated after it (less the margin) is
-    /// read, deleted ones too; without, the rows that are not deleted.
+    /// is the watermark and every row updated after it is read, deleted
+    /// ones too; without, the rows that are not deleted.
     fn select(&self, lo: LargeObjects, since: bool) -> String {
         let live = "r.res_deleted_at IS NULL";
         let id = match self.id {
@@ -265,7 +267,7 @@ impl Layout {
             IdColumn::FhirId => "",
         };
         let filter = if since {
-            format!("r.res_updated > $2::timestamp - interval '{WATERMARK_MARGIN_SECS} seconds'")
+            "r.res_updated > $2::timestamp".to_string()
         } else {
             live.to_string()
         };
@@ -514,6 +516,21 @@ async fn export_all(
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
         .map_err(db_error("starting a read-only transaction"))?;
+    // now() is the transaction's start; res_updated is read as UTC.
+    let cap: String = sqlx_core::query::query(AssertSqlSafe(format!(
+        "SELECT to_char((now() AT TIME ZONE 'UTC') - interval '{WATERMARK_MARGIN_SECS} seconds', \
+         'YYYY-MM-DD\"T\"HH24:MI:SS.US')"
+    )))
+    .fetch_one(&mut *tx)
+    .await
+    .and_then(|r| r.try_get(0))
+    .map_err(db_error("reading the database's clock"))?;
+    let reading = Reading {
+        layout: &layout,
+        lo,
+        args,
+        cap,
+    };
     for &t in types {
         let out = ndjson_path(&args.out, t);
         let since = state
@@ -524,11 +541,11 @@ async fn export_all(
             .filter(|w| valid_watermark(w));
         let mut done = None;
         if let Some(since) = &since {
-            done = read_changes(&mut tx, &layout, lo, args, t, since, report).await?;
+            done = read_changes(&mut tx, &reading, t, since, report).await?;
         }
         let done = match done {
             Some(d) => d,
-            None => read_all(&mut tx, &layout, lo, args, t, report).await?,
+            None => read_all(&mut tx, &reading, t, report).await?,
         };
         state.hapi_db.insert(t.to_string(), done);
         // After each type, so an interrupted run keeps what it finished.
@@ -579,6 +596,16 @@ async fn large_objects(conn: &mut PgConnection, layout: &Layout) -> Result<Large
     } else {
         LargeObjects::LoGet
     })
+}
+
+/// What every type's read shares within a run.
+struct Reading<'a> {
+    layout: &'a Layout,
+    lo: LargeObjects,
+    args: &'a ExportArgs,
+    /// The database's clock when the transaction began, less the margin:
+    /// the latest a watermark may be.
+    cap: String,
 }
 
 /// Run `sql` (see `Layout::select`) through a cursor and hand each row to
@@ -648,12 +675,16 @@ fn line(resource_type: &str, row: &HapiRow, report: &mut Report) -> Result<Optio
 /// written beside it and renamed into place.
 async fn read_all(
     conn: &mut PgConnection,
-    layout: &Layout,
-    lo: LargeObjects,
-    args: &ExportArgs,
+    reading: &Reading<'_>,
     resource_type: &str,
     report: &mut Report,
 ) -> Result<TypeState> {
+    let Reading {
+        layout,
+        lo,
+        args,
+        cap,
+    } = reading;
     let out = ndjson_path(&args.out, resource_type);
     let tmp = tmp_path(&args.out, resource_type);
     let mut total = 0usize;
@@ -663,7 +694,7 @@ async fn read_all(
         let mut w = std::io::BufWriter::new(file);
         read_rows(
             conn,
-            &layout.select(lo, false),
+            &layout.select(*lo, false),
             resource_type,
             None,
             |row| {
@@ -694,7 +725,17 @@ async fn read_all(
         "{resource_type}: {total} resources from the database -> {}",
         out.display()
     );
-    Ok(type_state(watermark, total))
+    // With no rows, everything committed before the cap was read.
+    Ok(type_state(Some(capped(watermark.as_deref(), cap)), total))
+}
+
+/// The watermark: the greatest `res_updated` seen, but no later than `cap`.
+/// Both are in the same fixed-width form, so they compare as text.
+fn capped(seen: Option<&str>, cap: &str) -> String {
+    match seen {
+        Some(s) if s < cap => s.to_string(),
+        _ => cap.to_string(),
+    }
 }
 
 /// Read what changed since `since`, merge it into OUT/<TYPE>.ndjson by id
@@ -702,13 +743,17 @@ async fn read_all(
 /// from the database's, so the caller reads the type in full instead.
 async fn read_changes(
     conn: &mut PgConnection,
-    layout: &Layout,
-    lo: LargeObjects,
-    args: &ExportArgs,
+    reading: &Reading<'_>,
     resource_type: &str,
     since: &str,
     report: &mut Report,
 ) -> Result<Option<TypeState>> {
+    let Reading {
+        layout,
+        lo,
+        args,
+        cap,
+    } = reading;
     let out = ndjson_path(&args.out, resource_type);
     let tmp = tmp_path(&args.out, resource_type);
     let incoming = incoming_path(&args.out, resource_type);
@@ -720,7 +765,7 @@ async fn read_changes(
         let mut w = std::io::BufWriter::new(file);
         read_rows(
             conn,
-            &layout.select(lo, true),
+            &layout.select(*lo, true),
             resource_type,
             Some(since),
             |row| {
@@ -798,14 +843,14 @@ async fn read_changes(
         return Ok(None);
     }
     println!(
-        // Rows updated within the margin before the watermark are read
-        // again each run.
+        // A capped watermark means rows updated after the cap are read
+        // again by the next run.
         "{resource_type}: {} new, {} updated or read again, {removed} deleted since {since}, {total} in all -> {}",
         stats.added,
         stats.updated,
         out.display()
     );
-    Ok(Some(type_state(Some(watermark), total)))
+    Ok(Some(type_state(Some(capped(Some(&watermark), cap)), total)))
 }
 
 #[cfg(test)]
@@ -888,9 +933,11 @@ mod tests {
         );
         let sql = l.select(LargeObjects::Catalog, true);
         assert!(sql.contains("FROM pg_catalog.pg_largeobject lo WHERE lo.loid = v.res_text"));
-        assert!(sql.contains(
-            "WHERE r.res_type = $1 AND r.res_updated > $2::timestamp - interval '300 seconds'"
-        ));
+        assert!(
+            sql.contains(
+                "WHERE r.res_type = $1 AND r.res_updated > $2::timestamp ORDER BY r.res_id"
+            )
+        );
     }
 
     #[test]
@@ -1044,6 +1091,13 @@ mod tests {
         );
         assert_eq!(identity("postgres://db/hapi"), "hapi-db:db/hapi");
         assert!(valid_watermark("2026-10-16T02:50:04.440000"));
+        let cap = "2026-10-16T02:45:00.000000";
+        assert_eq!(
+            capped(Some("2026-10-16T02:40:00.123000"), cap),
+            "2026-10-16T02:40:00.123000"
+        );
+        assert_eq!(capped(Some("2026-10-16T02:50:04.440000"), cap), cap);
+        assert_eq!(capped(None, cap), cap);
         assert!(!valid_watermark("2026-10-16T02:50:04Z"));
     }
 }
