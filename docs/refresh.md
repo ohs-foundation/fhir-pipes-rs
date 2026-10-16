@@ -32,7 +32,7 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
-| `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | a build with the `postgres` feature |
+| `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | |
 | `hooks` | the config's commands, in order | the commands |
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
@@ -146,10 +146,9 @@ can fetch the file and run its text, and the duckdb shell can run it with
 
 With a `[database]` section, each refresh also loads the view tables into
 PostgreSQL, for dashboards and tools that read a database (as the
-fhir-data-pipes single-machine setup does). It needs a fhir-pipes built with
-the `postgres` feature (`cargo build --release --features postgres`); the
-release binaries leave it out, and a refresh with `[database]` on one of them
-stops before it runs (`--skip database` runs the rest).
+fhir-data-pipes single-machine setup does). The release binaries include it;
+a build without the `postgres` feature (`--no-default-features`) stops a
+refresh with `[database]` before it runs (`--skip database` runs the rest).
 
 ```toml
 [database]
@@ -159,7 +158,16 @@ tables = ["indicator_value", "coverage"]   # default: every view table
 ```
 
 The connection string (`postgres://user:password@host:5432/db`) is read only
-from the environment, never from the file.
+from the environment, never from the file. Its `sslmode` sets TLS, as for
+`psql`: `require` encrypts the connection; `verify-ca` and `verify-full` also
+check the server's certificate, against Mozilla's root certificates (built
+in, so nothing on the machine is needed) or the CA file named by
+`sslrootcert`. Managed databases (Cloud SQL, RDS, Azure) usually need at least
+`require`:
+
+```sh
+export FHIR_PIPES_DATABASE_URL='postgres://warehouse:…@db.example.org:5432/analytics?sslmode=verify-full'
+```
 
 Each view table becomes a table of the same name, with the same columns and
 the partition column (`country`), its types taken from the Parquet files:

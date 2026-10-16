@@ -22,7 +22,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
-| Load the view tables into PostgreSQL, all in one transaction (`postgres` feature; #25) | `refresh` (`[database]`) | next release |
+| Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 | HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `refresh` | next release |
@@ -77,7 +77,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Profile builder: write a starting profile from an IG | Planned | A `profile build` subcommand, reusing the IG loader in `src/profile/check.rs` |
 | Port `bake` and `bake-points` (GRID3 and CSV → Locations) from Python | Planned | Still in `python/` |
 | Move the FHIR client, paging, snapshot merge and loader into their own crate | Planned | Step 1 of the consolidation plan |
-| Put geo, rasters and DHIS2 behind Cargo features | Planned | So an analytics-only build stays small; only `postgres` and `fhir-packages` are optional today |
+| Put geo, rasters and DHIS2 behind Cargo features | Planned | So an analytics-only build stays small; only `postgres` (on by default) and `fhir-packages` are optional today |
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
 | Bulk Data `Group/[id]/$export` and `Patient/$export` | Not started | `export --bulk` is system level only |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
@@ -124,7 +124,7 @@ on its own outstanding list, next to fhir-pipes.
 | # | RFC outstanding item | fhir-pipes |
 |---|---|---|
 | 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, including a system-level Bulk Data `$export` client (next release) |
-| 2 | Direct relational database sinks (PostgreSQL) | `refresh` with `[database]` loads the view tables into PostgreSQL (next release; `postgres` feature) |
+| 2 | Direct relational database sinks (PostgreSQL) | `refresh` with `[database]` loads the view tables into PostgreSQL, with TLS (next release) |
 | 3 | Schema from StructureDefinitions, including IG profiles | Not needed for the flat tables, which take their columns from the views. Would be the basis of nested output. `profile check` already reads an IG's StructureDefinitions |
 | 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done for views evaluated in memory (`views run --input`, `refresh`): `octofhir-fhirpath`, 144 of 144. Generated SQL (`views sql`, and `views run --db`, which uses it) supports fewer functions; `substring()`, for one, is refused |
 | 5 | Partitioned merging for large warehouses | Partly. Downloads are incremental and output is partitioned, but each refresh rewrites every view table from the whole download |
@@ -143,4 +143,4 @@ on its own outstanding list, next to fhir-pipes.
 | Item | Why |
 |---|---|
 | Replace duckdb and tippecanoe in the tiles step with pure Rust | They work; the tiles step stays optional |
-| Switch `crates/sof` and `crates/sof-lint` to the upstream octofhir-sof crates | Upstream has no optional `postgres` or `packages` features, so the default build would pull in sqlx and reqwest again. Upstream fixes are ported in instead (as in #14) |
+| Switch `crates/sof` and `crates/sof-lint` to the upstream octofhir-sof crates | Upstream has no optional `packages` feature, so every build would pull in its package downloader (reqwest with aws-lc) again. Upstream fixes are ported in instead (as in #14) |

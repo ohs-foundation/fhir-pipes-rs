@@ -233,7 +233,7 @@ fn read_error_body(resp: Response) -> String {
 /// call: reqwest is built with `rustls-no-provider`, so building a client
 /// panics at build time (not merely on the first request) if none is
 /// configured. Idempotent and cheap enough to call on every `new`.
-fn ensure_crypto_provider() {
+pub(crate) fn ensure_crypto_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         if rustls::crypto::CryptoProvider::get_default().is_none() {

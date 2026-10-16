@@ -80,8 +80,7 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 
 A full refresh can also extract and transform the Location registry, build
 map tiles, write a DuckDB catalog (a view per table, which a dashboard can
-attach by URL), load the view tables into PostgreSQL (with the `postgres`
-feature), run your own commands afterwards, and push the warehouse to object
+attach by URL), load the view tables into PostgreSQL, run your own commands afterwards, and push the warehouse to object
 storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
 partitioning and hooks.
 
@@ -148,11 +147,11 @@ A directory of views is read as `refresh` reads it. An `--input` directory is
 read with its subdirectories, skipping hidden files. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
 Synthea have, is rewritten to that entry's `Type/id`, as a FHIR server would
-store it, so `getReferenceKey()` and joins work on Bundle files. Two options need a build
-with an optional feature (see [Building and testing](#building-and-testing)):
-`views run --db URL` runs against PostgreSQL holding FHIR resources as JSONB
-instead of files (`postgres`), and `views lint --package hl7.fhir.r4.core`
-checks selectors against a FHIR package it downloads (`fhir-packages`).
+store it, so `getReferenceKey()` and joins work on Bundle files. `views run --db URL` runs
+against PostgreSQL holding FHIR resources as JSONB instead of files, and
+`views lint --package hl7.fhir.r4.core` checks selectors against a FHIR
+package it downloads; the second needs a build with the `fhir-packages`
+feature (see [Building and testing](#building-and-testing)).
 
 `export` downloads every resource of each `--type` to `DIR/<TYPE>.ndjson`:
 
@@ -282,19 +281,21 @@ cargo build --release
 cargo test --workspace
 ```
 
-Two features are off by default, and the release binaries leave them out:
+Two Cargo features add optional parts:
 
-| Feature | Adds |
-|---|---|
-| `postgres` | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL; `refresh` with `[database]`: the view tables into PostgreSQL |
-| `fhir-packages` | `views lint --package`: views checked against a FHIR package, downloaded over HTTP |
+| Feature | Default | Adds |
+|---|---|---|
+| `postgres` | on, in the release binaries | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL; `refresh` with `[database]`: the view tables into PostgreSQL. Connections can use TLS (`sslmode=require` and up), through the same rustls as the FHIR client |
+| `fhir-packages` | off | `views lint --package`: views checked against a FHIR package, downloaded over HTTP |
 
 ```sh
-cargo build --release --features postgres,fhir-packages
+cargo build --release --features fhir-packages     # everything
+cargo build --release --no-default-features        # without PostgreSQL
 ```
 
-Without them the binary is about 5 MB smaller and builds 113 fewer crates, and
-asking for either option says which feature it needs.
+`postgres` adds 21 crates and about 1 MB to the release binary;
+`fhir-packages` adds over 100 crates. Asking for an option a build lacks says
+which feature it needs.
 
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
 aarch64, statically linked against musl) and Windows (x86_64), as single files

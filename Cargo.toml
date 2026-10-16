@@ -9,11 +9,12 @@ license = "Apache-2.0"
 name = "fhir-pipes"
 path = "src/main.rs"
 
-# Both off by default: the release binaries leave them out.
+# postgres is on by default and in the release binaries; fhir-packages is off.
 [features]
-default = []
+default = ["postgres"]
 # `views run --db`: run views against FHIR resources stored as JSONB in PostgreSQL;
-# `refresh` with [database]: load the view tables into PostgreSQL.
+# `refresh` with [database]: load the view tables into PostgreSQL. TLS through
+# rustls and ring, as the FHIR client uses, with the webpki root certificates.
 postgres = ["fhir-pipes-sof/postgres", "dep:sqlx-postgres", "dep:sqlx-core"]
 # `views lint --package`: lint views against a FHIR package, downloaded over HTTP.
 fhir-packages = ["fhir-pipes-sof-lint/packages"]
@@ -86,7 +87,7 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["full", "io-util"] }
 futures-util = "0.3"
 pin-project-lite = "0.2"
-sqlx-core = { version = "0.9.0", default-features = false, features = ["_rt-tokio", "json"] }
+sqlx-core = { version = "0.9.0", default-features = false, features = ["_rt-tokio", "json", "_tls-rustls-ring-webpki"] }
 sqlx-postgres = { version = "0.9.0", default-features = false, features = ["json"] }
 csv = "1.4"
 arrow = { version = "59" }
