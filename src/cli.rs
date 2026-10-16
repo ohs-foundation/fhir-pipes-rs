@@ -84,6 +84,9 @@ pub enum Command {
     /// Work with the profile given by --profile
     #[command(subcommand)]
     Profile(ProfileCommand),
+    /// Admin boundaries (GeoJSON) and sites (CSV) as Location NDJSON for `fhir-pipes load` (offline)
+    #[command(subcommand)]
+    Import(crate::import::ImportCommand),
 }
 
 #[derive(Subcommand, Debug)]

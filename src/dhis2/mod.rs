@@ -87,12 +87,7 @@ impl Instance {
             admin_unit_type: profile.location.admin_unit_type.clone(),
             facility_type: profile.organization.facility_type.clone(),
             org_id_prefix: profile.organization.id_prefix.clone(),
-            boundary_extension: profile
-                .location
-                .boundary_extensions
-                .first()
-                .cloned()
-                .unwrap_or_else(|| crate::fhir::location::HL7_BOUNDARY_EXTENSION_URL.to_string()),
+            boundary_extension: profile.boundary_extension().to_string(),
         })
     }
 
