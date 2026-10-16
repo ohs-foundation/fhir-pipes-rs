@@ -46,6 +46,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use fhir_pipes_sof::ViewResult;
 use fhir_pipes_sof::output::WriteSummary;
 use serde_json::json;
 
@@ -723,9 +724,13 @@ struct ViewsDone {
     mismatches: Vec<(String, WriteSummary)>,
 }
 
-/// Download each resource type the views read, run each type's views on one
-/// read of it, then write each view's table, partitioned by the lookup rules,
-/// to the staging directory, and the views to the staged views/.
+/// Download each resource type the views read, then run each type's views on
+/// one read of it, a chunk of resources at a time, and write each view's
+/// table, partitioned by the lookup rules, to the staging directory, and the
+/// views to the staged views/. A type's tables are written as soon as its
+/// views are done, and its rows then dropped, except that the types whose
+/// views write lookup tables run first and their tables are all written
+/// before any other (`write_order`).
 fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
     let dir = s.views.as_ref().context("no views directory")?;
     println!("== views ({})", dir.display());
@@ -754,39 +759,88 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
         fhir::export(s, &download)?;
     }
 
-    let mut results: Vec<Option<fhir_pipes_sof::ViewResult>> = all.iter().map(|_| None).collect();
-    for (rtype, idx) in &by_type {
+    // Each type's views, run over one read of its file.
+    let run_type = |rtype: &str, idx: &[usize]| -> Result<Vec<(usize, ViewResult)>> {
         let t = Instant::now();
-        // A type the files lack gives its views empty tables.
-        let resources = if s.reads_files() && !ndjson(rtype).exists() {
-            println!("   {rtype}: none in the files; its views write empty tables");
-            Vec::new()
-        } else {
-            views::read_ndjson(&ndjson(rtype), s.threads)?
-        };
         let vs: Vec<&views::View> = idx.iter().map(|&i| &all[i]).collect();
-        for (&i, r) in idx.iter().zip(views::run(&vs, &resources, s.threads)?) {
-            results[i] = Some(r);
-        }
+        // A type the files lack gives its views empty tables.
+        let (n, results) = if s.reads_files() && !ndjson(rtype).exists() {
+            println!("   {rtype}: none in the files; its views write empty tables");
+            let rows = views::ViewRows::new(
+                vs.iter()
+                    .map(|v| (v.name.as_str(), &v.definition))
+                    .collect(),
+            );
+            (0, rows.finish(s.threads)?)
+        } else {
+            views::run_file(&vs, &ndjson(rtype), s.threads)?
+        };
         println!(
-            "   {rtype}: {} resources, {} view(s), {:.1}s",
-            resources.len(),
+            "   {rtype}: {n} resources, {} view(s), {:.1}s",
             idx.len(),
             t.elapsed().as_secs_f64()
         );
-    }
+        Ok(idx.iter().copied().zip(results).collect())
+    };
 
     // Tables other views look their partition up in are written first, and
-    // read back from the staging directory.
+    // read back from the staging directory: the types whose views write them
+    // run first, and their tables are written once they have all run, the
+    // lookup tables first, each group in view order, as if every view had
+    // run before any table was written.
     let sources: BTreeSet<&str> = s.lookups.iter().map(|l| l.table.as_str()).collect();
-    let mut order: Vec<usize> = (0..all.len()).collect();
-    order.sort_by_key(|&i| !sources.contains(all[i].table.as_str()));
+    let is_source = |i: usize| sources.contains(all[i].table.as_str());
+    let write_order = |i: usize| (!is_source(i), i);
+    let (first, rest): (Vec<_>, Vec<_>) = by_type
+        .iter()
+        .partition(|(_, idx)| idx.iter().any(|&i| is_source(i)));
 
-    let mut lookups: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
-    let mut mismatches = Vec::new();
-    for i in order {
-        let v = &all[i];
-        let result = results[i].take().expect("every view ran");
+    let mut writer = TableWriter {
+        s,
+        stage,
+        lookups: HashMap::new(),
+        mismatches: Vec::new(),
+    };
+    let mut held = Vec::new();
+    for (rtype, idx) in first {
+        held.extend(run_type(rtype, idx)?);
+    }
+    held.sort_by_key(|(i, _)| write_order(*i));
+    for (i, result) in held {
+        writer.write(i, &all[i], result)?;
+    }
+    for (rtype, idx) in rest {
+        for (i, result) in run_type(rtype, idx)? {
+            writer.write(i, &all[i], result)?;
+        }
+    }
+    // The type mismatches in the order the tables were written before they
+    // were written a type at a time.
+    let mut mismatches = writer.mismatches;
+    mismatches.sort_by_key(|(i, _, _)| write_order(*i));
+    Ok(ViewsDone {
+        downloaded,
+        mismatches: mismatches.into_iter().map(|(_, t, w)| (t, w)).collect(),
+        tables: all.into_iter().map(|v| v.table).collect(),
+    })
+}
+
+/// Writes the views' tables to the staging directory, reading the lookup
+/// tables their partitions come from once each.
+struct TableWriter<'a> {
+    s: &'a Settings,
+    stage: &'a stage::Stage,
+    /// (table, key) → key → partition value.
+    lookups: HashMap<(String, String), HashMap<String, String>>,
+    /// Each table written, by its view's index, with the values that did not
+    /// match their column's type.
+    mismatches: Vec<(usize, String, WriteSummary)>,
+}
+
+impl TableWriter<'_> {
+    /// Write view `i`'s table from its rows.
+    fn write(&mut self, i: usize, v: &views::View, result: ViewResult) -> Result<()> {
+        let (s, stage) = (self.s, self.stage);
         // The partition column is added to every row; a view column of the
         // same name would be lost beside it.
         if result.columns.iter().any(|c| c.name == s.partition_column) {
@@ -806,12 +860,12 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
             lookup_table = Some((l, key.clone(), table_dir.is_dir()));
             if table_dir.is_dir() {
                 let cache_key = (l.table.clone(), key.clone());
-                if !lookups.contains_key(&cache_key) {
+                if !self.lookups.contains_key(&cache_key) {
                     let m = partition::read_lookup(&table_dir, &key, &s.partition_column)
                         .with_context(|| format!("reading lookup table {}", l.table))?;
-                    lookups.insert(cache_key.clone(), m);
+                    self.lookups.insert(cache_key.clone(), m);
                 }
-                map = lookups.get(&cache_key);
+                map = self.lookups.get(&cache_key);
             }
         }
         let col = rule.map(|(_, c)| c);
@@ -837,7 +891,7 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
             "   {} ({}) → parquet/{} ({n} rows)",
             v.name, v.resource, v.table
         );
-        mismatches.push((v.table.clone(), summary));
+        self.mismatches.push((i, v.table.clone(), summary));
         if let Some((l, key, present)) = lookup_table {
             let (no_key, not_found) = (no_key.get(), not_found.get());
             if !present {
@@ -868,10 +922,6 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
                 );
             }
         }
+        Ok(())
     }
-    Ok(ViewsDone {
-        downloaded,
-        tables: all.into_iter().map(|v| v.table).collect(),
-        mismatches,
-    })
 }
