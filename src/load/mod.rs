@@ -9,14 +9,24 @@
 //! write the same resource, and a bundle starts only once every earlier
 //! bundle holding a resource it references is committed, so parents still
 //! land first on a server that checks references.
+//!
+//! The input is read twice. The first pass checks every line and keeps
+//! only what ordering and the plan need: each resource's type, id,
+//! `meta.versionId`, line number and `partOf` parent. The second reads each
+//! bundle's resources again as a worker takes the bundle, so only the
+//! bundles being posted are held. Within Locations, and within the other
+//! types, the resources at one `partOf` depth go in file order, so the
+//! second pass reads the file once per such group. It checks that the file
+//! is unchanged (size and modification time at each open, and each
+//! resource's type, id, version and `partOf`), since the plan rests on it.
 
 pub mod bundle;
 pub mod capability;
 pub mod order;
 
-use std::collections::HashSet;
+use std::borrow::Borrow;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, mpsc};
 use std::time::Duration;
 
@@ -25,58 +35,262 @@ use serde_json::Value;
 use crate::cli::LoadArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::client::{FetchError, FhirClient};
-use crate::fhir::ndjson::NdjsonReader;
-use crate::load::bundle::{Bundle, dependencies, plan};
+use crate::fhir::head::Head;
+use crate::fhir::ndjson::{Line, NdjsonReader};
+use crate::load::bundle::{Bundle, dependencies, depends_on, describe_put, put_bundle};
 use crate::load::capability::check_update_create;
-use crate::load::order::order_parents_first;
+use crate::load::order::{Node, parents_first, reference_key};
 
-/// Every line must be an object with string `resourceType` and `id`, and
-/// no `<Type>/<id>` may repeat. The whole changeset is held in memory:
-/// ordering needs all of it, and it is a changeset, not a registry.
-pub fn read_resources(path: &Path) -> Result<Vec<Value>> {
-    let mut resources = Vec::new();
-    let mut seen = HashSet::new();
+/// One resource of the input, as `load` keeps it between the two passes.
+struct Planned {
+    /// Index into `LoadPlan::types`.
+    resource_type: usize,
+    id: String,
+    /// `meta.versionId`; `None` is a create.
+    version: Option<String>,
+    /// `partOf.reference`, which placed it in the order.
+    part_of: Option<String>,
+    line: usize,
+}
+
+/// The input after the first pass.
+pub struct LoadPlan {
+    types: Vec<String>,
+    resources: Vec<Planned>,
+    /// Indexes into `resources`, in the order they are loaded.
+    order: Vec<usize>,
+    /// The input's length and modification time when it was planned.
+    stamp: Stamp,
+}
+
+type Stamp = (u64, std::time::SystemTime);
+
+/// The length and modification time of `path`, to tell whether it changed.
+fn stamp(path: &Path) -> Result<Stamp> {
+    let m = std::fs::metadata(path).map_err(|e| PipesError::io(path, e))?;
+    Ok((m.len(), m.modified().map_err(|e| PipesError::io(path, e))?))
+}
+
+/// The input changed after it was planned: an environment error, since the
+/// plan (order, versions, preflight) no longer describes it.
+fn changed(path: &Path, what: &str) -> PipesError {
+    PipesError::Environment(format!(
+        "{} changed while it was being loaded: {what}; bundles committed before this stay \
+         committed, and re-running on the file as it is now is safe",
+        path.display()
+    ))
+}
+
+impl LoadPlan {
+    pub fn len(&self) -> usize {
+        self.resources.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+
+    /// Types of the resources that have no `meta.versionId`: the creates.
+    fn create_types(&self) -> Vec<String> {
+        let mut types: Vec<usize> = self
+            .resources
+            .iter()
+            .filter(|r| r.version.is_none())
+            .map(|r| r.resource_type)
+            .collect();
+        types.sort_unstable();
+        types.dedup();
+        types.into_iter().map(|t| self.types[t].clone()).collect()
+    }
+
+    /// The bundle of `batch_size` each resource goes in, by `<Type>/<id>`.
+    fn bundle_of_each(&self, batch_size: usize) -> HashMap<String, usize> {
+        self.order
+            .iter()
+            .enumerate()
+            .map(|(at, &i)| {
+                let r = &self.resources[i];
+                (
+                    format!("{}/{}", self.types[r.resource_type], r.id),
+                    at / batch_size,
+                )
+            })
+            .collect()
+    }
+
+    /// One line per bundle of `batch_size`: its entries as
+    /// `describe_put` names them.
+    fn describe(&self, batch_size: usize) -> Vec<String> {
+        self.order
+            .chunks(batch_size)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|&i| {
+                        let r = &self.resources[i];
+                        describe_put(&self.types[r.resource_type], &r.id, r.version.as_deref())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .collect()
+    }
+}
+
+/// The first pass. Every line must be an object with string `resourceType`
+/// and `id`, and no `<Type>/<id>` may repeat; the plan is ordered parents
+/// first (`order::parents_first`), and a `partOf` cycle is an error.
+pub fn read_plan(path: &Path) -> Result<LoadPlan> {
+    let before = stamp(path)?;
+    let mut types: Vec<String> = Vec::new();
+    let mut type_index: HashMap<String, usize> = HashMap::new();
+    let mut resources: Vec<Planned> = Vec::new();
+    let mut seen: HashSet<(usize, String)> = HashSet::new();
     for line in NdjsonReader::open(path)? {
         let line = line?;
-        let value: Value = serde_json::from_str(&line.text).map_err(|e| {
+        let head = Head::parse(&line.text).map_err(|e| {
             PipesError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
         })?;
-        let resource_type = value.get("resourceType").and_then(Value::as_str);
-        let id = value.get("id").and_then(Value::as_str);
-        let key = match (resource_type, id) {
-            (Some(t), Some(i)) if !t.is_empty() && !i.is_empty() => format!("{t}/{i}"),
-            _ => {
-                return Err(PipesError::Usage(format!(
-                    "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
-                    path.display(),
-                    line.number
-                )));
+        let not_a_resource = || {
+            PipesError::Usage(format!(
+                "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
+                path.display(),
+                line.number
+            ))
+        };
+        let head = head.ok_or_else(not_a_resource)?;
+        let (Some(resource_type), Some(id)) = (head.resource_type, head.id) else {
+            return Err(not_a_resource());
+        };
+        if resource_type.is_empty() || id.is_empty() {
+            return Err(not_a_resource());
+        }
+        let t = match type_index.get(&resource_type) {
+            Some(&t) => t,
+            None => {
+                types.push(resource_type.clone());
+                type_index.insert(resource_type.clone(), types.len() - 1);
+                types.len() - 1
             }
         };
-        if !seen.insert(key.clone()) {
+        if !seen.insert((t, id.clone())) {
             return Err(PipesError::Usage(format!(
-                "{}: line {}: duplicate resource {key}",
+                "{}: line {}: duplicate resource {resource_type}/{id}",
                 path.display(),
                 line.number
             )));
         }
-        resources.push(value);
+        resources.push(Planned {
+            resource_type: t,
+            id,
+            version: head.version_id,
+            part_of: head.part_of,
+            line: line.number,
+        });
     }
-    Ok(resources)
+    drop(seen);
+    let nodes: Vec<Node> = resources
+        .iter()
+        .map(|r| {
+            let t = types[r.resource_type].as_str();
+            Node {
+                resource_type: t,
+                id: &r.id,
+                parent: r.part_of.as_deref().and_then(|p| reference_key(p, Some(t))),
+            }
+        })
+        .collect();
+    let order = parents_first(&nodes)?;
+    drop(nodes);
+    if stamp(path)? != before {
+        return Err(PipesError::Environment(format!(
+            "{} changed while it was being read; nothing was sent, run again",
+            path.display()
+        )));
+    }
+    Ok(LoadPlan {
+        types,
+        resources,
+        order,
+        stamp: before,
+    })
 }
 
-/// Types of the resources that have no `meta.versionId`: the creates.
-fn create_types(resources: &[Value]) -> Vec<String> {
-    resources
-        .iter()
-        .filter(|r| {
-            r.get("meta")
-                .and_then(|m| m.get("versionId"))
-                .and_then(Value::as_str)
-                .is_none()
-        })
-        .filter_map(|r| r.get("resourceType")?.as_str().map(str::to_string))
-        .collect()
+/// The second pass: the resources read again by line number. A line before
+/// the one last read starts the file again from the top.
+struct Reread<'a> {
+    path: &'a Path,
+    reader: Option<NdjsonReader>,
+    /// The number of the last line read.
+    at: usize,
+}
+
+impl<'a> Reread<'a> {
+    fn new(path: &'a Path) -> Self {
+        Reread {
+            path,
+            reader: None,
+            at: 0,
+        }
+    }
+
+    /// The resource on line `r.line`, checked to be the one planned: the
+    /// same type, id, `meta.versionId` and `partOf.reference`, so the
+    /// order, the preflight and the version checks still hold. Anything
+    /// else, including a file that no longer reads, is a changed file.
+    fn resource(&mut self, plan: &LoadPlan, r: &Planned) -> Result<Value> {
+        let resource_type = &plan.types[r.resource_type];
+        let not_planned = || {
+            changed(
+                self.path,
+                &format!(
+                    "line {} is no longer the {resource_type}/{} it was planned as",
+                    r.line, r.id
+                ),
+            )
+        };
+        let line = self.line(plan, r.line)?.ok_or_else(not_planned)?;
+        let value: Value = serde_json::from_str(&line.text).map_err(|_| not_planned())?;
+        let str_at = |p: &str| value.pointer(p).and_then(Value::as_str);
+        let same = str_at("/resourceType") == Some(resource_type)
+            && str_at("/id") == Some(r.id.as_str())
+            && str_at("/meta/versionId") == r.version.as_deref()
+            && str_at("/partOf/reference") == r.part_of.as_deref();
+        if !same {
+            return Err(not_planned());
+        }
+        Ok(value)
+    }
+
+    /// Line `n`, or `None` when the file no longer has a line `n`. The file
+    /// is checked against the plan's stamp each time it is opened, and an
+    /// error reading it is a changed file: the first pass read all of it.
+    fn line(&mut self, plan: &LoadPlan, n: usize) -> Result<Option<Line>> {
+        if n <= self.at {
+            self.reader = None;
+        }
+        if self.reader.is_none() {
+            if stamp(self.path).ok() != Some(plan.stamp) {
+                return Err(changed(self.path, "its size or modification time differs"));
+            }
+            let reader = NdjsonReader::open(self.path)
+                .map_err(|e| changed(self.path, &format!("reading it again: {e}")))?;
+            self.reader = Some(reader);
+            self.at = 0;
+        }
+        let reader = self.reader.as_mut().expect("opened above");
+        for line in reader {
+            let line = line.map_err(|e| changed(self.path, &format!("reading it again: {e}")))?;
+            self.at = line.number;
+            if line.number == n {
+                return Ok(Some(line));
+            }
+            if line.number > n {
+                break;
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// After a 412 or 409: read each version-checked entry back and name the
@@ -194,40 +408,83 @@ pub fn post_all(
     progress: &Progress,
     post: &PostFn,
 ) -> Posted {
-    let count = bundles.len();
-    let deps = dependencies(bundles);
-    let next = AtomicUsize::new(0);
+    let mut deps = dependencies(bundles);
+    post_stream(
+        client,
+        base,
+        bundles.len(),
+        concurrency,
+        progress,
+        |i| Ok((&bundles[i], std::mem::take(&mut deps[i]))),
+        post,
+    )
+}
+
+/// `post_all` over bundles made as they are posted: a worker takes the next
+/// bundle by calling `next(i)`, which returns bundle `i` and the earlier
+/// bundles it references. `next` is called once per bundle, in order and
+/// one call at a time, so it can read a file front to back; only the
+/// bundles being posted are held. An error from `next` is a failure like
+/// a failed post.
+pub fn post_stream<B, F>(
+    client: &FhirClient,
+    base: &str,
+    count: usize,
+    concurrency: usize,
+    progress: &Progress,
+    next: F,
+    post: &PostFn,
+) -> Posted
+where
+    B: Borrow<Bundle> + Send,
+    F: FnMut(usize) -> Result<(B, Vec<usize>)> + Send,
+{
+    // The next bundle to make, and how.
+    let source = Mutex::new((0usize, next));
     // Which bundles are committed, and whether to stop.
     let state = (Mutex::new((vec![false; count], false)), Condvar::new());
-    let (tx, rx) = mpsc::channel::<(usize, Result<()>)>();
+    let (tx, rx) = mpsc::channel::<(usize, Result<usize>)>();
     let mut failure: Option<PipesError> = None;
     std::thread::scope(|s| {
         for _ in 0..concurrency.clamp(1, count.max(1)) {
             let tx = tx.clone();
-            let (next, state, deps) = (&next, &state, &deps);
+            let (source, state) = (&source, &state);
             s.spawn(move || {
                 loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= count {
-                        break;
-                    }
+                    let (i, made) = {
+                        let mut src = source.lock().unwrap();
+                        let i = src.0;
+                        if i >= count || state.0.lock().unwrap().1 {
+                            break;
+                        }
+                        src.0 += 1;
+                        let made = (src.1)(i);
+                        if made.is_err() {
+                            // Before the next worker can make another.
+                            state.0.lock().unwrap().1 = true;
+                        }
+                        (i, made)
+                    };
+                    let (bundle, deps) = match made {
+                        Ok(made) => made,
+                        Err(e) => {
+                            state.1.notify_all();
+                            let _ = tx.send((i, Err(e)));
+                            break;
+                        }
+                    };
+                    let bundle = bundle.borrow();
                     {
                         let (lock, changed) = state;
                         let mut st = lock.lock().unwrap();
-                        while !st.1 && deps[i].iter().any(|&j| !st.0[j]) {
+                        while !st.1 && deps.iter().any(|&j| !st.0[j]) {
                             st = changed.wait(st).unwrap();
                         }
                         if st.1 {
                             break;
                         }
                     }
-                    let r = post(
-                        client,
-                        base,
-                        &bundles[i],
-                        progress.first + i + 1,
-                        progress.total,
-                    );
+                    let r = post(client, base, bundle, progress.first + i + 1, progress.total);
                     // Recorded before the next bundle is taken, so one worker
                     // stops right after a failure, as a sequential load does.
                     {
@@ -238,7 +495,7 @@ pub fn post_all(
                         }
                     }
                     state.1.notify_all();
-                    if tx.send((i, r)).is_err() {
+                    if tx.send((i, r.map(|()| bundle.size()))).is_err() {
                         break;
                     }
                 }
@@ -247,12 +504,11 @@ pub fn post_all(
         drop(tx);
         for (i, r) in rx.iter() {
             match r {
-                Ok(()) => eprintln!(
-                    "{}bundle {}/{} committed ({} resources)",
+                Ok(size) => eprintln!(
+                    "{}bundle {}/{} committed ({size} resources)",
                     progress.label,
                     progress.first + i + 1,
                     progress.total,
-                    bundles[i].size()
                 ),
                 Err(e) => {
                     if failure.is_none() {
@@ -308,17 +564,16 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
             args.input.display()
         )));
     }
-    let resources = read_resources(&args.input)?;
+    let resources = read_plan(&args.input)?;
     if resources.is_empty() {
         println!("Nothing to load: {} is empty", args.input.display());
         return Ok(());
     }
     // Ordering and the cycle check come before any request: a bad input
     // should never cost a network round trip.
-    let creates = create_types(&resources);
-    let ordered = order_parents_first(resources)?;
-    let bundles = plan(ordered, args.batch_size);
-    let total: usize = bundles.iter().map(|b| b.entries.len()).sum();
+    let creates = resources.create_types();
+    let total = resources.len();
+    let count = total.div_ceil(args.batch_size);
 
     let base = args.server.trim_end_matches('/').to_string();
     let client = FhirClient::new(
@@ -330,26 +585,253 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
     preflight(&client, &base, &creates)?;
 
     if args.dry_run {
-        println!(
-            "Dry run: {total} resources in {} bundle(s) for {base}; nothing posted",
-            bundles.len()
-        );
-        for (i, b) in bundles.iter().enumerate() {
-            println!("bundle {}/{}: {}", i + 1, bundles.len(), b.describe());
+        println!("Dry run: {total} resources in {count} bundle(s) for {base}; nothing posted");
+        for (i, line) in resources.describe(args.batch_size).iter().enumerate() {
+            println!("bundle {}/{count}: {line}", i + 1);
         }
         return Ok(());
     }
 
-    let count = bundles.len();
+    // Each bundle is read from the file as a worker takes it. With one
+    // worker every earlier bundle is committed before the next starts, so
+    // the references between bundles matter only with more.
+    let batch = args.batch_size;
+    let home = (args.concurrency > 1).then(|| resources.bundle_of_each(batch));
+    let chunks: Vec<&[usize]> = resources.order.chunks(batch).collect();
+    let mut reread = Reread::new(&args.input);
+    let next = |i: usize| -> Result<(Bundle, Vec<usize>)> {
+        let values = chunks[i]
+            .iter()
+            .map(|&j| reread.resource(&resources, &resources.resources[j]))
+            .collect::<Result<Vec<Value>>>()?;
+        let bundle = put_bundle(values);
+        let deps = match &home {
+            Some(home) => depends_on(&bundle, i, |key| home.get(key).copied()),
+            None => Vec::new(),
+        };
+        Ok((bundle, deps))
+    };
     let progress = Progress {
         label: "",
         first: 0,
         total: count,
     };
-    if let Some(e) = post_all(&client, &base, &bundles, args.concurrency, &progress, &post).failure
-    {
+    let posted = post_stream(
+        &client,
+        &base,
+        count,
+        args.concurrency,
+        &progress,
+        next,
+        &post,
+    );
+    if let Some(e) = posted.failure {
         return Err(e);
     }
     println!("Loaded {total} resources in {count} bundle(s) to {base}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn loc(id: &str, parent: Option<&str>) -> Value {
+        let mut r = json!({"resourceType": "Location", "id": id, "meta": {"versionId": "1"}});
+        if let Some(p) = parent {
+            r["partOf"] = json!({"reference": format!("Location/{p}")});
+        }
+        r
+    }
+
+    /// Every resource of the plan, read again in order.
+    fn reread_all(path: &Path, plan: &LoadPlan) -> Result<Vec<Value>> {
+        let mut reread = Reread::new(path);
+        plan.order
+            .iter()
+            .map(|&i| reread.resource(plan, &plan.resources[i]))
+            .collect()
+    }
+
+    #[test]
+    fn the_plan_keeps_what_ordering_and_the_bundles_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.ndjson");
+        let resources = [
+            json!({"resourceType": "Location", "id": "c", "partOf": {"reference": "Location/b"}}),
+            json!({"resourceType": "Organization", "id": "b"}),
+            loc("b", Some("a")),
+            json!({"resourceType": "Location", "id": "a", "meta": {"versionId": "W/\"7\""}}),
+        ];
+        // A blank line counts in the line numbers but holds no resource.
+        let text: String = resources.iter().map(|r| format!("{r}\n\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let plan = read_plan(&path).unwrap();
+        assert_eq!(plan.len(), 4);
+        assert_eq!(plan.create_types(), ["Location", "Organization"]);
+        assert_eq!(
+            plan.describe(3),
+            [
+                "Organization/b create, Location/a update@W/\"7\", Location/b update@1",
+                "Location/c create"
+            ]
+        );
+        let again = reread_all(&path, &plan).unwrap();
+        assert_eq!(again, [1, 3, 2, 0].map(|i| resources[i].clone()));
+    }
+
+    #[test]
+    fn a_bundle_that_cannot_be_made_stops_the_stream() {
+        let client = FhirClient::new(
+            crate::extract::client::Auth::None,
+            1,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let made = Mutex::new(Vec::new());
+        let posted = post_stream(
+            &client,
+            "http://unused",
+            6,
+            3,
+            &Progress {
+                label: "",
+                first: 0,
+                total: 6,
+            },
+            |i| {
+                made.lock().unwrap().push(i);
+                if i == 3 {
+                    return Err(PipesError::Environment("gone".into()));
+                }
+                let r = json!({"resourceType": "Location", "id": format!("l{i}")});
+                Ok((put_bundle(vec![r]), Vec::new()))
+            },
+            &|_, _, _, _, _| Ok(()),
+        );
+        assert!(
+            matches!(&posted.failure, Some(PipesError::Environment(m)) if m == "gone"),
+            "{:?}",
+            posted.failure.map(|e| e.to_string())
+        );
+        assert_eq!(
+            *made.lock().unwrap(),
+            [0, 1, 2, 3],
+            "made in order, none after"
+        );
+        assert_eq!(
+            posted.committed,
+            [true, true, true, false, false, false],
+            "those taken before it finish"
+        );
+    }
+
+    /// The text of `resources`, one per line.
+    fn ndjson(resources: &[Value]) -> Vec<u8> {
+        resources
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    /// Write `text` to `path`, gzip without compression when `gz` (so the
+    /// file's size follows the text's).
+    fn put(path: &Path, text: &[u8], gz: bool) {
+        use std::io::Write;
+        if gz {
+            let mut w = flate2::write::GzEncoder::new(
+                std::fs::File::create(path).unwrap(),
+                flate2::Compression::none(),
+            );
+            w.write_all(text).unwrap();
+            w.finish().unwrap();
+        } else {
+            std::fs::write(path, text).unwrap();
+        }
+    }
+
+    /// Replace the file's text with `text` of the same length and give it
+    /// back its modification time, so only reading it again can tell.
+    fn swap_unseen(path: &Path, text: &[u8], gz: bool) {
+        let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+        let len = std::fs::metadata(path).unwrap().len();
+        put(path, text, gz);
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(modified).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), len, "same size");
+    }
+
+    fn is_changed_file(r: Result<Vec<Value>>) -> String {
+        match r {
+            Err(PipesError::Environment(m)) if m.contains("changed while it was being loaded") => m,
+            Err(e) => panic!("not a changed-file error: {e}"),
+            Ok(_) => panic!("the change went unnoticed"),
+        }
+    }
+
+    #[test]
+    fn a_file_changed_between_the_passes_is_an_environment_error() {
+        let child = loc("b", Some("a"));
+        let parent = loc("a", None);
+        let original = ndjson(&[child.clone(), parent.clone()]);
+        let text = String::from_utf8(original.clone()).unwrap();
+        let same_length: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "another resource",
+                text.replace("\"id\":\"a\"", "\"id\":\"x\"").into_bytes(),
+            ),
+            // The preflight took it for an update and the order is by partOf.
+            (
+                "no versionId",
+                text.replace("versionId", "versionIx").into_bytes(),
+            ),
+            (
+                "another version",
+                text.replacen("\"versionId\":\"1\"", "\"versionId\":\"2\"", 2)
+                    .into_bytes(),
+            ),
+            (
+                "another parent",
+                text.replace("Location/a", "Location/z").into_bytes(),
+            ),
+            ("a JSON document", {
+                let mut t = b"[".to_vec();
+                t.extend_from_slice(&original[1..]);
+                t
+            }),
+            ("invalid UTF-8", {
+                let mut t = original.clone();
+                let at = t.iter().position(|&b| b == b'L').unwrap();
+                t[at] = 0xff;
+                t
+            }),
+            ("not JSON", text.replace('{', "(").into_bytes()),
+        ];
+        for gz in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join(if gz { "in.ndjson.gz" } else { "in.ndjson" });
+            for (what, text) in &same_length {
+                put(&path, &original, gz);
+                let plan = read_plan(&path).unwrap();
+                assert_eq!(
+                    reread_all(&path, &plan).unwrap(),
+                    [parent.clone(), child.clone()]
+                );
+                swap_unseen(&path, text, gz);
+                let m = is_changed_file(reread_all(&path, &plan));
+                assert!(m.contains("committed"), "{what}, gz {gz}: {m}");
+            }
+            // Any other change shows in the size or modification time,
+            // before anything is read.
+            put(&path, &original, gz);
+            let plan = read_plan(&path).unwrap();
+            put(&path, &ndjson(std::slice::from_ref(&child)), gz);
+            let m = is_changed_file(reread_all(&path, &plan));
+            assert!(m.contains("size or modification time"), "gz {gz}: {m}");
+        }
+    }
 }

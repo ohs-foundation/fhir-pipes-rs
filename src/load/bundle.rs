@@ -85,22 +85,14 @@ impl Bundle {
     pub fn size(&self) -> usize {
         self.entries.len() + self.deletes.len()
     }
+}
 
-    /// One line for `--dry-run`: `Location/a update@3, Location/b create`.
-    pub fn describe(&self) -> String {
-        self.entries
-            .iter()
-            .map(|e| match &e.version {
-                Some(v) => format!("{}/{} update@{v}", e.resource_type, e.id),
-                None => format!("{}/{} create", e.resource_type, e.id),
-            })
-            .chain(
-                self.deletes
-                    .iter()
-                    .map(|(t, id)| format!("{t}/{id} delete")),
-            )
-            .collect::<Vec<_>>()
-            .join(", ")
+/// One `PUT` entry as `load --dry-run` names it: `Location/a update@3` or
+/// `Location/b create`.
+pub fn describe_put(resource_type: &str, id: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("{resource_type}/{id} update@{v}"),
+        None => format!("{resource_type}/{id} create"),
     }
 }
 
@@ -149,30 +141,33 @@ pub fn dependencies(bundles: &[Bundle]) -> Vec<Vec<usize>> {
     bundles
         .iter()
         .enumerate()
-        .map(|(i, b)| {
-            let mut refs = Vec::new();
-            for e in &b.entries {
-                references(&e.resource, &mut refs);
-            }
-            let mut deps: Vec<usize> = refs
-                .iter()
-                .filter_map(|r| home.get(r).copied())
-                .filter(|&j| j < i)
-                .collect();
-            deps.sort_unstable();
-            deps.dedup();
-            deps
-        })
+        .map(|(i, b)| depends_on(b, i, |key| home.get(key).copied()))
         .collect()
 }
 
-/// Chunk already-ordered resources into bundles of `batch_size`. Every
-/// resource has been validated to carry string `resourceType` and `id`.
-pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
-    let mut bundles = Vec::new();
-    let mut current: Vec<Entry> = Vec::new();
-    for resource in resources {
-        let entry = Entry {
+/// The bundles before bundle `i` holding a resource it references, given
+/// the bundle of each `<Type>/<id>` (see `dependencies`).
+pub fn depends_on(bundle: &Bundle, i: usize, home: impl Fn(&str) -> Option<usize>) -> Vec<usize> {
+    let mut refs = Vec::new();
+    for e in &bundle.entries {
+        references(&e.resource, &mut refs);
+    }
+    let mut deps: Vec<usize> = refs
+        .iter()
+        .filter_map(|r| home(r))
+        .filter(|&j| j < i)
+        .collect();
+    deps.sort_unstable();
+    deps.dedup();
+    deps
+}
+
+/// One bundle of `PUT`s, in the order given. Every resource has been
+/// validated to carry string `resourceType` and `id`.
+pub fn put_bundle(resources: Vec<Value>) -> Bundle {
+    let entries = resources
+        .into_iter()
+        .map(|resource| Entry {
             resource_type: resource["resourceType"].as_str().unwrap_or("").to_string(),
             id: resource["id"].as_str().unwrap_or("").to_string(),
             version: resource
@@ -181,20 +176,26 @@ pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             resource,
-        };
-        current.push(entry);
+        })
+        .collect();
+    Bundle {
+        entries,
+        deletes: Vec::new(),
+    }
+}
+
+/// Chunk already-ordered resources into bundles of `batch_size`.
+pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
+    let mut bundles = Vec::new();
+    let mut current: Vec<Value> = Vec::new();
+    for resource in resources {
+        current.push(resource);
         if current.len() == batch_size.max(1) {
-            bundles.push(Bundle {
-                entries: std::mem::take(&mut current),
-                deletes: Vec::new(),
-            });
+            bundles.push(put_bundle(std::mem::take(&mut current)));
         }
     }
     if !current.is_empty() {
-        bundles.push(Bundle {
-            entries: current,
-            deletes: Vec::new(),
-        });
+        bundles.push(put_bundle(current));
     }
     bundles
 }
@@ -343,7 +344,6 @@ mod tests {
                 {"request": {"method": "DELETE", "url": "Patient/b"}},
             ])
         );
-        assert_eq!(bundles[1].describe(), "Patient/c delete");
         assert!(dependencies(&bundles).iter().all(Vec::is_empty));
     }
 
@@ -380,8 +380,9 @@ mod tests {
             "Organization/o"
         );
         assert_eq!(
-            bundles[0].describe(),
-            "Location/a update@1, Location/b create"
+            describe_put("Location", "a", Some("1")),
+            "Location/a update@1"
         );
+        assert_eq!(describe_put("Location", "b", None), "Location/b create");
     }
 }
