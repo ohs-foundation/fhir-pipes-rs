@@ -29,20 +29,17 @@ use super::config::{Database, Settings};
 /// Rows sent to COPY per message.
 const COPY_ROWS: usize = 4096;
 
-/// Load `tables` (names under parquet/) into the database `d` points at.
-pub fn load(s: &Settings, d: &Database, tables: &[String]) -> Result<()> {
+/// Load `tables` (each a name and the directory to read it from) into the
+/// database `d` points at.
+pub fn load(s: &Settings, d: &Database, tables: &[(String, PathBuf)]) -> Result<()> {
     println!("== database ({})", d.schema);
     let url = std::env::var(&d.url_env)
         .ok()
         .filter(|v| !v.is_empty())
         .with_context(|| format!("[database] needs the connection string in ${}", d.url_env))?;
     let mut plans = Vec::new();
-    for table in tables {
-        plans.push(plan(
-            &s.parquet_dir().join(table),
-            table,
-            &s.partition_column,
-        )?);
+    for (table, dir) in tables {
+        plans.push(plan(dir, table, &s.partition_column)?);
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

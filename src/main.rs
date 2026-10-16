@@ -17,6 +17,7 @@ mod raster;
 mod report;
 mod run;
 mod snapshot;
+mod sync;
 mod transform;
 mod views;
 mod warehouse;
@@ -56,6 +57,7 @@ fn main() {
         cli::Command::Run(args) => run::run(&args, profile),
         cli::Command::Diff(args) => diff::run_diff(&args, profile),
         cli::Command::Load(args) => load::run_load(&args),
+        cli::Command::Sync(args) => sync::run_sync(&args),
         cli::Command::Index(args) => cells::run_index(&args, profile),
         cli::Command::Population(args) => population::run_population(&args, profile),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd, profile),

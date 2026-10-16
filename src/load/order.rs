@@ -10,41 +10,44 @@ use serde_json::Value;
 
 use crate::error::{PipesError, Result};
 
-fn parent_id(resource: &Value) -> Option<&str> {
+/// The id at the end of `partOf.reference`, if any.
+pub fn parent_id(resource: &Value) -> Option<&str> {
     let reference = resource.get("partOf")?.get("reference")?.as_str()?;
     let last = reference.rsplit('/').next().unwrap_or(reference);
     (!last.is_empty()).then_some(last)
 }
 
-/// Depth of `start` within the set: 0 for a root, parent depth + 1
-/// otherwise. Memoised in `depths`; a cycle is a usage error.
-fn depth(
-    start: usize,
-    resources: &[Value],
-    by_id: &HashMap<&str, usize>,
-    depths: &mut [Option<usize>],
-) -> Result<usize> {
-    let mut chain: Vec<usize> = Vec::new();
-    let mut current = Some(start);
-    let mut base = 0usize;
-    while let Some(i) = current {
-        if let Some(d) = depths[i] {
-            base = d + 1;
-            break;
+/// The depth of every node, given the index of each one's parent in the
+/// set: 0 for a root, parent depth + 1 otherwise. A cycle is a usage
+/// error naming one of its nodes by `label`.
+pub fn depths(parents: &[Option<usize>], label: &dyn Fn(usize) -> String) -> Result<Vec<usize>> {
+    let mut depths: Vec<Option<usize>> = vec![None; parents.len()];
+    for start in 0..parents.len() {
+        let mut chain: Vec<usize> = Vec::new();
+        let mut current = Some(start);
+        let mut base = 0usize;
+        while let Some(i) = current {
+            if let Some(d) = depths[i] {
+                base = d + 1;
+                break;
+            }
+            if chain.contains(&i) {
+                return Err(PipesError::Usage(format!(
+                    "partOf cycle detected involving {}; fix the hierarchy before loading",
+                    label(i)
+                )));
+            }
+            chain.push(i);
+            current = parents[i];
         }
-        if chain.contains(&i) {
-            let id = resources[i]["id"].as_str().unwrap_or("?");
-            return Err(PipesError::Usage(format!(
-                "partOf cycle detected involving Location/{id}; fix the hierarchy before loading"
-            )));
+        for (offset, &i) in chain.iter().rev().enumerate() {
+            depths[i] = Some(base + offset);
         }
-        chain.push(i);
-        current = parent_id(&resources[i]).and_then(|p| by_id.get(p).copied());
     }
-    for (offset, &i) in chain.iter().rev().enumerate() {
-        depths[i] = Some(base + offset);
-    }
-    Ok(depths[start].expect("set above"))
+    Ok(depths
+        .into_iter()
+        .map(|d| d.expect("every node is set"))
+        .collect())
 }
 
 pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
@@ -53,17 +56,24 @@ pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
         .enumerate()
         .filter_map(|(i, r)| r.get("id")?.as_str().map(|id| (id, i)))
         .collect();
-    let mut depths = vec![None; resources.len()];
+    let parents: Vec<Option<usize>> = resources
+        .iter()
+        .map(|r| parent_id(r).and_then(|p| by_id.get(p).copied()))
+        .collect();
+    let label = |i: usize| {
+        let r = &resources[i];
+        format!(
+            "{}/{}",
+            r["resourceType"].as_str().unwrap_or("?"),
+            r["id"].as_str().unwrap_or("?")
+        )
+    };
+    let depths = depths(&parents, &label)?;
     let is_location =
         |i: usize| resources[i].get("resourceType").and_then(Value::as_str) == Some("Location");
-    let mut keyed: Vec<(bool, usize, usize)> = Vec::with_capacity(resources.len());
-    for i in 0..resources.len() {
-        keyed.push((
-            is_location(i),
-            depth(i, &resources, &by_id, &mut depths)?,
-            i,
-        ));
-    }
+    let mut keyed: Vec<(bool, usize, usize)> = (0..resources.len())
+        .map(|i| (is_location(i), depths[i], i))
+        .collect();
     keyed.sort_by_key(|&(l, d, i)| (l, d, i));
     let mut slots: Vec<Option<Value>> = resources.into_iter().map(Some).collect();
     Ok(keyed
