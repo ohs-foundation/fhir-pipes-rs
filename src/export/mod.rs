@@ -35,8 +35,7 @@ mod window;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -50,9 +49,7 @@ use crate::extract::page::{
 };
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
-use crate::snapshot::merge::{
-    MergeFiles, MergeStats, id_and_updated, merge_file, merge_file_dropping,
-};
+use crate::snapshot::merge::{MergeFiles, MergeOptions, MergeStats, id_and_updated, merge_file};
 use crate::snapshot::same_server;
 use crate::transform::write_report;
 
@@ -90,29 +87,27 @@ struct TypeState {
 }
 
 impl ExportState {
-    /// The state in `dir`, or an empty one. An unreadable state file means
-    /// a full download, not a failed run.
+    /// The state in `dir`, or an empty one. A state file that cannot be read
+    /// or parsed means a full download, with a warning, not a failed run:
+    /// the state only lets the next run download less, and a full download
+    /// replaces every file it describes.
     fn read(dir: &Path) -> Self {
         let path = dir.join(STATE_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                eprintln!(
-                    "{}: not a valid export state ({e}); downloading in full",
-                    path.display()
-                );
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
+        let why = match crate::fs::read_state(&path) {
+            Ok(state) => return state.unwrap_or_default(),
+            Err(crate::fs::StateError::Invalid(e)) => format!("not a valid export state ({e})"),
+            Err(crate::fs::StateError::Unreadable(e) | crate::fs::StateError::Io(e)) => {
+                format!("not readable ({e})")
+            }
+        };
+        eprintln!("{}: {why}; downloading in full", path.display());
+        Self::default()
     }
 
     /// Written beside the target and renamed into place.
     fn write(&self, dir: &Path) -> Result<()> {
-        let path = dir.join(STATE_FILE);
-        let tmp = dir.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&tmp, text).map_err(|e| PipesError::io(&tmp, e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| PipesError::io(&path, e))
+        crate::fs::atomic_write(&dir.join(STATE_FILE), text)
     }
 }
 
@@ -221,40 +216,29 @@ fn export_search(
         .iter()
         .map(|t| state.types.get(*t).filter(|_| args.incremental).cloned())
         .collect();
-    let next = AtomicUsize::new(0);
-    let stop = AtomicBool::new(false);
-    let (tx, rx) = mpsc::channel::<(usize, Result<TypeState>, Report)>();
     let mut reports: Vec<Option<Report>> = (0..types.len()).map(|_| None).collect();
     let mut failure = None;
-    std::thread::scope(|s| {
-        for _ in 0..args.concurrency.clamp(1, types.len().max(1)) {
-            let tx = tx.clone();
-            let (next, stop, previous) = (&next, &stop, &previous);
-            s.spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(t) = types.get(i) else { break };
-                    let mut issues = Report::default();
-                    let done = export_type(client, args, t, previous[i].as_ref(), &mut issues);
-                    if tx.send((i, done, issues)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        for (i, done, issues) in rx {
+    crate::work::run(
+        args.concurrency.clamp(1, types.len().max(1)),
+        crate::work::indices(0, types.len()),
+        |i| {
+            let mut issues = Report::default();
+            let done = export_type(client, args, types[i], previous[i].as_ref(), &mut issues);
+            (i, done, issues)
+        },
+        |(i, done, issues)| {
             reports[i] = Some(issues);
             let written = done.and_then(|done| {
                 state.types.insert(types[i].to_string(), done);
                 state.write(&args.out)
             });
             if let Err(e) = written {
-                stop.store(true, Ordering::Relaxed);
                 failure.get_or_insert(e);
+                return false;
             }
-        }
-    });
+            true
+        },
+    );
     for issues in reports.into_iter().flatten() {
         report.append(issues);
     }
@@ -326,11 +310,8 @@ fn export_changes(
             unparsed_kind: "export_line_unparsed",
         },
         &paged.notes,
-        false,
-        &|_| None,
-        &HashMap::new(),
+        &MergeOptions::default(),
         report,
-        &[],
     )?;
     if merged_count_differs(
         client,
@@ -418,15 +399,9 @@ fn export_all(
     out: &Path,
     report: &mut Report,
 ) -> Result<TypeState> {
-    let tmp = tmp_path(&args.out, resource_type);
-    let (paged, windows) = match download_all(client, args, resource_type, &tmp, report) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-    std::fs::rename(&tmp, out).map_err(|e| PipesError::io(out, e))?;
+    let tmp = crate::fs::AtomicFile::adopt(out, tmp_path(&args.out, resource_type));
+    let (paged, windows) = download_all(client, args, resource_type, tmp.tmp(), report)?;
+    tmp.commit()?;
     let total = paged.notes.len();
     // As in extract: a last page that was full with no next link may mean
     // the server stopped paging early, so only then is the count worth a
@@ -955,7 +930,7 @@ fn bulk_type(
     // A resource in this export's output existed at its transactionTime,
     // whatever the deleted list says; the merge keeps every id it reads.
     let gone: HashSet<&str> = deleted.into_iter().flatten().map(String::as_str).collect();
-    merge_file_dropping(
+    merge_file(
         &MergeFiles {
             existing: ndjson_path(&args.out, resource_type),
             tmp: tmp_path(&args.out, resource_type),
@@ -963,8 +938,11 @@ fn bulk_type(
             unparsed_kind: "export_line_unparsed",
         },
         &downloaded.notes,
-        job.since.is_none(),
-        &gone,
+        &MergeOptions {
+            full: job.since.is_none(),
+            drop: Some(&gone),
+            boundaries: None,
+        },
         report,
     )
 }
@@ -1008,6 +986,16 @@ fn download_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_means_a_full_download() {
+        let dir = tempfile::tempdir().unwrap();
+        for bytes in [&b"{nope"[..], &b"\xff\xfe"[..]] {
+            std::fs::write(dir.path().join(STATE_FILE), bytes).unwrap();
+            let state = ExportState::read(dir.path());
+            assert!(state.server.is_empty() && state.types.is_empty());
+        }
+    }
 
     #[test]
     fn type_names_are_plain_words() {

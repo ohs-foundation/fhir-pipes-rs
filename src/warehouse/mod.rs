@@ -52,6 +52,8 @@ use serde_json::json;
 
 use config::Settings;
 
+use crate::error::usage;
+
 #[derive(clap::Args, Debug, Clone)]
 pub struct RefreshArgs {
     /// Config file (default: ./fhir-pipes.toml, else ./fhir-warehouse.toml).
@@ -165,6 +167,30 @@ fn env_secret(name: &str) -> Option<String> {
 }
 
 pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
+    // Everything up to the tools check is the flags and the config: an error
+    // there is the operator's to fix.
+    let (s, steps, needed) = setup(args, profile).map_err(usage)?;
+    if args.check {
+        check(&s, &steps, &needed);
+        return Ok(());
+    }
+    // With a file source, whether the tiles step runs is known only once the
+    // files are read (without Locations it is skipped), so its tools are
+    // checked then.
+    let needed: Vec<(&str, &str)> = needed
+        .iter()
+        .map(|(t, w)| (t.as_str(), w.as_str()))
+        .collect();
+    let (later, now): (Vec<_>, Vec<_>) = needed
+        .into_iter()
+        .partition(|&(_, w)| s.reads_files() && w == "tiles");
+    tools::require(&now)?;
+    refresh(&s, &steps, &later)
+}
+
+/// The settings from the config file and flags, the steps to run and the
+/// tools they need.
+fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSet<Step>, Tools)> {
     let steps = steps(args);
     let (file, base) = config::load(args.config.as_deref())?;
     let s = config::settings(
@@ -212,22 +238,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
         );
     }
     let needed = required_tools(&s, &steps)?;
-    if args.check {
-        check(&s, &steps, &needed);
-        return Ok(());
-    }
-    // With a file source, whether the tiles step runs is known only once the
-    // files are read (without Locations it is skipped), so its tools are
-    // checked then.
-    let needed: Vec<(&str, &str)> = needed
-        .iter()
-        .map(|(t, w)| (t.as_str(), w.as_str()))
-        .collect();
-    let (later, now): (Vec<_>, Vec<_>) = needed
-        .into_iter()
-        .partition(|&(_, w)| s.reads_files() && w == "tiles");
-    tools::require(&now)?;
-    refresh(&s, &steps, &later)
+    Ok((s, steps, needed))
 }
 
 /// The steps a run takes, from --only, --skip and --push.
@@ -274,8 +285,11 @@ fn hook_program(s: &Settings, program: &str) -> String {
     }
 }
 
+/// External tools, each with what it is for.
+type Tools = Vec<(String, String)>;
+
 /// The external tools the chosen steps need, with what each is for.
-fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Vec<(String, String)>> {
+fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Tools> {
     let mut t = Vec::new();
     if steps.contains(&Step::Views) && s.views.is_none() {
         bail!(
@@ -694,8 +708,10 @@ fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
     let dir = s
         .views
         .as_ref()
-        .context("[database] loads the view tables, so it needs the views directory")?;
-    let all: BTreeSet<String> = views::discover(dir, &s.strip_prefix)?
+        .context("[database] loads the view tables, so it needs the views directory")
+        .map_err(usage)?;
+    let all: BTreeSet<String> = views::discover(dir, &s.strip_prefix)
+        .map_err(usage)?
         .into_iter()
         .map(|v| v.table)
         .collect();
@@ -703,10 +719,10 @@ fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
         None => Ok(all.into_iter().collect()),
         Some(names) => {
             if let Some(bad) = names.iter().find(|n| !all.contains(*n)) {
-                bail!(
+                return Err(usage(anyhow::anyhow!(
                     "[database] tables: `{bad}` is not a view table ({})",
                     all.iter().cloned().collect::<Vec<_>>().join(", ")
-                );
+                )));
             }
             Ok(names.clone())
         }
@@ -732,11 +748,19 @@ struct ViewsDone {
 /// views write lookup tables run first and their tables are all written
 /// before any other (`write_order`).
 fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
-    let dir = s.views.as_ref().context("no views directory")?;
+    let dir = s
+        .views
+        .as_ref()
+        .context("no views directory")
+        .map_err(usage)?;
     println!("== views ({})", dir.display());
-    let all = views::discover(dir, &s.strip_prefix)?;
+    // A missing, unreadable or invalid ViewDefinition is the operator's to fix.
+    let all = views::discover(dir, &s.strip_prefix).map_err(usage)?;
     if all.is_empty() {
-        bail!("no ViewDefinitions in {}", dir.display());
+        return Err(usage(anyhow::anyhow!(
+            "no ViewDefinitions in {}",
+            dir.display()
+        )));
     }
     views::save(&all, &stage.dir("views"))?;
 
@@ -844,12 +868,12 @@ impl TableWriter<'_> {
         // The partition column is added to every row; a view column of the
         // same name would be lost beside it.
         if result.columns.iter().any(|c| c.name == s.partition_column) {
-            bail!(
+            return Err(usage(anyhow::anyhow!(
                 "view {} has a column `{}`, which is the partition column; \
                  set [partition] column to another name",
                 v.name,
                 s.partition_column
-            );
+            )));
         }
         let rule = partition::rule_for(&result, &s.lookups);
         let mut map: Option<&HashMap<String, String>> = None;

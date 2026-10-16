@@ -17,7 +17,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::cli::{DEFAULT_PARTITION_BY, DEFAULT_ROW_GROUP_SIZE, TransformArgs};
+use crate::error::usage;
 use crate::fhir::head::Head;
+use crate::fs::AtomicFile;
 use crate::snapshot::instant::{format_utc, parse_instant};
 use crate::snapshot::{Snapshot, State};
 
@@ -46,7 +48,10 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
     let text = input.to_string_lossy();
     if !text.contains(['*', '?', '[']) {
         if !input.exists() {
-            bail!("input {} not found", input.display());
+            return Err(usage(anyhow::anyhow!(
+                "input {} not found",
+                input.display()
+            )));
         }
         return crate::views::resource_files(input);
     }
@@ -56,12 +61,15 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
         ..Default::default()
     };
     let mut matches: Vec<PathBuf> = glob::glob_with(&text, options)
-        .with_context(|| format!("input pattern {text}"))?
+        .with_context(|| format!("input pattern {text}"))
+        .map_err(usage)?
         .collect::<Result<_, _>>()
         .with_context(|| format!("input pattern {text}"))?;
     matches.sort();
     if matches.is_empty() {
-        bail!("input pattern {text} matches nothing");
+        return Err(usage(anyhow::anyhow!(
+            "input pattern {text} matches nothing"
+        )));
     }
     let mut files = Vec::new();
     for m in matches {
@@ -283,7 +291,9 @@ pub fn split(s: &Settings) -> Result<()> {
     let raw = s.raw_dir();
     println!("== files ({} files → {})", files.len(), raw.display());
     if files.is_empty() {
-        bail!("the inputs hold no .json or .ndjson files");
+        return Err(usage(anyhow::anyhow!(
+            "the inputs hold no .json or .ndjson files"
+        )));
     }
     fs::create_dir_all(&raw).with_context(|| format!("creating {}", raw.display()))?;
     let spill_path = raw.join(".files-spill.ndjson.tmp");
@@ -350,20 +360,17 @@ pub fn split(s: &Settings) -> Result<()> {
         paths: &sources.paths,
         open: None,
     };
+    // Every temporary file not yet renamed is removed if this returns early.
     let mut written = Vec::new();
     for (rtype, t) in &types {
-        let tmp = write_ndjson(&raw, rtype, &t.slots, &mut reader)?;
-        written.push((tmp, raw.join(format!("{rtype}.ndjson"))));
+        written.push(write_ndjson(&raw, rtype, &t.slots, &mut reader)?);
     }
     // A changed input could have put other text where a resource was.
-    if let Err(e) = sources.check_unchanged() {
-        for (tmp, _) in &written {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(e);
-    }
-    for ((rtype, t), (tmp, path)) in types.iter().zip(&written) {
-        fs::rename(tmp, path).with_context(|| format!("renaming {} into place", path.display()))?;
+    sources.check_unchanged()?;
+    for ((rtype, t), file) in types.iter().zip(written) {
+        let path = raw.join(format!("{rtype}.ndjson"));
+        file.commit()
+            .with_context(|| format!("renaming {} into place", path.display()))?;
         if t.duplicates > 0 {
             println!(
                 "   {rtype}: {} resources ({} duplicates by id merged)",
@@ -393,30 +400,26 @@ fn is_older(candidate: Option<(i64, u32)>, current: Option<(i64, u32)>) -> bool 
 
 /// The resources at `slots` into `dir/.<rtype>.ndjson.tmp`, to be renamed
 /// to `<rtype>.ndjson` once every type is written, so a failed write leaves
-/// the previous file. Returns the temporary file.
+/// the previous file. Returns the temporary file, not yet committed.
 fn write_ndjson(
     dir: &Path,
     rtype: &str,
     slots: &[Slot],
     reader: &mut SlotReader,
-) -> Result<PathBuf> {
+) -> Result<AtomicFile> {
+    let path = dir.join(format!("{rtype}.ndjson"));
     let tmp = dir.join(format!(".{rtype}.ndjson.tmp"));
-    let result = (|| -> Result<()> {
-        let mut out = BufWriter::new(fs::File::create(&tmp)?);
+    let result = (|| -> Result<AtomicFile> {
+        let mut out = BufWriter::new(AtomicFile::create_at(&path, tmp.clone())?);
         let mut buf = Vec::new();
         for slot in slots {
             reader.read(slot, &mut buf)?;
             out.write_all(&buf)?;
             out.write_all(b"\n")?;
         }
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        Ok(())
+        Ok(out.into_inner().map_err(|e| e.into_error())?)
     })();
-    if let Err(e) = result {
-        let _ = fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("writing {}", tmp.display()));
-    }
-    Ok(tmp)
+    result.with_context(|| format!("writing {}", tmp.display()))
 }
 
 /// The types with a `<Type>.ndjson` in `dir`.
@@ -511,8 +514,11 @@ fn copy_into(from: &Path, tmp: &Path, to: &Path) -> Result<usize> {
     for chunk in crate::views::ndjson::open(from)? {
         count += chunk?.len();
     }
+    // Removes the copy if it fails part of the way.
+    let file = AtomicFile::adopt(to, tmp.to_path_buf());
     fs::copy(from, tmp).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(tmp, to).with_context(|| format!("renaming {} into place", to.display()))?;
+    file.commit()
+        .with_context(|| format!("renaming {} into place", to.display()))?;
     Ok(count)
 }
 
@@ -697,6 +703,30 @@ mod tests {
         assert_eq!(copy_into(&from, &tmp, &to).unwrap(), 2);
         assert_eq!(fs::read(&to).unwrap(), fs::read(&from).unwrap());
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn copy_into_copies_a_read_only_source() {
+        // A cached raw file the operator made read-only (mode 0444): the
+        // copy keeps its permissions and is committed all the same.
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("Location.ndjson");
+        fs::write(&from, "{\"a\":1}\n").unwrap();
+        let read_only = |p: &Path, on: bool| {
+            let mut perms = fs::metadata(p).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(on);
+            fs::set_permissions(p, perms).unwrap();
+        };
+        read_only(&from, true);
+        let (tmp, to) = (dir.path().join(".to.tmp"), dir.path().join("to.ndjson"));
+        assert_eq!(copy_into(&from, &tmp, &to).unwrap(), 1);
+        assert_eq!(fs::read(&to).unwrap(), fs::read(&from).unwrap());
+        assert!(fs::metadata(&to).unwrap().permissions().readonly());
+        assert!(!tmp.exists());
+        // So the temporary directory can be removed on Windows.
+        read_only(&from, false);
+        read_only(&to, false);
     }
 
     #[test]

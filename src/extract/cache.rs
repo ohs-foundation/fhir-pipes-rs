@@ -5,11 +5,14 @@
 //! run: every failure is an `Err(String)` the caller reports as `cache_error`.
 //! Same layout as the Python cache, so directories are interchangeable.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
+use crate::error::PipesError;
+use crate::fs::AtomicFile;
 use crate::snapshot::instant::format_utc;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -94,12 +97,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::result::Result<(), String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let tmp = path.with_file_name(format!(".{name}.{}-{seq}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("{}: {e}", path.display()));
-    }
-    Ok(())
+    let written = AtomicFile::create_at(path, tmp).and_then(|mut f| {
+        f.write_all(bytes).map_err(|e| PipesError::io(f.tmp(), e))?;
+        f.commit()
+    });
+    written.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

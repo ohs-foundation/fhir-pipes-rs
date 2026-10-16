@@ -25,6 +25,14 @@ fhir-pipes refresh --input exports/ --input extra.ndjson   # from files, no serv
 fhir-pipes refresh --check                           # settings, steps, tools found
 ```
 
+A run exits 2 when its input is wrong: an unknown or invalid key in the
+config file or the profile, a config file that cannot be read, `--only
+catalog` without a `[catalog]` section, an `--input` that is not there, or a
+ViewDefinition that is not valid. It exits 1 when something fails while it
+runs: a server or database that cannot be reached or answers with an error, a
+missing or failing tool, a failing hook, a file that cannot be written.
+Earlier versions exited 1 for every error.
+
 ### Steps
 
 | Step | What it does | Needs |

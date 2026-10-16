@@ -12,7 +12,7 @@ pub mod rebuild;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -26,6 +26,7 @@ use crate::error::{PipesError, Result};
 use crate::fhir::Location;
 use crate::fhir::location::strip_reference;
 use crate::fhir::ndjson::{LineAccess, Output, is_gz};
+use crate::fs::AtomicFile;
 use crate::profile::Profile;
 use crate::report::Report;
 use crate::snapshot::ORGANIZATIONS_FILE;
@@ -76,7 +77,7 @@ struct Diff<'a> {
     access: LineAccess,
     /// The Organization side of the facility pairing, when the snapshot has it.
     organizations: Option<(LineIndex, LineAccess)>,
-    out: Output,
+    out: Output<AtomicFile>,
     out_path: &'a Path,
     seen: HashSet<String>,
     stats: DiffStats,
@@ -250,17 +251,9 @@ fn read_input(
     }
 }
 
-fn tmp_path(out: &Path) -> PathBuf {
-    let mut s = out.as_os_str().to_owned();
-    s.push(".tmp");
-    PathBuf::from(s)
-}
-
 /// Flush, fsync and rename the finished changes file into place.
-fn finish(out: Output, tmp: &Path, dest: &Path) -> Result<()> {
-    let file = out.finish().map_err(|e| PipesError::io(tmp, e))?;
-    file.sync_all().map_err(|e| PipesError::io(tmp, e))?;
-    std::fs::rename(tmp, dest).map_err(|e| PipesError::io(dest, e))
+fn finish(out: Output<AtomicFile>, tmp: &Path) -> Result<()> {
+    out.finish().map_err(|e| PipesError::io(tmp, e))?.commit()
 }
 
 pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
@@ -302,9 +295,10 @@ pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
         None
     };
 
-    let tmp = tmp_path(&args.out);
-    let out = Output::create(&tmp, is_gz(&args.out))
-        .map_err(|e| PipesError::Usage(format!("--out {}: {e}", tmp.display())))?;
+    let file =
+        AtomicFile::create(&args.out).map_err(|e| PipesError::Usage(format!("--out {e}")))?;
+    let tmp = file.tmp().to_path_buf();
+    let out = Output::new(file, is_gz(&args.out));
     let mut diff = Diff {
         index,
         access: LineAccess::open(&ndjson)?,
@@ -317,10 +311,7 @@ pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
     };
     let read = read_input(format, &args.input, &mut diff, &mut report);
     let Diff { out, stats, .. } = diff;
-    if let Err(e) = read.and_then(|()| finish(out, &tmp, &args.out)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    read.and_then(|()| finish(out, &tmp))?;
 
     println!(
         "{} changed, {} unchanged, {} new -> {}",

@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
+use crate::fs::{AtomicFile, atomic_write};
 use crate::report::Report;
 
 /// A report's content, as a 64-bit hash. Left out: `date`, which is when
@@ -221,13 +222,13 @@ impl Scope {
 /// One id per line (gzip when `out` ends in `.gz`), written to a temporary
 /// file and renamed into place.
 pub fn write_lines(out: &Path, lines: &[String]) -> Result<()> {
-    let tmp = with_suffix(out, ".tmp");
-    let mut w = Output::create(&tmp, is_gz(out))?;
+    let file = AtomicFile::create(out)?;
+    let tmp = file.tmp().to_path_buf();
+    let mut w = Output::new(file, is_gz(out));
     for l in lines {
         writeln!(w, "{l}").map_err(|e| PipesError::io(&tmp, e))?;
     }
-    w.finish().map_err(|e| PipesError::io(&tmp, e))?;
-    std::fs::rename(&tmp, out).map_err(|e| PipesError::io(out, e))
+    w.finish().map_err(|e| PipesError::io(&tmp, e))?.commit()
 }
 
 /// A file as the plan sees it: its path, length and modification time, so
@@ -294,10 +295,7 @@ impl Checkpoint {
     /// Written whole to a temporary file and renamed, so a crash leaves the
     /// previous checkpoint, never half of one.
     pub fn write(&self, path: &Path) -> Result<()> {
-        let tmp = with_suffix(path, ".tmp");
-        let bytes = serde_json::to_vec(self)?;
-        std::fs::write(&tmp, bytes).map_err(|e| PipesError::io(&tmp, e))?;
-        std::fs::rename(&tmp, path).map_err(|e| PipesError::io(path, e))
+        atomic_write(path, serde_json::to_vec(self)?)
     }
 }
 

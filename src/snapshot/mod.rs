@@ -5,12 +5,12 @@ pub mod index;
 pub mod instant;
 pub mod merge;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PipesError, Result};
+use crate::fs::{StateError, read_state};
 
 pub const LOCATIONS_FILE: &str = "locations.ndjson";
 pub const ORGANIZATIONS_FILE: &str = "organizations.ndjson";
@@ -82,51 +82,25 @@ pub struct State {
 }
 
 impl State {
+    /// None when there is no state file. A state file that cannot be read
+    /// or parsed is a usage error: a fresh start would re-extract
+    /// everything, which the operator should choose.
     pub fn read(path: &Path) -> Result<Option<State>> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).map(Some).map_err(|e| {
+        read_state(path).map_err(|e| match e {
+            StateError::Invalid(e) => {
                 PipesError::Usage(format!("{}: not a valid state file: {e}", path.display()))
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(PipesError::Usage(
-                format!("{}: not a valid state file: {e}", path.display()),
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(PipesError::Usage(
-                format!("{}: not readable: {e}", path.display()),
-            )),
-            Err(e) => Err(PipesError::io(path, e)),
-        }
+            }
+            StateError::Unreadable(e) => {
+                PipesError::Usage(format!("{}: not readable: {e}", path.display()))
+            }
+            StateError::Io(e) => PipesError::io(path, e),
+        })
     }
 
-    /// Atomic: write `state.json.tmp`, fsync it, then rename over `path`.
+    /// Atomic: written to `state.json.tmp`, fsynced, renamed over `path`.
     pub fn write(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(self)? + "\n";
-        let result: Result<()> = (|| {
-            let mut file = std::fs::File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
-            file.write_all(text.as_bytes())
-                .map_err(|e| PipesError::io(&tmp, e))?;
-            file.sync_all().map_err(|e| PipesError::io(&tmp, e))
-        })();
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(PipesError::io(path, e));
-        }
-        // Durability: fsync the directory whose entry (the state.json
-        // rename) just changed, so that change survives a crash right
-        // after this returns. Not every platform/filesystem supports
-        // fsync on a directory; that is a best-effort improvement, not
-        // something worth failing an otherwise-successful write over.
-        if let Some(parent) = path.parent()
-            && let Ok(d) = std::fs::File::open(parent)
-        {
-            let _ = d.sync_all();
-        }
-        Ok(())
+        crate::fs::atomic_write(path, text)
     }
 }
 

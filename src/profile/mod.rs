@@ -285,9 +285,17 @@ impl Profile {
             return;
         }
         let tmp = snapshot.join(format!("{SNAPSHOT_COPY}.{}.tmp", std::process::id()));
-        let written = std::fs::write(&tmp, &self.text).and_then(|()| std::fs::rename(&tmp, &path));
+        let written = crate::fs::AtomicFile::create_at(&path, tmp).and_then(|mut f| {
+            std::io::Write::write_all(&mut f, self.text.as_bytes())
+                .map_err(|e| PipesError::io(f.tmp(), e))?;
+            f.commit()
+        });
         if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
+            // The I/O error alone: the message names the path already.
+            let e = match e {
+                PipesError::Io { source, .. } => source.to_string(),
+                e => e.to_string(),
+            };
             eprintln!(
                 "fhir-pipes: warning: could not keep a copy of the profile at {} ({e}); \
                  pass --profile to diff, index and population",

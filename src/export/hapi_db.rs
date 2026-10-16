@@ -44,7 +44,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
 use crate::report::Report;
 use crate::snapshot::instant::WATERMARK_MARGIN_SECS;
-use crate::snapshot::merge::{MergeFiles, merge_file_dropping};
+use crate::snapshot::merge::{MergeFiles, MergeOptions, merge_file};
 use crate::snapshot::same_server;
 
 /// Rows fetched from the cursor at a time.
@@ -716,7 +716,7 @@ async fn read_all(
     let mut total = 0usize;
     let mut watermark: Option<String> = None;
     let result = async {
-        let file = std::fs::File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
+        let file = crate::fs::AtomicFile::create_at(&out, tmp.clone())?;
         let mut w = std::io::BufWriter::new(file);
         read_rows(
             conn,
@@ -738,15 +738,12 @@ async fn read_all(
             },
         )
         .await?;
-        w.flush().map_err(|e| PipesError::io(&tmp, e))?;
-        drop(w);
-        std::fs::rename(&tmp, &out).map_err(|e| PipesError::io(&out, e))
+        w.into_inner()
+            .map_err(|e| PipesError::io(&tmp, e.into_error()))?
+            .commit()
     }
     .await;
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    result?;
     println!(
         "{resource_type}: {total} resources from the database -> {}",
         out.display()
@@ -824,7 +821,7 @@ async fn read_changes(
     // A resource deleted and created again is live: its row says so, and
     // the merge keeps an id it reads.
     let gone: HashSet<&str> = deleted.iter().map(String::as_str).collect();
-    let stats = merge_file_dropping(
+    let stats = merge_file(
         &MergeFiles {
             existing: out.clone(),
             tmp: tmp.clone(),
@@ -832,8 +829,10 @@ async fn read_changes(
             unparsed_kind: "export_line_unparsed",
         },
         &notes,
-        false,
-        &gone,
+        &MergeOptions {
+            drop: Some(&gone),
+            ..MergeOptions::default()
+        },
         report,
     )?;
     let (total, removed) = (stats.total, stats.removed);
