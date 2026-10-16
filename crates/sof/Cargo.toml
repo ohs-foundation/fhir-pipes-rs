@@ -36,7 +36,6 @@ chrono = { workspace = true, optional = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
-pin-project-lite = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

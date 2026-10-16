@@ -28,10 +28,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 geojson = "1"
-geo = "0.33"
-geo-types = "0.7"
+# The defaults (earcut, spade, multithreading through rayon) are unused.
+geo = { version = "0.33", default-features = false }
 wkb = "0.9"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.11"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
@@ -48,7 +48,7 @@ tar = { version = "0.4", default-features = false }
 httpdate = "1"
 # refresh (formerly fhir-warehouse)
 anyhow = "1"
-toml = "0.9"
+toml = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tempfile = "3"
 arrow = { workspace = true }
@@ -93,14 +93,19 @@ banshee_parser = "0.2.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
+# octofhir-fhirpath turns on "full" itself, so a shorter list here saves nothing.
 tokio = { version = "1", features = ["full", "io-util"] }
 futures-util = "0.3"
-pin-project-lite = "0.2"
 sqlx-core = { version = "0.9.0", default-features = false, features = ["_rt-tokio", "json", "_tls-rustls-ring-webpki"] }
 sqlx-postgres = { version = "0.9.0", default-features = false, features = ["json"] }
 csv = "1.4"
-arrow = { version = "59" }
-parquet = { version = "59", features = ["arrow", "snap", "zstd", "lz4", "flate2"] }
+# Without the defaults: arrow's are arrow-csv, arrow-json and arrow-ipc, which
+# nothing uses; parquet's add brotli and simdutf8. The codecs are what we
+# write (zstd in the geo outputs, snappy by default in views and refresh, gzip
+# and lz4 as sof options) and what QGIS, GDAL and DuckDB write by default
+# (snappy), so `diff` reads them all; zlib-rs is the gzip backend, as before.
+arrow = { version = "59", default-features = false }
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd", "lz4", "flate2-zlib-rs"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytes = "1"
 thiserror = "2.0"

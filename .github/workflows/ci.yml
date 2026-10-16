@@ -80,6 +80,16 @@ jobs:
           FHIR_PIPES_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=require
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --no-default-features
+  # Known advisories against Cargo.lock. .cargo/audit.toml sets what fails
+  # (a vulnerability, an unmaintained or an unsound crate) and which are
+  # ignored and why. The weekly run catches advisories published after a merge.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit
   release-build:
     needs: [changes, test]
     if: >-
