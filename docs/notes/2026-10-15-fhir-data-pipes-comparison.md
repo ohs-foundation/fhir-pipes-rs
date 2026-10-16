@@ -109,9 +109,12 @@ Changed by the code review (#63 to #76):
   resource types, boundaries on expressions and contained references inside
   `forEach` (#74). Rows are byte-identical to before on the ICR and
   fhir-data-pipes views.
-- **Exit codes.** `refresh` and `views` now exit 2 for input the operator can
-  fix (configuration, flags, ViewDefinitions, unreadable input) and 1 for
-  failures while running, as the other commands do (#75).
+- **Exit codes.** `refresh` and `views` now exit 2 for configuration and
+  flag errors, ViewDefinitions that do not compile, and input files that are
+  missing or not valid JSON; they exit 1 for failures while running,
+  including an input file that exists but cannot be read, as the other
+  commands do (#75). `views validate`, `views lint` and `views test` still
+  exit 1 when they report findings.
 
 The OpenMRS database mode is not needed: OpenMRS works over FHIR search, which
 fhir-pipes supports (to be checked in #29).
@@ -236,7 +239,7 @@ into FHIR, release binaries for five platforms, and view linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Distribution | Docker image (`us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main`), jars, compose files for HAPI, OpenMRS, Spark, OpenHIM | Release binaries for macOS, Linux (static musl) and Windows (C runtime linked in, no redistributable needed) with checksums; `cargo install` | Missing: no image or compose files |
-| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 933 tests with default features on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite and fake FHIR servers; on Linux also 953 with all features and the database tests against PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
+| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | Tests with default features on Linux, macOS and Windows for every PR (933 on Linux, 920 on Windows, where some tests are Unix-only), including the official SQL-on-FHIR suite and fake FHIR servers; on Linux also 953 with all features and the database tests against PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
 | Docs | mkdocs site: concepts, installation (Docker, controller, pipeline), tutorials (single machine, test servers, Superset, GCP), schema | README, ROADMAP, `docs/` per command, profile walkthrough | Partial: no install-with-Docker or dashboard tutorials |
 | Licence | Apache-2.0, Google CLA | Apache-2.0 (sof crates MIT OR Apache-2.0) | Same; CLA needed to contribute |
 
