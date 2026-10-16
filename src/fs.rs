@@ -129,18 +129,54 @@ impl AtomicFile {
     pub fn commit(mut self) -> Result<()> {
         let synced = match self.file.take() {
             Some(file) => file.sync_all(),
-            // Opened for writing, not truncated: on Windows, sync_all
-            // (FlushFileBuffers) needs a handle with write access.
-            None => std::fs::OpenOptions::new()
-                .write(true)
-                .open(&self.tmp)
-                .and_then(|f| f.sync_all()),
+            None => sync_adopted(&self.tmp),
         };
         synced.map_err(|e| PipesError::io(&self.tmp, e))?;
         std::fs::rename(&self.tmp, &self.path).map_err(|e| PipesError::io(&self.path, e))?;
         self.keep = true;
         sync_dir(self.path.parent());
         Ok(())
+    }
+}
+
+/// Fsyncs a temporary file something else wrote. It is opened for writing,
+/// not truncated: on Windows, sync_all (FlushFileBuffers) needs a handle
+/// with write access. A read-only file, such as `fs::copy` makes of a
+/// read-only source, keeps its permissions: on Unix it is fsynced through a
+/// read-only handle, which fsync allows; on Windows its read-only attribute
+/// is cleared for the fsync and set again.
+fn sync_adopted(tmp: &Path) -> std::io::Result<()> {
+    let sync = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp)
+            .and_then(|f| f.sync_all())
+    };
+    match sync() {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            #[cfg(not(windows))]
+            {
+                let _ = e;
+                File::open(tmp).and_then(|f| f.sync_all())
+            }
+            #[cfg(windows)]
+            {
+                let readonly = std::fs::metadata(tmp)?.permissions();
+                if !readonly.readonly() {
+                    return Err(e);
+                }
+                let mut writable = readonly.clone();
+                // Windows only: this clears the read-only attribute of our
+                // own temporary file, which is set again just after.
+                #[allow(clippy::permissions_set_readonly_false)]
+                writable.set_readonly(false);
+                std::fs::set_permissions(tmp, writable)?;
+                let synced = sync();
+                std::fs::set_permissions(tmp, readonly)?;
+                synced
+            }
+        }
+        other => other,
     }
 }
 
@@ -228,6 +264,31 @@ mod tests {
         let tmp = dir.path().join("a.ndjson.tmp");
         assert_eq!(std::fs::read_to_string(tmp).unwrap(), "partial");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn adopt_commits_a_read_only_file_and_keeps_it_read_only() {
+        // `fs::copy` of a read-only source makes a read-only copy; main kept
+        // it so, and the commit must not need it writable.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, tmp) = (dir.path().join("out.ndjson"), dir.path().join(".out.tmp"));
+        std::fs::write(&tmp, "{}\n").unwrap();
+        let mut perms = std::fs::metadata(&tmp).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&tmp, perms).unwrap();
+        AtomicFile::adopt(&path, tmp.clone()).commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+        assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(!tmp.exists());
+        make_writable(&path);
+    }
+
+    /// So the temporary directory can be removed on Windows.
+    fn make_writable(path: &Path) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms).unwrap();
     }
 
     #[test]

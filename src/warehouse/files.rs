@@ -706,6 +706,30 @@ mod tests {
     }
 
     #[test]
+    fn copy_into_copies_a_read_only_source() {
+        // A cached raw file the operator made read-only (mode 0444): the
+        // copy keeps its permissions and is committed all the same.
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("Location.ndjson");
+        fs::write(&from, "{\"a\":1}\n").unwrap();
+        let read_only = |p: &Path, on: bool| {
+            let mut perms = fs::metadata(p).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(on);
+            fs::set_permissions(p, perms).unwrap();
+        };
+        read_only(&from, true);
+        let (tmp, to) = (dir.path().join(".to.tmp"), dir.path().join("to.ndjson"));
+        assert_eq!(copy_into(&from, &tmp, &to).unwrap(), 1);
+        assert_eq!(fs::read(&to).unwrap(), fs::read(&from).unwrap());
+        assert!(fs::metadata(&to).unwrap().permissions().readonly());
+        assert!(!tmp.exists());
+        // So the temporary directory can be removed on Windows.
+        read_only(&from, false);
+        read_only(&to, false);
+    }
+
+    #[test]
     fn inputs_expand_to_files_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
