@@ -122,7 +122,7 @@ fn probe_conflicts(client: &FhirClient, base: &str, bundle: &Bundle) -> Vec<Stri
 
 /// Posts one bundle; the error says what was and was not written.
 fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> Result<()> {
-    let body = b.to_json().to_string().into_bytes();
+    let body = b.to_bytes();
     match client.post_json(base, body) {
         Ok(_) => Ok(()),
         Err(FetchError::Status {

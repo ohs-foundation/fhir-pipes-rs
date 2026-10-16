@@ -276,7 +276,7 @@ fn post_one(
     count: usize,
     label: &str,
 ) -> Result<()> {
-    let body = b.to_json().to_string().into_bytes();
+    let body = b.to_bytes();
     client.post_json(base, body).map(|_| ()).map_err(|e| {
         PipesError::Environment(format!(
             "{label}bundle {n}/{count} failed: {e}; nothing in it was written"
