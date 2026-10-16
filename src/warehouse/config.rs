@@ -67,6 +67,10 @@ pub enum Fetch {
     Search,
     /// A Bulk Data `$export` (`export --bulk`).
     Bulk,
+    /// The HAPI server's PostgreSQL database (`export --hapi-db`), its
+    /// connection string in $FHIR_PIPES_HAPI_DATABASE_URL.
+    #[serde(rename = "hapi-db")]
+    HapiDb,
 }
 
 impl Fetch {
@@ -74,6 +78,7 @@ impl Fetch {
         match self {
             Fetch::Search => "search",
             Fetch::Bulk => "bulk",
+            Fetch::HapiDb => "hapi-db",
         }
     }
 }
@@ -567,6 +572,9 @@ mod tests {
         assert_eq!(bulk.fetch, Fetch::Bulk);
         assert_eq!(bulk.bulk_timeout, 60);
         assert!(toml::from_str::<File>("[server]\nfetch = \"jdbc\"").is_err());
+        let db = s("data = \"d\"\n[server]\nfetch = \"hapi-db\"");
+        assert_eq!(db.fetch, Fetch::HapiDb);
+        assert_eq!(db.fetch.name(), "hapi-db");
     }
 
     #[test]

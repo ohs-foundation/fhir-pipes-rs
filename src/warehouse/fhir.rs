@@ -54,16 +54,22 @@ pub fn locations(s: &Settings, out: &Path) -> Result<()> {
 
 /// `fhir-pipes export --incremental`: each type to raw/<server>/<Type>.ndjson,
 /// downloading only what changed since the last refresh unless `full`. With
-/// `fetch = "bulk"`, through a Bulk Data `$export` (`export --bulk`).
+/// `fetch = "bulk"`, through a Bulk Data `$export` (`export --bulk`); with
+/// `fetch = "hapi-db"`, from the HAPI server's database (`export --hapi-db`).
 pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
     if types.is_empty() {
         return Ok(());
     }
     let bulk = s.fetch == Fetch::Bulk;
+    let hapi_db = s.fetch == Fetch::HapiDb;
     println!(
         "   export {}{} → {}",
         types.join(", "),
-        if bulk { " ($export)" } else { "" },
+        match s.fetch {
+            Fetch::Search => "",
+            Fetch::Bulk => " ($export)",
+            Fetch::HapiDb => " (HAPI database)",
+        },
         s.raw_dir().display()
     );
     crate::export::run_export(&ExportArgs {
@@ -74,6 +80,7 @@ pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
         incremental: !s.full,
         bulk,
         bulk_timeout: s.bulk_timeout,
+        hapi_db,
         report: None,
         retries: DEFAULT_RETRIES,
         timeout: DEFAULT_TIMEOUT_SECS,

@@ -565,7 +565,7 @@ pub struct ExtractArgs {
 #[derive(clap::Args, Debug, Clone)]
 pub struct ExportArgs {
     /// Base URL of the FHIR server (the resource type is appended), or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
-    #[arg(long, value_parser = parse_server)]
+    #[arg(long, value_parser = parse_server, required_unless_present = "hapi_db", default_value = "")]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
@@ -589,6 +589,12 @@ pub struct ExportArgs {
     /// before cancelling it; also the time allowed for each file's download
     #[arg(long, default_value_t = DEFAULT_BULK_TIMEOUT_SECS, requires = "bulk")]
     pub bulk_timeout: u64,
+    /// Read the resources from a HAPI FHIR JPA server's PostgreSQL database
+    /// instead of its API; the connection string comes only from
+    /// $FHIR_PIPES_HAPI_DATABASE_URL. This depends on HAPI's internal
+    /// schema; with --incremental, deleted resources are removed
+    #[arg(long, conflicts_with_all = ["server", "bulk"])]
+    pub hapi_db: bool,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,

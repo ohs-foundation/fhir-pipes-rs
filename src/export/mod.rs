@@ -15,8 +15,13 @@
 //! exported in full in a second export. The export's `deleted` resources are
 //! removed from the files, and every type's watermark becomes the manifest's
 //! `transactionTime`. The count check after a merge is the same as above.
+//!
+//! With `--hapi-db`, the files come from a HAPI FHIR JPA server's PostgreSQL
+//! database instead of its API (see `hapi_db`), with watermarks of their own.
 
 mod bulk;
+#[cfg(feature = "postgres")]
+mod hapi_db;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
@@ -39,6 +44,10 @@ use crate::transform::write_report;
 
 const STATE_FILE: &str = ".export-state.json";
 
+/// The environment variable `--hapi-db` takes the database's connection
+/// string from; it is never read from the command line or a file.
+pub const HAPI_DB_URL_ENV: &str = "FHIR_PIPES_HAPI_DATABASE_URL";
+
 /// What the last export into a directory downloaded, per resource type.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ExportState {
@@ -48,6 +57,12 @@ struct ExportState {
     /// A Bulk Data export started and not yet finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bulk: Option<bulk::Pending>,
+    /// `--hapi-db`, per type: the watermark is the greatest
+    /// `hfj_resource.res_updated` read, as the database has it (no zone).
+    /// The server is then the database (see `hapi_db::identity`), so these
+    /// and `types` are never both filled.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    hapi_db: BTreeMap<String, TypeState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +123,15 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
     }
     std::fs::create_dir_all(&args.out)
         .map_err(|e| PipesError::Usage(format!("--out {}: {e}", args.out.display())))?;
+    if args.hapi_db {
+        let mut report = Report::default();
+        export_hapi_db(args, &types, &mut report)?;
+        if let Some(path) = &args.report {
+            write_report(path, &report)?;
+        }
+        println!("{}", report.summary());
+        return Ok(());
+    }
     let client = FhirClient::new(
         args.auth.auth()?,
         args.retries,
@@ -144,6 +168,38 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
     }
     println!("{}", report.summary());
     Ok(())
+}
+
+/// The `--hapi-db` side of `run_export`.
+#[cfg(feature = "postgres")]
+fn export_hapi_db(args: &ExportArgs, types: &[&str], report: &mut Report) -> Result<()> {
+    let url = std::env::var(HAPI_DB_URL_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            PipesError::Usage(format!(
+                "--hapi-db needs the database's connection string in ${HAPI_DB_URL_ENV}"
+            ))
+        })?;
+    let server = hapi_db::identity(&url);
+    let mut state = ExportState::read(&args.out);
+    if !same_server(&state.server, &server) {
+        // Files from a server's API or another database are not merged into.
+        state = ExportState {
+            server,
+            ..ExportState::default()
+        };
+    }
+    hapi_db::export(&url, args, types, &mut state, report)
+}
+
+#[cfg(not(feature = "postgres"))]
+fn export_hapi_db(_args: &ExportArgs, _types: &[&str], _report: &mut Report) -> Result<()> {
+    Err(PipesError::Usage(
+        "--hapi-db needs PostgreSQL support, which this fhir-pipes was built without; \
+         build it with `--features postgres`"
+            .into(),
+    ))
 }
 
 /// Bring OUT/<resource_type>.ndjson up to date: incrementally when there is
