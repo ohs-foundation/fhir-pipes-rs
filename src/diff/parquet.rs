@@ -304,15 +304,18 @@ mod tests {
         assert_eq!(report.count("geometry_unparseable"), 1);
     }
 
-    /// QGIS, GDAL and DuckDB write Snappy by default; the parquet crate only
-    /// decodes codecs enabled at build time, so this guards the feature list.
+    /// QGIS, GDAL and DuckDB write Snappy by default and our geo outputs are
+    /// Zstd; the parquet crate only decodes codecs enabled at build time, so
+    /// this guards the feature list in Cargo.toml.
     #[test]
-    fn snappy_and_lz4_compressed_input_is_readable() {
+    fn snappy_lz4_zstd_and_gzip_compressed_input_is_readable() {
         use parquet::basic::Compression;
         let dir = tempfile::tempdir().unwrap();
         for (name, compression) in [
             ("snappy", Compression::SNAPPY),
             ("lz4", Compression::LZ4_RAW),
+            ("zstd", Compression::ZSTD(Default::default())),
+            ("gzip", Compression::GZIP(Default::default())),
         ] {
             let path = dir.path().join(format!("{name}.parquet"));
             let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
