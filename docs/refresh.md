@@ -190,8 +190,9 @@ The views step keeps `server.concurrency` search requests in flight at once
 side by side, and a full download of a large type (10,000 resources or more)
 is split into `_lastUpdated` windows paged side by side. Incremental
 downloads stay one stream per type. `concurrency = 1` downloads one type at a
-time, one page at a time. The `locations` step pages Locations as one stream
-either way.
+time, one page at a time. With `fetch = "bulk"`, it is the number of the
+export's output files downloaded at once. The `locations` step pages
+Locations as one stream either way.
 
 ```toml
 [server]

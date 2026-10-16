@@ -33,9 +33,10 @@ use crate::cli::SyncArgs;
 use crate::error::{PipesError, Result};
 use crate::export::valid_type;
 use crate::extract::client::FhirClient;
+use crate::fhir::head::Head;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::load::bundle::{Bundle, plan, plan_deletes};
-use crate::load::order::{depths, parent_key};
+use crate::load::order::{depths, reference_key};
 use crate::load::{Progress, post_all, preflight};
 use crate::snapshot::instant::{format_utc, later};
 use state::{SyncState, Synced, TypeState};
@@ -90,14 +91,6 @@ fn valid_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-}
-
-fn last_updated(resource: &Value) -> &str {
-    resource
-        .get("meta")
-        .and_then(|m| m.get("lastUpdated"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
 }
 
 /// Drop `meta.versionId` and `meta.lastUpdated`, and `meta` when nothing
@@ -177,11 +170,13 @@ fn plan_type(resource_type: &str, path: &Path, synced: &Synced, full: bool) -> R
         let at = |what: &str| {
             PipesError::Usage(format!("{}: line {}: {what}", path.display(), line.number))
         };
-        let value: Value = serde_json::from_str(&line.text).map_err(|e| at(&e.to_string()))?;
-        if value.get("resourceType").and_then(Value::as_str) != Some(resource_type) {
+        let head = Head::parse(&line.text)
+            .map_err(|e| at(&e.to_string()))?
+            .unwrap_or_default();
+        if head.resource_type.as_deref() != Some(resource_type) {
             return Err(at(&format!("not a {resource_type}")));
         }
-        let id = value.get("id").and_then(Value::as_str).unwrap_or("");
+        let id = head.id.as_deref().unwrap_or("");
         if !valid_id(id) {
             return Err(at(&format!(
                 "id {id:?} is not a FHIR id (1 to 64 letters, digits, '-' and '.')"
@@ -190,7 +185,7 @@ fn plan_type(resource_type: &str, path: &Path, synced: &Synced, full: bool) -> R
         if !present.insert(id.to_string()) {
             return Err(at(&format!("duplicate resource {resource_type}/{id}")));
         }
-        let updated = last_updated(&value);
+        let updated = head.last_updated.as_deref().unwrap_or("");
         let same = !updated.is_empty() && synced.get(id).is_some_and(|s| s == updated);
         if same && !full {
             unchanged += 1;
@@ -198,7 +193,9 @@ fn plan_type(resource_type: &str, path: &Path, synced: &Synced, full: bool) -> R
         }
         // One type per file: a parent of another type is not in this set.
         parents.push(
-            parent_key(&value)
+            head.part_of
+                .as_deref()
+                .and_then(|r| reference_key(r, Some(resource_type)))
                 .filter(|(t, _)| *t == resource_type)
                 .map(|(_, id)| id.to_string()),
         );
@@ -276,7 +273,7 @@ fn post_one(
     count: usize,
     label: &str,
 ) -> Result<()> {
-    let body = b.to_json().to_string().into_bytes();
+    let body = b.to_bytes();
     client.post_json(base, body).map(|_| ()).map_err(|e| {
         PipesError::Environment(format!(
             "{label}bundle {n}/{count} failed: {e}; nothing in it was written"

@@ -4,6 +4,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use assert_cmd::assert::Assert;
@@ -231,6 +232,164 @@ fn a_bulk_export_is_polled_until_done_and_written_per_type() {
         names,
         [".export-state.json", "Observation.ndjson", "Patient.ndjson"]
     );
+}
+
+/// Output files answered after `delay`, counting the requests in flight.
+#[derive(Clone)]
+struct SlowFiles {
+    delay: Duration,
+    bodies: std::sync::Arc<std::collections::HashMap<String, (u16, String)>>,
+    in_flight: std::sync::Arc<AtomicUsize>,
+    most: std::sync::Arc<AtomicUsize>,
+}
+
+impl Responder for SlowFiles {
+    fn respond<'a>(
+        &mut self,
+        req: &'a httptest::http::Request<httptest::bytes::Bytes>,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = httptest::http::Response<httptest::bytes::Bytes>> + Send + 'a>,
+    > {
+        let me = self.clone();
+        let path = req.uri().path().to_string();
+        Box::pin(async move {
+            let now = me.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            me.most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(me.delay).await;
+            let (status, body) = me.bodies[&path].clone();
+            me.in_flight.fetch_sub(1, Ordering::SeqCst);
+            httptest::http::Response::builder()
+                .status(status)
+                .body(httptest::bytes::Bytes::from(body))
+                .unwrap()
+        })
+    }
+}
+
+/// An export of Patient and Observation whose nine output files, the two
+/// types interleaved, each take `delay` to answer; `failing` answers 404.
+fn slow_export(server: &Server, delay: Duration, failing: Option<&str>) -> SlowFiles {
+    expect_kick_off(
+        server,
+        "Observation,Patient",
+        None,
+        &server.url_str("/status/1"),
+    );
+    let mut output = Vec::new();
+    let mut bodies = std::collections::HashMap::new();
+    for i in 0..9 {
+        let t = if i % 3 == 2 { "Observation" } else { "Patient" };
+        let path = format!("/files/{i}.ndjson");
+        let lines: Vec<Value> = (0..3)
+            .map(|k| json!({"resourceType": t, "id": format!("{t}-{i}-{k}"), "n": "é\\\"x"}))
+            .collect();
+        let status = if failing == Some(path.as_str()) {
+            404
+        } else {
+            200
+        };
+        bodies.insert(path.clone(), (status, ndjson(&lines)));
+        output.push((t, path));
+    }
+    let pairs: Vec<(&str, &str)> = output.iter().map(|(t, p)| (*t, p.as_str())).collect();
+    let m = manifest(server, &pairs, false);
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/status/1"))
+            .times(1)
+            .respond_with(done(&m)),
+    );
+    let files = SlowFiles {
+        delay,
+        bodies: std::sync::Arc::new(bodies),
+        in_flight: Default::default(),
+        most: Default::default(),
+    };
+    server.expect(
+        Expectation::matching(request::method_path("GET", matches("^/files/")))
+            .times(..)
+            .respond_with(files.clone()),
+    );
+    files
+}
+
+#[test]
+fn output_files_download_side_by_side_and_join_in_manifest_order() {
+    let server = Server::run();
+    let files = slow_export(&server, Duration::from_millis(300), None);
+    expect_delete(&server, "/status/1");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    let a = export_bulk(&server, &out, &["Patient", "Observation"])
+        .args(["--concurrency", "3"])
+        .assert()
+        .success();
+    let text = stdout(&a);
+    assert!(text.contains("Patient: 18 resources, 6 files"), "{text}");
+    assert!(text.contains("Observation: 9 resources, 3 files"), "{text}");
+    assert_eq!(
+        files.most.load(Ordering::SeqCst),
+        3,
+        "--concurrency at once"
+    );
+    // Each type's lines in manifest order, as a download a file at a time
+    // writes them.
+    let types: [(&str, &[usize]); 2] = [
+        ("Patient", &[0, 1, 3, 4, 6, 7]),
+        ("Observation", &[2, 5, 8]),
+    ];
+    for (t, want) in types {
+        let want: String = want
+            .iter()
+            .map(|i| files.bodies[&format!("/files/{i}.ndjson")].1.clone())
+            .collect();
+        assert_eq!(
+            std::fs::read_to_string(out.join(format!("{t}.ndjson"))).unwrap(),
+            want,
+            "{t}"
+        );
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [".export-state.json", "Observation.ndjson", "Patient.ndjson"]
+    );
+}
+
+#[test]
+fn a_failed_output_file_keeps_no_part_and_advances_nothing() {
+    let server = Server::run();
+    slow_export(&server, Duration::from_millis(50), Some("/files/4.ndjson"));
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(
+        out.join("Patient.ndjson"),
+        ndjson(&[patient("old", "2026-01-01T00:00:00Z")]),
+    )
+    .unwrap();
+    let a = export_bulk(&server, &out, &["Patient", "Observation"])
+        .args(["--concurrency", "4"])
+        .assert()
+        .failure();
+    assert!(stderr(&a).contains("/files/4.ndjson"), "{}", stderr(&a));
+    assert_eq!(ids(&out.join("Patient.ndjson")), ["old"]);
+    assert!(!out.join("Observation.ndjson").exists());
+    let s = state(&out);
+    assert!(s["types"].as_object().is_none_or(|t| t.is_empty()), "{s}");
+    assert!(
+        s.get("bulk").is_some(),
+        "the export is picked up next run: {s}"
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, [".export-state.json", "Patient.ndjson"]);
 }
 
 /// `parts` as one gzip body of a member each. Concatenated members are one

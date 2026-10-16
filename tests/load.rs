@@ -249,6 +249,44 @@ fn a_412_names_the_conflicting_ids_and_stops() {
 }
 
 #[test]
+fn a_412_after_a_retry_says_the_earlier_attempt_may_have_committed() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("a", Some("1"), None)]);
+    expect_metadata(&server, true);
+    // The first attempt was committed but its answer lost (a gateway's
+    // 503); the retry then conflicts with that attempt's own write.
+    server.expect(
+        Expectation::matching(any_bundle())
+            .times(2)
+            .respond_with(cycle![
+                status_code(503),
+                status_code(412).body(r#"{"resourceType":"OperationOutcome"}"#),
+            ]),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Location/a"))
+            .times(1)
+            .respond_with(ok(
+                json!({"resourceType": "Location", "id": "a", "meta": {"versionId": "2"}})
+                    .to_string(),
+            )),
+    );
+    let a = load(&server, &input, &["--retries", "2"]).failure().code(1);
+    let err = stderr(&a);
+    assert!(
+        err.contains("bundle 1/1 rejected with HTTP 412 after it was sent 2 times"),
+        "{err}"
+    );
+    assert!(err.contains("may have been committed"), "{err}");
+    assert!(!err.contains("nothing in it was written"), "{err}");
+    assert!(
+        err.contains("Location/a (expected version 1, server has 2)"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_503_is_retried_and_a_400_aborts_with_the_body() {
     let dir = tempfile::tempdir().unwrap();
     let input = write_ndjson(dir.path(), &[loc("a", Some("1"), None)]);

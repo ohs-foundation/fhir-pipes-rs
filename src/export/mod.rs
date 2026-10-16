@@ -15,6 +15,8 @@
 //! exported in full in a second export. The export's `deleted` resources are
 //! removed from the files, and every type's watermark becomes the manifest's
 //! `transactionTime`. The count check after a merge is the same as above.
+//! The output files download `--concurrency` at a time, through the same
+//! limit, and each type's are joined in manifest order.
 //!
 //! With `--hapi-db`, the files come from a HAPI FHIR JPA server's PostgreSQL
 //! database instead of its API (see `hapi_db`), with watermarks of their own.
@@ -46,10 +48,11 @@ use crate::extract::client::FhirClient;
 use crate::extract::page::{
     PageNote, PageResult, count_resources, next_link, page_resources, page_search,
 };
-use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
-use crate::snapshot::merge::{MergeFiles, MergeStats, id_and_updated, merge_file};
+use crate::snapshot::merge::{
+    MergeFiles, MergeStats, id_and_updated, merge_file, merge_file_dropping,
+};
 use crate::snapshot::same_server;
 use crate::transform::write_report;
 
@@ -723,13 +726,24 @@ fn run_job(
     }
     let deleted = deleted_ids(client, &manifest, &job.types, timeout, report)?;
 
+    // Removed by the merges that read them, and on any failure.
+    let _incoming = window::Remove(
+        job.types
+            .iter()
+            .map(|t| incoming_path(&args.out, t))
+            .collect(),
+    );
+    let mut downloaded = download_job(client, args, job, &manifest)?;
     let mut done = Vec::new();
     let mut redo = Vec::new();
     for t in &job.types {
         let out = ndjson_path(&args.out, t);
-        let (stats, removed, files) =
-            bulk_type(client, args, job, t, &manifest, deleted.get(t), report)?;
-        let total = stats.total - removed;
+        let d = downloaded
+            .remove(t)
+            .expect("every type of the job was downloaded");
+        let files = d.files;
+        let stats = bulk_type(args, job, t, d, deleted.get(t), report)?;
+        let (total, removed) = (stats.total, stats.removed);
         if job.since.is_some() && merged_count_differs(client, &args.server, t, total, &out, report)
         {
             redo.push(t.clone());
@@ -850,139 +864,145 @@ fn deleted_ids(
     Ok(ids)
 }
 
-/// Download one type's output files and merge them into OUT/<TYPE>.ndjson by
-/// id (replacing it, for a full export), then remove the resources listed
-/// as deleted. Returns the merge's numbers, how many resources were
-/// removed, and how many files were read.
-fn bulk_type(
+/// One type's output files, downloaded into its incoming file.
+struct Downloaded {
+    notes: Vec<PageNote>,
+    files: usize,
+    /// The lines skipped, per file in manifest order.
+    report: Report,
+}
+
+/// Download every output file of `job`'s types, `--concurrency` at a time
+/// through the client's limit, each into a part file of its own. Each
+/// type's parts are then joined in manifest order into its incoming file,
+/// so the file is the same as one downloaded a file at a time. The first
+/// failure stops new downloads, and the parts are removed. No type's file is
+/// touched here.
+fn download_job(
     client: &FhirClient,
     args: &ExportArgs,
     job: &Job,
-    resource_type: &str,
     manifest: &bulk::Manifest,
-    deleted: Option<&HashSet<String>>,
-    report: &mut Report,
-) -> Result<(MergeStats, usize, usize)> {
-    let out = ndjson_path(&args.out, resource_type);
-    let tmp = tmp_path(&args.out, resource_type);
-    let incoming = incoming_path(&args.out, resource_type);
-    let files: Vec<&str> = manifest
+) -> Result<HashMap<String, Downloaded>> {
+    let files: Vec<(&str, &str)> = manifest
         .output
         .iter()
-        .filter(|f| f.resource_type == resource_type)
-        .map(|f| f.url.as_str())
+        .filter(|f| job.types.contains(&f.resource_type))
+        .map(|f| (f.resource_type.as_str(), f.url.as_str()))
         .collect();
+    let parts = window::Remove(
+        files
+            .iter()
+            .enumerate()
+            .map(|(i, (t, _))| args.out.join(format!(".{t}.part-{i}.ndjson")))
+            .collect(),
+    );
     let timeout = Duration::from_secs(args.bulk_timeout);
-    let notes = match download_outputs(
-        client,
-        &files,
-        manifest.requires_access_token,
-        timeout,
-        &incoming,
-        report,
-    ) {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = std::fs::remove_file(&incoming);
-            return Err(e);
+    let failed = AtomicBool::new(false);
+    let indexes: Vec<usize> = (0..files.len()).collect();
+    let results = window::parallel(&indexes, args.concurrency, |&i| {
+        if failed.load(Ordering::Relaxed) {
+            return Ok(None);
         }
-    };
-    let stats = merge_file(
+        let (_, url) = files[i];
+        let got = download_part(
+            client,
+            url,
+            manifest.requires_access_token,
+            timeout,
+            &parts.0[i],
+        );
+        if got.is_err() {
+            failed.store(true, Ordering::Relaxed);
+        }
+        got.map(Some)
+    });
+    // Every download ran when none failed.
+    let mut downloaded = results.into_iter().collect::<Result<Vec<_>>>()?;
+    let mut by_type: HashMap<String, Downloaded> = HashMap::new();
+    for t in &job.types {
+        let mine: Vec<usize> = (0..files.len()).filter(|&i| files[i].0 == t).collect();
+        let paths: Vec<PathBuf> = mine.iter().map(|&i| parts.0[i].clone()).collect();
+        window::concatenate(&paths, &incoming_path(&args.out, t))?;
+        let mut d = Downloaded {
+            notes: Vec::new(),
+            files: mine.len(),
+            report: Report::default(),
+        };
+        for &i in &mine {
+            let (notes, report) = downloaded[i].take().expect("every file was downloaded");
+            d.notes.extend(notes);
+            d.report.append(report);
+        }
+        by_type.insert(t.clone(), d);
+    }
+    Ok(by_type)
+}
+
+/// Merge one type's downloaded files into OUT/<TYPE>.ndjson by id
+/// (replacing it, for a full export), leaving out, in the same pass, the
+/// resources listed as deleted. Returns the merge's numbers, with the
+/// resources removed.
+fn bulk_type(
+    args: &ExportArgs,
+    job: &Job,
+    resource_type: &str,
+    downloaded: Downloaded,
+    deleted: Option<&HashSet<String>>,
+    report: &mut Report,
+) -> Result<MergeStats> {
+    report.append(downloaded.report);
+    // A resource in this export's output existed at its transactionTime,
+    // whatever the deleted list says; the merge keeps every id it reads.
+    let gone: HashSet<&str> = deleted.into_iter().flatten().map(String::as_str).collect();
+    merge_file_dropping(
         &MergeFiles {
-            existing: out.clone(),
-            tmp: tmp.clone(),
-            incoming,
+            existing: ndjson_path(&args.out, resource_type),
+            tmp: tmp_path(&args.out, resource_type),
+            incoming: incoming_path(&args.out, resource_type),
             unparsed_kind: "export_line_unparsed",
         },
-        &notes,
+        &downloaded.notes,
         job.since.is_none(),
-        &|_| None,
-        &HashMap::new(),
+        &gone,
         report,
-        &[],
-    )?;
-    let removed = match deleted {
-        Some(ids) => {
-            // A resource in this export's output existed at its
-            // transactionTime, whatever the deleted list says.
-            let exported: HashSet<&str> = notes.iter().map(|n| n.id.as_str()).collect();
-            let gone: HashSet<&str> = ids
-                .iter()
-                .map(String::as_str)
-                .filter(|id| !exported.contains(id))
-                .collect();
-            remove_ids(&out, &tmp, &gone)?
-        }
-        None => 0,
-    };
-    Ok((stats, removed, files.len()))
+    )
 }
 
-/// Write every line of `files` to `incoming`, noting each resource's id and
-/// meta.lastUpdated for the merge. A line without an id is reported and
-/// left out.
-fn download_outputs(
+/// Write every line of the file at `url` to `part`, noting each resource's
+/// id and meta.lastUpdated for the merge. A line without an id is reported
+/// and left out.
+fn download_part(
     client: &FhirClient,
-    files: &[&str],
+    url: &str,
     authorize: bool,
     timeout: Duration,
-    incoming: &Path,
-    report: &mut Report,
-) -> Result<Vec<PageNote>> {
-    let file = std::fs::File::create(incoming).map_err(|e| PipesError::io(incoming, e))?;
+    part: &Path,
+) -> Result<(Vec<PageNote>, Report)> {
+    let file = std::fs::File::create(part).map_err(|e| PipesError::io(part, e))?;
     let mut out = std::io::BufWriter::new(file);
     let mut notes = Vec::new();
-    for url in files {
-        let mut n = 0usize;
-        bulk::read_lines(client, url, authorize, timeout, |line| {
-            n += 1;
-            let Some((id, last_updated)) = id_and_updated(line) else {
-                report.add(
-                    "bulk_line_skipped",
-                    &format!("{url} line {n}"),
-                    "not a JSON resource with an id",
-                );
-                return Ok(());
-            };
-            notes.push(PageNote {
-                id,
-                last_updated,
-                boundary_url: None,
-            });
-            writeln!(out, "{line}").map_err(|e| PipesError::io(incoming, e))
-        })?;
-    }
-    out.flush().map_err(|e| PipesError::io(incoming, e))?;
-    Ok(notes)
-}
-
-/// Rewrite `path` without the resources whose id is in `ids`, through `tmp`.
-/// Returns how many were removed.
-fn remove_ids(path: &Path, tmp: &Path, ids: &HashSet<&str>) -> Result<usize> {
-    if ids.is_empty() || !path.exists() {
-        return Ok(0);
-    }
-    let result = (|| {
-        let file = std::fs::File::create(tmp).map_err(|e| PipesError::io(tmp, e))?;
-        let mut out = std::io::BufWriter::new(file);
-        let mut removed = 0usize;
-        for line in NdjsonReader::open(path)? {
-            let line = line?;
-            if id_and_updated(&line.text).is_some_and(|(id, _)| ids.contains(id.as_str())) {
-                removed += 1;
-                continue;
-            }
-            writeln!(out, "{}", line.text).map_err(|e| PipesError::io(tmp, e))?;
-        }
-        out.flush().map_err(|e| PipesError::io(tmp, e))?;
-        drop(out);
-        std::fs::rename(tmp, path).map_err(|e| PipesError::io(path, e))?;
-        Ok(removed)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(tmp);
-    }
-    result
+    let mut report = Report::default();
+    let mut n = 0usize;
+    bulk::read_lines(client, url, authorize, timeout, |line| {
+        n += 1;
+        let Some((id, last_updated)) = id_and_updated(line) else {
+            report.add(
+                "bulk_line_skipped",
+                &format!("{url} line {n}"),
+                "not a JSON resource with an id",
+            );
+            return Ok(());
+        };
+        notes.push(PageNote {
+            id,
+            last_updated,
+            boundary_url: None,
+        });
+        writeln!(out, "{line}").map_err(|e| PipesError::io(part, e))
+    })?;
+    out.flush().map_err(|e| PipesError::io(part, e))?;
+    Ok((notes, report))
 }
 
 #[cfg(test)]
