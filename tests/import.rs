@@ -258,6 +258,41 @@ fn a_mapping_problem_exits_2_and_writes_nothing() {
         .code(2)
         .stderr(contains("the CSV has no column \"ward\" (--parent)"));
     assert!(!out.exists());
+
+    // Rows are written as they are built; a repeated id found after some
+    // were written still leaves nothing, not even the temporary file.
+    let rows: String = (1..=500).map(|i| format!("f{i},A{i},1,1,Toro\n")).collect();
+    std::fs::write(
+        &csv,
+        format!("id,name,lat,lon,lga\n{rows}f7,Again,1,1,Toro\n"),
+    )
+    .unwrap();
+    fhir_pipes(Some(ICR_PROFILE))
+        .args(["import", "location-sites", "--in"])
+        .arg(&csv)
+        .arg("--boundaries")
+        .arg(&admin)
+        .args([
+            "--type",
+            "facility",
+            "--name-col",
+            "name",
+            "--lat-col",
+            "lat",
+            "--lon-col",
+            "lon",
+            "--id-col",
+            "id",
+            "--parent",
+            "lga=lga",
+            "--out",
+        ])
+        .arg(&out)
+        .assert()
+        .code(2)
+        .stderr(contains("duplicate id"));
+    assert!(!out.exists());
+    assert!(!dir.path().join("sites.ndjson.tmp").exists());
 }
 
 #[test]

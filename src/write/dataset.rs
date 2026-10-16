@@ -38,15 +38,22 @@ pub struct WrittenPartition {
 
 /// Re-read and parse one record's line. Diagnostics were reported in pass
 /// one; this parses with a throwaway report so nothing is counted twice.
+/// `fhir_json` is built only `with_json`: a parent polygon needs just the
+/// geometry.
 fn load_location(
     lines: &mut LineAccess,
     rec: &IndexRecord,
     profile: &Profile,
+    with_json: bool,
 ) -> Result<Option<Location>> {
     let text = lines.read_at(rec.offset, rec.len)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let mut silent = Report::default();
-    Ok(Location::parse(&value, profile, &mut silent))
+    Ok(if with_json {
+        Location::parse_owned(value, profile, &mut silent)
+    } else {
+        Location::parse(&value, profile, &mut silent)
+    })
 }
 
 /// Bounded cache of parent polygons for the point-outside-parent check,
@@ -78,7 +85,7 @@ impl ParentCache {
                 self.polygons.clear();
             }
             let mut silent = Report::default();
-            let geom = load_location(lines, &records[idx as usize], profile)?
+            let geom = load_location(lines, &records[idx as usize], profile, false)?
                 .and_then(|loc| geometry::build(&loc, &mut silent))
                 .filter(|g| g.kind == GeomKind::Polygon)
                 .map(|g| g.geometry);
@@ -275,7 +282,7 @@ fn write_partitions(
         for &i in idxs {
             let i = i as usize;
             let rec = &records[i];
-            let Some(loc) = load_location(&mut lines, rec, profile)? else {
+            let Some(loc) = load_location(&mut lines, rec, profile, true)? else {
                 report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
                 continue;
             };
@@ -373,6 +380,17 @@ fn write_partitions(
                 .and_then(|_| crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells))
                 .map(|c| (Some(c.cell.clone()), i32::try_from(c.level).ok()))
                 .unwrap_or((None, None));
+            let (organization_identifier, organization_columns, organization_json) = match org {
+                Some(o) => (
+                    o.identifier
+                        .into_iter()
+                        .map(|i| (i.system, i.value))
+                        .collect(),
+                    o.columns,
+                    Some(o.fhir_json),
+                ),
+                None => (Vec::new(), Vec::new(), None),
+            };
             let row = OutputRow {
                 id: loc.id,
                 version_id: loc.version_id.clone(),
@@ -394,16 +412,8 @@ fn write_partitions(
                 location_columns: loc.columns,
                 quadkey,
                 quadkey_level,
-                organization_identifier: org
-                    .as_ref()
-                    .map(|o| {
-                        o.identifier
-                            .iter()
-                            .map(|i| (i.system.clone(), i.value.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                organization_columns: org.as_ref().map(|o| o.columns.clone()).unwrap_or_default(),
+                organization_identifier,
+                organization_columns,
                 depth: i32::from(info.depth),
                 admin_level: info.admin_level.map(i32::from),
                 tier: rec.tier.clone(),
@@ -412,7 +422,7 @@ fn write_partitions(
                 admin_names: hierarchy.admin_names(records, i),
                 admin_codes: hierarchy.admin_codes(records, i),
                 overlays_admin_unit_ids: loc.overlays_admin_unit_ids,
-                organization_json: org.as_ref().map(|o| o.fhir_json.clone()),
+                organization_json,
                 country: rec.country.clone(),
                 geom_type: geom.as_ref().map(|g| g.kind.as_str().to_string()),
                 lon: geom.as_ref().map(|g| g.lon),

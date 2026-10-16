@@ -1,7 +1,8 @@
 //! `fhir-pipes diff`: edited GeoJSON or GeoParquet -> FHIR NDJSON of the Locations
 //! that changed. Offline. The snapshot is indexed by id and byte offset;
 //! the input is streamed; each named resource is re-read, rebuilt from the
-//! writable columns, and emitted only when its canonical JSON differs.
+//! writable columns, and emitted only when it differs (object key order
+//! aside; see `compare::differs`).
 
 pub mod compare;
 pub mod geojson;
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::cli::DiffArgs;
-use crate::diff::compare::canonical;
+use crate::diff::compare::differs;
 use crate::diff::geojson::{feature_to_row, read_feature_collection, read_feature_lines};
 use crate::diff::input::{ColumnValue, InputRow};
 use crate::diff::parquet::read_geoparquet;
@@ -176,7 +177,7 @@ impl Diff<'_> {
                             &self.profile,
                             report,
                         );
-                        if canonical(&org_new) != canonical(&org_base) {
+                        if differs(&org_new, &org_base) {
                             writeln!(self.out, "{org_new}")
                                 .map_err(|e| PipesError::io(self.out_path, e))?;
                             self.stats.organizations += 1;
@@ -212,7 +213,7 @@ impl Diff<'_> {
             }
         }
 
-        if is_create || canonical(&rebuilt) != canonical(&base) {
+        if is_create || differs(&rebuilt, &base) {
             writeln!(self.out, "{rebuilt}").map_err(|e| PipesError::io(self.out_path, e))?;
             self.stats.locations += 1;
             emitted += 1;

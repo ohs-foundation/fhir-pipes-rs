@@ -133,8 +133,11 @@ pub fn zonal_sum(raster: &mut impl Raster, geom: &Geometry<f64>) -> Result<Zonal
             let Some((c0, c1)) = columns(&t, width, pair[0], pair[1]) else {
                 continue;
             };
-            for col in c0..=c1 {
+            // One tile lookup per tile the span crosses, not per pixel.
+            let mut col = c0;
+            while col <= c1 {
                 let tx = col / tw;
+                let last = c1.min(tx * tw + (tw - 1));
                 let tile = match tiles.entry(tx) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     std::collections::hash_map::Entry::Vacant(e) => {
@@ -142,8 +145,12 @@ pub fn zonal_sum(raster: &mut impl Raster, geom: &Geometry<f64>) -> Result<Zonal
                         e.insert(tile)
                     }
                 };
-                let v = tile.data[((row - ty * th) * tile.width + (col - tx * tw)) as usize];
-                total.add(v, nodata);
+                let start = ((row - ty * th) * tile.width) as usize;
+                let (from, to) = ((col - tx * tw) as usize, (last - tx * tw) as usize);
+                for &v in &tile.data[start + from..=start + to] {
+                    total.add(v, nodata);
+                }
+                col = last + 1;
             }
         }
     }
