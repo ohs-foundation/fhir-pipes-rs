@@ -50,9 +50,7 @@ use crate::extract::page::{
 };
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
-use crate::snapshot::merge::{
-    MergeFiles, MergeStats, id_and_updated, merge_file, merge_file_dropping,
-};
+use crate::snapshot::merge::{MergeFiles, MergeOptions, MergeStats, id_and_updated, merge_file};
 use crate::snapshot::same_server;
 use crate::transform::write_report;
 
@@ -324,11 +322,8 @@ fn export_changes(
             unparsed_kind: "export_line_unparsed",
         },
         &paged.notes,
-        false,
-        &|_| None,
-        &HashMap::new(),
+        &MergeOptions::default(),
         report,
-        &[],
     )?;
     if merged_count_differs(
         client,
@@ -947,7 +942,7 @@ fn bulk_type(
     // A resource in this export's output existed at its transactionTime,
     // whatever the deleted list says; the merge keeps every id it reads.
     let gone: HashSet<&str> = deleted.into_iter().flatten().map(String::as_str).collect();
-    merge_file_dropping(
+    merge_file(
         &MergeFiles {
             existing: ndjson_path(&args.out, resource_type),
             tmp: tmp_path(&args.out, resource_type),
@@ -955,8 +950,11 @@ fn bulk_type(
             unparsed_kind: "export_line_unparsed",
         },
         &downloaded.notes,
-        job.since.is_none(),
-        &gone,
+        &MergeOptions {
+            full: job.since.is_none(),
+            drop: Some(&gone),
+            boundaries: None,
+        },
         report,
     )
 }

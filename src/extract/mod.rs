@@ -17,7 +17,7 @@ use crate::extract::client::FhirClient;
 use crate::extract::page::{count_resources, page_locations, page_resources};
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, parse_instant};
-use crate::snapshot::merge::{MergeFiles, merge, merge_file};
+use crate::snapshot::merge::{MergeFiles, MergeOptions, merge, merge_file};
 use crate::snapshot::{Snapshot, State, same_server};
 use crate::transform::write_report;
 
@@ -250,11 +250,11 @@ fn run_phases(
     let org_stats = merge_file(
         &MergeFiles::organizations(snap),
         &org_paged.notes,
-        org_since.is_none(),
-        &|_| None,
-        &HashMap::new(),
+        &MergeOptions {
+            full: org_since.is_none(),
+            ..MergeOptions::default()
+        },
         &mut report,
-        &[],
     )?;
 
     // Compare the server's count with the merged snapshot's. Incremental

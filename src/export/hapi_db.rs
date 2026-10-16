@@ -44,7 +44,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
 use crate::report::Report;
 use crate::snapshot::instant::WATERMARK_MARGIN_SECS;
-use crate::snapshot::merge::{MergeFiles, merge_file_dropping};
+use crate::snapshot::merge::{MergeFiles, MergeOptions, merge_file};
 use crate::snapshot::same_server;
 
 /// Rows fetched from the cursor at a time.
@@ -821,7 +821,7 @@ async fn read_changes(
     // A resource deleted and created again is live: its row says so, and
     // the merge keeps an id it reads.
     let gone: HashSet<&str> = deleted.iter().map(String::as_str).collect();
-    let stats = merge_file_dropping(
+    let stats = merge_file(
         &MergeFiles {
             existing: out.clone(),
             tmp: tmp.clone(),
@@ -829,8 +829,10 @@ async fn read_changes(
             unparsed_kind: "export_line_unparsed",
         },
         &notes,
-        false,
-        &gone,
+        &MergeOptions {
+            drop: Some(&gone),
+            ..MergeOptions::default()
+        },
         report,
     )?;
     let (total, removed) = (stats.total, stats.removed);
