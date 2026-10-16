@@ -668,13 +668,13 @@ mod tests {
 
     #[test]
     fn spark_names_are_quoted() {
-        let t = vec![Table {
+        let t = Table {
             name: "group".into(),
             column: "country".into(),
             files: vec!["parquet/group/country=NGA/part-0.parquet".into()],
-        }];
+        };
         let columns = vec![col("order", "STRING"), col("a`b", "BIGINT")];
-        let sql = render_spark(&[(&t[0], columns)], "/dwh", "my db", None, "T");
+        let sql = render_spark(&[(&t, columns)], "/dwh", "my db", None, "T");
         assert!(
             sql.contains("CREATE DATABASE IF NOT EXISTS `my db`;"),
             "{sql}"
