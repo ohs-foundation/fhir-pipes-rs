@@ -460,3 +460,469 @@ impl Drop for Remove {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extract::client::Auth;
+    use httptest::bytes::Bytes;
+    use httptest::http;
+    use httptest::responders::Responder;
+    use httptest::{Expectation, Server, matchers::request};
+    use serde_json::Value;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    const T0: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
+
+    /// A FHIR server holding `data` (id, meta.lastUpdated) in server order:
+    /// `_lastUpdated` ge/lt filters, `_sort` on `_lastUpdated`, `_summary=count`,
+    /// and `_count` paging with an `_offset` in the next link.
+    #[derive(Clone)]
+    struct Fake {
+        data: Arc<Vec<(String, String)>>,
+        sorts: bool,
+        filters: bool,
+        /// First pages of a window to serve one resource short.
+        shorten: Arc<AtomicUsize>,
+        delay: Duration,
+        in_flight: Arc<AtomicUsize>,
+        most: Arc<AtomicUsize>,
+        queries: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Fake {
+        fn new(data: Vec<(String, String)>) -> Self {
+            Fake {
+                data: Arc::new(data),
+                sorts: true,
+                filters: true,
+                shorten: Arc::new(AtomicUsize::new(0)),
+                delay: Duration::ZERO,
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                most: Arc::new(AtomicUsize::new(0)),
+                queries: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn answer(&self, path: &str, query: &str) -> (u16, String) {
+            self.queries.lock().unwrap().push(query.to_string());
+            let params: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect();
+            let get = |k: &str| -> Vec<&str> {
+                params
+                    .iter()
+                    .filter(|(n, _)| n == k)
+                    .map(|(_, v)| v.as_str())
+                    .collect()
+            };
+            let at = |s: &str| parse_instant(s).unwrap();
+            let mut rows: Vec<&(String, String)> = self.data.iter().collect();
+            let windowed = !get("_lastUpdated").is_empty();
+            if self.filters {
+                for v in get("_lastUpdated") {
+                    let (op, bound) = v.split_at(2);
+                    let bound = at(bound);
+                    rows.retain(|r| match op {
+                        "ge" => at(&r.1) >= bound,
+                        "lt" => at(&r.1) < bound,
+                        _ => panic!("{v}"),
+                    });
+                }
+            }
+            if get("_summary") == ["count"] {
+                return (
+                    200,
+                    serde_json::json!({"resourceType":"Bundle","total":rows.len()}).to_string(),
+                );
+            }
+            if let Some(sort) = get("_sort").first() {
+                if !self.sorts {
+                    return (400, r#"{"resourceType":"OperationOutcome"}"#.into());
+                }
+                rows.sort_by_key(|r| at(&r.1));
+                if sort.starts_with('-') {
+                    rows.reverse();
+                }
+            }
+            let count: usize = get("_count").first().map_or(1000, |c| c.parse().unwrap());
+            let offset: usize = get("_offset").first().map_or(0, |c| c.parse().unwrap());
+            let mut page: Vec<&(String, String)> =
+                rows.iter().skip(offset).take(count).copied().collect();
+            if windowed
+                && offset == 0
+                && !page.is_empty()
+                && self
+                    .shorten
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+            {
+                page.remove(0);
+            }
+            let mut bundle = serde_json::json!({
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": page.iter().map(|(id, u)| serde_json::json!({"resource": {
+                    "resourceType": "Observation", "id": id, "meta": {"lastUpdated": u}
+                }})).collect::<Vec<_>>(),
+            });
+            if offset + count < rows.len() {
+                let mut next = url::form_urlencoded::Serializer::new(String::new());
+                for (k, v) in params.iter().filter(|(k, _)| k != "_offset") {
+                    next.append_pair(k, v);
+                }
+                next.append_pair("_offset", &(offset + count).to_string());
+                bundle["link"] = serde_json::json!([{"relation":"next","url":format!("{path}?{}", next.finish())}]);
+            }
+            (200, bundle.to_string())
+        }
+    }
+
+    impl Responder for Fake {
+        fn respond<'a>(
+            &mut self,
+            req: &'a http::Request<Bytes>,
+        ) -> Pin<Box<dyn Future<Output = http::Response<Bytes>> + Send + 'a>> {
+            let fake = self.clone();
+            let path = req.uri().path().to_string();
+            let query = req.uri().query().unwrap_or("").to_string();
+            Box::pin(async move {
+                let now = fake.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                fake.most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(fake.delay).await;
+                let (status, body) = fake.answer(&path, &query);
+                fake.in_flight.fetch_sub(1, Ordering::SeqCst);
+                http::Response::builder()
+                    .status(status)
+                    .body(Bytes::from(body))
+                    .unwrap()
+            })
+        }
+    }
+
+    fn serve(fake: &Fake) -> Server {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Observation"))
+                .times(..)
+                .respond_with(fake.clone()),
+        );
+        server
+    }
+
+    fn stamp(secs: i64, millis: u32) -> String {
+        let s = instant(secs);
+        format!("{}.{millis:03}Z", s.trim_end_matches('Z'))
+    }
+
+    /// `n` resources over `span` seconds from T0, in an order that is not
+    /// their time order.
+    fn spread(n: usize, span: i64) -> Vec<(String, String)> {
+        (0..n)
+            .map(|i| {
+                let k = (i * 7919) % n;
+                (
+                    format!("r{i:05}"),
+                    stamp(T0 + k as i64 * span / n as i64, (k % 1000) as u32),
+                )
+            })
+            .collect()
+    }
+
+    struct Run {
+        result: Windowed,
+        lines: Vec<(String, String)>,
+        report: Report,
+    }
+
+    fn run(fake: &Fake, server: &Server, workers: usize, limit: usize) -> Run {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.ndjson");
+        let client = FhirClient::new(Auth::None, 1, Duration::from_secs(10))
+            .unwrap()
+            .with_concurrency(limit);
+        let mut report = Report::default();
+        let base = server.url("/fhir").to_string();
+        let result = download(
+            &client,
+            &Options {
+                server: &base,
+                resource_type: "Observation",
+                total: fake.data.len() as u64,
+                workers,
+                dir: dir.path(),
+            },
+            &out,
+            &mut report,
+        )
+        .unwrap();
+        let lines = std::fs::read_to_string(&out)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                (
+                    v["id"].as_str().unwrap().to_string(),
+                    v["meta"]["lastUpdated"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        // Only the output is left: the window files are removed.
+        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(left.len() <= 1, "{left:?}");
+        Run {
+            result,
+            lines,
+            report,
+        }
+    }
+
+    fn windows(r: &Run) -> usize {
+        match &r.result {
+            Windowed::Done { windows, .. } => *windows,
+            Windowed::Unsuitable(why) => panic!("not windowed: {why}"),
+        }
+    }
+
+    fn sorted_ids(lines: &[(String, String)]) -> Vec<String> {
+        let mut ids: Vec<String> = lines.iter().map(|(id, _)| id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn windows_are_half_open_and_cover_everything() {
+        let w = split(T0, T0 + 4, 4);
+        assert_eq!(w.len(), 4);
+        assert_eq!(
+            w[0].params(),
+            [("_lastUpdated", "lt2026-01-01T00:00:01Z".into())]
+        );
+        assert_eq!(
+            w[1].params(),
+            [
+                ("_lastUpdated", "ge2026-01-01T00:00:01Z".into()),
+                ("_lastUpdated", "lt2026-01-01T00:00:02Z".into())
+            ]
+        );
+        assert_eq!(
+            w[3].params(),
+            [("_lastUpdated", "ge2026-01-01T00:00:03Z".into())]
+        );
+        // A range too short for every window gives fewer, never empty ones.
+        assert_eq!(split(T0, T0 + 2, 8).len(), 2);
+    }
+
+    #[test]
+    fn a_windowed_download_has_every_resource_once_in_window_order() {
+        let fake = Fake::new(spread(5000, 86_400));
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 4);
+        assert!(windows(&r) >= 4, "{}", windows(&r));
+        assert_eq!(r.lines.len(), 5000);
+        let mut want: Vec<String> = fake.data.iter().map(|(id, _)| id.clone()).collect();
+        want.sort();
+        assert_eq!(sorted_ids(&r.lines), want);
+        // The windows paged, from the server's log, oldest first.
+        let mut bounds: Vec<(Option<i64>, Option<i64>)> = fake
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|q| {
+                q.contains("_lastUpdated=") && !q.contains("_summary") && !q.contains("_offset")
+            })
+            .map(|q| {
+                let mut b = (None, None);
+                for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+                    if k == "_lastUpdated" {
+                        let at = Some(parse_instant(&v[2..]).unwrap().0);
+                        if v.starts_with("ge") {
+                            b.0 = at
+                        } else {
+                            b.1 = at
+                        }
+                    }
+                }
+                b
+            })
+            .collect();
+        bounds.sort();
+        bounds.dedup();
+        assert_eq!(bounds.len(), windows(&r), "{bounds:?}");
+        // Window by window, and the server's order within each.
+        let position: HashMap<&str, usize> = fake
+            .data
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (id.as_str(), i))
+            .collect();
+        let mut previous = (0, 0);
+        for (id, updated) in &r.lines {
+            let t = parse_instant(updated).unwrap().0;
+            let w = bounds
+                .iter()
+                .position(|(ge, lt)| ge.is_none_or(|g| t >= g) && lt.is_none_or(|l| t < l))
+                .unwrap();
+            let here = (w, position[id.as_str()]);
+            assert!(
+                here > previous || previous == (0, 0),
+                "{id} at {here:?} after {previous:?}"
+            );
+            previous = here;
+        }
+        assert_eq!(r.report.counts().len(), 0, "{:?}", r.report.counts());
+        let Windowed::Done { paged, .. } = &r.result else {
+            unreachable!()
+        };
+        assert_eq!(paged.notes.len(), 5000);
+    }
+
+    #[test]
+    fn resources_stamped_on_a_boundary_land_in_the_window_that_starts_there() {
+        // 300 resources at each of T0, T0+1, T0+2 and T0+3: with four
+        // windows the cuts fall exactly on the last three.
+        let mut data = Vec::new();
+        for k in 0..4 {
+            for i in 0..300 {
+                data.push((format!("s{k}-{i:03}"), instant(T0 + k)));
+            }
+        }
+        // Server order is not time order.
+        data.reverse();
+        let fake = Fake::new(data);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 4);
+        assert_eq!(windows(&r), 4);
+        assert_eq!(r.lines.len(), 1200);
+        // Window by window: the first 300 lines are T0's, then T0+1's, …
+        for (n, (id, _)) in r.lines.iter().enumerate() {
+            assert!(id.starts_with(&format!("s{}-", n / 300)), "line {n}: {id}");
+        }
+        let queries = fake.queries.lock().unwrap();
+        assert!(
+            queries.iter().any(|q| q.contains(
+                "_lastUpdated=ge2026-01-01T00%3A00%3A01Z&_lastUpdated=lt2026-01-01T00%3A00%3A02Z"
+            )),
+            "{queries:?}"
+        );
+    }
+
+    #[test]
+    fn updates_bunched_in_time_are_split_further() {
+        // 3000 resources in the first ten seconds of a day, 300 over the rest.
+        let mut data: Vec<(String, String)> = (0..3000)
+            .map(|i| {
+                (
+                    format!("a{i:04}"),
+                    stamp(T0 + (i % 10) as i64, i as u32 % 1000),
+                )
+            })
+            .collect();
+        data.extend((0..300).map(|i| (format!("b{i:03}"), instant(T0 + 3600 + i * 200))));
+        let fake = Fake::new(data);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 2, 2);
+        // Two windows of time would put 3000 in the first; halving gives more.
+        assert!(windows(&r) > 2, "{}", windows(&r));
+        assert_eq!(r.lines.len(), 3300);
+    }
+
+    #[test]
+    fn a_resource_in_two_windows_keeps_its_later_version() {
+        // `moved` was updated while the windows were paged: the first window
+        // saw its old version and the last its new one.
+        let mut data = spread(3000, 3600);
+        data.push(("moved".into(), stamp(T0 + 1, 0)));
+        data.push(("moved".into(), stamp(T0 + 3599, 0)));
+        let fake = Fake::new(data);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 4);
+        windows(&r);
+        assert_eq!(r.lines.len(), 3001);
+        let moved: Vec<&(String, String)> =
+            r.lines.iter().filter(|(id, _)| id == "moved").collect();
+        assert_eq!(moved, [&("moved".to_string(), stamp(T0 + 3599, 0))]);
+    }
+
+    #[test]
+    fn a_window_short_of_its_count_is_downloaded_again() {
+        let fake = Fake::new(spread(3000, 3600));
+        fake.shorten.store(1, Ordering::SeqCst);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 3, 3);
+        windows(&r);
+        assert_eq!(r.lines.len(), 3000, "the second download has them all");
+        assert_eq!(r.report.count("count_mismatch"), 0);
+        // One window's first page was asked for twice.
+        let queries = fake.queries.lock().unwrap();
+        let firsts: Vec<&String> = queries
+            .iter()
+            .filter(|q| {
+                q.contains("_lastUpdated") && q.contains("_count=1000") && !q.contains("_offset")
+            })
+            .collect();
+        let distinct: HashSet<&&String> = firsts.iter().collect();
+        assert_eq!(firsts.len(), distinct.len() + 1, "{firsts:?}");
+    }
+
+    #[test]
+    fn a_window_that_stays_short_is_reported() {
+        let fake = Fake::new(spread(3000, 3600));
+        fake.shorten.store(usize::MAX, Ordering::SeqCst);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 3, 3);
+        let n = windows(&r);
+        assert_eq!(r.report.count("count_mismatch"), n);
+        assert_eq!(r.lines.len(), 3000 - n);
+    }
+
+    #[test]
+    fn a_server_that_cannot_sort_by_last_updated_is_not_windowed() {
+        let mut fake = Fake::new(spread(3000, 3600));
+        fake.sorts = false;
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 4);
+        match r.result {
+            Windowed::Unsuitable(why) => assert!(why.contains("did not sort"), "{why}"),
+            Windowed::Done { .. } => panic!("windowed"),
+        }
+    }
+
+    #[test]
+    fn windows_whose_counts_do_not_add_up_are_not_used() {
+        // A server that ignores _lastUpdated: every window counts everything.
+        let mut fake = Fake::new(spread(3000, 3600));
+        fake.filters = false;
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 4);
+        match r.result {
+            Windowed::Unsuitable(why) => assert!(why.contains("server counts 3000"), "{why}"),
+            Windowed::Done { .. } => panic!("windowed"),
+        }
+    }
+
+    #[test]
+    fn one_second_of_updates_is_not_windowed() {
+        let data = (0..2000)
+            .map(|i| (format!("r{i}"), stamp(T0, i % 1000)))
+            .collect();
+        let fake = Fake::new(data);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 4);
+        assert!(matches!(r.result, Windowed::Unsuitable(_)));
+    }
+
+    #[test]
+    fn requests_in_flight_stay_within_the_clients_limit() {
+        let mut fake = Fake::new(spread(6000, 86_400));
+        fake.delay = Duration::from_millis(20);
+        let server = serve(&fake);
+        let r = run(&fake, &server, 4, 2);
+        windows(&r);
+        assert_eq!(r.lines.len(), 6000);
+        assert_eq!(fake.most.load(Ordering::SeqCst), 2);
+    }
+}

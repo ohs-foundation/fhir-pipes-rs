@@ -775,6 +775,64 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_lets_in_only_its_limit() {
+        let gate = Gate::new(2);
+        let a = gate.enter();
+        let _b = gate.enter();
+        let entered = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _c = gate.enter();
+                entered.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!entered.load(std::sync::atomic::Ordering::SeqCst));
+            drop(a);
+        });
+        assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_pause_holds_every_request_back() {
+        let gate = Gate::new(4);
+        gate.pause(Duration::from_millis(200));
+        // A shorter pause does not cut the longer one short.
+        gate.pause(Duration::from_millis(10));
+        let started = Instant::now();
+        let _pass = gate.enter();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn a_retry_after_pauses_the_other_threads_sharing_the_client() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/slow"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(429).insert_header("retry-after", "1"),
+                    status_code(200),
+                ]),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/other"))
+                .times(1)
+                .respond_with(status_code(200)),
+        );
+        let client = client(1).with_concurrency(4);
+        client.get(&server.url_str("/slow")).unwrap_err();
+        // The 429's Retry-After holds back a request to another URL too.
+        let started = Instant::now();
+        client.get(&server.url_str("/other")).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        client.get(&server.url_str("/slow")).unwrap();
+    }
+
+    #[test]
     fn backoff_doubles_from_half_a_second_and_is_clamped() {
         assert_eq!(backoff_delay(1, None).as_millis(), 500);
         assert_eq!(backoff_delay(2, None).as_millis(), 1000);
