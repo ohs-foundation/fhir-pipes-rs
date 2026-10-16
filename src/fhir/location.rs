@@ -589,6 +589,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_gives_the_same_fields_without_fhir_json() {
+        let geojson = r#"{"type":"Point","coordinates":[1,2]}"#;
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, geojson);
+        let src = format!(
+            r#"{{"resourceType":"Location","id":"a","name":"A","extension":[
+            {{"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+              "valueAttachment":{{"contentType":"application/geo+json","data":"{b64}"}}}}]}}"#
+        );
+        let value: Value = serde_json::from_str(&src).unwrap();
+        let profile = crate::profile::test_profile();
+        let (mut r1, mut r2) = (Report::default(), Report::default());
+        let fields = Location::parse(&value, &profile, &mut r1).unwrap();
+        let mut owned = Location::parse_owned(value, &profile, &mut r2).unwrap();
+        assert!(fields.fhir_json.is_empty());
+        assert_eq!(
+            owned.fhir_json,
+            r#"{"resourceType":"Location","id":"a","name":"A"}"#
+        );
+        owned.fhir_json.clear();
+        assert_eq!(format!("{fields:?}"), format!("{owned:?}"));
+        assert_eq!(r1.counts(), r2.counts());
+    }
+
+    #[test]
     fn a_spatial_index_level_out_of_range_is_reported_and_skipped() {
         let mut report = Report::default();
         let cell = |level: u64| {
