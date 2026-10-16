@@ -23,13 +23,9 @@
 //! column were written as their date or as null.
 
 use std::io::Write;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use futures_util::{Stream, StreamExt};
 use serde_json::Value;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use arrow::array::{
     ArrayRef, BooleanArray, Date32Array, Float64Array, Int64Array, StringArray,
@@ -41,38 +37,10 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use super::{AsyncOutputWriter, ColumnSummary, OutputWriter, WriteSummary};
+use super::{ColumnSummary, OutputWriter, WriteSummary};
 use crate::column::{ColumnInfo, ColumnType};
 use crate::runner::ViewResult;
 use crate::{Error, Result};
-
-/// Parquet compression codecs.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum ParquetCompression {
-    /// No compression.
-    None,
-    /// Snappy compression (default, good balance of speed and ratio).
-    #[default]
-    Snappy,
-    /// Gzip compression (better ratio, slower).
-    Gzip,
-    /// LZ4 compression (faster, lower ratio).
-    Lz4,
-    /// Zstd compression (good balance).
-    Zstd,
-}
-
-impl From<ParquetCompression> for Compression {
-    fn from(compression: ParquetCompression) -> Self {
-        match compression {
-            ParquetCompression::None => Compression::UNCOMPRESSED,
-            ParquetCompression::Snappy => Compression::SNAPPY,
-            ParquetCompression::Gzip => Compression::GZIP(Default::default()),
-            ParquetCompression::Lz4 => Compression::LZ4,
-            ParquetCompression::Zstd => Compression::ZSTD(Default::default()),
-        }
-    }
-}
 
 /// How temporal columns (`date`, `dateTime`, `instant`, `time`) are encoded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -127,11 +95,10 @@ impl std::str::FromStr for TemporalEncoding {
     }
 }
 
-/// Parquet output writer configuration.
+/// Parquet output writer configuration. Files are written with Snappy
+/// compression.
 #[derive(Debug, Clone, Default)]
 pub struct ParquetWriter {
-    /// Compression codec to use.
-    pub compression: ParquetCompression,
     /// How temporal columns are encoded.
     pub temporal: TemporalEncoding,
 }
@@ -140,12 +107,6 @@ impl ParquetWriter {
     /// Create a new Parquet writer with default settings.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Set the compression codec.
-    pub fn with_compression(mut self, compression: ParquetCompression) -> Self {
-        self.compression = compression;
-        self
     }
 
     /// Set how temporal columns are encoded.
@@ -179,7 +140,7 @@ impl ParquetWriter {
         }
     }
 
-    /// Build an Arrow schema from column info.
+    /// Build an Arrow schema from column info. Every column is nullable.
     fn build_schema(columns: &[ColumnInfo], temporal: TemporalEncoding) -> Schema {
         let fields: Vec<Field> = columns
             .iter()
@@ -187,7 +148,7 @@ impl ParquetWriter {
                 Field::new(
                     &c.name,
                     Self::column_to_arrow_type(c.col_type, temporal),
-                    c.nullable,
+                    true,
                 )
             })
             .collect();
@@ -306,7 +267,7 @@ impl ParquetWriter {
         let mut buffer = Vec::new();
         {
             let props = WriterProperties::builder()
-                .set_compression(self.compression.into())
+                .set_compression(Compression::SNAPPY)
                 .build();
 
             let mut arrow_writer = ArrowWriter::try_new(&mut buffer, schema, Some(props))
@@ -480,14 +441,6 @@ mod temporal {
 }
 
 impl OutputWriter for ParquetWriter {
-    fn content_type(&self) -> &'static str {
-        "application/vnd.apache.parquet"
-    }
-
-    fn file_extension(&self) -> &'static str {
-        "parquet"
-    }
-
     fn write(&self, result: &ViewResult, output: &mut dyn Write) -> Result<()> {
         self.write_with_summary(result, output).map(|_| ())
     }
@@ -503,61 +456,6 @@ impl OutputWriter for ParquetWriter {
             .map_err(|e| Error::Output(e.to_string()))?;
         output.flush().map_err(|e| Error::Output(e.to_string()))?;
         Ok(summary)
-    }
-}
-
-#[async_trait]
-impl AsyncOutputWriter for ParquetWriter {
-    fn content_type(&self) -> &'static str {
-        "application/vnd.apache.parquet"
-    }
-
-    fn file_extension(&self) -> &'static str {
-        "parquet"
-    }
-
-    async fn write<W: AsyncWrite + Unpin + Send>(
-        &self,
-        result: &ViewResult,
-        mut writer: W,
-    ) -> Result<()> {
-        // Write to buffer first (Parquet writer needs sync write)
-        let (buffer, _) = self.write_to_buffer(result)?;
-
-        // Write buffer to async writer
-        writer
-            .write_all(&buffer)
-            .await
-            .map_err(|e| Error::Output(e.to_string()))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| Error::Output(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn write_streaming<W: AsyncWrite + Unpin + Send>(
-        &self,
-        columns: &[ColumnInfo],
-        rows: Pin<Box<dyn Stream<Item = Vec<Value>> + Send>>,
-        writer: W,
-    ) -> Result<()> {
-        // Parquet is a columnar format, so we need to buffer all rows
-        // to build efficient column chunks
-        let mut data = Vec::new();
-        let mut rows = rows;
-        while let Some(row) = rows.next().await {
-            data.push(row);
-        }
-
-        let result = ViewResult {
-            columns: columns.to_vec(),
-            data,
-            row_count: 0,
-        };
-
-        AsyncOutputWriter::write(self, &result, writer).await
     }
 }
 
@@ -599,7 +497,6 @@ mod tests {
     fn column_of(col_type: ColumnType, values: Vec<Value>) -> ViewResult {
         ViewResult {
             columns: vec![ColumnInfo::new("c", col_type)],
-            row_count: values.len(),
             data: values.into_iter().map(|v| vec![v]).collect(),
         }
     }
@@ -620,20 +517,20 @@ mod tests {
     #[test]
     fn test_parquet_writer_default() {
         let writer = ParquetWriter::new();
-        assert!(matches!(writer.compression, ParquetCompression::Snappy));
         assert_eq!(writer.temporal, TemporalEncoding::Text);
     }
 
     #[test]
-    fn test_parquet_compression_conversion() {
-        assert!(matches!(
-            Compression::from(ParquetCompression::None),
-            Compression::UNCOMPRESSED
-        ));
-        assert!(matches!(
-            Compression::from(ParquetCompression::Snappy),
-            Compression::SNAPPY
-        ));
+    fn columns_are_snappy_compressed() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        let result = column_of(ColumnType::String, vec![json!("a"), json!("b")]);
+        for writer in [ParquetWriter::new(), native()] {
+            let mut output = Vec::new();
+            writer.write(&result, &mut output).unwrap();
+            let reader = SerializedFileReader::new(bytes::Bytes::from(output)).unwrap();
+            let row_group = reader.metadata().row_group(0);
+            assert_eq!(row_group.column(0).compression(), Compression::SNAPPY);
+        }
     }
 
     #[test]
@@ -790,7 +687,6 @@ mod tests {
                 ColumnInfo::new("value", ColumnType::Integer),
             ],
             data: vec![vec![json!("1"), json!(100)], vec![json!("2"), json!(200)]],
-            row_count: 2,
         };
 
         let writer = ParquetWriter::new();
@@ -813,7 +709,6 @@ mod tests {
                 vec![json!("a"), json!("2026-06-15")],
                 vec![json!("b"), json!("2026-06")],
             ],
-            row_count: 2,
         };
 
         let batch = round_trip(&ParquetWriter::new(), &result);
@@ -865,7 +760,6 @@ mod tests {
                     json!(3),
                 ],
             ],
-            row_count: 3,
         };
 
         let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
@@ -1111,7 +1005,6 @@ mod tests {
                     json!(1.5),
                 ],
             ],
-            row_count: 2,
         };
         let (batch, summary) = round_trip_with_summary(&native(), &result);
         // A string column takes anything; the others null what does not fit.
@@ -1136,7 +1029,6 @@ mod tests {
         let result = ViewResult {
             columns: vec![ColumnInfo::new("id", ColumnType::String)],
             data: vec![],
-            row_count: 0,
         };
 
         let writer = ParquetWriter::new();
@@ -1153,7 +1045,6 @@ mod tests {
         let result = ViewResult {
             columns: vec![ColumnInfo::new("when", ColumnType::DateTime)],
             data: vec![],
-            row_count: 0,
         };
 
         let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
@@ -1173,7 +1064,6 @@ mod tests {
                 ColumnInfo::new("name", ColumnType::String),
             ],
             data: vec![vec![json!("1"), Value::Null]],
-            row_count: 1,
         };
 
         let writer = ParquetWriter::new();
@@ -1182,39 +1072,5 @@ mod tests {
 
         // Should write successfully with null value
         assert!(output.len() > 4);
-    }
-
-    #[test]
-    fn test_content_type_and_extension() {
-        let writer = ParquetWriter::new();
-        assert_eq!(
-            <ParquetWriter as OutputWriter>::content_type(&writer),
-            "application/vnd.apache.parquet"
-        );
-        assert_eq!(
-            <ParquetWriter as OutputWriter>::file_extension(&writer),
-            "parquet"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_async_parquet_writer() {
-        let result = ViewResult {
-            columns: vec![
-                ColumnInfo::new("id", ColumnType::String),
-                ColumnInfo::new("count", ColumnType::Integer),
-            ],
-            data: vec![vec![json!("a"), json!(1)], vec![json!("b"), json!(2)]],
-            row_count: 2,
-        };
-
-        let writer = ParquetWriter::new();
-        let mut output = Vec::new();
-        AsyncOutputWriter::write(&writer, &result, &mut output)
-            .await
-            .unwrap();
-
-        assert!(output.len() > 4);
-        assert_eq!(&output[0..4], b"PAR1");
     }
 }

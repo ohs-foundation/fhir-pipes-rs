@@ -13,35 +13,15 @@ pub struct ColumnInfo {
 
     /// The column's data type.
     pub col_type: ColumnType,
-
-    /// Whether this column can contain null values.
-    pub nullable: bool,
-
-    /// Human-readable description of the column.
-    pub description: Option<String>,
 }
 
 impl ColumnInfo {
-    /// Create a new column info with default settings.
+    /// Create a new column info.
     pub fn new(name: impl Into<String>, col_type: ColumnType) -> Self {
         Self {
             name: name.into(),
             col_type,
-            nullable: true,
-            description: None,
         }
-    }
-
-    /// Set whether this column is nullable.
-    pub fn with_nullable(mut self, nullable: bool) -> Self {
-        self.nullable = nullable;
-        self
-    }
-
-    /// Set the column description.
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
     }
 }
 
@@ -159,11 +139,6 @@ impl ColumnType {
             Self::Json => "JSON",
         }
     }
-
-    /// Get the default value representation for null values.
-    pub fn null_representation(&self) -> &'static str {
-        "NULL"
-    }
 }
 
 impl std::fmt::Display for ColumnType {
@@ -250,17 +225,5 @@ mod tests {
         assert_eq!(ColumnType::from_fhir_type("integer"), ColumnType::Integer);
         assert_eq!(ColumnType::from_ansi_type("BIGINT"), ColumnType::Integer64);
         assert_eq!(ColumnType::from_ansi_type("INTEGER"), ColumnType::Integer);
-    }
-
-    #[test]
-    fn test_column_info_builder() {
-        let col = ColumnInfo::new("test_col", ColumnType::String)
-            .with_nullable(false)
-            .with_description("A test column");
-
-        assert_eq!(col.name, "test_col");
-        assert_eq!(col.col_type, ColumnType::String);
-        assert!(!col.nullable);
-        assert_eq!(col.description, Some("A test column".to_string()));
     }
 }

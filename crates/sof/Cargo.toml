@@ -32,10 +32,9 @@ arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 
-# Async
+# Async: the FHIRPath engine is async; the evaluator runs it on Tokio.
 async-trait = { workspace = true }
 tokio = { workspace = true }
-futures-util = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
@@ -47,11 +46,10 @@ tracing = { workspace = true }
 default = []
 parquet = ["dep:arrow", "dep:parquet", "dep:chrono"]
 # Run views against FHIR resources stored as JSONB in PostgreSQL (ViewRunner).
-# SQL generation (SqlGenerator, run_with) needs no database driver.
+# SQL generation (SqlGenerator) needs no database driver.
 postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
 
 [dev-dependencies]
-tokio-test = "0.4"
 bytes = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

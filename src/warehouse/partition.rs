@@ -207,7 +207,6 @@ pub fn write(
             .collect();
         let part = ViewResult {
             columns: columns.clone(),
-            row_count: data.len(),
             data,
         };
         let path = dir.join("part-0.parquet");
@@ -285,7 +284,6 @@ mod tests {
                 .iter()
                 .map(|c| ColumnInfo::new(*c, ColumnType::String))
                 .collect(),
-            row_count: rows.len(),
             data: rows,
         }
     }
@@ -330,7 +328,6 @@ mod tests {
                 ColumnInfo::new("where", ColumnType::String),
                 ColumnInfo::new("start", ColumnType::Date),
             ],
-            row_count: 3,
             data: vec![
                 vec![json!("SLE"), json!("2026-06-15T08:30:00+01:00")],
                 vec![json!("NGA"), json!("2026-06-15T08:30:00+01:00")],

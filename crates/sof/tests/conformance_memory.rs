@@ -173,7 +173,7 @@ async fn run_test(file: &str, title: String, test: &Value, resources: &[Value]) 
             )
         }
     } else if let Some(count) = test.get("expectCount").and_then(Value::as_u64) {
-        let got = result.row_count as u64;
+        let got = result.data.len() as u64;
         mk(got == count, format!("count: want {count} got {got}"))
     } else if let Some(cols) = test.get("expectColumns").and_then(Value::as_array) {
         let got: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();

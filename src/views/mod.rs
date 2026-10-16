@@ -704,7 +704,7 @@ fn run_one_test(test: &serde_json::Value, resources: &[serde_json::Value]) -> (b
             (false, format!("rows differ: got {}", Value::Array(actual)))
         }
     } else if let Some(count) = test.get("expectCount").and_then(Value::as_u64) {
-        let got = result.row_count as u64;
+        let got = result.data.len() as u64;
         (got == count, format!("want {count} rows, got {got}"))
     } else if let Some(cols) = test.get("expectColumns").and_then(Value::as_array) {
         let got: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
@@ -934,7 +934,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                         .write_with_summary(&result, &mut sink)
                         .with_context(|| format!("writing {}", path.display()))?;
                     sink.flush().ok();
-                    eprintln!("{name} → {} ({} rows)", path.display(), result.row_count);
+                    eprintln!("{name} → {} ({} rows)", path.display(), result.data.len());
                     mismatches.push((name.as_str(), summary));
                 }
                 report_mismatches(&mismatches);

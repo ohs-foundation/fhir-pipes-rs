@@ -61,11 +61,9 @@ pub async fn execute(view: &ViewDefinition, resources: &[Value]) -> Result<ViewR
     for resource in resources {
         data.extend(compiled.execute_resource(resource).await?);
     }
-    let row_count = data.len();
     Ok(ViewResult {
         columns: compiled.columns().to_vec(),
         data,
-        row_count,
     })
 }
 
@@ -180,7 +178,17 @@ impl CompiledView {
             uses_context: AtomicBool::new(false),
         };
 
-        let shape = shape(&view.select)?;
+        let mut mismatched = false;
+        let shape: Vec<(String, ColumnType)> = view
+            .output_columns(|| mismatched = true)
+            .into_iter()
+            .map(|col| (col.name.clone(), column_type(col)))
+            .collect();
+        if mismatched {
+            return Err(Error::InvalidViewDefinition(
+                "unionAll branches have mismatched column shape".to_string(),
+            ));
+        }
         if shape.is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition produces no columns".to_string(),
@@ -296,11 +304,9 @@ impl CompiledView {
             for part in parts {
                 data.extend(part);
             }
-            let row_count = data.len();
             Ok(ViewResult {
                 columns: self.columns.clone(),
                 data,
-                row_count,
             })
         })
     }
@@ -308,11 +314,6 @@ impl CompiledView {
     /// The output columns, in order.
     pub fn columns(&self) -> &[ColumnInfo] {
         &self.columns
-    }
-
-    /// The FHIR resource type this view selects from.
-    pub fn resource_type(&self) -> &str {
-        &self.ev.resource_type
     }
 
     /// Evaluate the view against a single resource, returning its rows (column
@@ -388,44 +389,6 @@ fn cartesian(left: Vec<Vec<Value>>, right: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
         }
     }
     out
-}
-
-/// The ordered column shape of a select list, validating `unionAll` branch
-/// consistency.
-fn shape(selects: &[SelectColumn]) -> Result<Vec<(String, ColumnType)>> {
-    let mut cols = Vec::new();
-    for select in selects {
-        cols.extend(shape_of(select)?);
-    }
-    Ok(cols)
-}
-
-fn shape_of(select: &SelectColumn) -> Result<Vec<(String, ColumnType)>> {
-    let mut cols = Vec::new();
-    if let Some(columns) = &select.column {
-        for col in columns {
-            cols.push((col.name.clone(), column_type(col)));
-        }
-    }
-    for nested in &select.select {
-        cols.extend(shape_of(nested)?);
-    }
-    if let Some(branches) = &select.union_all {
-        let mut shapes = branches.iter().map(shape_of).collect::<Result<Vec<_>>>()?;
-        if let Some(first) = shapes.first() {
-            let first_names: Vec<&str> = first.iter().map(|(n, _)| n.as_str()).collect();
-            for other in &shapes[1..] {
-                let names: Vec<&str> = other.iter().map(|(n, _)| n.as_str()).collect();
-                if names != first_names {
-                    return Err(Error::InvalidViewDefinition(
-                        "unionAll branches have mismatched column shape".to_string(),
-                    ));
-                }
-            }
-            cols.extend(shapes.swap_remove(0));
-        }
-    }
-    Ok(cols)
 }
 
 struct Evaluator {
@@ -1571,7 +1534,7 @@ mod tests {
             .map(|i| (i % 4).max(1))
             .sum::<usize>()
             + 100 * 40;
-        assert_eq!(sequential.row_count, expected);
+        assert_eq!(sequential.data.len(), expected);
         for threads in [1, 3, 8, 64, 5000] {
             let parallel = execute_parallel(&v, &resources, threads).unwrap();
             assert_eq!(parallel.data, sequential.data, "{threads} threads");
