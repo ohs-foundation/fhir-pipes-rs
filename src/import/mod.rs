@@ -32,7 +32,7 @@ pub enum ImportCommand {
     LocationBoundaries(LocationBoundariesArgs),
     /// Rows of points (CSV: facilities, schools, settlements) as site Locations under the
     /// admin units location-boundaries wrote, optionally each with a facility Organization
-    LocationSites(LocationSitesArgs),
+    LocationSites(Box<LocationSitesArgs>),
 }
 
 #[derive(clap::Args, Debug, Clone)]
