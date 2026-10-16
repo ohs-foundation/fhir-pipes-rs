@@ -26,6 +26,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 | HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `refresh` | next release |
+| Google Cloud Healthcare API FHIR stores: tokens from Application Default Credentials (service account key, gcloud user credentials, metadata server), renewed before expiry; store paths (`projects/…/fhirStores/…`) accepted as the server (#34) | `--google-auth` on `extract`, `export`, `run`, `load`, `refresh` | next release |
 
 ### ViewDefinitions
 
@@ -123,7 +124,7 @@ on its own outstanding list, next to fhir-pipes.
 
 | # | RFC outstanding item | fhir-pipes |
 |---|---|---|
-| 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, including a system-level Bulk Data `$export` client (next release) |
+| 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, including a system-level Bulk Data `$export` client and Google Application Default Credentials for Cloud Healthcare API stores (next release) |
 | 2 | Direct relational database sinks (PostgreSQL) | `refresh` with `[database]` loads the view tables into PostgreSQL, with TLS (next release) |
 | 3 | Schema from StructureDefinitions, including IG profiles | Not needed for the flat tables, which take their columns from the views. Would be the basis of nested output. `profile check` already reads an IG's StructureDefinitions |
 | 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done for views evaluated in memory (`views run --input`, `refresh`): `octofhir-fhirpath`, 144 of 144. Generated SQL (`views sql`, and `views run --db`, which uses it) supports fewer functions; `substring()`, for one, is refused |
