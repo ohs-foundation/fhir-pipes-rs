@@ -1,133 +1,76 @@
-> **In fhir-pipes.** This crate is `octofhir-sof` from
-> [octofhir/sof](https://github.com/octofhir/sof) by the OctoFHIR Team
-> (MIT OR Apache-2.0), by way of the Recode Labs fork, brought into
-> fhir-pipes-rs with its history and renamed `fhir-pipes-sof`. The upstream
-> CLI is now `fhir-pipes views` (`generate` is `views sql`). The rest of
-> this README is the upstream text and still uses the upstream names.
+# fhir-pipes-sof
 
-# octofhir/sof
+The [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/) engine
+behind `fhir-pipes views` and `fhir-pipes refresh`: it parses
+`ViewDefinition` resources and turns FHIR data into flat tables, in memory or
+as generated SQL.
 
-A Rust toolkit for [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/):
-parse `ViewDefinition` resources and turn FHIR data into flat tables — with no
-database required, or by generating PostgreSQL.
+This crate is `octofhir-sof` from
+[octofhir/sof](https://github.com/octofhir/sof) by the OctoFHIR Team
+(MIT OR Apache-2.0), by way of the Recode Labs fork, brought into
+fhir-pipes-rs with its history and renamed `fhir-pipes-sof`. It keeps only
+what fhir-pipes uses. The upstream CLI is now `fhir-pipes views` (`generate`
+is `views sql`); see the [fhir-pipes README](../../README.md).
 
-**Documentation:** <https://octofhir.github.io/sof>
+- **Two execution paths**, both passing the full official content-test suite
+  (144/144):
+  - a **database-free in-memory evaluator** over `serde_json`, with FHIRPath
+    evaluated by [octofhir-fhirpath](https://crates.io/crates/octofhir-fhirpath),
+    and
+  - a **SQL generator** that lowers FHIRPath to PostgreSQL over JSONB or to
+    DuckDB over JSON.
+- **Writers** for the rows: CSV, NDJSON, JSON, and Parquet (the `parquet`
+  feature; Snappy compression; temporal columns as strings by default or as
+  native Arrow types). CSV and JSON write each value as it is. Parquet writes
+  an integral number (`5.0`) in an integer column as the integer and, with
+  native temporal types, a dateTime with a time in a `date` column as its
+  date part as written; any other value that does not fit its column's type
+  is written as null and counted per column
+  (`OutputWriter::write_with_summary`).
+- Support for the v2.1 additions: the `repeat` directive and the `%rowIndex`
+  environment variable, on both paths.
 
-- **Two interchangeable execution paths**, both passing the full official
-  content-test suite (144/144):
-  - a **database-free in-memory evaluator** over `serde_json`, and
-  - a **PostgreSQL generator** that lowers FHIRPath to SQL over JSONB.
-- **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated; temporal columns
-  as strings by default or native Arrow types with `--parquet-temporal native`).
-  CSV and JSON write each value as it is. Parquet writes an integral number
-  (`5.0`) in an integer column as the integer and, with native temporal
-  types, a dateTime with a time in a `date` column as its date part as
-  written; any other value that does not fit its column's type is written as
-  null and counted per column (`OutputWriter::write_with_summary`).
-- **Offline lint & validation** of ViewDefinitions (FH01–FH10) with rustc-style
-  diagnostics, plus JSON and SARIF output for CI.
-- Full support for the v2.1 additions: the `repeat` directive and the
-  `%rowIndex` environment variable, on both paths.
+Lint and validation of ViewDefinitions are in
+[fhir-pipes-sof-lint](../sof-lint).
 
-## Install
+## Features
 
-```sh
-# Prebuilt binary (detects your platform, verifies SHA-256):
-curl -fsSL https://raw.githubusercontent.com/octofhir/sof/main/install.sh | sh
-
-# From crates.io:
-cargo install octofhir-sof-cli
-
-# …or from a clone of this repo:
-cargo install --path crates/octofhir-sof-cli
-
-# …or build and run in place:
-cargo build --release
-./target/release/octofhir-sof --help
-```
-
-Prebuilt binaries for macOS, Linux and Windows are attached to each
-[GitHub release](https://github.com/octofhir/sof/releases).
-
-## Usage
-
-```sh
-# Run a view over FHIR files, no database — CSV to stdout
-octofhir-sof run view.json --input patients.ndjson
-
-# Stream a large NDJSON export with bounded memory (NDJSON in, NDJSON out)
-cat export/*.ndjson | octofhir-sof run view.json --input - --output ndjson
-
-# Run every view in a directory in one pass, one output file per view
-octofhir-sof run views/ --input data/ --output csv --out out/
-
-# Parquet with native temporal types (Date32 / Timestamp(µs, UTC) / Time64)
-# instead of the spec-default strings; partial dates floor to period start
-octofhir-sof run view.json --input data.ndjson --output parquet \
-  --parquet-temporal native --out view.parquet
-
-# Generate SQL for the view (PostgreSQL JSONB by default, or DuckDB JSON)
-octofhir-sof generate view.json
-octofhir-sof generate view.json --dialect duckdb
-
-# Generate a CREATE TABLE for the view's columns (ansi | postgres | duckdb)
-octofhir-sof generate view.json --ddl --dialect postgres
-
-# Run against PostgreSQL instead of files
-octofhir-sof run view.json --db postgres://localhost/fhir --output csv
-
-# Validate a ViewDefinition offline (no FHIR package needed)
-octofhir-sof validate view.json
-octofhir-sof validate view.json --sarif > results.sarif
-
-# Lint selectors and generated SQL against a FHIR package (any version)
-octofhir-sof lint view.json --package hl7.fhir.r4.core
-octofhir-sof lint view.json --package hl7.fhir.r5.core --version 5.0.0
-
-# Check a view against the portable ShareableViewDefinition FHIRPath subset
-# (offline, no package). --allow-fn exempts a registered custom function.
-octofhir-sof lint view.json --shareable
-
-# Run the official content-test format in memory
-octofhir-sof test tests/
-```
-
-Exit codes: `0` on success, `1` on validation errors, lint errors, test
-failures, or I/O errors.
+- `parquet`: the Parquet writer (`output::ParquetWriter`).
+- `postgres`: `ViewRunner`, which runs the generated SQL against PostgreSQL.
+  SQL generation needs no database driver.
 
 ## Library
 
 ```rust
-use octofhir_sof::{ViewDefinition, execute, SqlGenerator};
+use fhir_pipes_sof::output::{OutputWriter, get_writer};
+use fhir_pipes_sof::{CompiledView, SqlGenerator, ViewDefinition};
 
-let view = ViewDefinition::parse(&json_text)?;
+let view = ViewDefinition::from_json(&json)?;
 
-// In-memory:
-let result = execute(&view, &resources)?;
+// In memory, on four threads. Rows keep the input order.
+let compiled = CompiledView::compile_blocking(&view)?;
+let result = compiled.execute_parallel(&resources, 4)?;
+get_writer("csv")?.write(&result, &mut std::io::stdout())?;
 
-// Or generate SQL:
+// Or generate SQL (PostgreSQL by default; `with_dialect(Dialect::DuckDb)`).
 let sql = SqlGenerator::new().generate(&view)?.sql;
 ```
 
-For bounded-memory streaming, compile once and run resource-at-a-time:
+`execute` (async), `execute_blocking` and `execute_parallel` compile and run
+in one call. A compiled view can also run one resource at a time, from async
+code:
 
 ```rust
-use octofhir_sof::CompiledView;
-
-let compiled = CompiledView::compile(&view)?;
-for resource in resources {
-    for row in compiled.execute_resource(&resource)? {
+let compiled = CompiledView::compile(&view).await?;
+for resource in &resources {
+    for row in compiled.execute_resource(resource).await? {
         // row is the column values in column order
     }
 }
 ```
 
-## SQL dialects
-
-`generate` emits a PostgreSQL JSONB query by default and a DuckDB JSON query
-with `--dialect duckdb`; both come from one dialect-parametrized generator and
-pass the full content-test suite (DuckDB verified through the `duckdb` CLI). The
-in-memory engine (`run --input`, `execute`) needs no database at all.
+`create_table` gives the `CREATE TABLE` for a view's generated columns in the
+ANSI, PostgreSQL or DuckDB dialect.
 
 ## Known limitations
 
@@ -148,30 +91,28 @@ the engine and filters by `resourceType`.
 
 ## FHIR versions
 
-Execution is **version-agnostic**: the engine navigates the resource JSON and is
-not coupled to any StructureDefinition, so the same view runs unchanged over R4,
-R4B, R5 or R6 resources (the suite includes an R5 `CodeableReference` case). The
-schema-driven lint (`lint --package`) accepts any package the canonical manager
-can resolve — pass the package name and `--version`, e.g. `hl7.fhir.r4.core`,
-`hl7.fhir.r4b.core`, `hl7.fhir.r5.core`, or an R6 build — there is no hard-coded
-version.
+Execution does not depend on the FHIR version: the engine navigates the
+resource JSON and uses no StructureDefinition, so the same view runs
+unchanged over R4, R4B, R5 or R6 resources (the suite includes an R5
+`CodeableReference` case).
 
 ## Conformance
 
 The official reference tests from
-[FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) are vendored under
-`crates/octofhir-sof/tests/spec/` (refresh with `just update-spec-tests`). Both
-execution paths pass the full v2.1 suite (144/144). Run them:
+[FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) are vendored
+under `tests/spec/`. Extra cases are in `tests/extra/` (all three paths) and
+`tests/extra_memory/` (in memory only: functions the SQL generator cannot
+lower). Both execution paths pass the full v2.1 suite (144/144). Run them
+with `cargo test -p fhir-pipes-sof`:
 
-```sh
-just conformance                 # in-memory (no database)
-just conformance-pg              # against PostgreSQL (needs Docker)
-just conformance-duckdb          # against DuckDB (needs the `duckdb` CLI)
-just conformance-report          # emit a result file for the sql-on-fhir.org registry
-```
+- in memory: always (`tests/conformance_memory.rs`);
+- DuckDB: when the `duckdb` CLI is on `PATH` (`tests/conformance_duckdb.rs`);
+- PostgreSQL: with the `postgres` feature and `SOF_CONFORMANCE_DB` set to a
+  database URL (`tests/conformance.rs`). The tests create a `conf` schema in
+  that database.
 
-See [CONFORMANCE.md](CONFORMANCE.md) for the result-file format and how to submit
-our entry to the implementation registry.
+`SOF_RESULT_JSON=<path>` makes the in-memory run write a result file in the
+format of the sql-on-fhir.org registry; see [CONFORMANCE.md](CONFORMANCE.md).
 
 ## License
 
