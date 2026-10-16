@@ -86,6 +86,15 @@ pub fn extract_payload(body: &[u8]) -> std::result::Result<Vec<u8>, String> {
     Ok(body.to_vec())
 }
 
+/// GET a boundary URL and take its payload (see `extract_payload`).
+fn fetch_payload(client: &FhirClient, url: &str) -> std::result::Result<Vec<u8>, String> {
+    let body = client.get(url).map_err(|e| e.to_string())?.body;
+    extract_payload(&body)
+}
+
+/// A cached entry is taken from its meta file, without reading and
+/// hashing the bytes here: the merge reads them once, with
+/// `read_for_merge`.
 fn resolve_one(
     client: &FhirClient,
     url: &str,
@@ -93,17 +102,13 @@ fn resolve_one(
     cache_errors: &mut Vec<String>,
 ) -> Outcome {
     if let (Some(cache), false) = (&opts.cache, opts.refresh) {
-        match cache.read(url) {
-            Ok(Some(_)) => return Outcome::Cached,
-            Ok(None) => {}
+        match cache.contains(url) {
+            Ok(true) => return Outcome::Cached,
+            Ok(false) => {}
             Err(e) => cache_errors.push(e),
         }
     }
-    let body = match client.get(url) {
-        Ok(f) => f.body,
-        Err(e) => return Outcome::Failed(e.to_string()),
-    };
-    let bytes = match extract_payload(&body) {
+    let bytes = match fetch_payload(client, url) {
         Ok(b) => b,
         Err(e) => return Outcome::Failed(e),
     };
@@ -116,6 +121,31 @@ fn resolve_one(
             }
         },
         None => Outcome::Fetched(Some(bytes)),
+    }
+}
+
+/// The cached bytes of `url` for the merge. An entry that fails its
+/// sha256 check (damaged after `fetch_boundaries` found it) is fetched
+/// again and written back, as the fetch phase would have done; the error
+/// comes back too, for the report's `cache_error`.
+pub fn read_for_merge(
+    client: &FhirClient,
+    cache: &Cache,
+    url: &str,
+) -> (Option<Vec<u8>>, Option<String>) {
+    let damaged = match cache.read(url) {
+        Ok(found) => return (found, None),
+        Err(e) => e,
+    };
+    match fetch_payload(client, url) {
+        Ok(bytes) => {
+            let rewritten = match cache.write(url, &bytes) {
+                Ok(()) => "fetched again".to_string(),
+                Err(e) => format!("fetched again; writing it back: {e}"),
+            };
+            (Some(bytes), Some(format!("{damaged}; {rewritten}")))
+        }
+        Err(e) => (None, Some(format!("{damaged}; fetching it again: {e}"))),
     }
 }
 
@@ -370,7 +400,57 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_cache_entry_is_reported_and_refetched() {
+    fn a_cached_entry_is_read_once_and_a_damaged_one_fetched_again_for_the_merge() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/d"))
+                .times(1)
+                .respond_with(status_code(200).body("fresh")),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        let url = server.url("/d").to_string();
+        cache.write(&url, b"x").unwrap();
+        std::fs::write(
+            dir.path()
+                .join(format!("{}.bin", crate::extract::cache::cache_key(&url))),
+            b"tampered",
+        )
+        .unwrap();
+        let mut report = Report::default();
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: Some(cache.clone()),
+            refresh: false,
+            max_consecutive_failures: 0,
+        };
+        let summary =
+            fetch_boundaries(&client(1), std::slice::from_ref(&url), &opts, &mut report).unwrap();
+        assert_eq!(
+            (summary.cached, summary.fetched),
+            (1, 0),
+            "from the meta file"
+        );
+        let (bytes, error) = read_for_merge(&client(1), &cache, &url);
+        assert_eq!(bytes.as_deref(), Some(&b"fresh"[..]));
+        let error = error.unwrap();
+        assert!(
+            error.contains("sha256") && error.contains("fetched again"),
+            "{error}"
+        );
+        assert_eq!(
+            cache.read(&url).unwrap(),
+            Some(b"fresh".to_vec()),
+            "rewritten"
+        );
+        assert_eq!(
+            read_for_merge(&client(1), &cache, &url),
+            (Some(b"fresh".to_vec()), None)
+        );
+    }
+
+    #[test]
+    fn a_cache_entry_without_its_bin_is_reported_and_refetched() {
         let server = Server::run();
         server.expect(
             Expectation::matching(request::method_path("GET", "/c"))
@@ -381,10 +461,9 @@ mod tests {
         let cache = Cache::new(dir.path());
         let url = server.url("/c").to_string();
         cache.write(&url, b"x").unwrap();
-        std::fs::write(
+        std::fs::remove_file(
             dir.path()
                 .join(format!("{}.bin", crate::extract::cache::cache_key(&url))),
-            b"tampered",
         )
         .unwrap();
         let mut report = Report::default();

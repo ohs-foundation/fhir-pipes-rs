@@ -68,6 +68,29 @@ impl Cache {
         Ok(Some(bytes))
     }
 
+    /// Whether there is an entry for `url`, from its meta file and without
+    /// reading the bin: Ok(false) on a miss (no meta file), Err when the
+    /// meta file is unreadable or names no sha256 or its bin is missing.
+    /// The bytes are checked against the sha256 when `read`.
+    pub fn contains(&self, url: &str) -> std::result::Result<bool, String> {
+        let (bin, meta) = self.paths(url);
+        let meta_text = match std::fs::read_to_string(&meta) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("{}: {e}", meta.display())),
+        };
+        let meta_json: serde_json::Value =
+            serde_json::from_str(&meta_text).map_err(|e| format!("{}: {e}", meta.display()))?;
+        if !meta_json["sha256"].is_string() {
+            return Err(format!("{}: no sha256", meta.display()));
+        }
+        match std::fs::metadata(&bin) {
+            Ok(m) if m.is_file() => Ok(true),
+            Ok(_) => Err(format!("{}: not a file", bin.display())),
+            Err(e) => Err(format!("{}: {e}", bin.display())),
+        }
+    }
+
     /// Two writers racing on the same URL with differing bytes can leave a
     /// mismatched bin/meta pair (one writer's bin next to the other's meta);
     /// `read` detects that via the sha256 check and reports it as an error
@@ -163,9 +186,32 @@ mod tests {
         let cache = Cache::new(dir.path());
         std::fs::write(dir.path().join(format!("{}.bin", cache_key("u"))), b"x").unwrap();
         assert_eq!(cache.read("u").unwrap(), None);
+        assert_eq!(cache.contains("u"), Ok(false));
         cache.write("v", b"y").unwrap();
+        assert_eq!(cache.contains("v"), Ok(true));
         std::fs::remove_file(dir.path().join(format!("{}.bin", cache_key("v")))).unwrap();
         assert!(cache.read("v").is_err());
+        assert!(cache.contains("v").is_err());
+    }
+
+    #[test]
+    fn contains_reads_the_meta_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        cache.write("w", b"geo").unwrap();
+        let bin = dir.path().join(format!("{}.bin", cache_key("w")));
+        std::fs::write(&bin, b"tampered").unwrap();
+        assert_eq!(
+            cache.contains("w"),
+            Ok(true),
+            "the bytes are checked on read"
+        );
+        assert!(cache.read("w").is_err());
+        let meta = dir.path().join(format!("{}.meta.json", cache_key("w")));
+        std::fs::write(&meta, "{}").unwrap();
+        assert!(cache.contains("w").unwrap_err().contains("no sha256"));
+        std::fs::write(&meta, "not json").unwrap();
+        assert!(cache.contains("w").is_err());
     }
 
     #[test]
