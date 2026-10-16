@@ -1075,6 +1075,20 @@ committed.
 `--dry-run` runs the preflight and prints one line per bundle, naming each
 entry as `create` or `update@<version>`, without posting anything.
 
+Load reads the input twice, so a large file does not have to fit in
+memory. The first pass checks every line and keeps only each resource's
+type, id, `meta.versionId`, line number and `partOf` parent; that is enough
+to order the resources, check for cycles, run the preflight and print a dry
+run. The second pass reads each bundle's resources again when a worker
+takes the bundle, so only the bundles being posted are in memory. It reads
+the file once per `partOf` depth, counted separately for Locations and for
+other types: a MeasureReport file once, a Location hierarchy once per
+level. The file must not change while it is loaded: a line that no longer
+holds the resource planned for it stops the run like a failed bundle, and
+bundles committed before it stay committed. With four workers and bundles
+of 500, a 185 MB MeasureReport file loads in about 230 MB of memory instead
+of 1.9 GB.
+
 Load does not update the snapshot. The server is the authority on what was
 stored; the next extract brings the snapshot up to date.
 
