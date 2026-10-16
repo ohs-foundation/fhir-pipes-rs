@@ -32,7 +32,7 @@ pub struct SqlGenerator {
     /// Alias used for the base table (e.g. `base` in `FROM patient base`).
     table_pattern: String,
     /// Optional row-status predicate template; `{base}` is replaced with the
-    /// base alias. `None` disables row filtering entirely.
+    /// base alias.
     row_filter: Option<String>,
     /// SQL dialect for the generated SELECT query.
     dialect: Dialect,
@@ -54,26 +54,10 @@ impl SqlGenerator {
         }
     }
 
-    /// Create a new SQL generator with a custom base-table alias.
-    pub fn with_table_pattern(table_pattern: impl Into<String>) -> Self {
-        Self {
-            table_pattern: table_pattern.into(),
-            ..Self::new()
-        }
-    }
-
     /// Select the SQL dialect for the generated SELECT query. Defaults to
     /// [`Dialect::Postgres`]. `Dialect::Ansi` is treated as `Postgres`.
     pub fn with_dialect(mut self, dialect: Dialect) -> Self {
         self.dialect = dialect;
-        self
-    }
-
-    /// Set the row-status predicate. `{base}` is replaced with the base alias.
-    /// Pass `None` to emit no row filter (useful for plain tables that have no
-    /// `status` column).
-    pub fn with_row_filter(mut self, filter: Option<String>) -> Self {
-        self.row_filter = filter;
         self
     }
 
@@ -150,11 +134,7 @@ impl SqlGenerator {
             })
             .collect();
 
-        Ok(GeneratedSql {
-            sql,
-            columns,
-            ctes: Vec::new(),
-        })
+        Ok(GeneratedSql { sql, columns })
     }
 
     fn render_plan(&self, table: &str, plan: &Plan, where_sql: &[String]) -> String {
@@ -231,9 +211,6 @@ pub struct GeneratedSql {
 
     /// Column information for the result set.
     pub columns: Vec<GeneratedColumn>,
-
-    /// Common Table Expressions (CTEs) to prepend to the query.
-    pub ctes: Vec<String>,
 }
 
 /// A generated column with its SQL expression and metadata.

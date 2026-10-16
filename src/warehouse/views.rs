@@ -168,7 +168,6 @@ impl<'a> ViewRows<'a> {
                 .with_context(|| format!("running view {name}"))?;
             match &mut self.results[i] {
                 Some(all) => {
-                    all.row_count += r.row_count;
                     all.data.extend(r.data);
                 }
                 slot => *slot = Some(r),
@@ -359,12 +358,11 @@ mod tests {
             assert_eq!(n, 103);
             for (a, b) in chunked.iter().zip(&whole) {
                 assert_eq!(a.data, b.data, "{lines} lines a chunk");
-                assert_eq!(a.row_count, b.row_count);
                 assert_eq!(a.columns.len(), b.columns.len());
             }
         }
-        assert_eq!(whole[0].row_count, 93);
-        assert_eq!(whole[2].row_count, 10);
+        assert_eq!(whole[0].data.len(), 93);
+        assert_eq!(whole[2].data.len(), 10);
     }
 
     #[test]

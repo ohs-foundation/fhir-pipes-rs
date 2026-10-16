@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format follows
   writer returns, per column, the values it did not write as they are,
   instead of logging them at `warn` (which nothing showed). CSV and JSON
   return an empty summary.
+- **`ViewDefinition::output_columns`** — the view's output columns in order,
+  calling back for each `unionAll` whose branches do not have the same
+  column names. The in-memory evaluator and `fhir-pipes-sof-lint`'s
+  `validate_structure` both use it, in place of a walk of their own; their
+  errors and findings are unchanged.
 
 ### Changed
 
@@ -34,6 +39,33 @@ All notable changes to this project are documented here. The format follows
   (`2026-06-15`, not converted to UTC) instead of null. Anything else that
   cannot be converted is still null, and is now counted in the
   `WriteSummary`.
+
+### Removed
+
+API that fhir-pipes does not use. Nothing the `fhir-pipes` binary does
+changes.
+
+- The async writers: `output::AsyncOutputWriter` and its `write` and
+  `write_streaming` for every format, `output::AsyncWriter` and
+  `output::OutputFormat`. `OutputWriter::content_type` and
+  `OutputWriter::file_extension`.
+- Writer options: `ParquetCompression` and `ParquetWriter::with_compression`
+  (Parquet is written with Snappy, the default before);
+  `CsvWriter::with_header`, `with_delimiter` and `with_quote` (CSV has a
+  header, commas and double quotes); the `pretty` option of `NdjsonWriter`
+  and `JsonArrayWriter`. The writers are now unit structs.
+- `SqlExecutor` and `run_with`; `ViewRunner::with_generator`, `explain` and
+  `pool`.
+- `ViewResult::row_count` (use `data.len()`), `is_empty`, `row_as_object`,
+  `column_values` and `column_count`; `GeneratedSql::ctes`, which was always
+  empty.
+- `ColumnInfo::nullable`, `description`, `with_nullable` and
+  `with_description`; `ColumnType::null_representation`.
+- `ViewDefinition::parse` (use `from_json`) and `column_names`;
+  `Constant::value`.
+- `SqlGenerator::with_table_pattern` and `with_row_filter`.
+- `CompiledView::resource_type`.
+- The `futures-util` dependency and the `tokio-test` dev-dependency.
 
 ### Fixed
 

@@ -1,35 +1,46 @@
-//! SQL on FHIR implementation for OctoFHIR.
+//! SQL on FHIR v2 for fhir-pipes: ViewDefinition parsing, a database-free
+//! in-memory evaluator, SQL generation, and writers for the rows.
 //!
-//! This crate provides support for the SQL on FHIR specification, which enables
-//! transformation of FHIR resources into tabular data using ViewDefinition resources.
-//!
-//! # Overview
-//!
-//! SQL on FHIR allows you to define views over FHIR resources that can be materialized
-//! as relational tables. This is useful for analytics, reporting, and integration with
-//! SQL-based tools.
+//! This crate came from [octofhir/sof](https://github.com/octofhir/sof) and
+//! keeps only what fhir-pipes uses.
 //!
 //! # Components
 //!
-//! - [`ViewDefinition`] - Parsed representation of a FHIR ViewDefinition resource
-//! - [`SqlGenerator`] - Generates SQL from ViewDefinitions
-//! - [`ViewRunner`] - Executes views against a PostgreSQL database
+//! - [`ViewDefinition`]: a parsed ViewDefinition resource
+//!   ([`ViewDefinition::from_json`]).
+//! - [`CompiledView`]: a view compiled once and run over in-memory FHIR
+//!   resources (`serde_json::Value`), one resource at a time
+//!   ([`CompiledView::execute_resource`]) or on several threads
+//!   ([`CompiledView::execute_parallel`]). [`execute`], [`execute_blocking`]
+//!   and [`execute_parallel`] compile and run in one call.
+//! - [`SqlGenerator`]: generates a PostgreSQL or DuckDB query over FHIR
+//!   resources stored as JSON, and [`create_table`] the matching
+//!   `CREATE TABLE`.
+//! - [`ViewRunner`] (the `postgres` feature): runs the generated SQL against
+//!   PostgreSQL.
+//! - [`ViewResult`]: the columns and rows of a run, which the writers in
+//!   [`output`] write as CSV, NDJSON, JSON or (the `parquet` feature)
+//!   Parquet.
 //!
 //! # Example
 //!
-//! ```ignore
-//! use fhir_pipes_sof::{ViewDefinition, SqlGenerator, ViewRunner};
+//! ```no_run
+//! use fhir_pipes_sof::output::{OutputWriter, get_writer};
+//! use fhir_pipes_sof::{CompiledView, SqlGenerator, ViewDefinition};
 //!
-//! // Parse a ViewDefinition
-//! let view_def = ViewDefinition::from_json(&json)?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let json = serde_json::json!({});
+//! # let resources: Vec<serde_json::Value> = Vec::new();
+//! let view = ViewDefinition::from_json(&json)?;
 //!
-//! // Generate SQL
-//! let generator = SqlGenerator::new();
-//! let sql = generator.generate(&view_def)?;
+//! // In memory, on four threads.
+//! let result = CompiledView::compile_blocking(&view)?.execute_parallel(&resources, 4)?;
+//! get_writer("csv")?.write(&result, &mut std::io::stdout())?;
 //!
-//! // Execute the view
-//! let runner = ViewRunner::new(pool, generator);
-//! let result = runner.run(&view_def).await?;
+//! // Or as SQL.
+//! let sql = SqlGenerator::new().generate(&view)?.sql;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # SQL on FHIR Specification
@@ -46,9 +57,9 @@ mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
 pub use eval::{CompiledView, execute, execute_blocking, execute_parallel};
+pub use runner::ViewResult;
 #[cfg(feature = "postgres")]
 pub use runner::ViewRunner;
-pub use runner::{SqlExecutor, ViewResult, run_with};
 pub use sql_generator::{Dialect, GeneratedColumn, GeneratedSql, SqlGenerator, create_table};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
 

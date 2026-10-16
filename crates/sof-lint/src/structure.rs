@@ -55,7 +55,18 @@ pub fn validate_structure(view: &ViewDefinition) -> Vec<Finding> {
 
     walk(&view.select, &mut out);
 
-    let names = shape_names(&view.select, &mut out);
+    // The ordered output column names, with `unionAll` branches contributing
+    // once (and flagged when their shapes disagree).
+    let names: Vec<String> = view
+        .output_columns(|| {
+            out.push(err(
+                "FH09",
+                "unionAll branches have mismatched column shape (same names in the same order required)",
+            ))
+        })
+        .into_iter()
+        .map(|c| c.name.clone())
+        .collect();
     let mut seen = std::collections::HashSet::new();
     for name in &names {
         if !seen.insert(name) {
@@ -109,39 +120,6 @@ fn check_name(col: &Column, out: &mut Vec<Finding>) {
             .at(&col.name),
         );
     }
-}
-
-/// The ordered output column names, with `unionAll` branches contributing once
-/// (and flagged when their shapes disagree).
-fn shape_names(selects: &[SelectColumn], out: &mut Vec<Finding>) -> Vec<String> {
-    let mut names = Vec::new();
-    for select in selects {
-        names.extend(shape_names_of(select, out));
-    }
-    names
-}
-
-fn shape_names_of(select: &SelectColumn, out: &mut Vec<Finding>) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Some(columns) = &select.column {
-        names.extend(columns.iter().map(|c| c.name.clone()));
-    }
-    for nested in &select.select {
-        names.extend(shape_names_of(nested, out));
-    }
-    if let Some(branches) = &select.union_all {
-        let shapes: Vec<Vec<String>> = branches.iter().map(|b| shape_names_of(b, out)).collect();
-        if let Some(first) = shapes.first() {
-            if shapes[1..].iter().any(|s| s != first) {
-                out.push(err(
-                    "FH09",
-                    "unionAll branches have mismatched column shape (same names in the same order required)",
-                ));
-            }
-            names.extend(first.clone());
-        }
-    }
-    names
 }
 
 /// `sql-name` invariant: `^[A-Za-z][A-Za-z0-9_]*$`.

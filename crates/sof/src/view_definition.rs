@@ -177,54 +177,49 @@ impl ViewDefinition {
             .map_err(|e| Error::InvalidViewDefinition(e.to_string()))
     }
 
-    /// Parse a ViewDefinition from a JSON string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the string is not valid JSON or not a valid ViewDefinition.
-    pub fn parse(s: &str) -> Result<Self, Error> {
-        serde_json::from_str(s).map_err(|e| Error::InvalidViewDefinition(e.to_string()))
-    }
-
-    /// Get the list of all column names defined in this view.
-    pub fn column_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        collect_column_names(&self.select, &mut names);
-        names
+    /// The view's output columns, in order: each select's own columns, then
+    /// its nested selects', then its `unionAll`'s, which are the first
+    /// branch's. `mismatch` is called once for each `unionAll` whose branches
+    /// do not all have the same column names in the same order, innermost
+    /// first.
+    pub fn output_columns(&self, mut mismatch: impl FnMut()) -> Vec<&Column> {
+        let mut cols = Vec::new();
+        for select in &self.select {
+            output_columns_of(select, &mut mismatch, &mut cols);
+        }
+        cols
     }
 }
 
-/// Recursively collect column names from select clauses.
-fn collect_column_names(selects: &[SelectColumn], names: &mut Vec<String>) {
-    for select in selects {
-        if let Some(columns) = &select.column {
-            for col in columns {
-                names.push(col.name.clone());
+fn output_columns_of<'a>(
+    select: &'a SelectColumn,
+    mismatch: &mut dyn FnMut(),
+    cols: &mut Vec<&'a Column>,
+) {
+    if let Some(columns) = &select.column {
+        cols.extend(columns);
+    }
+    for nested in &select.select {
+        output_columns_of(nested, mismatch, cols);
+    }
+    if let Some(branches) = &select.union_all {
+        let shapes: Vec<Vec<&Column>> = branches
+            .iter()
+            .map(|branch| {
+                let mut shape = Vec::new();
+                output_columns_of(branch, mismatch, &mut shape);
+                shape
+            })
+            .collect();
+        if let Some(first) = shapes.first() {
+            let names = |shape: &[&Column]| -> Vec<String> {
+                shape.iter().map(|c| c.name.clone()).collect()
+            };
+            let first_names = names(first);
+            if shapes[1..].iter().any(|s| names(s) != first_names) {
+                mismatch();
             }
-        }
-        collect_column_names(&select.select, names);
-
-        if let Some(union_selects) = &select.union_all {
-            collect_column_names(union_selects, names);
-        }
-    }
-}
-
-impl Constant {
-    /// Get the value of this constant as a serde_json::Value.
-    pub fn value(&self) -> Value {
-        if let Some(s) = &self.value_string {
-            Value::String(s.clone())
-        } else if let Some(i) = self.value_integer {
-            Value::Number(i.into())
-        } else if let Some(b) = self.value_boolean {
-            Value::Bool(b)
-        } else if let Some(d) = self.value_decimal {
-            serde_json::Number::from_f64(d)
-                .map(Value::Number)
-                .unwrap_or(Value::Null)
-        } else {
-            Value::Null
+            cols.extend(first);
         }
     }
 }
@@ -339,64 +334,30 @@ mod tests {
     }
 
     #[test]
-    fn test_column_names() {
-        let json = json!({
-            "resourceType": "ViewDefinition",
-            "name": "test_view",
-            "status": "active",
+    fn output_columns_take_the_first_union_branch_and_report_mismatches() {
+        let view = ViewDefinition::from_json(&json!({
             "resource": "Patient",
-            "select": [{
-                "column": [{
-                    "name": "id",
-                    "path": "id"
-                }, {
-                    "name": "gender",
-                    "path": "gender"
-                }]
-            }, {
-                "forEach": "name",
-                "column": [{
-                    "name": "family",
-                    "path": "family"
-                }]
-            }]
-        });
-
-        let view = ViewDefinition::from_json(&json).unwrap();
-        let names = view.column_names();
-        assert_eq!(names, vec!["id", "gender", "family"]);
-    }
-
-    #[test]
-    fn test_constant_values() {
-        let string_const = Constant {
-            name: "s".to_string(),
-            value_string: Some("test".to_string()),
-            value_integer: None,
-            value_boolean: None,
-            value_decimal: None,
-            values: Default::default(),
-        };
-        assert_eq!(string_const.value(), Value::String("test".to_string()));
-
-        let int_const = Constant {
-            name: "i".to_string(),
-            value_string: None,
-            value_integer: Some(42),
-            value_boolean: None,
-            value_decimal: None,
-            values: Default::default(),
-        };
-        assert_eq!(int_const.value(), json!(42));
-
-        let bool_const = Constant {
-            name: "b".to_string(),
-            value_string: None,
-            value_integer: None,
-            value_boolean: Some(true),
-            value_decimal: None,
-            values: Default::default(),
-        };
-        assert_eq!(bool_const.value(), Value::Bool(true));
+            "select": [
+                { "column": [{ "name": "id", "path": "id" }] },
+                { "unionAll": [
+                    { "column": [{ "name": "a", "path": "id" }],
+                      "unionAll": [
+                        { "column": [{ "name": "x", "path": "id" }] },
+                        { "column": [{ "name": "y", "path": "id" }] }
+                      ] },
+                    { "column": [{ "name": "b", "path": "id" }] }
+                ] }
+            ]
+        }))
+        .unwrap();
+        let mut mismatches = 0;
+        let names: Vec<&str> = view
+            .output_columns(|| mismatches += 1)
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["id", "a", "x"]);
+        // The inner unionAll (x, y) and the outer one ([a, x], [b]).
+        assert_eq!(mismatches, 2);
     }
 }
