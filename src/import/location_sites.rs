@@ -14,11 +14,14 @@
 //! position), names that do not resolve.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::Path;
 
+use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 use super::{LocationSitesArgs, Shape, Site, TypeConcept, slugify, split_pair};
+use crate::dhis2::NdjsonWriter;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
@@ -95,33 +98,21 @@ pub fn parse_where(arg: &str) -> Result<(String, String)> {
 /// parent with one slug, the first keeps it.
 pub type AdminIndex = HashMap<String, HashMap<String, String>>;
 
-pub fn build_admin_index(units: &[Value]) -> AdminIndex {
-    let ids: HashSet<&str> = units
-        .iter()
-        .filter_map(|r| r.get("id").and_then(Value::as_str))
-        .collect();
+pub fn build_admin_index(units: &[Unit]) -> AdminIndex {
+    let ids: HashSet<&str> = units.iter().filter_map(|r| r.id.as_deref()).collect();
     let mut index = AdminIndex::new();
     for unit in units {
         let (Some(id), Some(name)) = (
-            unit.get("id")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty()),
-            unit.get("name")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty()),
+            unit.id.as_deref().filter(|s| !s.is_empty()),
+            unit.name.as_deref().filter(|s| !s.is_empty()),
         ) else {
             continue;
         };
-        let reference = unit
-            .pointer("/partOf/reference")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let reference = unit.part_of.as_deref().unwrap_or_default();
         let parent = reference.rsplit('/').next().unwrap_or_default();
         let key = if ids.contains(parent) { parent } else { "" };
         let bucket = index.entry(key.to_string()).or_default();
-        let aliases = unit.get("alias").and_then(Value::as_array);
-        let labels =
-            std::iter::once(name).chain(aliases.into_iter().flatten().filter_map(Value::as_str));
+        let labels = std::iter::once(name).chain(unit.aliases.iter().map(String::as_str));
         for label in labels {
             let slug = slugify(label);
             if !slug.is_empty() {
@@ -142,10 +133,40 @@ fn walk_start(index: &AdminIndex) -> String {
     }
 }
 
-type Row = HashMap<String, String>;
+/// A row's cells by column name; "" for a column the row lacks.
+pub trait Row {
+    fn cell(&self, column: &str) -> &str;
+}
 
-fn cell<'a>(row: &'a Row, column: &str) -> &'a str {
-    row.get(column).map_or("", String::as_str)
+/// Each header name and the positions it is at, in order.
+pub fn header_index(header: &[String]) -> HashMap<String, Vec<usize>> {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, name) in header.iter().enumerate() {
+        index.entry(name.clone()).or_default().push(i);
+    }
+    index
+}
+
+/// One CSV record read against its header. A name the header repeats reads
+/// the last of its positions that the record has, and a record shorter than
+/// the header lacks the columns past its end: as a map built by zipping the
+/// header with the record gave.
+pub struct CsvRow<'a> {
+    pub columns: &'a HashMap<String, Vec<usize>>,
+    pub record: csv::StringRecord,
+}
+
+impl Row for CsvRow<'_> {
+    fn cell(&self, column: &str) -> &str {
+        self.columns
+            .get(column)
+            .and_then(|at| at.iter().rev().find_map(|&i| self.record.get(i)))
+            .unwrap_or("")
+    }
+}
+
+fn cell<'a>(row: &'a impl Row, column: &str) -> &'a str {
+    row.cell(column)
 }
 
 /// The id of the deepest unit the row's names resolve to; reports
@@ -153,7 +174,7 @@ fn cell<'a>(row: &'a Row, column: &str) -> &'a str {
 pub fn resolve_parent(
     index: &AdminIndex,
     parents: &[ParentSpec],
-    row: &Row,
+    row: &impl Row,
     label: &str,
     report: &mut Report,
 ) -> Option<String> {
@@ -260,7 +281,7 @@ pub fn check_columns(header: &[String], opts: &Options) -> Result<()> {
 }
 
 /// (system, value) pairs from the row; empty cells are left out.
-fn row_identifiers(row: &Row, specs: &[(String, String)]) -> Vec<(String, String)> {
+fn row_identifiers(row: &impl Row, specs: &[(String, String)]) -> Vec<(String, String)> {
     specs
         .iter()
         .filter_map(|(system, column)| {
@@ -272,7 +293,7 @@ fn row_identifiers(row: &Row, specs: &[(String, String)]) -> Vec<(String, String
 
 /// The cell as a slug is the code (`Primary` → `primary`, the IG's code
 /// style), the cell itself the display, the text column the concept text.
-fn type_concepts(row: &Row, specs: &[TypeCodingSpec]) -> Vec<TypeConcept> {
+fn type_concepts(row: &impl Row, specs: &[TypeCodingSpec]) -> Vec<TypeConcept> {
     specs
         .iter()
         .filter_map(|s| {
@@ -298,7 +319,7 @@ fn type_concepts(row: &Row, specs: &[TypeCodingSpec]) -> Vec<TypeConcept> {
 
 /// (longitude, latitude), or None (reported) when not numbers in range.
 fn read_position(
-    row: &Row,
+    row: &impl Row,
     opts: &Options,
     label: &str,
     report: &mut Report,
@@ -323,17 +344,19 @@ fn read_position(
     Some((lon, lat))
 }
 
-/// The resources for `rows` (each paired Organization before its Location).
-pub fn build(
-    rows: &[Row],
-    units: &[Value],
+/// The resources for `rows` (each paired Organization before its Location),
+/// handed to `emit` as each row is built.
+pub fn build<R: Row>(
+    rows: impl IntoIterator<Item = Result<R>>,
+    units: &[Unit],
     opts: &Options,
     report: &mut Report,
-) -> Result<Vec<Value>> {
+    mut emit: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
     let index = build_admin_index(units);
-    let mut out = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for (i, row) in rows.iter().enumerate() {
+    for (i, row) in rows.into_iter().enumerate() {
+        let row = &row?;
         let number = i + 1;
         if opts.wheres.iter().any(|(c, v)| cell(row, c) != v) {
             continue;
@@ -375,12 +398,12 @@ pub fn build(
             )));
         }
         if let Some(org_id) = &org_id {
-            out.push(opts.shape.facility_organization(
+            emit(opts.shape.facility_organization(
                 org_id,
                 name,
                 &row_identifiers(row, &opts.org_identifiers),
                 &type_concepts(row, &opts.org_type_codings),
-            ));
+            ))?;
         }
         let position = read_position(row, opts, &label, report);
         let mut extensions = Vec::new();
@@ -392,7 +415,7 @@ pub fn build(
             }
         }
         let parent = resolve_parent(&index, &opts.parents, row, &label, report);
-        out.push(opts.shape.site(&Site {
+        emit(opts.shape.site(&Site {
             id,
             name,
             type_code: &opts.type_code,
@@ -402,29 +425,244 @@ pub fn build(
             managing_organization: org_id.as_deref(),
             extra_types: type_concepts(row, &opts.type_codings),
             extensions,
-        }));
+        }))?;
     }
-    Ok(out)
+    Ok(())
+}
+
+/// What `build_admin_index` reads of an admin unit: `id`, `name`,
+/// `partOf.reference` and the string aliases. Everything else, the boundary
+/// above all, is skipped over rather than built. A field of another JSON
+/// type counts as absent, and a repeated field keeps its last value, as a
+/// `Value` read gave.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Unit {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub part_of: Option<String>,
+    pub aliases: Vec<String>,
+}
+
+/// One `--boundaries` line: a unit, or a Bundle whose entries' resources
+/// are the units.
+#[derive(Default)]
+struct UnitLine {
+    unit: Unit,
+    resource_type: Option<String>,
+    entries: Vec<Unit>,
+}
+
+/// Visitor methods for the JSON types a field reader does not want: the
+/// value is consumed and the default returned.
+macro_rules! other_types_are_default {
+    () => {
+        fn visit_bool<E>(self, _: bool) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_i64<E>(self, _: i64) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_u64<E>(self, _: u64) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_f64<E>(self, _: f64) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_str<E>(self, _: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+    };
+}
+
+fn skip_seq<'de, A: SeqAccess<'de>>(mut seq: A) -> std::result::Result<(), A::Error> {
+    while seq.next_element::<IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
+fn skip_map<'de, A: MapAccess<'de>>(mut map: A) -> std::result::Result<(), A::Error> {
+    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+    Ok(())
+}
+
+fn string(v: &Value) -> Option<String> {
+    v.as_str().map(str::to_string)
+}
+
+/// Reads `key`'s value into `unit` if it is a unit field; false otherwise
+/// (the value is then not consumed).
+fn unit_field<'de, A: MapAccess<'de>>(
+    unit: &mut Unit,
+    key: &str,
+    map: &mut A,
+) -> std::result::Result<bool, A::Error> {
+    match key {
+        "id" => unit.id = string(&map.next_value::<Value>()?),
+        "name" => unit.name = string(&map.next_value::<Value>()?),
+        "partOf" => unit.part_of = map.next_value::<Value>()?.get("reference").and_then(string),
+        "alias" => {
+            unit.aliases = map
+                .next_value::<Value>()?
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(string)
+                .collect()
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+impl<'de> Deserialize<'de> for Unit {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Unit;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            other_types_are_default!();
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> std::result::Result<Unit, A::Error> {
+                skip_seq(seq).map(|()| Unit::default())
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Unit, A::Error> {
+                let mut unit = Unit::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !unit_field(&mut unit, &key, &mut map)? {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(unit)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A Bundle entry's `resource`, if it has one.
+struct Entry(Option<Unit>);
+
+impl<'de> Deserialize<'de> for Entry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Option<Unit>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            other_types_are_default!();
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                skip_seq(seq).map(|()| None)
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut resource = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "resource" {
+                        resource = Some(map.next_value::<Unit>()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(resource)
+            }
+        }
+        d.deserialize_any(V).map(Entry)
+    }
+}
+
+/// A Bundle's `entry`: the resources of the entries that have one.
+struct Entries(Vec<Unit>);
+
+impl<'de> Deserialize<'de> for Entries {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Vec<Unit>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            other_types_are_default!();
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut units = Vec::new();
+                while let Some(Entry(resource)) = seq.next_element::<Entry>()? {
+                    units.extend(resource);
+                }
+                Ok(units)
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                skip_map(map).map(|()| Vec::new())
+            }
+        }
+        d.deserialize_any(V).map(Entries)
+    }
+}
+
+impl<'de> Deserialize<'de> for UnitLine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = UnitLine;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            other_types_are_default!();
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<UnitLine, A::Error> {
+                skip_seq(seq).map(|()| UnitLine::default())
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<UnitLine, A::Error> {
+                let mut line = UnitLine::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "resourceType" => line.resource_type = string(&map.next_value::<Value>()?),
+                        "entry" => line.entries = map.next_value::<Entries>()?.0,
+                        _ => {
+                            if !unit_field(&mut line.unit, &key, &mut map)? {
+                                map.next_value::<IgnoredAny>()?;
+                            }
+                        }
+                    }
+                }
+                Ok(line)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 /// The admin units: each line a resource, or a Bundle whose entries are.
 /// A line that does not parse is reported and skipped.
-fn read_units(path: &Path, report: &mut Report) -> Result<Vec<Value>> {
+fn read_units(path: &Path, report: &mut Report) -> Result<Vec<Unit>> {
     let mut units = Vec::new();
     let mut unparsed = 0usize;
     for line in NdjsonReader::open(path)? {
         let line = line?;
-        match serde_json::from_str::<Value>(&line.text) {
-            Ok(v) if v.get("resourceType").and_then(Value::as_str) == Some("Bundle") => {
-                units.extend(
-                    v.get("entry")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|e| e.get("resource").cloned()),
-                );
-            }
-            Ok(v) => units.push(v),
+        match serde_json::from_str::<UnitLine>(&line.text) {
+            Ok(v) if v.resource_type.as_deref() == Some("Bundle") => units.extend(v.entries),
+            Ok(v) => units.push(v.unit),
             Err(e) => {
                 unparsed += 1;
                 report.add(
@@ -444,31 +682,23 @@ fn read_units(path: &Path, report: &mut Report) -> Result<Vec<Value>> {
     Ok(units)
 }
 
-/// The CSV's header and rows, each row keyed by column name.
-fn read_csv(path: &Path) -> Result<(Vec<String>, Vec<Row>)> {
-    let bad = |e: csv::Error| PipesError::Usage(format!("--in {}: {e}", path.display()));
+/// The CSV reader, past its header, and the header.
+fn open_csv(path: &Path) -> Result<(csv::Reader<std::fs::File>, Vec<String>)> {
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
         .from_path(path)
-        .map_err(bad)?;
+        .map_err(|e| csv_error(path, e))?;
     let header: Vec<String> = reader
         .headers()
-        .map_err(bad)?
+        .map_err(|e| csv_error(path, e))?
         .iter()
         .map(str::to_string)
         .collect();
-    let mut rows = Vec::new();
-    for record in reader.records() {
-        let record = record.map_err(bad)?;
-        rows.push(
-            header
-                .iter()
-                .cloned()
-                .zip(record.iter().map(str::to_string))
-                .collect(),
-        );
-    }
-    Ok((header, rows))
+    Ok((reader, header))
+}
+
+fn csv_error(path: &Path, e: csv::Error) -> PipesError {
+    PipesError::Usage(format!("--in {}: {e}", path.display()))
 }
 
 pub fn run(args: &LocationSitesArgs, profile: &Profile) -> Result<()> {
@@ -535,16 +765,31 @@ pub fn run(args: &LocationSitesArgs, profile: &Profile) -> Result<()> {
             )));
         }
     }
-    let (header, rows) = read_csv(&args.input)?;
+    let (reader, header) = open_csv(&args.input)?;
     check_columns(&header, &opts)?;
+    let columns = header_index(&header);
     let mut report = Report::default();
     let units = read_units(&args.boundaries, &mut report)?;
-    let resources = build(&rows, &units, &opts, &mut report)?;
-    let n = crate::dhis2::write_ndjson(&args.out, &resources)?;
-    let organizations = resources
-        .iter()
-        .filter(|r| r["resourceType"] == "Organization")
-        .count();
+    // Each resource is written as its row is built. The file is renamed
+    // into place only at the end, so a fatal row (a repeated id) still
+    // leaves nothing written.
+    let rows = reader.into_records().map(|record| {
+        record
+            .map(|record| CsvRow {
+                columns: &columns,
+                record,
+            })
+            .map_err(|e| csv_error(&args.input, e))
+    });
+    let mut out = NdjsonWriter::create(&args.out)?;
+    let mut organizations = 0usize;
+    build(rows, &units, &opts, &mut report, |resource| {
+        if resource["resourceType"] == "Organization" {
+            organizations += 1;
+        }
+        out.write(&resource)
+    })?;
+    let n = out.finish()?;
     println!(
         "Wrote {n} resources to {} ({} Locations, {organizations} Organizations)",
         args.out.display(),
@@ -572,7 +817,14 @@ mod tests {
     const SPATIAL_INDEX: &str = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
 
     /// country → state → lga → two wards, as location-boundaries writes them.
-    fn registry() -> Vec<Value> {
+    fn registry() -> Vec<Unit> {
+        registry_values()
+            .iter()
+            .map(|v| serde_json::from_str(&v.to_string()).unwrap())
+            .collect()
+    }
+
+    fn registry_values() -> Vec<Value> {
         let shape = icr_shape();
         let ids = [(
             "https://icr.healthcampaigns.org/identifiers/national-admin-code".to_string(),
@@ -601,8 +853,16 @@ mod tests {
         ]
     }
 
-    fn row(overrides: &[(&str, &str)]) -> Row {
-        let mut row: Row = [
+    type MapRow = HashMap<String, String>;
+
+    impl Row for MapRow {
+        fn cell(&self, column: &str) -> &str {
+            self.get(column).map_or("", String::as_str)
+        }
+    }
+
+    fn row(overrides: &[(&str, &str)]) -> MapRow {
+        let mut row: MapRow = [
             ("state", "Bauchi"),
             ("lga", "Toro"),
             ("ward", "Tilde"),
@@ -662,8 +922,23 @@ mod tests {
         opts
     }
 
-    fn run_build(rows: &[Row], opts: &Options, report: &mut Report) -> Vec<Value> {
-        build(rows, &registry(), opts, report).unwrap()
+    fn build_all(rows: &[MapRow], opts: &Options, report: &mut Report) -> Result<Vec<Value>> {
+        let mut out = Vec::new();
+        build(
+            rows.iter().cloned().map(Ok),
+            &registry(),
+            opts,
+            report,
+            |r| {
+                out.push(r);
+                Ok(())
+            },
+        )?;
+        Ok(out)
+    }
+
+    fn run_build(rows: &[MapRow], opts: &Options, report: &mut Report) -> Vec<Value> {
+        build_all(rows, opts, report).unwrap()
     }
 
     #[test]
@@ -891,9 +1166,8 @@ mod tests {
     #[test]
     fn duplicate_ids_are_fatal() {
         let shape = icr_shape();
-        let err = build(
+        let err = build_all(
             &[row(&[]), row(&[])],
-            &registry(),
             &options(&shape),
             &mut Report::default(),
         )
@@ -979,5 +1253,108 @@ mod tests {
         header.retain(|h| h != "ward");
         let err = check_columns(&header, &opts).unwrap_err().to_string();
         assert!(err.contains("\"ward\" (--parent)"), "{err}");
+    }
+
+    #[test]
+    fn a_csv_row_reads_as_the_header_zipped_into_a_map_did() {
+        // A repeated name, a short record, a long one, an empty cell.
+        let text = "a,b,a,c\n1,2,3,4\n5,6\n7,8,9,10,11\n,x,,\n";
+        let mut reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_reader(text.as_bytes());
+        let header: Vec<String> = reader
+            .headers()
+            .unwrap()
+            .iter()
+            .map(str::to_string)
+            .collect();
+        let columns = header_index(&header);
+        for record in reader.records() {
+            let record = record.unwrap();
+            let map: MapRow = header
+                .iter()
+                .cloned()
+                .zip(record.iter().map(str::to_string))
+                .collect();
+            let row = CsvRow {
+                columns: &columns,
+                record: record.clone(),
+            };
+            for name in ["a", "b", "c", "missing"] {
+                assert_eq!(row.cell(name), map.cell(name), "{name} in {record:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn units_are_read_without_the_rest_of_the_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("units.ndjson");
+        let mut lines: Vec<String> = registry_values().iter().map(Value::to_string).collect();
+        lines.extend([
+            // Another JSON type counts as absent; the last of a repeated
+            // field wins; only string aliases count.
+            r#"{"id":"u1","name":5,"partOf":["x"],"alias":["A",1,null,"B"]}"#.to_string(),
+            r#"{"id":"u2","name":"First","name":"Second","partOf":{"reference":"Location/nga"},"alias":"x"}"#.to_string(),
+            // A Bundle: entries with a resource (any value) are units.
+            r#"{"entry":[{"resource":{"id":"b1","name":"B1"}},{"fullUrl":"x"},{"resource":null},7],"resourceType":"Bundle"}"#.to_string(),
+            r#"{"resourceType":"Bundle","entry":{"resource":{"id":"b2"}}}"#.to_string(),
+            "[1,2]".to_string(),
+            "not json".to_string(),
+            // A unit with its boundary.
+            icr_shape()
+                .admin_unit(
+                    "nga-x",
+                    "X",
+                    Some("nga"),
+                    &[(
+                        "https://icr.healthcampaigns.org/identifiers/national-admin-code".into(),
+                        "x".into(),
+                    )],
+                    &[],
+                    Some(br#"{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}"#),
+                )
+                .to_string(),
+        ]);
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let mut report = Report::default();
+        let units = read_units(&path, &mut report).unwrap();
+        assert_eq!(report.count("malformed_field"), 1);
+        let n = registry_values().len();
+        assert_eq!(&units[..n], &registry()[..]);
+        assert_eq!(
+            units[n],
+            Unit {
+                id: Some("u1".into()),
+                name: None,
+                part_of: None,
+                aliases: vec!["A".into(), "B".into()],
+            }
+        );
+        assert_eq!(
+            units[n + 1],
+            Unit {
+                id: Some("u2".into()),
+                name: Some("Second".into()),
+                part_of: Some("Location/nga".into()),
+                aliases: Vec::new(),
+            }
+        );
+        assert_eq!(units[n + 2].id.as_deref(), Some("b1"));
+        assert_eq!(units[n + 3], Unit::default());
+        // The bundle whose entry is not a list adds nothing; the array line
+        // is a unit with nothing in it.
+        assert_eq!(units[n + 4], Unit::default());
+        assert!(lines[n + 6].contains("valueAttachment"));
+        assert_eq!(
+            units[n + 5],
+            Unit {
+                id: Some("nga-x".into()),
+                name: Some("X".into()),
+                part_of: Some("Location/nga".into()),
+                aliases: Vec::new(),
+            }
+        );
+        assert_eq!(units.len(), n + 6);
     }
 }
