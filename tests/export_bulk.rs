@@ -233,6 +233,70 @@ fn a_bulk_export_is_polled_until_done_and_written_per_type() {
     );
 }
 
+/// `parts` as one gzip body of a member each. Concatenated members are one
+/// valid gzip body (RFC 1952 section 2.2).
+fn gzip_members(parts: &[&[u8]]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut body = Vec::new();
+    for part in parts {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(part).unwrap();
+        body.extend(e.finish().unwrap());
+    }
+    body
+}
+
+#[test]
+fn every_member_of_a_multi_member_gzip_manifest_and_file_is_read() {
+    // A decoder that stops after the first member saved one Patient of
+    // three, reported no issue and moved the watermark on.
+    let server = Server::run();
+    expect_kick_off(&server, "Patient", None, &server.url_str("/status/g"));
+    let m = manifest(&server, &[("Patient", "/files/g.ndjson")], false).to_string();
+    let (head, tail) = m.split_at(m.len() / 2);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/status/g"),
+            request::headers(contains(("accept-encoding", matches("gzip")))),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200)
+                .insert_header("Content-Type", "application/json")
+                .insert_header("Content-Encoding", "gzip")
+                .body(gzip_members(&[head.as_bytes(), tail.as_bytes()])),
+        ),
+    );
+    let lines: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|id| format!("{}\n", patient(id, "2026-10-01T00:00:00Z")))
+        .collect();
+    let parts: Vec<&[u8]> = lines.iter().map(|l| l.as_bytes()).collect();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/files/g.ndjson"),
+            request::headers(contains(("accept-encoding", matches("gzip")))),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200)
+                .insert_header("Content-Encoding", "gzip")
+                .body(gzip_members(&parts)),
+        ),
+    );
+    expect_delete(&server, "/status/g");
+
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("raw");
+    let a = export_bulk(&server, &out, &["Patient"]).assert().success();
+    let text = stdout(&a);
+    assert!(text.contains("Patient: 3 resources, 1 files"), "{text}");
+    assert_eq!(ids(&out.join("Patient.ndjson")), ["a", "b", "c"]);
+    let s = state(&out);
+    assert_eq!(s["types"]["Patient"]["count"], 3);
+    assert_eq!(s["types"]["Patient"]["watermark"], TRANSACTION_TIME);
+}
+
 #[test]
 fn without_retry_after_the_status_is_polled_with_a_backoff() {
     let server = Server::run();

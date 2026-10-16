@@ -158,6 +158,62 @@ fn export_follows_next_links_and_writes_one_file_per_type() {
     assert_eq!(r["counts"], json!({}));
 }
 
+/// `parts` as one gzip body of a member each (RFC 1952 section 2.2).
+fn gzip_members(parts: &[&[u8]]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut body = Vec::new();
+    for part in parts {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(part).unwrap();
+        body.extend(e.finish().unwrap());
+    }
+    body
+}
+
+#[test]
+fn a_search_page_in_several_gzip_members_is_read_whole() {
+    let server = Server::run();
+    let base = server.url_str("/fhir");
+    let page = bundle(
+        vec![
+            json!({"resourceType": "Measure", "id": "m1"}),
+            json!({"resourceType": "Measure", "id": "m2"}),
+            json!({"resourceType": "Measure", "id": "m3"}),
+        ],
+        None,
+    );
+    let third = page.len() / 3;
+    let (a, rest) = page.as_bytes().split_at(third);
+    let (b, c) = rest.split_at(third);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Measure"),
+            request::headers(contains(("accept-encoding", matches("gzip")))),
+            request::headers(contains(("cache-control", "no-cache"))),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200)
+                .insert_header("Content-Encoding", "gzip")
+                .body(gzip_members(&[a, b, c])),
+        ),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = fhir_pipes()
+        .args(["export", "--server", &base, "--type", "Measure"])
+        .arg("--out")
+        .arg(dir.path())
+        .assert()
+        .success();
+    let text = stdout(&a);
+    assert!(text.contains("Measure: 3 resources, 1 pages"), "{text}");
+    let ids: Vec<String> = read_ndjson(&dir.path().join("Measure.ndjson"))
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["m1", "m2", "m3"]);
+}
+
 #[test]
 fn a_failed_export_keeps_the_previous_file() {
     let server = Server::run();

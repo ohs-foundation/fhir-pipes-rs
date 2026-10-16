@@ -4,7 +4,7 @@
 //! `export --bulk` does with the lines is in the parent module.
 
 use std::io::BufRead;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::error::{PipesError, Result};
-use crate::extract::client::{Exchange, FetchError, FhirClient, parse_retry_after};
+use crate::extract::client::{Exchange, FetchError, FhirClient};
 
 /// The longest failure text shown from a status response.
 const DISPLAY_CAP: usize = 500;
@@ -158,7 +158,7 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
                     println!("   bulk export: {p}");
                     progress = Some(p.to_string());
                 }
-                retry_after(&got)
+                got.retry_after()
             }
             404 | 410 => return Ok(Polled::Gone),
             status => {
@@ -187,7 +187,7 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
                     .collect();
                     return Ok(Polled::Failed(format!("HTTP {status}: {text}")));
                 }
-                retry_after(&got)
+                got.retry_after()
             }
         };
         let delay = retry_after
@@ -228,16 +228,6 @@ fn manifest(got: &Exchange, status_url: &str) -> Result<Manifest> {
             .to_string();
     }
     Ok(m)
-}
-
-/// The Retry-After header as a wait: seconds, or an HTTP date.
-fn retry_after(got: &Exchange) -> Option<Duration> {
-    let value = got.header("retry-after")?;
-    if let Some(secs) = parse_retry_after(Some(value)) {
-        return Some(Duration::from_secs_f64(secs.max(0.0)));
-    }
-    let at = httpdate::parse_http_date(value.trim()).ok()?;
-    Some(at.duration_since(SystemTime::now()).unwrap_or_default())
 }
 
 /// DELETE the status URL: cancels a running export, or tells the server it
@@ -422,5 +412,35 @@ mod tests {
             "error processing: no such type; warning informational: slow"
         );
         assert!(issues(&json!({"resourceType": "Bundle"})).is_empty());
+    }
+
+    #[test]
+    fn a_huge_retry_after_waits_until_the_deadline_without_panicking() {
+        use httptest::{Expectation, Server, matchers::*, responders::*};
+        // `Duration::from_secs_f64(1e300)` panics; the shared parser clamps.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/status"),
+                request::headers(contains(("cache-control", "no-cache"))),
+            ])
+            .times(1)
+            .respond_with(status_code(202).insert_header("Retry-After", "1e300")),
+        );
+        let client = FhirClient::new(
+            crate::extract::client::Auth::None,
+            1,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let got = wait(
+            &client,
+            &server.url_str("/status"),
+            started + Duration::from_millis(500),
+        )
+        .unwrap();
+        assert!(matches!(got, Polled::TimedOut), "{got:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
