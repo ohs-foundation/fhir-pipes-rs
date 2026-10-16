@@ -45,6 +45,7 @@ use crate::extract::page::PageNote;
 use crate::report::Report;
 use crate::snapshot::instant::WATERMARK_MARGIN_SECS;
 use crate::snapshot::merge::{MergeFiles, merge_file};
+use crate::snapshot::same_server;
 
 /// Rows fetched from the cursor at a time.
 const FETCH_ROWS: usize = 1000;
@@ -71,17 +72,21 @@ const TABLES: &[&str] = &[
     "hfj_tag_def",
 ];
 
-/// The state file's server for a database: host, port and database name,
-/// without the user or password.
-pub fn identity(url: &str) -> String {
+/// The state file's server for a database: host, port, database name and
+/// the schema HAPI's tables were found in, without the user or password.
+/// The schema is the one the search path resolved `hfj_resource` to, so
+/// another schema in the same database (through the connection string's
+/// `options` or the role's default search path) is another server, and its
+/// files are read in full.
+fn identity(url: &str, schema: &str) -> String {
     match url::Url::parse(url) {
         Ok(u) => format!(
-            "hapi-db:{}{}{}",
+            "hapi-db:{}{}{}/{schema}",
             u.host_str().unwrap_or(""),
             u.port().map(|p| format!(":{p}")).unwrap_or_default(),
             u.path()
         ),
-        Err(_) => "hapi-db".to_string(),
+        Err(_) => format!("hapi-db:/{schema}"),
     }
 }
 
@@ -479,26 +484,19 @@ fn db_error(what: &str) -> impl FnOnce(sqlx_core::error::Error) -> PipesError + 
 }
 
 /// Bring OUT/<TYPE>.ndjson up to date from the database `url` for each of
-/// `types`, recording each in `state.hapi_db` as it finishes.
-pub fn export(
-    url: &str,
-    args: &ExportArgs,
-    types: &[&str],
-    state: &mut ExportState,
-    report: &mut Report,
-) -> Result<()> {
+/// `types`, recording each in the export state's `hapi_db` as it finishes.
+pub fn export(url: &str, args: &ExportArgs, types: &[&str], report: &mut Report) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| PipesError::Environment(format!("starting the database runtime: {e}")))?;
-    rt.block_on(export_all(url, args, types, state, report))
+    rt.block_on(export_all(url, args, types, report))
 }
 
 async fn export_all(
     url: &str,
     args: &ExportArgs,
     types: &[&str],
-    state: &mut ExportState,
     report: &mut Report,
 ) -> Result<()> {
     // TLS (sslmode=require and up) uses rustls with the same provider as the
@@ -510,7 +508,18 @@ async fn export_all(
     let layout =
         Layout::detect(&found_tables(&mut conn).await?).map_err(PipesError::Environment)?;
     let lo = large_objects(&mut conn, &layout).await?;
-    println!("HAPI database: {}", layout.describe());
+    let schema = schema_of(&mut conn, "hfj_resource").await?;
+    println!("HAPI database: schema {schema}, {}", layout.describe());
+    let server = identity(url, &schema);
+    let mut state = ExportState::read(&args.out);
+    if !same_server(&state.server, &server) {
+        // Files from a server's API, another database or another schema
+        // are not merged into.
+        state = ExportState {
+            server,
+            ..ExportState::default()
+        };
+    }
     // One snapshot for every type, and nothing written.
     let mut tx = conn
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -578,6 +587,21 @@ async fn found_tables(conn: &mut PgConnection) -> Result<Found> {
         found.entry(get(0)?).or_default().insert(get(1)?, get(2)?);
     }
     Ok(found)
+}
+
+/// The schema `table` resolves to through the search path, as the queries
+/// that name it unqualified see it.
+async fn schema_of(conn: &mut PgConnection, table: &str) -> Result<String> {
+    sqlx_core::query::query(
+        "SELECT n.nspname::text FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.oid = to_regclass($1)",
+    )
+    .bind(table)
+    .fetch_one(&mut *conn)
+    .await
+    .and_then(|r| r.try_get(0))
+    .map_err(db_error(&format!("finding the schema of {table}")))
 }
 
 async fn large_objects(conn: &mut PgConnection, layout: &Layout) -> Result<LargeObjects> {
@@ -1086,10 +1110,16 @@ mod tests {
     #[test]
     fn identity_leaves_out_the_credentials() {
         assert_eq!(
-            identity("postgres://ro:secret@db.example.org:5432/hapi?sslmode=require"),
-            "hapi-db:db.example.org:5432/hapi"
+            identity(
+                "postgres://ro:secret@db.example.org:5432/hapi?sslmode=require",
+                "public"
+            ),
+            "hapi-db:db.example.org:5432/hapi/public"
         );
-        assert_eq!(identity("postgres://db/hapi"), "hapi-db:db/hapi");
+        assert_eq!(
+            identity("postgres://db/hapi", "fhir"),
+            "hapi-db:db/hapi/fhir"
+        );
         assert!(valid_watermark("2026-10-16T02:50:04.440000"));
         let cap = "2026-10-16T02:45:00.000000";
         assert_eq!(

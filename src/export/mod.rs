@@ -59,7 +59,7 @@ struct ExportState {
     bulk: Option<bulk::Pending>,
     /// `--hapi-db`, per type: the watermark is the greatest
     /// `hfj_resource.res_updated` read, as the database has it (no zone).
-    /// The server is then the database (see `hapi_db::identity`), so these
+    /// The server is then the database and schema, so these
     /// and `types` are never both filled.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     hapi_db: BTreeMap<String, TypeState>,
@@ -181,16 +181,7 @@ fn export_hapi_db(args: &ExportArgs, types: &[&str], report: &mut Report) -> Res
                 "--hapi-db needs the database's connection string in ${HAPI_DB_URL_ENV}"
             ))
         })?;
-    let server = hapi_db::identity(&url);
-    let mut state = ExportState::read(&args.out);
-    if !same_server(&state.server, &server) {
-        // Files from a server's API or another database are not merged into.
-        state = ExportState {
-            server,
-            ..ExportState::default()
-        };
-    }
-    hapi_db::export(&url, args, types, &mut state, report)
+    hapi_db::export(&url, args, types, report)
 }
 
 #[cfg(not(feature = "postgres"))]

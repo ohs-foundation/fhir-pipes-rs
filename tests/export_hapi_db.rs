@@ -537,3 +537,89 @@ table_key = "id"
     );
     sql(&url, &[format!("DROP SCHEMA {s} CASCADE")]);
 }
+
+/// Two HAPI schemas in one database, each with one Patient `p` (the second
+/// schema's older): switching the search path, by the connection string or
+/// by the role's default, must read the other schema in full rather than
+/// apply the first schema's watermark to it.
+#[test]
+fn another_schema_in_the_same_database_is_read_in_full() {
+    let Some(url) = url() else { return };
+    let a = unique("schema_a");
+    let b = unique("schema_b");
+    let role = unique("schema_role");
+    let mut setup = Vec::new();
+    for (s, updated, gender) in [
+        (&a, "2026-03-01 00:00:00", "female"),
+        (&b, "2026-02-01 00:00:00", "male"),
+    ] {
+        setup.extend(hapi8_schema(s));
+        setup.push(format!(
+            "INSERT INTO {s}.hfj_resource VALUES (1, 'Patient', 'p', 1, '{updated}', NULL)"
+        ));
+        setup.push(format!(
+            "INSERT INTO {s}.hfj_res_ver (res_id, res_ver, res_encoding, res_text_vc) VALUES \
+             (1, 1, 'JSON', '{{\"resourceType\":\"Patient\",\"gender\":\"{gender}\"}}')"
+        ));
+    }
+    setup.extend([
+        format!("CREATE ROLE {role} LOGIN PASSWORD 'pw'"),
+        format!("GRANT USAGE ON SCHEMA {a}, {b} TO {role}"),
+        format!("GRANT SELECT ON ALL TABLES IN SCHEMA {a} TO {role}"),
+        format!("GRANT SELECT ON ALL TABLES IN SCHEMA {b} TO {role}"),
+        format!("ALTER ROLE {role} SET search_path = {a}"),
+    ]);
+    sql(&url, &setup);
+    let gender = |dir: &Path| by_id(&dir.join("Patient.ndjson"))["p"]["gender"].clone();
+    let server = |dir: &Path| {
+        let state: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".export-state.json")).unwrap())
+                .unwrap();
+        state["server"].as_str().unwrap().to_string()
+    };
+
+    // By the connection string's options.
+    let dir = tempfile::tempdir().unwrap();
+    let got = export(&url_for(&url, &a, None), dir.path(), &[]);
+    assert!(got.status.success(), "{}", text(&got.stderr));
+    assert_eq!(gender(dir.path()), "female");
+    assert!(server(dir.path()).ends_with(&format!("/{a}")));
+    let got = export(&url_for(&url, &b, None), dir.path(), &["--incremental"]);
+    assert!(got.status.success(), "{}", text(&got.stderr));
+    let out = text(&got.stdout);
+    assert!(
+        out.contains("Patient: 1 resources from the database"),
+        "{out}"
+    );
+    assert_eq!(gender(dir.path()), "male");
+    assert!(server(dir.path()).ends_with(&format!("/{b}")));
+
+    // By the role's default search path, with nothing in the URL.
+    let mut role_url = url::Url::parse(&url).unwrap();
+    role_url.set_username(&role).unwrap();
+    role_url.set_password(Some("pw")).unwrap();
+    let role_url = role_url.to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let got = export(&role_url, dir.path(), &[]);
+    assert!(got.status.success(), "{}", text(&got.stderr));
+    assert_eq!(gender(dir.path()), "female");
+    sql(&url, &[format!("ALTER ROLE {role} SET search_path = {b}")]);
+    let got = export(&role_url, dir.path(), &["--incremental"]);
+    assert!(got.status.success(), "{}", text(&got.stderr));
+    let out = text(&got.stdout);
+    assert!(
+        out.contains("Patient: 1 resources from the database"),
+        "{out}"
+    );
+    assert_eq!(gender(dir.path()), "male");
+
+    sql(
+        &url,
+        &[
+            format!("DROP SCHEMA {a} CASCADE"),
+            format!("DROP SCHEMA {b} CASCADE"),
+            format!("DROP OWNED BY {role}"),
+            format!("DROP ROLE {role}"),
+        ],
+    );
+}

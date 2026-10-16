@@ -289,8 +289,8 @@ deletions on a HAPI server without Bulk Data export.
   by id, and removes the resources deleted since (a delete sets
   `res_deleted_at`). If the merged file's count then differs from the
   database's, as after an `$expunge`, the type is read in full. Files written
-  from a search, a bulk export or another database are read in full the
-  first time.
+  from a search, a bulk export, another database or another schema are read
+  in full the first time.
 - The watermark is never later than the database's clock when the run began,
   less five minutes, so a resource HAPI was still writing then is read by the
   next run, as with search.
@@ -315,7 +315,9 @@ GRANT SELECT ON pg_catalog.pg_largeobject TO fhir_pipes_ro;
 Reading a large object with `lo_get` needs SELECT on that object, which
 `pg_read_all_data` does not give, so fhir-pipes reads `pg_largeobject`
 directly when the role may. If HAPI's tables are in a schema other than
-`public`, add `options=-c%20search_path%3D<schema>` to the connection string.
+`public`, add `options=-c%20search_path%3D<schema>` to the connection string,
+or set the role's default `search_path`. The state file records the schema
+`hfj_resource` was found in, so a run against another schema reads in full.
 `refresh` reads this way with `fetch = "hapi-db"` (see
 [docs/refresh.md](docs/refresh.md#reading-the-hapi-servers-database)).
 
