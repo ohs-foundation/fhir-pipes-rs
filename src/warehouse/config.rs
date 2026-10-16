@@ -269,14 +269,14 @@ pub struct Settings {
 
 impl Settings {
     /// Whether the run reads files instead of a FHIR server.
-    pub fn from_files(&self) -> bool {
+    pub fn reads_files(&self) -> bool {
         !self.files.is_empty()
     }
 
     /// The server the run reads, for the manifest, last-refresh.json and the
     /// hooks' FHIR_BASE; none with a file source.
     pub fn server_used(&self) -> Option<&str> {
-        (!self.from_files()).then_some(self.server.as_str())
+        (!self.reads_files()).then_some(self.server.as_str())
     }
 
     /// The file source's inputs as given, for the manifest and
@@ -666,7 +666,7 @@ mod tests {
             toml::from_str("data = \"d\"\n[source]\nfiles = [\"../fhir\", \"/abs/*.ndjson\"]")
                 .unwrap();
         let s = settings(file, PathBuf::from("/repo/tools"), Overrides::default()).unwrap();
-        assert!(s.from_files());
+        assert!(s.reads_files());
         assert_eq!(
             s.files,
             [
@@ -690,7 +690,7 @@ mod tests {
 
         let file: File = toml::from_str("data = \"d\"").unwrap();
         let s = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap();
-        assert!(!s.from_files());
+        assert!(!s.reads_files());
         assert_eq!(s.server_name, "hapi-local");
     }
 

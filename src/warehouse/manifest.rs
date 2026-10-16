@@ -67,7 +67,7 @@ pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
         "views": views,
         "extract": extract,
     });
-    if s.from_files() {
+    if s.reads_files() {
         manifest["files"] = json!(s.inputs());
     }
     let path = stage.file("manifest.json");

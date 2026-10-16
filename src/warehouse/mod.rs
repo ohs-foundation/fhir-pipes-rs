@@ -306,7 +306,7 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
         "steps:      {}",
         names(steps.iter().map(|s| s.name().to_string()).collect())
     );
-    if s.from_files() {
+    if s.reads_files() {
         // The server settings are not used, so they are not shown.
         println!("source:     files, no server (raw/{})", s.server_name);
         for input in &s.files {
@@ -389,7 +389,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
     // A file source is split by type into raw/ first, as a download would
     // be; --reuse-raw reruns on the last split.
     let reads = steps.contains(&Step::Locations) || steps.contains(&Step::Views);
-    if s.from_files() && reads && !s.reuse_raw {
+    if s.reads_files() && reads && !s.reuse_raw {
         let t = Instant::now();
         files::split(s)?;
         timings.push(("files", t.elapsed().as_secs_f64()));
@@ -397,7 +397,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
 
     if steps.contains(&Step::Locations) {
         let t = Instant::now();
-        let built = if s.from_files() {
+        let built = if s.reads_files() {
             files::locations(s, stage.tables_dir())?
         } else {
             fhir::locations(s, stage.tables_dir())?;
@@ -411,7 +411,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
 
     // Files without Locations leave no locations table to build tiles from.
     let tiles_wanted =
-        steps.contains(&Step::Tiles) && !(s.from_files() && !stage.read("locations").is_dir());
+        steps.contains(&Step::Tiles) && !(s.reads_files() && !stage.read("locations").is_dir());
     if steps.contains(&Step::Tiles) && !tiles_wanted {
         println!("== tiles: there is no locations table; skipped");
     }
@@ -537,7 +537,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         "seconds": total,
         "steps": timings.iter().map(|(n, t)| (n.to_string(), json!(t))).collect::<serde_json::Map<_, _>>(),
     });
-    if s.from_files() {
+    if s.reads_files() {
         report["files"] = json!(s.inputs());
     }
     std::fs::write(
@@ -599,7 +599,7 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
                 || !ndjson(t).exists()
         })
         .collect();
-    if !s.from_files() {
+    if !s.reads_files() {
         fhir::export(s, &download)?;
     }
 
@@ -607,7 +607,7 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
     for (rtype, idx) in &by_type {
         let t = Instant::now();
         // A type the files lack gives its views empty tables.
-        let resources = if s.from_files() && !ndjson(rtype).exists() {
+        let resources = if s.reads_files() && !ndjson(rtype).exists() {
             println!("   {rtype}: none in the files; its views write empty tables");
             Vec::new()
         } else {
