@@ -84,7 +84,8 @@ pub struct Location {
     pub boundary: Option<Boundary>,
     /// The resource as JSON (key order preserved) with the captured boundary
     /// extension removed; everything else, including any boundary extension
-    /// that was NOT captured into `boundary`, is kept verbatim.
+    /// that was NOT captured into `boundary`, is kept verbatim. Filled only
+    /// by [`Location::parse_owned`]; empty after [`Location::parse`].
     pub fhir_json: String,
 }
 
@@ -237,12 +238,48 @@ fn read_boundary(
 
 impl Location {
     /// Flatten one resource, with `profile`'s columns. Returns None (after
-    /// reporting) if it has no usable id.
+    /// reporting) if it has no usable id. `fhir_json` is left empty: most
+    /// readers need only the fields, and building it copies the resource.
     pub fn parse(
         resource: &Value,
         profile: &crate::profile::Profile,
         report: &mut Report,
     ) -> Option<Location> {
+        Self::parse_fields(resource, profile, report).map(|(loc, _)| loc)
+    }
+
+    /// As [`Location::parse`], with `fhir_json` too. The resource is taken
+    /// by value so the captured boundary extension is removed in place
+    /// rather than from a copy.
+    pub fn parse_owned(
+        mut resource: Value,
+        profile: &crate::profile::Profile,
+        report: &mut Report,
+    ) -> Option<Location> {
+        let (mut loc, captured_boundary_index) = Self::parse_fields(&resource, profile, report)?;
+        // fhir_json: the resource minus the one boundary extension actually
+        // captured. Everything else, including any unusable or
+        // not-yet-resolved boundary extension, is preserved verbatim.
+        if let Some(index) = captured_boundary_index
+            && let Value::Object(obj) = &mut resource
+            && let Some(Value::Array(exts)) = obj.get_mut("extension")
+        {
+            exts.remove(index);
+            if exts.is_empty() {
+                obj.remove("extension");
+            }
+        }
+        loc.fhir_json = resource.to_string();
+        Some(loc)
+    }
+
+    /// The fields, and the index of the extension whose boundary was
+    /// captured as `Boundary::Inline`.
+    fn parse_fields(
+        resource: &Value,
+        profile: &crate::profile::Profile,
+        report: &mut Report,
+    ) -> Option<(Location, Option<usize>)> {
         let Value::Object(obj) = resource else {
             report.add(
                 "malformed_field",
@@ -360,7 +397,7 @@ impl Location {
 
         // Index of the extension whose boundary was captured into
         // `loc.boundary` as `Boundary::Inline` -- the only extension entry
-        // `fhir_json` removes below. A `Boundary::Url` extension, or a
+        // `fhir_json` removes (`parse_owned`). A `Boundary::Url` extension, or a
         // boundary extension that failed to parse, stays in `fhir_json`
         // untouched: the geometry column carries only what was decoded.
         let mut captured_boundary_index: Option<usize> = None;
@@ -416,20 +453,7 @@ impl Location {
             Some(_) => report.add("malformed_field", &id, "extension is not a list"),
         }
 
-        // fhir_json: the resource minus the one boundary extension actually
-        // captured above. Everything else, including any unusable or
-        // not-yet-resolved boundary extension, is preserved verbatim.
-        let mut stripped = resource.clone();
-        if let Some(index) = captured_boundary_index
-            && let Some(Value::Array(exts)) = stripped.get_mut("extension")
-        {
-            exts.remove(index);
-            if exts.is_empty() {
-                stripped.as_object_mut().unwrap().remove("extension");
-            }
-        }
-        loc.fhir_json = stripped.to_string();
-        Some(loc)
+        Some((loc, captured_boundary_index))
     }
 }
 
@@ -460,8 +484,8 @@ mod tests {
     use crate::report::Report;
 
     fn parse_str(s: &str, report: &mut Report) -> Option<Location> {
-        Location::parse(
-            &serde_json::from_str(s).unwrap(),
+        Location::parse_owned(
+            serde_json::from_str(s).unwrap(),
             &crate::profile::test_profile(),
             report,
         )
