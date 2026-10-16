@@ -511,3 +511,49 @@ fn parquet_values_that_do_not_match_their_column_type() {
     assert_eq!(end.value(1), micros(2026, 1, 1, 0));
     assert_eq!(end.value(2), micros(2026, 6, 15, 7) + 30 * 60_000_000);
 }
+
+/// More resources than one chunk of lines: every view's rows come in the
+/// order of the input, with the types no view reads (Encounter) left out
+/// and the other view's type (Observation) between them.
+#[test]
+fn rows_keep_the_input_order_across_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    fs::create_dir_all(&input).unwrap();
+    let mut text = String::new();
+    let mut patients = Vec::new();
+    for i in 0..45_000 {
+        let line = match i % 3 {
+            0 => {
+                patients.push(format!("p{i}"));
+                format!(r#"{{"resourceType":"Patient","id":"p{i}","birthDate":"2020-01-01"}}"#)
+            }
+            1 => format!(
+                r#"{{"resourceType":"Observation","id":"o{i}","status":"final","code":{{"text":"x"}},"valueInteger":{i}}}"#
+            ),
+            _ => format!(r#"{{"resourceType":"Encounter","id":"e{i}"}}"#),
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+    fs::write(input.join("all.ndjson"), text).unwrap();
+    let out = dir.path().join("out");
+    views()
+        .arg("run")
+        .arg(fixtures().join("views"))
+        .arg("--input")
+        .arg(&input)
+        .args(["--threads", "3", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(contains("IcrPatient.csv (15000 rows)"))
+        .stderr(contains("IcrObs.csv (15000 rows)"));
+    let csv = fs::read_to_string(out.join("IcrPatient.csv")).unwrap();
+    let ids: Vec<&str> = csv
+        .lines()
+        .skip(1)
+        .map(|l| l.split(',').next().unwrap())
+        .collect();
+    assert_eq!(ids, patients);
+}
