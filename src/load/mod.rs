@@ -249,7 +249,7 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
 
     let base = args.server.trim_end_matches('/').to_string();
     let client = FhirClient::new(
-        args.auth.auth(),
+        args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
     )?;

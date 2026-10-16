@@ -228,7 +228,7 @@ Any FHIR R4 server that supports standard search with `_lastUpdated`,
 on any vendor's extensions. `export --bulk` also needs the server's
 system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
-A server that needs authentication gets one of three kinds:
+A server that needs authentication gets one of four kinds:
 
 - `--token` (or `FHIR_PIPES_TOKEN`) is sent as a fixed bearer token. Getting
   it is up to you, and a run that outlasts it fails with a 401.
@@ -245,6 +245,9 @@ A server that needs authentication gets one of three kinds:
   HAPI servers expect. Use HTTPS: Basic sends the password with every request.
   `refresh` takes the username from `--username` or `server.username`, and
   reads the password only from the environment.
+- `--google-auth` (or `FHIR_PIPES_GOOGLE_AUTH=1`) gets tokens from Google
+  Application Default Credentials, for a Cloud Healthcare API FHIR store. See
+  [Google Cloud Healthcare API](#google-cloud-healthcare-api).
 
 They are mutually exclusive; with none, requests carry no Authorization
 header.
@@ -260,6 +263,48 @@ fhir-pipes export --server https://gateway.example.org/fhir \
 default. Connection errors, 429 and 5xx responses are retried up to
 `--retries` times with exponential backoff and jitter, honouring a numeric
 `Retry-After`. Any other 4xx is final.
+
+### Google Cloud Healthcare API
+
+A Cloud Healthcare API FHIR store is a FHIR server at
+`https://healthcare.googleapis.com/v1/projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>/fhir`.
+`--server` (and `server.base` in `refresh`) also takes the store path,
+`projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>`, and expands it to
+that URL.
+
+With `--google-auth`, fhir-pipes finds credentials in the order Google's
+client libraries use (Application Default Credentials):
+
+1. The JSON key file named by `GOOGLE_APPLICATION_CREDENTIALS`. For a service
+   account key, fhir-pipes signs a JWT with the key (RS256) and trades it at
+   the key's `token_uri` for a token with the `cloud-platform` scope. An
+   `authorized_user` file's refresh token is traded instead.
+2. gcloud's application default credentials,
+   `~/.config/gcloud/application_default_credentials.json`
+   (`%APPDATA%\gcloud\…` on Windows, or under `$CLOUDSDK_CONFIG`), written by
+   `gcloud auth application-default login`.
+3. The metadata server on Compute Engine, Cloud Run and GKE, which gives the
+   tokens of the attached service account. `GCE_METADATA_HOST` replaces
+   `metadata.google.internal`. Off Google Cloud this fails within seconds.
+
+Tokens are renewed a minute before they expire, as with an OAuth client. A
+file's `quota_project_id`, or `GOOGLE_CLOUD_QUOTA_PROJECT`, is sent as
+`x-goog-user-project`. Tokens and keys are never printed; `refresh --check`
+shows only where the credentials come from. Other credential types
+(workload identity federation, impersonation) are not supported.
+
+```sh
+export GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/fhir-reader.json
+fhir-pipes export --google-auth \
+  --server projects/my-project/locations/us-central1/datasets/health/fhirStores/main \
+  --type Patient --type Observation --out raw/
+```
+
+The account needs an IAM role on the store or its dataset:
+`roles/healthcare.fhirResourceReader` to read (`export`, `extract`,
+`refresh`), `roles/healthcare.fhirResourceEditor` to write (`load`).
+`export --bulk` uses the server's `$export`; the Healthcare API's own export
+to Cloud Storage is not used.
 
 ## Not done yet
 

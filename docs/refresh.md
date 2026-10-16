@@ -37,8 +37,9 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
 `locations` runs first. `views` and `tiles` then run side by side, since both
-read only the registry. The manifest, the catalog, the database, the hooks
-and the push follow.
+read only the registry. The manifest, the catalog and the database follow.
+The run's tables, manifest and catalog are then swapped in together (see
+below), and the hooks and the push run last, on the swapped-in warehouse.
 
 By default every step except `push` runs, `catalog` only when the config has a
 `[catalog]` section, and `database` only with `[database]`. `--only
@@ -46,6 +47,63 @@ views,tiles` picks steps (the manifest, the catalog and the database are added
 when a data step is picked), `--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
+
+### What a failed run leaves behind
+
+A run does not change the warehouse's tables, `manifest.json` or `catalog.sql`
+until every step up to and including `database` has succeeded. Until then it
+writes them to staging directories:
+
+| Staged at | Swapped in to |
+|---|---|
+| `parquet/.staging/<table>/`, for each table the run writes, `locations` included | `parquet/<table>/` |
+| `parquet/.staging/_report.json` (the Location transform's report) | `parquet/_report.json` |
+| `.staging/manifest.json`, `.staging/catalog.sql` | `manifest.json`, `catalog.sql` |
+
+While the run goes on, each step reads a table from staging if the run wrote
+it, and from `parquet/` if not: the views look partitions up in the new
+`locations` and in lookup tables written earlier in the run, the tiles are
+built from the new `locations`, and the manifest, the catalog and the database
+step describe or load the tables as they will be after the swap. Tables the
+run does not write (`locations` with `--only views`, say) stay as they are and
+are counted and listed as before.
+
+After the `database` step, each staged table is renamed into `parquet/` (the
+old one is renamed aside and then removed), then `manifest.json` and
+`catalog.sql` are renamed into place. A reader can see tables from two runs
+only during those renames. A table is never half-written.
+
+So a run that fails in `locations`, `views`, `tiles`, `manifest`, `catalog`
+or `database` leaves every table, `manifest.json` and `catalog.sql` exactly as
+the previous successful run left them, and removes its staging. What it does
+change:
+
+- `raw/`: the downloads and the extract state move forward, so the next run
+  downloads only what changed since and rebuilds every table from the whole
+  download.
+- `views/`: the copies of the views are written by the `views` step.
+- `tiles/`: the archives are written by the `tiles` step. They are not staged.
+- PostgreSQL: the `database` step commits before the swap, so if a rename in
+  the swap fails afterwards, the database has the new run's rows.
+
+`catalog.duckdb` with relative paths is built just after the swap, since
+DuckDB reads each table's schema from its files at their final paths. If
+that build fails, the run stops with the new tables, `manifest.json` and
+`catalog.sql` in place and the previous `catalog.duckdb`.
+
+The hooks run after the swap, on the published warehouse: a hook such as a
+catalog build reads the new tables and can write beside them. A hook that
+fails stops the run before the push, with the new tables, manifest and
+catalog in place. The push uploads the swapped-in warehouse.
+
+A run that is killed leaves its staging behind; the next run removes it
+before it starts. A run killed between the two renames of a table's swap
+leaves the old table as `parquet/.<table>.old`; the next run renames it
+back. While it runs, a refresh holds a lock on `.refresh.lock` in the
+warehouse directory, so a second refresh of the same warehouse waits for the
+first to finish.
+
+Disk use doubles for the tables a run writes, until the swap.
 
 ### Tables
 
@@ -59,8 +117,9 @@ another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
 goes to the null partition, `__HIVE_DEFAULT_PARTITION__`, as hive and DuckDB
 name it. A view with no rows writes one empty file there, so the table keeps
-its columns. Tables other views look up in are written first. A table is replaced
-only once all of its new files are written.
+its columns. Tables other views look up in are written first, and are read
+back from staging. Tables are swapped in at the end of the run (see [What a
+failed run leaves behind](#what-a-failed-run-leaves-behind)).
 
 The views directory can be any directory of JSON files: files whose
 `resourceType` is `ViewDefinition`, or ends in `/ViewDefinition` as in an IG
@@ -130,7 +189,8 @@ SELECT * FROM warehouse.coverage WHERE country = 'NGA';
 
 DuckDB reads each table's schema from its files when it creates a view, so
 the file is built where the views can reach the data. With relative paths
-that is the catalog step. With a `base_url` it is the push: after the tables
+that is just after the run's tables are swapped in. With a `base_url` it is
+the push: after the tables
 are uploaded, `refresh --push` builds `catalog.duckdb` against the uploaded
 copy, then uploads `catalog.sql` and `catalog.duckdb` last, so a client never
 sees a catalog naming files that are not there yet. `duckdb_setup` runs before
@@ -264,7 +324,9 @@ the partition column (`country`), its types taken from the Parquet files:
 `text`, `bigint`, `double precision`, `boolean`, `date`, `timestamp with time
 zone` and `time`. The Location table is not loaded.
 
-All the tables are replaced in one transaction: each is created if missing,
+The step reads the tables the run has staged, before they are swapped into
+`parquet/`, so a database failure leaves the files as they were too. All the
+tables are replaced in one transaction: each is created if missing,
 emptied with `DELETE`, and filled with `COPY`. A reader sees the previous run's
 rows until the commit, then all of the new run's, never a mix. Views and grants
 built on the tables survive, since a table is dropped and recreated only when
@@ -291,7 +353,7 @@ the file are relative to the file.
 | `--data` | `FHIR_PIPES_DATA` | `data` | (required) |
 | `--profile` | `FHIR_PIPES_PROFILE` | `profile` | the snapshot's copy, else none (base FHIR); a path relative to the config file, or an https URL. See [profiles.md](profiles.md) |
 | `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
-| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir` |
+| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir`; a Cloud Healthcare API store path (`projects/…/fhirStores/…`) is expanded to its FHIR URL |
 | `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local` |
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
@@ -300,6 +362,7 @@ the file are relative to the file.
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
+| `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
 | `--countries` | | `tiles.countries` | every country |
 | `--threads` | | | number of CPUs |
 | `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
@@ -310,8 +373,11 @@ The client ID and secret are read only from the environment, never from flags
 or the file. They are traded for a token with the client-credentials grant,
 and the token is renewed before it expires, as for the other commands. With a
 username, the password is read only from `FHIR_PIPES_PASSWORD` and the two are
-sent as HTTP Basic auth. A token, a client ID and a username are mutually
-exclusive.
+sent as HTTP Basic auth. With `google_auth`, tokens come from Google
+Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud's
+credentials, or the metadata server), as described in the
+[README](../README.md#google-cloud-healthcare-api); `--check` shows which.
+A token, a client ID, a username and Google auth are mutually exclusive.
 
 ```toml
 data = "../data"
@@ -322,6 +388,7 @@ base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
 fetch = "search"            # or "bulk" for a Bulk Data $export
+# google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
 
 [tools]            # paths or names on the PATH
 duckdb = "duckdb"
@@ -366,7 +433,8 @@ run = ["./catalog.sh"]      # a path with / is relative to this file
 ```
 
 Hooks run in the config file's directory with `DATA`, `FHIR_BASE`,
-`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set.
+`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set, after the run's
+tables, manifest and catalog are swapped in.
 
 Each run writes its step timings to `raw/<server>/last-refresh.json`.
 

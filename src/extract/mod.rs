@@ -3,6 +3,7 @@
 pub mod boundary;
 pub mod cache;
 pub mod client;
+pub mod google;
 pub mod page;
 
 use std::collections::HashMap;
@@ -136,7 +137,7 @@ fn run_phases(
 ) -> Result<()> {
     let full = since.is_none();
     let client = FhirClient::new(
-        args.auth.auth(),
+        args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
     )?;

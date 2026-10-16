@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS};
+use crate::extract::google::{self, Credentials};
 
 /// The config file (`fhir-pipes.toml`). Every field is optional.
 #[derive(Debug, Default, Deserialize)]
@@ -53,6 +54,8 @@ pub struct ServerFile {
     pub bulk_timeout: Option<u64>,
     /// HTTP Basic username; the password comes only from FHIR_PIPES_PASSWORD.
     pub username: Option<String>,
+    /// Google Application Default Credentials (`--google-auth`).
+    pub google_auth: Option<bool>,
 }
 
 /// How resources are downloaded from the FHIR server.
@@ -274,7 +277,9 @@ pub struct Settings {
 impl Settings {
     /// How the run authenticates, for `--check`.
     pub fn auth_kind(&self) -> &'static str {
-        if self.auth.token.is_some() {
+        if self.auth.google_auth {
+            "Google application default credentials"
+        } else if self.auth.token.is_some() {
             "bearer token"
         } else if self.auth.client_id.is_some() {
             "client credentials"
@@ -282,6 +287,18 @@ impl Settings {
             "basic"
         } else {
             "none"
+        }
+    }
+
+    /// `auth_kind`, and for Google where the credentials are, for `--check`.
+    /// Never shows a secret.
+    pub fn auth_description(&self) -> String {
+        if !self.auth.google_auth {
+            return self.auth_kind().to_string();
+        }
+        match Credentials::application_default() {
+            Ok(c) => format!("{}: {}", self.auth_kind(), c.describe()),
+            Err(e) => format!("{} ({e})", self.auth_kind()),
         }
     }
 
@@ -347,6 +364,9 @@ pub struct Overrides {
     pub token_url: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Given on the command line or in the environment, true or false; the
+    /// file's `server.google_auth` applies only when this is unset.
+    pub google_auth: Option<bool>,
     pub countries: Vec<String>,
     pub threads: Option<usize>,
     pub reuse_raw: bool,
@@ -366,10 +386,15 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     };
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
     let username = o.username.or(file.server.username);
+    let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
     let kinds: Vec<&str> = [
         (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
         (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
         (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
+        (
+            google_auth,
+            "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
+        ),
     ]
     .into_iter()
     .filter_map(|(set, what)| set.then_some(what))
@@ -377,15 +402,12 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     if kinds.len() > 1 {
         bail!("use one way to authenticate, not {}", kinds.join(" and "));
     }
-    let none = AuthArgs {
-        token: None,
-        client_id: None,
-        client_secret: None,
-        token_url: None,
-        username: None,
-        password: None,
-    };
+    let none = AuthArgs::none();
     let auth = match (o.client_id, o.client_secret, username, o.password) {
+        _ if google_auth => AuthArgs {
+            google_auth: true,
+            ..none
+        },
         (Some(id), Some(secret), _, _) => AuthArgs {
             client_id: Some(id),
             client_secret: Some(secret),
@@ -419,10 +441,11 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     Ok(Settings {
         data,
         views,
-        server: o
-            .server
-            .or(file.server.base)
-            .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
+        server: google::server_url(
+            &o.server
+                .or(file.server.base)
+                .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
+        ),
         server_name: o
             .server_name
             .or(file.server.name)
@@ -603,6 +626,63 @@ mod tests {
         assert_eq!(spark.extra, Some(PathBuf::from("/b/x.sql")));
         let err = s("data = \"d\"\n[catalog]\nspark_location = \"s3a://b/w\"\n").unwrap_err();
         assert!(err.to_string().contains("need spark = true"), "{err}");
+    }
+
+    #[test]
+    fn google_auth_comes_from_the_file_or_the_flag_and_excludes_the_others() {
+        let file: File = toml::from_str("data = \"d\"\n[server]\ngoogle_auth = true").unwrap();
+        let s = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap();
+        assert!(s.auth.google_auth);
+        assert_eq!(s.auth_kind(), "Google application default credentials");
+
+        let file: File = toml::from_str("data = \"d\"").unwrap();
+        let o = Overrides {
+            google_auth: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            settings(file, PathBuf::from("/b"), o)
+                .unwrap()
+                .auth
+                .google_auth
+        );
+
+        let file: File = toml::from_str("data = \"d\"\n[server]\ngoogle_auth = true").unwrap();
+        let o = Overrides {
+            token: Some("t".into()),
+            ..Default::default()
+        };
+        let err = settings(file, PathBuf::from("/b"), o).unwrap_err();
+        assert!(
+            err.to_string().contains("FHIR_PIPES_TOKEN") && err.to_string().contains("Google"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_false_turns_off_the_files_google_auth() {
+        let file: File = toml::from_str("data = \"d\"\n[server]\ngoogle_auth = true").unwrap();
+        let o = Overrides {
+            google_auth: Some(false),
+            token: Some("t".into()),
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert!(!s.auth.google_auth);
+        assert_eq!(s.auth_kind(), "bearer token");
+    }
+
+    #[test]
+    fn a_store_path_as_the_server_is_expanded() {
+        let file: File = toml::from_str(
+            "data = \"d\"\n[server]\nbase = \"projects/p/locations/l/datasets/d/fhirStores/s\"",
+        )
+        .unwrap();
+        let s = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap();
+        assert_eq!(
+            s.server,
+            "https://healthcare.googleapis.com/v1/projects/p/locations/l/datasets/d/fhirStores/s/fhir"
+        );
     }
 
     #[test]

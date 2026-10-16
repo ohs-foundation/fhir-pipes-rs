@@ -15,6 +15,11 @@
 //!              build with the postgres feature
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
+//!
+//! The tables, the manifest and catalog.sql are written to staging directories
+//! (stage.rs) and swapped in together after the database step, so a run that
+//! fails before then leaves the previous run's warehouse as it was. The hooks
+//! and the push work on the published warehouse.
 
 mod catalog;
 mod config;
@@ -24,6 +29,7 @@ mod fhir;
 mod manifest;
 mod partition;
 mod push;
+mod stage;
 mod tiles;
 mod tools;
 pub(crate) mod views;
@@ -49,7 +55,8 @@ pub struct RefreshArgs {
     /// Directory of ViewDefinition JSON files (e.g. an IG's fsh-generated/resources).
     #[arg(long, env = "FHIR_PIPES_VIEWS")]
     views: Option<PathBuf>,
-    /// FHIR server base URL.
+    /// FHIR server base URL, or a Cloud Healthcare API FHIR store path
+    /// (projects/P/locations/L/datasets/D/fhirStores/S).
     #[arg(long, env = "FHIR_PIPES_SERVER")]
     server: Option<String>,
     /// Name for the server's raw downloads: raw/<name>/.
@@ -66,6 +73,19 @@ pub struct RefreshArgs {
     /// FHIR_PIPES_PASSWORD, which is read only from the environment.
     #[arg(long, env = "FHIR_PIPES_USERNAME")]
     username: Option<String>,
+    /// Google Application Default Credentials, for a Cloud Healthcare API
+    /// FHIR store (as `server.google_auth = true`). `--google-auth=false` or
+    /// FHIR_PIPES_GOOGLE_AUTH=0 turns off the config file's setting.
+    #[arg(
+        long,
+        env = "FHIR_PIPES_GOOGLE_AUTH",
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    google_auth: Option<bool>,
     /// Run only these steps (comma-separated). The manifest is added when a
     /// data step is among them.
     #[arg(long, value_delimiter = ',')]
@@ -146,6 +166,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
             token_url: args.token_url.clone(),
             username: args.username.clone(),
             password: env_secret("FHIR_PIPES_PASSWORD"),
+            google_auth: args.google_auth,
             countries: args.countries.clone(),
             threads: args.threads,
             reuse_raw: args.reuse_raw,
@@ -275,7 +296,7 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
         names(steps.iter().map(|s| s.name().to_string()).collect())
     );
     println!("server:     {} (raw/{})", s.server, s.server_name);
-    println!("auth:       {}", s.auth_kind());
+    println!("auth:       {}", s.auth_description());
     match s.fetch {
         config::Fetch::Bulk => println!(
             "fetch:      bulk ($export, waiting up to {} s)",
@@ -352,10 +373,11 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
     let mut ran: BTreeSet<Step> = BTreeSet::new();
     std::fs::create_dir_all(s.raw_dir())?;
     std::fs::create_dir_all(s.parquet_dir())?;
+    let stage = stage::Stage::new(s)?;
 
     if steps.contains(&Step::Locations) {
         let t = Instant::now();
-        fhir::locations(s)?;
+        fhir::locations(s, stage.tables_dir())?;
         timings.push(("locations", t.elapsed().as_secs_f64()));
         ran.insert(Step::Locations);
     }
@@ -366,12 +388,12 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         let tiles = steps.contains(&Step::Tiles).then(|| {
             scope.spawn(|| {
                 let t = Instant::now();
-                tiles::build(s).map(|()| t.elapsed().as_secs_f64())
+                tiles::build(s, &stage.read("locations")).map(|()| t.elapsed().as_secs_f64())
             })
         });
         let views = steps.contains(&Step::Views).then(|| {
             let t = Instant::now();
-            views_step(s).map(|()| t.elapsed().as_secs_f64())
+            views_step(s, &stage).map(|()| t.elapsed().as_secs_f64())
         });
         let tiles = tiles.map(|h| {
             h.join()
@@ -393,7 +415,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         .to_string();
     if steps.contains(&Step::Manifest) {
         let t = Instant::now();
-        refreshed_at = manifest::write(s)?;
+        refreshed_at = manifest::write(s, &stage)?;
         timings.push(("manifest", t.elapsed().as_secs_f64()));
         ran.insert(Step::Manifest);
     }
@@ -402,7 +424,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         && let Some(c) = &s.catalog
     {
         let t = Instant::now();
-        catalog::write(s, c, &refreshed_at)?;
+        catalog::write(s, c, &refreshed_at, &stage)?;
         timings.push(("catalog", t.elapsed().as_secs_f64()));
         ran.insert(Step::Catalog);
     }
@@ -412,9 +434,37 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
         && let Some(d) = &s.database
     {
         let t = Instant::now();
-        database::load(s, d, &database_tables(s, d)?)?;
+        let tables: Vec<(String, PathBuf)> = database_tables(s, d)?
+            .into_iter()
+            .map(|n| {
+                let dir = stage.read(&n);
+                (n, dir)
+            })
+            .collect();
+        database::load(s, d, &tables)?;
         timings.push(("database", t.elapsed().as_secs_f64()));
         ran.insert(Step::Database);
+    }
+
+    // Everything above wrote to the staging directories; swap it all in now,
+    // the tables first, then the manifest and catalog.sql.
+    if !stage.is_empty()? {
+        let t = Instant::now();
+        println!("== publish");
+        let n = stage.publish()?;
+        println!("   {n} table(s), then the manifest and catalog");
+        // DuckDB reads each table's schema from its files when it creates a
+        // view, so a catalog.duckdb with relative paths can only be built once
+        // the tables are in place. If that fails the run stops here, with the
+        // new tables, manifest and catalog.sql and the previous catalog.duckdb.
+        if ran.contains(&Step::Catalog)
+            && let Some(c) = &s.catalog
+            && c.duckdb_file
+            && c.base_url.is_none()
+        {
+            catalog::build_duckdb(s, c)?;
+        }
+        timings.push(("publish", t.elapsed().as_secs_f64()));
     }
 
     if steps.contains(&Step::Hooks) {
@@ -487,8 +537,9 @@ fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
 }
 
 /// Download each resource type the views read, run each type's views on one
-/// read of it, then write each view's table partitioned by the lookup rules.
-fn views_step(s: &Settings) -> Result<()> {
+/// read of it, then write each view's table, partitioned by the lookup rules,
+/// to the staging directory.
+fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
     let dir = s.views.as_ref().context("no views directory")?;
     println!("== views ({})", dir.display());
     let all = views::discover(dir, &s.strip_prefix)?;
@@ -529,7 +580,8 @@ fn views_step(s: &Settings) -> Result<()> {
         );
     }
 
-    // Tables other views look their partition up in are written first.
+    // Tables other views look their partition up in are written first, and
+    // read back from the staging directory.
     let sources: BTreeSet<&str> = s.lookups.iter().map(|l| l.table.as_str()).collect();
     let mut order: Vec<usize> = (0..all.len()).collect();
     order.sort_by_key(|&i| !sources.contains(all[i].table.as_str()));
@@ -541,7 +593,7 @@ fn views_step(s: &Settings) -> Result<()> {
         let rule = partition::rule_for(&result, &s.lookups);
         let mut map: Option<&HashMap<String, String>> = None;
         if let Some((l, _)) = rule {
-            let table_dir = s.parquet_dir().join(&l.table);
+            let table_dir = stage.read(&l.table);
             let key = l.table_key.clone().unwrap_or_else(|| l.key.clone());
             if table_dir.is_dir() {
                 let cache_key = (l.table.clone(), key.clone());
@@ -554,17 +606,12 @@ fn views_step(s: &Settings) -> Result<()> {
             }
         }
         let col = rule.map(|(_, c)| c);
-        let n = partition::write(
-            result,
-            &s.parquet_dir().join(&v.table),
-            &s.partition_column,
-            |row| {
-                let (Some(map), Some(c)) = (map, col) else {
-                    return None;
-                };
-                row[c].as_str().and_then(|k| map.get(k)).cloned()
-            },
-        )?;
+        let n = partition::write(result, &stage.table(&v.table), &s.partition_column, |row| {
+            let (Some(map), Some(c)) = (map, col) else {
+                return None;
+            };
+            row[c].as_str().and_then(|k| map.get(k)).cloned()
+        })?;
         println!(
             "   {} ({}) → parquet/{} ({n} rows)",
             v.name, v.resource, v.table

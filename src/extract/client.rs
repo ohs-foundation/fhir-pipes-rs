@@ -4,10 +4,11 @@
 //! (0.5 s doubling, clamped to [0, 30] s, a numeric Retry-After replacing
 //! the computed delay); any other status is final.
 //!
-//! The bearer token is either fixed (`--token`) or obtained with the OAuth
-//! client-credentials grant (`--client-id`), in which case the client gets
-//! a new token shortly before the current one expires, so a run can outlast
-//! any one token.
+//! The bearer token is either fixed (`--token`), obtained with the OAuth
+//! client-credentials grant (`--client-id`), or obtained from Google
+//! Application Default Credentials (`--google-auth`, see `google.rs`). In the
+//! last two cases the client gets a new token shortly before the current one
+//! expires, so a run can outlast any one token.
 //!
 //! `fhir-pipes dhis2` uses the same client against the DHIS2 Web API, with a
 //! complete Authorization value (`ApiToken …` or `Basic …`) and plain JSON.
@@ -24,6 +25,7 @@ use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
+use super::google::{self, Credentials};
 use crate::error::{PipesError, Result};
 
 const RETRY_BASE: f64 = 0.5;
@@ -38,6 +40,9 @@ const ERROR_BODY_READ_LIMIT: u64 = 8192;
 const EXCHANGE_BODY_LIMIT: u64 = 1 << 20;
 /// Assumed token lifetime, in seconds, when a token response omits `expires_in`.
 const DEFAULT_TOKEN_LIFETIME: u64 = 300;
+/// Per-request timeout for the Google metadata server, which answers in
+/// milliseconds on Google Cloud; short so a run elsewhere fails quickly.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How requests are authorised.
 #[derive(Clone)]
@@ -54,6 +59,8 @@ pub enum Auth {
         client_id: String,
         client_secret: String,
     },
+    /// Google credentials, usually `Credentials::application_default()`.
+    Google(Credentials),
 }
 
 impl Auth {
@@ -67,13 +74,31 @@ impl Auth {
     }
 }
 
-/// The current client-credentials token and when to replace it. The lock is
-/// held across a renewal so concurrent boundary workers wait for one new
-/// token instead of each fetching their own.
+/// The current renewable token and when to replace it. The lock is held
+/// across a renewal so concurrent boundary workers wait for one new token
+/// instead of each fetching their own.
 struct TokenSource {
-    url: String,
-    form: String,
+    grant: Grant,
     current: Mutex<(HeaderValue, Instant)>,
+}
+
+/// How a token is requested.
+enum Grant {
+    /// POST a fixed form: OAuth client credentials, or a Google refresh token.
+    Form { url: String, form: String },
+    /// POST a newly signed JWT (a Google service account key).
+    Jwt(google::ServiceAccount),
+    /// GET from the Google metadata server.
+    Metadata { url: String },
+}
+
+impl Grant {
+    fn url(&self) -> &str {
+        match self {
+            Grant::Form { url, .. } | Grant::Metadata { url } => url,
+            Grant::Jwt(sa) => &sa.token_uri,
+        }
+    }
 }
 
 enum Authorizer {
@@ -204,6 +229,8 @@ pub struct FhirClient {
     /// The per-request timeout the client was built with.
     timeout: Duration,
     auth: Authorizer,
+    /// `x-goog-user-project`, sent with the Authorization header.
+    user_project: Option<HeaderValue>,
 }
 
 pub fn backoff_delay(attempt: usize, retry_after: Option<f64>) -> Duration {
@@ -277,8 +304,9 @@ fn jittered(delay: Duration) -> Duration {
 }
 
 impl FhirClient {
-    /// With client credentials the first token is fetched here, so a wrong
-    /// secret or token URL fails before any FHIR request is made.
+    /// With client credentials or Google credentials the first token is
+    /// fetched here, so a wrong secret, key or token URL fails before any
+    /// FHIR request is made.
     pub fn new(auth: Auth, retries: usize, timeout: Duration) -> Result<Self> {
         ensure_crypto_provider();
         let mut headers = HeaderMap::new();
@@ -294,6 +322,7 @@ impl FhirClient {
             retries: retries.max(1),
             timeout,
             auth: Authorizer::None,
+            user_project: None,
         };
         client.auth = match auth {
             Auth::None => Authorizer::None,
@@ -319,17 +348,53 @@ impl FhirClient {
                     .append_pair("client_id", &client_id)
                     .append_pair("client_secret", &client_secret)
                     .finish();
-                let first = client.request_token(&token_url, &form).map_err(|e| {
-                    PipesError::Environment(format!("cannot get a token from {token_url}: {e}"))
-                })?;
-                Authorizer::Renewing(TokenSource {
+                client.renewing(Grant::Form {
                     url: token_url,
                     form,
-                    current: Mutex::new(first),
-                })
+                })?
+            }
+            Auth::Google(creds) => {
+                if let Some(project) = &creds.quota_project {
+                    client.user_project = Some(HeaderValue::from_str(project).map_err(|_| {
+                        PipesError::Usage(
+                            "the Google quota project is not valid in a header".into(),
+                        )
+                    })?);
+                }
+                let grant = match &creds.source {
+                    google::Source::ServiceAccount(sa) => Grant::Jwt(sa.clone()),
+                    google::Source::RefreshToken { token_uri, form } => Grant::Form {
+                        url: token_uri.clone(),
+                        form: form.clone(),
+                    },
+                    google::Source::Metadata { url } => Grant::Metadata { url: url.clone() },
+                };
+                client.renewing(grant).map_err(|e| {
+                    let hint = if creds.is_metadata() {
+                        ". Off Google Cloud, set GOOGLE_APPLICATION_CREDENTIALS to a service \
+                         account key file or run `gcloud auth application-default login`"
+                    } else {
+                        ""
+                    };
+                    PipesError::Environment(format!(
+                        "Google credentials from {}: {e}{hint}",
+                        creds.describe()
+                    ))
+                })?
             }
         };
         Ok(client)
+    }
+
+    /// A renewing authorizer, with its first token fetched now.
+    fn renewing(&self, grant: Grant) -> Result<Authorizer> {
+        let first = self.request_token(&grant).map_err(|e| {
+            PipesError::Environment(format!("cannot get a token from {}: {e}", grant.url()))
+        })?;
+        Ok(Authorizer::Renewing(TokenSource {
+            grant,
+            current: Mutex::new(first),
+        }))
     }
 
     /// GET with the retry policy. Sleeps between attempts.
@@ -404,7 +469,7 @@ impl FhirClient {
                 request = request.timeout(self.timeout.min(left));
             }
             if let Some(v) = &auth {
-                request = request.header(AUTHORIZATION, v.clone());
+                request = self.authorize(request, v);
             }
             match request.send() {
                 Ok(resp) => return exchanged(resp),
@@ -449,25 +514,43 @@ impl FhirClient {
         }
     }
 
-    /// One client-credentials token request, with the retry policy. Returns
-    /// the Authorization header and when to replace it, counted from before
-    /// the request so the margin also covers the round trip.
+    /// One token request, with the retry policy. Returns the Authorization
+    /// header and when to replace it, counted from before the request so the
+    /// margin also covers the round trip.
     fn request_token(
         &self,
-        url: &str,
-        form: &str,
+        grant: &Grant,
     ) -> std::result::Result<(HeaderValue, Instant), FetchError> {
         let started = Instant::now();
-        let got = self.retrying(
-            || {
-                self.http
-                    .post(url)
-                    .header(ACCEPT, "application/json")
-                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(form.to_owned())
-            },
-            fetched,
-        )?;
+        let post = |url: &str, form: String| {
+            self.retrying(
+                || {
+                    self.http
+                        .post(url)
+                        .header(ACCEPT, "application/json")
+                        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(form.clone())
+                },
+                fetched,
+            )
+        };
+        let got = match grant {
+            Grant::Form { url, form } => post(url, form.clone())?,
+            Grant::Jwt(sa) => post(
+                &sa.token_uri,
+                sa.token_form().map_err(FetchError::Transport)?,
+            )?,
+            Grant::Metadata { url } => self.retrying(
+                || {
+                    self.http
+                        .get(url)
+                        .header(ACCEPT, "application/json")
+                        .header("metadata-flavor", "Google")
+                        .timeout(METADATA_TIMEOUT)
+                },
+                fetched,
+            )?,
+        };
         let body: Value = serde_json::from_slice(&got.body)
             .map_err(|e| FetchError::Transport(format!("token response is not JSON: {e}")))?;
         let header = body
@@ -493,8 +576,11 @@ impl FhirClient {
             Authorizer::Renewing(src) => {
                 let mut current = src.current.lock().unwrap_or_else(PoisonError::into_inner);
                 if Instant::now() >= current.1 {
-                    *current = self.request_token(&src.url, &src.form).map_err(|e| {
-                        FetchError::Transport(format!("renewing the token at {}: {e}", src.url))
+                    *current = self.request_token(&src.grant).map_err(|e| {
+                        FetchError::Transport(format!(
+                            "renewing the token at {}: {e}",
+                            src.grant.url()
+                        ))
                     })?;
                 }
                 Ok(Some(current.0.clone()))
@@ -512,11 +598,20 @@ impl FhirClient {
         let auth = self.authorization()?;
         self.retrying(
             || match &auth {
-                Some(v) => request().header(AUTHORIZATION, v.clone()),
+                Some(v) => self.authorize(request(), v),
                 None => request(),
             },
             success,
         )
+    }
+
+    /// The Authorization header, and `x-goog-user-project` when set.
+    fn authorize(&self, request: RequestBuilder, auth: &HeaderValue) -> RequestBuilder {
+        let request = request.header(AUTHORIZATION, auth.clone());
+        match &self.user_project {
+            Some(p) => request.header("x-goog-user-project", p.clone()),
+            None => request,
+        }
     }
 
     /// The retry loop. Any 2xx is a success, handed to `success`; 429 and
@@ -787,6 +882,178 @@ mod tests {
             panic!("expected a missing access_token to fail");
         };
         assert!(err.to_string().contains("access_token"), "{err}");
+    }
+
+    fn google(json: &str) -> Auth {
+        Auth::Google(Credentials::from_json(json, "test").unwrap())
+    }
+
+    fn metadata(server: &Server) -> Auth {
+        let host = server.addr().to_string();
+        Auth::Google(
+            Credentials::discover(|k| match k {
+                "GCE_METADATA_HOST" => Some(host.clone()),
+                "CLOUDSDK_CONFIG" => Some("/nonexistent".into()),
+                _ => None,
+            })
+            .unwrap(),
+        )
+    }
+
+    const METADATA_PATH: &str = "/computeMetadata/v1/instance/service-accounts/default/token";
+
+    #[test]
+    fn a_service_account_signs_a_jwt_and_trades_it_for_a_token() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::headers(contains((
+                    "content-type",
+                    "application/x-www-form-urlencoded"
+                ))),
+                request::body(url_decoded(contains((
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:jwt-bearer"
+                )))),
+                request::body(url_decoded(contains(key("assertion")))),
+            ])
+            .times(1)
+            .respond_with(token("ya29.sa", 3600)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("authorization", "Bearer ya29.sa"))),
+                request::headers(not(contains(key("x-goog-user-project")))),
+            ])
+            .times(2)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let json = google::tests::service_account_json(&server.url_str("/token"));
+        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url_str("/fhir/Patient")).unwrap();
+        c.get(&server.url_str("/fhir/Patient")).unwrap();
+    }
+
+    #[test]
+    fn a_service_account_token_is_renewed_with_a_new_assertion() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::body(url_decoded(contains(key("assertion")))),
+            ])
+            .times(2)
+            .respond_with(cycle![token("old", 1), token("new", 3600)]),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/t"),
+                request::headers(contains(("authorization", "Bearer new"))),
+            ])
+            .times(2)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let json = google::tests::service_account_json(&server.url_str("/token"));
+        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url_str("/t")).unwrap();
+        c.get(&server.url_str("/t")).unwrap();
+    }
+
+    #[test]
+    fn a_rejected_service_account_fails_before_any_fhir_request() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(1)
+                .respond_with(status_code(400).body(
+                    r#"{"error":"invalid_grant","error_description":"Invalid JWT Signature."}"#,
+                )),
+        );
+        let json = google::tests::service_account_json(&server.url_str("/token"));
+        let Err(err) = FhirClient::new(google(&json), 3, Duration::from_secs(5)) else {
+            panic!("expected the token request to fail");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(google::tests::TEST_EMAIL), "{msg}");
+        assert!(msg.contains("invalid_grant"), "{msg}");
+        assert!(!msg.contains("assertion"), "{msg}");
+    }
+
+    #[test]
+    fn user_credentials_trade_their_refresh_token_and_name_the_quota_project() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::body(url_decoded(contains(("grant_type", "refresh_token")))),
+                request::body(url_decoded(contains(("refresh_token", "1//refresh-me")))),
+                request::body(url_decoded(contains((
+                    "client_id",
+                    "user-client.apps.googleusercontent.com"
+                )))),
+                request::body(url_decoded(contains(("client_secret", "user-secret")))),
+            ])
+            .times(1)
+            .respond_with(token("ya29.user", 3600)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/t"),
+                request::headers(contains(("authorization", "Bearer ya29.user"))),
+                request::headers(contains(("x-goog-user-project", "billing-project"))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let json = google::tests::authorized_user_json(Some(&server.url_str("/token")));
+        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url_str("/t")).unwrap();
+    }
+
+    #[test]
+    fn the_metadata_server_gives_tokens_that_are_renewed() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", METADATA_PATH),
+                request::headers(contains(("metadata-flavor", "Google"))),
+            ])
+            .times(2)
+            .respond_with(cycle![token("meta-old", 1), token("meta-new", 3600)]),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/t"),
+                request::headers(contains(("authorization", "Bearer meta-new"))),
+            ])
+            .times(2)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let c = FhirClient::new(metadata(&server), 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url_str("/t")).unwrap();
+        c.get(&server.url_str("/t")).unwrap();
+    }
+
+    #[test]
+    fn no_metadata_server_is_an_error_that_says_what_to_set() {
+        let auth = Auth::Google(
+            Credentials::discover(|k| match k {
+                "GCE_METADATA_HOST" => Some("127.0.0.1:9".into()),
+                "CLOUDSDK_CONFIG" => Some("/nonexistent".into()),
+                _ => None,
+            })
+            .unwrap(),
+        );
+        let started = Instant::now();
+        let Err(err) = FhirClient::new(auth, 1, Duration::from_secs(300)) else {
+            panic!("expected no metadata server");
+        };
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let msg = err.to_string();
+        assert!(msg.contains("metadata server at 127.0.0.1:9"), "{msg}");
+        assert!(msg.contains("GOOGLE_APPLICATION_CREDENTIALS"), "{msg}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Download every resource of the given types as NDJSON | `export` | 0.3.0 |
 | Download through a system-level Bulk Data `$export` instead of search: `_since` the last export's `transactionTime`, merged by id, `deleted` resources removed, an interrupted export resumed from its saved status URL, cancelled after `--bulk-timeout`. Group and Patient exports are not supported yet | `export --bulk`, `refresh` (`fetch = "bulk"`) | next release |
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
+| A refresh is all-or-nothing: tables, `manifest.json` and `catalog.sql` are staged and swapped in together at the end, so a run that fails leaves the previous run's warehouse as it was (#35) | `refresh` | next release |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
 | Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
@@ -27,6 +28,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Spark SQL tables for a Spark Thrift server: `catalog.spark.sql` with a table per warehouse table over `s3a://`, `hdfs://` or local paths, plus your own Spark SQL; the Locations table needs Spark 4.1 (#31) | `refresh` (`[catalog] spark`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 | HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `refresh` | next release |
+| Google Cloud Healthcare API FHIR stores: tokens from Application Default Credentials (service account key, gcloud user credentials, metadata server), renewed before expiry; store paths (`projects/…/fhirStores/…`) accepted as the server (#34) | `--google-auth` on `extract`, `export`, `run`, `load`, `refresh` | next release |
 
 ### ViewDefinitions
 
@@ -82,6 +84,8 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
 | Bulk Data `Group/[id]/$export` and `Patient/$export` | Not started | `export --bulk` is system level only |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
+| Versioned run directories: each refresh in its own directory, with the manifest and catalog naming the current one, and old runs kept for rollback | Not started | Option 2 of #35, like the Java pipeline's timestamped snapshots. Changes the paths readers use, so it needs a migration. A refresh is already all-or-nothing without it |
+| Stage the tiles and the `views/` copies with the tables | Not started | A failed refresh can still leave new tiles and view copies beside the previous run's tables |
 
 ## Moving into fhir-data-pipes
 
@@ -124,7 +128,7 @@ on its own outstanding list, next to fhir-pipes.
 
 | # | RFC outstanding item | fhir-pipes |
 |---|---|---|
-| 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, including a system-level Bulk Data `$export` client (next release) |
+| 1 | Network sources: paged FHIR search, `_lastUpdated` incremental sync, OAuth2 and bearer tokens, retry with backoff | Done, including a system-level Bulk Data `$export` client and Google Application Default Credentials for Cloud Healthcare API stores (next release) |
 | 2 | Direct relational database sinks (PostgreSQL) | `refresh` with `[database]` loads the view tables into PostgreSQL, with TLS (next release) |
 | 3 | Schema from StructureDefinitions, including IG profiles | Not needed for the flat tables, which take their columns from the views. Would be the basis of nested output. `profile check` already reads an IG's StructureDefinitions |
 | 4 | Complete FHIRPath, passing the official SQL-on-FHIR v2 tests | Done for views evaluated in memory (`views run --input`, `refresh`): `octofhir-fhirpath`, 144 of 144. Generated SQL (`views sql`, and `views run --db`, which uses it) supports fewer functions; `substring()`, for one, is refused |

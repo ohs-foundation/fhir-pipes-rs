@@ -2,6 +2,8 @@
 //! the views read. These were `kiln run` and `kiln export` in a separate
 //! process; they are now the same commands' code, called directly.
 
+use std::path::Path;
+
 use anyhow::Result;
 
 use crate::cli::{
@@ -12,9 +14,10 @@ use crate::cli::{
 use super::config::{Fetch, Settings};
 
 /// `fhir-pipes run`: incremental extract into raw/<server>/locations, transform
-/// into parquet/locations. `full` re-extracts every Location (the incremental
-/// extract cannot see deletions).
-pub fn locations(s: &Settings) -> Result<()> {
+/// into `out`/locations (the run's staging directory; it becomes
+/// parquet/locations when the run is published). `full` re-extracts every
+/// Location (the incremental extract cannot see deletions).
+pub fn locations(s: &Settings, out: &Path) -> Result<()> {
     let snapshot = s.raw_dir().join("locations");
     println!(
         "== locations ({} → {} → {})",
@@ -38,7 +41,7 @@ pub fn locations(s: &Settings) -> Result<()> {
                 cache_dir: None,
                 timeout: DEFAULT_TIMEOUT_SECS,
             },
-            out: s.parquet_dir(),
+            out: out.to_path_buf(),
             country: None,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             partition_by: DEFAULT_PARTITION_BY.to_string(),

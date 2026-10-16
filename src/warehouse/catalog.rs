@@ -10,9 +10,9 @@
 //!
 //! catalog.duckdb holds the same views in a DuckDB database a client can
 //! ATTACH, by URL once pushed. DuckDB reads the files' schemas when it creates
-//! a view, so the file is built where the views can reach the data: in the
-//! catalog step when the paths are relative, otherwise during --push, after
-//! the tables are uploaded. Only that needs the duckdb command.
+//! a view, so the file is built where the views can reach the data: right after
+//! the run's tables are swapped in when the paths are relative, otherwise during
+//! --push, after the tables are uploaded. Only that needs the duckdb command.
 //!
 //! catalog.spark.sql, with `spark = true`, has a Spark SQL table per warehouse
 //! table, for a Spark Thrift server (as the fhir-data-pipes Java pipeline
@@ -41,16 +41,17 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::config::{Catalog, Settings};
 use super::partition::table_files;
+use super::stage::Stage;
 
 pub const SQL_FILE: &str = "catalog.sql";
 pub const DUCKDB_FILE: &str = "catalog.duckdb";
 pub const SPARK_FILE: &str = "catalog.spark.sql";
 
-/// Write data/catalog.sql and, when the views read local files, build
-/// catalog.duckdb from it.
-pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str) -> Result<()> {
+/// Write catalog.sql into the staging directory, naming the tables as they
+/// will be once the run is published.
+pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str, stage: &Stage) -> Result<()> {
     println!("== catalog");
-    let tables = tables(s)?;
+    let tables = tables(s, stage)?;
     let extra = match &c.extra {
         Some(p) => Some((
             p.clone(),
@@ -64,7 +65,7 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str) -> Result<()> {
         extra.as_ref().map(|(p, t)| (p.as_path(), t.as_str())),
         refreshed_at,
     );
-    let path = s.data.join(SQL_FILE);
+    let path = stage.file(SQL_FILE);
     fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
     let listed = tables.iter().filter(|t| !t.files.is_empty()).count();
     println!("   {SQL_FILE}: {listed} table view(s)");
@@ -80,9 +81,16 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str) -> Result<()> {
             Some(l) => l.clone(),
             None => file_url(&s.data)?,
         };
+        // Column types from the files as they are now: the run's staged copy
+        // of a table, else the live one.
+        let read_from: std::collections::HashMap<String, PathBuf> =
+            stage.tables()?.into_iter().collect();
         let spark_tables = tables
             .iter()
-            .map(|t| Ok((t, spark_columns(&s.data, t)?)))
+            .map(|t| {
+                let dir = read_from.get(&t.name).context("a table the stage lists")?;
+                Ok((t, spark_columns(dir, t)?))
+            })
             .collect::<Result<Vec<_>>>()?;
         let sql = render_spark(
             &spark_tables,
@@ -91,15 +99,12 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str) -> Result<()> {
             extra.as_ref().map(|(p, t)| (p.as_path(), t.as_str())),
             refreshed_at,
         );
-        let path = s.data.join(SPARK_FILE);
+        let path = stage.file(SPARK_FILE);
         fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
         println!(
             "   {SPARK_FILE}: {listed} table(s) in database {}",
             spark.database
         );
-    }
-    if c.duckdb_file && c.base_url.is_none() {
-        build_duckdb(s, c)?;
     }
     Ok(())
 }
@@ -167,28 +172,23 @@ pub struct Table {
     pub files: Vec<String>,
 }
 
-/// The tables under data/parquet, as the manifest counts them.
-fn tables(s: &Settings) -> Result<Vec<Table>> {
-    let parquet = s.parquet_dir();
-    let mut names: Vec<String> = fs::read_dir(&parquet)
-        .with_context(|| format!("reading {}", parquet.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    names.sort();
-    Ok(names
+/// The tables under data/parquet once the run is published, as the manifest
+/// counts them, with each file named where it will be then.
+fn tables(s: &Settings, stage: &Stage) -> Result<Vec<Table>> {
+    Ok(stage
+        .tables()?
         .into_iter()
-        .map(|name| {
-            let files = table_files(&parquet.join(&name), &s.partition_column)
+        .map(|(name, dir)| {
+            let files = table_files(&dir, &s.partition_column)
                 .iter()
-                .filter_map(|f| f.strip_prefix(&s.data).ok())
+                .filter_map(|f| f.strip_prefix(&dir).ok())
                 .map(|f| {
-                    f.components()
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join("/")
+                    let mut path = vec!["parquet".to_string(), name.clone()];
+                    path.extend(
+                        f.components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+                    );
+                    path.join("/")
                 })
                 .collect();
             Table {
@@ -279,10 +279,12 @@ pub struct SparkColumn {
 
 /// The columns of a table's files, by name in the order first seen, each
 /// typed as in the first file that has it.
-fn spark_columns(data: &Path, t: &Table) -> Result<Vec<SparkColumn>> {
+fn spark_columns(dir: &Path, t: &Table) -> Result<Vec<SparkColumn>> {
+    let prefix = format!("parquet/{}/", t.name);
     let mut columns: Vec<SparkColumn> = Vec::new();
     for f in &t.files {
-        let path = data.join(f);
+        // `files` are named where they will be; read them from `dir`.
+        let path = dir.join(f.strip_prefix(&prefix).unwrap_or(f));
         let file = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .with_context(|| format!("reading {}", path.display()))?;
@@ -813,7 +815,7 @@ mod tests {
             column: "country".into(),
             files: vec!["parquet/locations/country=SLE/part-0.parquet".into()],
         };
-        let columns = spark_columns(&data, &t).unwrap();
+        let columns = spark_columns(&data.join("parquet/locations"), &t).unwrap();
         assert_eq!(
             columns,
             vec![

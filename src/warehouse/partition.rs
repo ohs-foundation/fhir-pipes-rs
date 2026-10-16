@@ -184,14 +184,30 @@ pub fn write(
             .with_context(|| format!("writing {}", path.display()))?;
     }
     fs::create_dir_all(&staging)?;
+    replace(&staging, table_dir)?;
+    Ok(total)
+}
+
+/// Put the table at `staged` in place of `table_dir`: the old one is renamed
+/// to `.<table>.old`, the new one renamed in, then the old one removed.
+pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
+    let parent = table_dir
+        .parent()
+        .context("table directory has no parent")?;
+    let name = table_dir
+        .file_name()
+        .context("table directory has no name")?
+        .to_string_lossy();
     let old = parent.join(format!(".{name}.old"));
     let _ = fs::remove_dir_all(&old);
     if table_dir.exists() {
-        fs::rename(table_dir, &old)?;
+        fs::rename(table_dir, &old)
+            .with_context(|| format!("moving {} aside", table_dir.display()))?;
     }
-    fs::rename(&staging, table_dir)?;
+    fs::rename(staged, table_dir)
+        .with_context(|| format!("renaming {} into place", staged.display()))?;
     let _ = fs::remove_dir_all(&old);
-    Ok(total)
+    Ok(())
 }
 
 /// A partition value made safe as one path segment, as hive escapes it.
