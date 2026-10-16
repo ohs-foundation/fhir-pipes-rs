@@ -39,8 +39,9 @@ use octofhir_fhirpath::{
 use serde_json::Value;
 
 use crate::column::{ColumnInfo, ColumnType};
+use crate::lexer::{Kind, Token, tokens};
 use crate::runner::ViewResult;
-use crate::sql_generator::{build_constants, substitute_constants};
+use crate::sql_generator::{build_constants, substitute_constants_keeping};
 use crate::view_definition::{Column, SelectColumn, ViewDefinition};
 use crate::{Error, Result};
 
@@ -210,11 +211,12 @@ impl CompiledView {
 
         // Build the engine once with the SoF custom functions registered. No
         // network, no FHIR package: EmptyModelProvider keeps the library
-        // self-contained (ofType choice resolution is handled by string rewrite
-        // below, not by the model provider).
+        // self-contained (ofType choice resolution is handled by a rewrite of
+        // the path, see `rewrite_of_type`, not by the model provider).
         let mut registry = create_function_registry();
         registry.register_lazy_function(Arc::new(GetResourceKey));
         registry.register_lazy_function(Arc::new(GetReferenceKey));
+        registry.register_lazy_function(Arc::new(ChoiceOfType));
         // SoF-divergent function semantics: override the engine's defaults to
         // match the SQL-on-FHIR conformance suite (join() with no separator,
         // and the spec's precision-boundary rules for low/highBoundary).
@@ -293,18 +295,23 @@ impl CompiledView {
             return Ok(Vec::new());
         }
         // The resource's one conversion to the engine's tree; every focus
-        // below shares it.
+        // below shares it, and every context is a child of its context.
         let root = FhirPathValue::resource_from_node(FhirNode::from_json(resource));
-        let focus = Focus::new(&root, 0);
+        let root_ctx = self.ev.root_context(&root);
+        let focus = Focus::with_context(&root, root_ctx.clone());
         for plan in &self.wheres {
-            if !self.ev.eval_where(plan, self.ev.ctx(&root, &focus)).await? {
+            if !self
+                .ev
+                .eval_where(plan, self.ev.ctx(&root_ctx, &focus))
+                .await?
+            {
                 return Ok(Vec::new());
             }
         }
 
         let mut rows = vec![Vec::with_capacity(self.columns.len())];
         for select in &self.selects {
-            let srows = self.ev.eval_select(select, &root, &focus).await?;
+            let srows = self.ev.eval_select(select, &root_ctx, &focus).await?;
             rows = cartesian(rows, srows);
         }
         Ok(rows)
@@ -403,6 +410,9 @@ struct Evaluator {
 /// SoF boundary rules applied to each value.
 enum PreparedPath {
     Plain(Arc<CompiledPlan>),
+    /// The base of a boundary call: a node of the parsed path, which the
+    /// engine evaluates directly.
+    Node(ExpressionNode),
     Boundary(Box<PreparedPath>, bool, BoundaryType),
 }
 
@@ -440,6 +450,15 @@ impl<'a> Focus<'a> {
             ctx: OnceLock::new(),
         }
     }
+
+    /// The resource itself as the focus, with the resource's context.
+    fn with_context(value: &'a FhirPathValue, ctx: EvaluationContext) -> Self {
+        Self {
+            value,
+            rid: 0,
+            ctx: OnceLock::from(ctx),
+        }
+    }
 }
 
 struct CompiledColumn {
@@ -453,8 +472,15 @@ impl Evaluator {
     /// constants (`%name`) into the string, then rewrite `ofType()` over FHIR
     /// choice elements (the engine, on an `EmptyModelProvider`, cannot map
     /// `value.ofType(Quantity)` → `valueQuantity` itself).
+    ///
+    /// `%` names that are not constants are left for the engine when they are
+    /// FHIRPath environment variables or are bound by a `defineVariable()` in
+    /// the same path; any other is an undefined constant.
     fn prepare(&self, path: &str) -> Result<String> {
-        let substituted = substitute_constants(path, &self.constants)?;
+        let defined = defined_variables(path);
+        let substituted = substitute_constants_keeping(path, &self.constants, |name| {
+            is_environment_variable(name) || defined.iter().any(|d| d == name)
+        })?;
         Ok(rewrite_of_type(&substituted))
     }
 
@@ -468,17 +494,15 @@ impl Evaluator {
     /// Compile a column or forEach path.
     ///
     /// `lowBoundary()`/`highBoundary()` diverge from the engine's stock
-    /// behaviour, so they are split off here: the base is compiled on its own
-    /// and the SoF precision-boundary rules are applied to each of its values.
-    /// The temporal flavour (`date`/`dateTime`/`time`) is taken from a leading
-    /// `ofType(T)` on the base before the `ofType` rewrite collapses it.
+    /// behaviour, so they are split off here: the base, any expression, is
+    /// evaluated on its own and the SoF precision-boundary rules are applied
+    /// to each of its values. The temporal flavour (`date`/`dateTime`/`time`)
+    /// is taken from a leading `ofType(T)` on the base in the path as written,
+    /// before the `ofType` rewrite.
     fn compile_path(&self, path: &str) -> Result<PreparedPath> {
-        Ok(match boundary_call(path) {
-            Some((base, low, hint)) => {
-                PreparedPath::Boundary(Box::new(self.compile_path(&base)?), low, hint)
-            }
-            None => PreparedPath::Plain(self.plan(&self.prepare(path)?)?),
-        })
+        let plan = self.plan(&self.prepare(path)?)?;
+        let written = octofhir_fhirpath::parse_ast(path).ok();
+        Ok(boundary_path(plan.ast(), written.as_ref()).unwrap_or(PreparedPath::Plain(plan)))
     }
 
     fn compile_select(&self, select: &SelectColumn) -> Result<CompiledSelect> {
@@ -536,31 +560,52 @@ impl Evaluator {
         })
     }
 
-    /// An evaluation context with `focus` as its input and `%rowIndex` bound to
-    /// `rid`. Building one sets up the engine's shared state, so callers
-    /// evaluating several paths against the same focus build it once and run
-    /// each path in a scope nested under it.
-    ///
-    /// `root` is the resource being evaluated; `focus` is it or a node within
-    /// it. The context does not bind `root` yet: nested contexts take the focus
-    /// as their root, so `getReferenceKey()` on a `#` reference inside
-    /// `forEach` looks in the focus for `contained` (issue #57).
-    fn context(&self, _root: &FhirPathValue, focus: &FhirPathValue, rid: i64) -> EvaluationContext {
+    /// The evaluation context of a resource: the resource is its input and
+    /// its root, so `%resource`, `%rootResource` and `%context` are the
+    /// resource, and `%rowIndex` is 0. Building one sets up the engine's
+    /// shared state (caches, providers); every other context for the resource
+    /// is a child of this one ([`Evaluator::context`]) and shares it.
+    fn root_context(&self, root: &FhirPathValue) -> EvaluationContext {
         let ctx = EvaluationContext::new(
-            Collection::single(focus.clone()),
+            Collection::single(root.clone()),
             self.model.clone(),
             None,
             None,
             None,
         );
+        // The engine binds %resource and %context to the root itself, but
+        // not %rootResource.
+        ctx.set_variable("rootResource".to_string(), root.clone());
         // %rowIndex: the engine resolves `%rowIndex` by stripping `%` and
         // looking up `rowIndex`.
+        ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(0));
+        ctx
+    }
+
+    /// A context with `focus`, a node within the resource of `root`, as its
+    /// input and `$this`, and `%rowIndex` bound to `rid`. Callers evaluating
+    /// several paths against the same focus build it once and run each path
+    /// in a scope nested under it.
+    ///
+    /// As a child of the resource's context, it keeps the resource as its
+    /// root: `%resource` inside `forEach` is the resource, and
+    /// `getReferenceKey()` resolves a `#` reference against the resource's
+    /// `contained`.
+    fn context(
+        &self,
+        root: &EvaluationContext,
+        focus: &FhirPathValue,
+        rid: i64,
+    ) -> EvaluationContext {
+        let ctx = root.create_child_context(Collection::single(focus.clone()));
+        // Without this, `$this` outside a lambda would resolve to the root.
+        ctx.set_this(focus.clone());
         ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(rid));
         ctx
     }
 
     /// The context for `focus`, built on first use.
-    fn ctx<'f>(&self, root: &FhirPathValue, focus: &'f Focus<'_>) -> &'f EvaluationContext {
+    fn ctx<'f>(&self, root: &EvaluationContext, focus: &'f Focus<'_>) -> &'f EvaluationContext {
         focus
             .ctx
             .get_or_init(|| self.context(root, focus.value, focus.rid))
@@ -592,7 +637,22 @@ impl Evaluator {
                     .collect())
             }
             PreparedPath::Plain(plan) => Ok(collection_to_json(&self.eval_plan(plan, ctx).await?)),
+            PreparedPath::Node(node) => Ok(collection_to_json(&self.eval_node(node, ctx).await?)),
         }
+    }
+
+    /// Evaluate a parsed node in its own variable scope under `ctx`, as
+    /// [`Evaluator::eval_plan`] does a plan.
+    async fn eval_node(
+        &self,
+        node: &ExpressionNode,
+        ctx: &EvaluationContext,
+    ) -> Result<Collection> {
+        self.engine
+            .evaluate_ast(node, &ctx.nest())
+            .await
+            .map(|r| r.value)
+            .map_err(|e| Error::FhirPath(e.to_string()))
     }
 
     /// Evaluate a path in a context, as foci for nested evaluation.
@@ -603,6 +663,7 @@ impl Evaluator {
     ) -> Result<Vec<FhirPathValue>> {
         match path {
             PreparedPath::Plain(plan) => Ok(focus_values(&self.eval_plan(plan, ctx).await?)),
+            PreparedPath::Node(node) => Ok(focus_values(&self.eval_node(node, ctx).await?)),
             PreparedPath::Boundary(..) => Ok(self
                 .eval_path(path, ctx)
                 .await?
@@ -616,7 +677,7 @@ impl Evaluator {
     async fn eval_select(
         &self,
         select: &CompiledSelect,
-        root: &FhirPathValue,
+        root: &EvaluationContext,
         focus: &Focus<'_>,
     ) -> Result<Vec<Vec<Value>>> {
         // `repeat` recursively traverses the focus, collecting every node reached
@@ -658,7 +719,7 @@ impl Evaluator {
     async fn eval_level(
         &self,
         select: &CompiledSelect,
-        root: &FhirPathValue,
+        root: &EvaluationContext,
         focus: &Focus<'_>,
     ) -> Result<Vec<Vec<Value>>> {
         let mut own = Vec::with_capacity(select.null_row.len());
@@ -689,7 +750,7 @@ impl Evaluator {
     async fn repeat_collect(
         &self,
         plans: &[Arc<CompiledPlan>],
-        root: &FhirPathValue,
+        root: &EvaluationContext,
         node: &FhirPathValue,
         out: &mut Vec<FhirPathValue>,
     ) -> Result<()> {
@@ -711,7 +772,7 @@ impl Evaluator {
     async fn repeat_children(
         &self,
         plans: &[Arc<CompiledPlan>],
-        root: &FhirPathValue,
+        root: &EvaluationContext,
         node: &FhirPathValue,
     ) -> Result<Vec<FhirPathValue>> {
         let ctx = self.context(root, node, 0);
@@ -823,52 +884,154 @@ fn value_to_json(v: &FhirPathValue) -> Value {
     }
 }
 
-/// Rewrite `<base>.ofType(Type)` so a FHIR choice element collapses onto the
-/// concrete property (`value.ofType(Quantity)` → `valueQuantity`,
-/// `value.ofType(string)` → `valueString`), matching how the SQL generator and
-/// the FHIR JSON representation name choice elements. The type name is
-/// capitalized exactly as the choice-element suffix requires. The engine, on an
-/// `EmptyModelProvider`, cannot do this mapping itself.
-fn rewrite_of_type(path: &str) -> String {
-    let bytes = path.as_bytes();
-    let mut out = String::with_capacity(path.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        // Look for the literal `.ofType(` at position i.
-        if path[i..].starts_with(".ofType(") {
-            // The base identifier is the trailing run of [A-Za-z0-9_] already in
-            // `out`. Pop it so we can fuse the capitalized type onto it.
-            let base_start = out
-                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            let base: String = out[base_start..].to_string();
-            // Find the matching close paren for the argument.
-            let arg_start = i + ".ofType(".len();
-            if let Some(rel_close) = path[arg_start..].find(')') {
-                let arg = path[arg_start..arg_start + rel_close].trim();
-                // Only a bare type identifier is a choice rewrite; anything else
-                // (shouldn't occur) is left to the engine.
-                if !base.is_empty() && is_simple_ident(arg) {
-                    out.truncate(base_start);
-                    out.push_str(&base);
-                    out.push_str(&capitalize_first(arg));
-                    i = arg_start + rel_close + 1;
-                    continue;
-                }
+/// FHIRPath environment variables the engine resolves itself, which constant
+/// substitution leaves in place.
+fn is_environment_variable(name: &str) -> bool {
+    matches!(
+        name,
+        "resource" | "rootResource" | "context" | "ucum" | "sct" | "loinc"
+    ) || name.starts_with("vs-")
+        || name.starts_with("ext-")
+}
+
+/// The names a path binds with `defineVariable('name', ...)`, so that its
+/// `%name` references are not taken for undefined constants. Empty if the
+/// path does not parse; compiling it then reports the error.
+fn defined_variables(path: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(ast) = octofhir_fhirpath::parse_ast(path) {
+        visit(&ast, &mut |node| {
+            let (name, args) = match node {
+                ExpressionNode::MethodCall(m) => (&m.method, &m.arguments),
+                ExpressionNode::FunctionCall(f) => (&f.name, &f.arguments),
+                _ => return,
+            };
+            if name == "defineVariable"
+                && let Some(ExpressionNode::Literal(l)) = args.first()
+                && let octofhir_fhirpath::LiteralValue::String(s) = &l.value
+            {
+                names.push(s.clone());
             }
-        }
-        let ch = path[i..].chars().next().unwrap();
-        out.push(ch);
-        i += ch.len_utf8();
+        });
     }
+    names
+}
+
+/// Call `f` on `node` and every node below it.
+fn visit(node: &ExpressionNode, f: &mut impl FnMut(&ExpressionNode)) {
+    f(node);
+    match node {
+        ExpressionNode::Literal(_)
+        | ExpressionNode::Identifier(_)
+        | ExpressionNode::Variable(_)
+        | ExpressionNode::TypeInfo(_) => {}
+        ExpressionNode::FunctionCall(n) => n.arguments.iter().for_each(|a| visit(a, f)),
+        ExpressionNode::MethodCall(n) => {
+            visit(&n.object, f);
+            n.arguments.iter().for_each(|a| visit(a, f));
+        }
+        ExpressionNode::PropertyAccess(n) => visit(&n.object, f),
+        ExpressionNode::IndexAccess(n) => {
+            visit(&n.object, f);
+            visit(&n.index, f);
+        }
+        ExpressionNode::BinaryOperation(n) => {
+            visit(&n.left, f);
+            visit(&n.right, f);
+        }
+        ExpressionNode::UnaryOperation(n) => visit(&n.operand, f),
+        ExpressionNode::Lambda(n) => visit(&n.body, f),
+        ExpressionNode::Collection(n) => n.elements.iter().for_each(|e| visit(e, f)),
+        ExpressionNode::Parenthesized(e) => visit(e, f),
+        ExpressionNode::TypeCast(n) => visit(&n.expression, f),
+        ExpressionNode::Filter(n) => {
+            visit(&n.base, f);
+            visit(&n.condition, f);
+        }
+        ExpressionNode::Union(n) => {
+            visit(&n.left, f);
+            visit(&n.right, f);
+        }
+        ExpressionNode::TypeCheck(n) => visit(&n.expression, f),
+        ExpressionNode::Path(n) => visit(&n.base, f),
+    }
+}
+
+/// The function [`rewrite_of_type`] calls; see [`ChoiceOfType`].
+const CHOICE_OF_TYPE: &str = "_sofOfType";
+
+/// Rewrite `element.ofType(T)`, where `T` is a FHIR datatype, so that a
+/// choice element is found under its JSON name: `value.ofType(Quantity)`
+/// becomes `_sofOfType(valueQuantity, value, Quantity)` (see [`ChoiceOfType`]),
+/// which on each input item reads `valueQuantity` when the item has it, as
+/// the FHIR JSON form of a choice element, and otherwise `value`, kept when
+/// its JSON form fits the type. So `value.ofType(Quantity)` gives the same
+/// values as `valueQuantity`, while `name.family.ofType(string)` reads
+/// `family`, not `familyString`. The type name is capitalized as the JSON
+/// name requires. The engine, on an `EmptyModelProvider`, cannot map choice
+/// elements itself, and its own `ofType` knows no FHIR datatypes.
+///
+/// The rewrite works on tokens, so string literals, backtick-quoted names and
+/// comments are left alone. `ofType` with a resource type
+/// (`contained.ofType(Practitioner)`), on a base that is not an element name
+/// (`first().ofType(string)`), or with a qualified type is left to the engine.
+fn rewrite_of_type(path: &str) -> String {
+    let toks = tokens(path);
+    // The tokens that are not whitespace or comments.
+    let sig: Vec<&Token> = toks
+        .iter()
+        .filter(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+        .collect();
+    let text = |t: &Token| &path[t.span.clone()];
+    let mut out = String::with_capacity(path.len());
+    let mut copied = 0;
+    let mut k = 0;
+    while let Some(&[element, dot, of_type, open, ty, close]) = sig.get(k..k + 6) {
+        if element.kind == Kind::Ident
+            && text(dot) == "."
+            && text(of_type) == "ofType"
+            && text(open) == "("
+            && ty.kind == Kind::Ident
+            && text(close) == ")"
+            && is_fhir_datatype(text(ty))
+        {
+            let (element, ty_name) = (text(element), text(ty));
+            out.push_str(&path[copied..sig[k].span.start]);
+            out.push_str(&format!(
+                "{CHOICE_OF_TYPE}({element}{}, {element}, {ty_name})",
+                capitalize_first(ty_name)
+            ));
+            copied = close.span.end;
+            k += 6;
+        } else {
+            k += 1;
+        }
+    }
+    out.push_str(&path[copied..]);
     out
 }
 
-fn is_simple_ident(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !s.chars().next().unwrap().is_ascii_digit()
+/// Whether `name` is a FHIR datatype a choice element can take (R4 and R5),
+/// or a FHIRPath system type name, as opposed to a resource type.
+fn is_fhir_datatype(name: &str) -> bool {
+    matches!(
+        name,
+        // Primitive types.
+        "base64Binary" | "boolean" | "canonical" | "code" | "date" | "dateTime" | "decimal"
+            | "id" | "instant" | "integer" | "integer64" | "markdown" | "oid" | "positiveInt"
+            | "string" | "time" | "unsignedInt" | "uri" | "url" | "uuid"
+            // General-purpose and metadata types.
+            | "Address" | "Age" | "Annotation" | "Attachment" | "Availability"
+            | "CodeableConcept" | "CodeableReference" | "Coding" | "ContactDetail"
+            | "ContactPoint" | "Contributor" | "Count" | "DataRequirement" | "Distance"
+            | "Dosage" | "Duration" | "Expression" | "ExtendedContactDetail" | "HumanName"
+            | "Identifier" | "Meta" | "MonetaryComponent" | "Money" | "ParameterDefinition"
+            | "Period" | "Quantity" | "Range" | "Ratio" | "RatioRange" | "Reference"
+            | "RelatedArtifact" | "SampledData" | "Signature" | "Timing"
+            | "TriggerDefinition" | "UsageContext" | "VirtualServiceDetail"
+            // FHIRPath system types.
+            | "Boolean" | "String" | "Integer" | "Decimal" | "Date" | "DateTime" | "Time"
+    )
 }
 
 fn capitalize_first(s: &str) -> String {
@@ -1055,6 +1218,103 @@ impl LazyFunctionEvaluator for GetReferenceKey {
     }
 }
 
+/// `_sofOfType(choice, element, T)`, which [`rewrite_of_type`] writes for
+/// `element.ofType(T)` with `T` a FHIR datatype. For each input item: if the
+/// item has the field `choice` (`valueQuantity`), its value; else if it has
+/// `element`, those of its values whose JSON form fits `T`
+/// ([`json_form_fits`]); else nothing. The arguments are names read off the
+/// AST; the fields are read through the engine, so the values are those of
+/// plain navigation.
+struct ChoiceOfType;
+
+#[async_trait]
+impl LazyFunctionEvaluator for ChoiceOfType {
+    async fn evaluate(
+        &self,
+        input: Collection,
+        context: &EvaluationContext,
+        args: Vec<ExpressionNode>,
+        evaluator: AsyncNodeEvaluator<'_>,
+    ) -> octofhir_fhirpath::Result<octofhir_fhirpath::EvaluationResult> {
+        let (Some(choice), Some(element), Some(ty)) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Err(FhirPathError::evaluation_error(
+                FP0053,
+                "_sofOfType() takes three arguments",
+            ));
+        };
+        let (choice_name, element_name) = match (choice, element) {
+            (ExpressionNode::Identifier(c), ExpressionNode::Identifier(e)) => (&c.name, &e.name),
+            _ => {
+                return Err(FhirPathError::evaluation_error(
+                    FP0053,
+                    "_sofOfType() takes element names",
+                ));
+            }
+        };
+        let mut values = Vec::new();
+        for item in input.iter() {
+            let node = value_node(item);
+            let plain = if node.get(choice_name).is_some() {
+                false
+            } else if node.get(element_name).is_some() {
+                true
+            } else {
+                continue;
+            };
+            let ctx = context.create_child_context(Collection::single(item.clone()));
+            if plain {
+                let ty = ast_type_name(ty)?;
+                let found = evaluator.evaluate(element, &ctx).await?.value;
+                values.extend(found.into_iter().filter(|v| json_form_fits(v, &ty)));
+            } else {
+                values.extend(evaluator.evaluate(choice, &ctx).await?.value);
+            }
+        }
+        Ok(octofhir_fhirpath::EvaluationResult::from_values(values))
+    }
+
+    fn metadata(&self) -> &FunctionMetadata {
+        static META: std::sync::LazyLock<FunctionMetadata> =
+            std::sync::LazyLock::new(|| sof_fn_metadata(CHOICE_OF_TYPE, 3, Some(3)));
+        &META
+    }
+}
+
+/// Whether `v`, a value of an element that is not a choice element, can be of
+/// FHIR datatype `ty`. With no FHIR model the element's declared type is not
+/// known, so this checks the JSON form only: a JSON string fits any
+/// string-based primitive type (`string`, `code`, `date`, ...), a JSON object
+/// any complex type.
+fn json_form_fits(v: &FhirPathValue, ty: &str) -> bool {
+    match ty {
+        "boolean" | "Boolean" => matches!(v, FhirPathValue::Boolean(..)),
+        "integer" | "unsignedInt" | "positiveInt" | "Integer" => {
+            matches!(v, FhirPathValue::Integer(..))
+        }
+        "decimal" | "Decimal" => {
+            matches!(v, FhirPathValue::Integer(..) | FhirPathValue::Decimal(..))
+        }
+        "String" | "Date" | "DateTime" | "Time" => string_form(v),
+        _ if ty.starts_with(|c: char| c.is_ascii_lowercase()) => string_form(v),
+        _ => match v {
+            FhirPathValue::Resource(node, _, _) => node.is_object(),
+            FhirPathValue::Quantity { .. } => true,
+            _ => false,
+        },
+    }
+}
+
+fn string_form(v: &FhirPathValue) -> bool {
+    matches!(
+        v,
+        FhirPathValue::String(..)
+            | FhirPathValue::Date(..)
+            | FhirPathValue::DateTime(..)
+            | FhirPathValue::Time(..)
+    )
+}
+
 /// Extract a bare type name from an argument node (`Patient`, `Organization`,
 /// or a `System.String`-style qualified type). Errors on anything else.
 fn ast_type_name(node: &ExpressionNode) -> octofhir_fhirpath::Result<String> {
@@ -1164,45 +1424,27 @@ enum BoundaryType {
     Unknown,
 }
 
-/// If `path` is a `…lowBoundary()`/`…highBoundary()` call, return the base path
-/// string, the low flag, and the temporal hint from a leading `ofType(T)`.
-fn boundary_call(path: &str) -> Option<(String, bool, BoundaryType)> {
-    let ast = octofhir_fhirpath::parse_ast(path).ok()?;
-    let (object, method) = match &ast {
-        ExpressionNode::MethodCall(m)
-            if m.method == "lowBoundary" || m.method == "highBoundary" =>
-        {
-            (m.object.as_ref(), m.method.as_str())
-        }
+/// If `node` is a `lowBoundary()`/`highBoundary()` call, the path that
+/// evaluates its base (a node, or another boundary call) and applies the
+/// boundary. `written` is the same call in the path as written, before the
+/// `ofType` rewrite, from which the temporal hint is read.
+fn boundary_path(node: &ExpressionNode, written: Option<&ExpressionNode>) -> Option<PreparedPath> {
+    let ExpressionNode::MethodCall(m) = node else {
+        return None;
+    };
+    let low = match m.method.as_str() {
+        "lowBoundary" => true,
+        "highBoundary" => false,
         _ => return None,
     };
-    let low = method == "lowBoundary";
-    let hint = boundary_hint(object);
-    Some((unparse(object), low, hint))
-}
-
-/// Recover a FHIRPath source string for a navigation/`ofType` sub-expression,
-/// enough to re-evaluate the boundary's base through the engine.
-fn unparse(node: &ExpressionNode) -> String {
-    match node {
-        ExpressionNode::Identifier(n) => n.name.clone(),
-        ExpressionNode::PropertyAccess(p) => format!("{}.{}", unparse(&p.object), p.property),
-        ExpressionNode::MethodCall(m) => {
-            let args: Vec<String> = m.arguments.iter().map(unparse).collect();
-            format!("{}.{}({})", unparse(&m.object), m.method, args.join(", "))
-        }
-        ExpressionNode::FunctionCall(f) => {
-            let args: Vec<String> = f.arguments.iter().map(unparse).collect();
-            format!("{}({})", f.name, args.join(", "))
-        }
-        ExpressionNode::Parenthesized(e) => format!("({})", unparse(e)),
-        ExpressionNode::TypeInfo(t) => t.name.clone(),
-        ExpressionNode::Literal(l) => match &l.value {
-            octofhir_fhirpath::LiteralValue::String(s) => format!("'{s}'"),
-            other => other.to_string(),
-        },
-        _ => String::new(),
-    }
+    let written = match written {
+        Some(ExpressionNode::MethodCall(w)) if w.method == m.method => Some(w.object.as_ref()),
+        _ => None,
+    };
+    let hint = written.map_or(BoundaryType::Unknown, boundary_hint);
+    let base = boundary_path(&m.object, written)
+        .unwrap_or_else(|| PreparedPath::Node(m.object.as_ref().clone()));
+    Some(PreparedPath::Boundary(Box::new(base), low, hint))
 }
 
 fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
@@ -1425,6 +1667,70 @@ mod tests {
             vec![
                 vec![json!(["c1", "x"]), json!("c1"), json!("Practitioner")],
                 vec![json!(["c1", "x"]), json!("c2"), json!("Organization")],
+            ]
+        );
+    }
+
+    #[test]
+    fn of_type_is_rewritten_only_for_datatypes_on_element_names() {
+        for (path, want) in [
+            (
+                "value.ofType(Quantity).value",
+                "_sofOfType(valueQuantity, value, Quantity).value",
+            ),
+            (
+                "a.value . ofType ( dateTime )",
+                "a._sofOfType(valueDateTime, value, dateTime)",
+            ),
+            (
+                "where(value.ofType(integer) > 1)",
+                "where(_sofOfType(valueInteger, value, integer) > 1)",
+            ),
+            // Left to the engine.
+            (
+                "contained.ofType(Practitioner)",
+                "contained.ofType(Practitioner)",
+            ),
+            ("first().ofType(string)", "first().ofType(string)"),
+            ("$this.ofType(string)", "$this.ofType(string)"),
+            ("value.ofType(FHIR.string)", "value.ofType(FHIR.string)"),
+            ("'a.ofType(string)'", "'a.ofType(string)'"),
+            ("id // value.ofType(string)", "id // value.ofType(string)"),
+        ] {
+            assert_eq!(rewrite_of_type(path), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn repeat_keeps_the_resource_as_root() {
+        // repeat foci are children of the resource's context, like forEach
+        // foci: %resource is the resource and a `#` reference resolves
+        // against its contained resources.
+        let resource = json!({
+            "resourceType": "QuestionnaireResponse",
+            "id": "q1",
+            "contained": [{ "resourceType": "Practitioner", "id": "c1" }],
+            "item": [{
+                "linkId": "1",
+                "answer": [{ "valueReference": { "reference": "#c1" } }],
+                "item": [{ "linkId": "1.1" }]
+            }]
+        });
+        let v = view(json!({
+            "resource": "QuestionnaireResponse",
+            "select": [{ "repeat": ["item"], "column": [
+                { "name": "link", "path": "linkId" },
+                { "name": "res", "path": "%resource.id" },
+                { "name": "who", "path": "answer.value.ofType(Reference).getReferenceKey(Practitioner)" }
+            ] }]
+        }));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute(&v, &[resource])).unwrap();
+        assert_eq!(
+            result.data,
+            vec![
+                vec![json!("1"), json!("q1"), json!("c1")],
+                vec![json!("1.1"), json!("q1"), Value::Null],
             ]
         );
     }

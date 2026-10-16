@@ -25,7 +25,7 @@ pub use ddl::{Dialect, create_table};
 use lower::Lower;
 // Re-exported for the in-memory evaluator (crate::eval), which shares the
 // constant-handling logic.
-pub(crate) use constants::{build_constants, substitute_constants};
+pub(crate) use constants::{build_constants, substitute_constants_keeping};
 
 /// Generates SQL queries from ViewDefinitions.
 pub struct SqlGenerator {

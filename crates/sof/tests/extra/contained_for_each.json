@@ -1,0 +1,97 @@
+{
+  "title": "contained_for_each",
+  "description": "Inside forEach the resource stays the root: getReferenceKey() resolves a # reference against the resource's contained[], while $this is the element (issue #57).",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "50%off",
+          "given": [
+            "Ann"
+          ]
+        }
+      ],
+      "generalPractitioner": [
+        {
+          "reference": "#c1"
+        },
+        {
+          "reference": "Practitioner/x"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "getReferenceKey on a contained reference inside forEach",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "forEach": "generalPractitioner",
+            "column": [
+              {
+                "name": "ref",
+                "path": "reference",
+                "type": "string"
+              },
+              {
+                "name": "key",
+                "path": "getReferenceKey(Practitioner)",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "ref": "#c1",
+          "key": "c1"
+        },
+        {
+          "ref": "Practitioner/x",
+          "key": "x"
+        }
+      ]
+    },
+    {
+      "title": "$this inside forEach is the element",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "forEach": "generalPractitioner",
+            "column": [
+              {
+                "name": "ref",
+                "path": "$this.reference",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "ref": "#c1"
+        },
+        {
+          "ref": "Practitioner/x"
+        }
+      ]
+    }
+  ]
+}

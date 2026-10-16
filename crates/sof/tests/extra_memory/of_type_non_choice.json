@@ -1,0 +1,112 @@
+{
+  "title": "of_type_memory",
+  "description": "ofType() with a resource type, or on an element that is not a choice element, keeps its FHIRPath meaning rather than being joined onto the element name (issue #57). The SQL generator still joins the type onto the element name.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "50%off",
+          "given": [
+            "Ann"
+          ]
+        }
+      ],
+      "generalPractitioner": [
+        {
+          "reference": "#c1"
+        },
+        {
+          "reference": "Practitioner/x"
+        }
+      ]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "p2",
+      "deceasedBoolean": true,
+      "name": [
+        {
+          "family": "Doe"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "ofType with a resource type filters contained resources",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "n",
+                "path": "contained.ofType(Practitioner).count()",
+                "type": "integer"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "n": 1
+        },
+        {
+          "id": "p2",
+          "n": 0
+        }
+      ]
+    },
+    {
+      "title": "ofType on an element that is not a choice element",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "family",
+                "path": "name.family.ofType(string)",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "family": "50%off"
+        },
+        {
+          "id": "p2",
+          "family": "Doe"
+        }
+      ]
+    }
+  ]
+}

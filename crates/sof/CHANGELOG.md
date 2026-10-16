@@ -35,6 +35,33 @@ All notable changes to this project are documented here. The format follows
   cannot be converted is still null, and is now counted in the
   `WriteSummary`.
 
+### Fixed
+
+- **In-memory FHIRPath cases the view engine got wrong** (found by probes
+  outside the official suite):
+  - Constant substitution tokenizes the path, so a `%` inside a string
+    literal, a backtick-quoted name or a comment is no longer taken for a
+    constant (`name.where(family = '50%off')`). This also applies to the SQL
+    generator. In `run`/`execute`, the environment variables `%resource`,
+    `%rootResource`, `%context`, `%ucum`, `%sct`, `%loinc`, `` %`vs-name` ``
+    and `` %`ext-name` ``, and names bound by `defineVariable()` in the same
+    path, are passed to the engine instead of failing as undefined
+    constants. The SQL generator still rejects them.
+  - `ofType(T)` reads a choice element under its JSON name
+    (`value.ofType(Quantity)` → `valueQuantity`) only when `T` is a FHIR
+    datatype and the element is stored under that name.
+    `contained.ofType(Practitioner)` filters by resource type,
+    `name.family.ofType(string)` reads `family`, and text inside string
+    literals is not rewritten. On an element that is not a choice element,
+    the type is checked against the JSON form of the value (a JSON string
+    fits any string-based type), since there is no FHIR model.
+  - `lowBoundary()` / `highBoundary()` accept any expression as their base,
+    such as `(1.5 + 1).lowBoundary()`.
+  - Inside `forEach`, `forEachOrNull` and `repeat`, the resource stays the
+    root: `%resource` is the resource, and `getReferenceKey()` resolves a `#`
+    reference against the resource's `contained`. `$this` is still the
+    element.
+
 ## [0.1.2]
 
 ### Added

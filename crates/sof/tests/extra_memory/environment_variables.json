@@ -1,0 +1,161 @@
+{
+  "title": "environment_variables",
+  "description": "FHIRPath environment variables (%resource, %rootResource, %context, %ucum, %sct, %loinc) and names bound by defineVariable() pass through constant substitution to the engine; %resource is the resource inside forEach too (issue #57). The SQL generator does not support them.",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "50%off",
+          "given": [
+            "Ann"
+          ]
+        }
+      ],
+      "generalPractitioner": [
+        {
+          "reference": "#c1"
+        },
+        {
+          "reference": "Practitioner/x"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "%resource, %rootResource and %context are the resource",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "r",
+                "path": "%resource.id",
+                "type": "string"
+              },
+              {
+                "name": "rr",
+                "path": "%rootResource.id",
+                "type": "string"
+              },
+              {
+                "name": "c",
+                "path": "%context.id",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "r": "p1",
+          "rr": "p1",
+          "c": "p1"
+        }
+      ]
+    },
+    {
+      "title": "%ucum, %sct and %loinc are the code system URLs",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "ucum",
+                "path": "%ucum",
+                "type": "string"
+              },
+              {
+                "name": "sct",
+                "path": "%sct",
+                "type": "string"
+              },
+              {
+                "name": "loinc",
+                "path": "%loinc",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "ucum": "http://unitsofmeasure.org",
+          "sct": "http://snomed.info/sct",
+          "loinc": "http://loinc.org"
+        }
+      ]
+    },
+    {
+      "title": "a name bound by defineVariable is not a constant",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "fam",
+                "path": "name.first().family.defineVariable('fam').select(%fam)",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "fam": "50%off"
+        }
+      ]
+    },
+    {
+      "title": "%resource inside forEach",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "forEach": "generalPractitioner",
+            "column": [
+              {
+                "name": "ref",
+                "path": "reference",
+                "type": "string"
+              },
+              {
+                "name": "pid",
+                "path": "%resource.getResourceKey()",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "ref": "#c1",
+          "pid": "p1"
+        },
+        {
+          "ref": "Practitioner/x",
+          "pid": "p1"
+        }
+      ]
+    }
+  ]
+}
