@@ -82,6 +82,19 @@ fn export_follows_next_links_and_writes_one_file_per_type() {
         ])
         .respond_with(status_code(200).body(bundle(vec![report("c")], None))),
     );
+    // More than one page: the count decides whether to split the type into
+    // _lastUpdated windows. Three resources are too few.
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains(("_summary", "count")))),
+            bearer(),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200).body(r#"{"resourceType":"Bundle","type":"searchset","total":3}"#),
+        ),
+    );
     server.expect(
         Expectation::matching(all_of![
             request::method_path("GET", "/fhir/Measure"),

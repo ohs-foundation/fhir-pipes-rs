@@ -15,12 +15,21 @@
 //! exported in full in a second export. The export's `deleted` resources are
 //! removed from the files, and every type's watermark becomes the manifest's
 //! `transactionTime`. The count check after a merge is the same as above.
+//!
+//! Searches run `--concurrency` requests at a time, through one limit in the
+//! client: that many types are brought up to date side by side, and a full
+//! download of a large type is split into `_lastUpdated` windows paged side
+//! by side (see `window`). Each type's file is the same whatever the
+//! setting, except that a windowed file is in window order.
 
 mod bulk;
+mod window;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -29,7 +38,9 @@ use serde_json::Value;
 use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
-use crate::extract::page::{PageNote, count_resources, page_resources};
+use crate::extract::page::{
+    PageNote, PageResult, count_resources, next_link, page_resources, page_search,
+};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
@@ -106,13 +117,17 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
             types.push(t);
         }
     }
+    if args.concurrency == 0 {
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+    }
     std::fs::create_dir_all(&args.out)
         .map_err(|e| PipesError::Usage(format!("--out {}: {e}", args.out.display())))?;
     let client = FhirClient::new(
         args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
-    )?;
+    )?
+    .with_concurrency(args.concurrency);
     let mut state = ExportState::read(&args.out);
     if !same_server(&state.server, &args.server) {
         // Files from another server are not merged into; every type starts over.
@@ -131,19 +146,69 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
             cancel(&client, &pending.status_url);
             state.write(&args.out)?;
         }
-        for t in types {
-            let previous = state.types.get(t).filter(|_| args.incremental).cloned();
-            let done = export_type(&client, args, t, previous.as_ref(), &mut report)?;
-            state.types.insert(t.to_string(), done);
-            // After each type, so an interrupted run keeps what it finished.
-            state.write(&args.out)?;
-        }
+        export_search(&client, args, &types, &mut state, &mut report)?;
     }
     if let Some(path) = &args.report {
         write_report(path, &report)?;
     }
     println!("{}", report.summary());
     Ok(())
+}
+
+/// Bring every type up to date by search, `--concurrency` types at a time.
+/// The state is written as each type finishes, so an interrupted run keeps
+/// what it finished. A failure stops new types from starting; the ones
+/// already running finish. The types' issues go into `report` in the order
+/// of `types`, whichever finished first.
+fn export_search(
+    client: &FhirClient,
+    args: &ExportArgs,
+    types: &[&str],
+    state: &mut ExportState,
+    report: &mut Report,
+) -> Result<()> {
+    let previous: Vec<Option<TypeState>> = types
+        .iter()
+        .map(|t| state.types.get(*t).filter(|_| args.incremental).cloned())
+        .collect();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<(usize, Result<TypeState>, Report)>();
+    let mut reports: Vec<Option<Report>> = (0..types.len()).map(|_| None).collect();
+    let mut failure = None;
+    std::thread::scope(|s| {
+        for _ in 0..args.concurrency.clamp(1, types.len().max(1)) {
+            let tx = tx.clone();
+            let (next, stop, previous) = (&next, &stop, &previous);
+            s.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(t) = types.get(i) else { break };
+                    let mut issues = Report::default();
+                    let done = export_type(client, args, t, previous[i].as_ref(), &mut issues);
+                    if tx.send((i, done, issues)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        for (i, done, issues) in rx {
+            reports[i] = Some(issues);
+            let written = done.and_then(|done| {
+                state.types.insert(types[i].to_string(), done);
+                state.write(&args.out)
+            });
+            if let Err(e) = written {
+                stop.store(true, Ordering::Relaxed);
+                failure.get_or_insert(e);
+            }
+        }
+    });
+    for issues in reports.into_iter().flatten() {
+        report.append(issues);
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 /// Bring OUT/<resource_type>.ndjson up to date: incrementally when there is
@@ -304,7 +369,7 @@ fn export_all(
     report: &mut Report,
 ) -> Result<TypeState> {
     let tmp = tmp_path(&args.out, resource_type);
-    let paged = match page_resources(client, &args.server, resource_type, None, &tmp, report, &[]) {
+    let (paged, windows) = match download_all(client, args, resource_type, &tmp, report) {
         Ok(p) => p,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -332,11 +397,18 @@ fn export_all(
             ),
         }
     }
-    println!(
-        "{resource_type}: {total} resources, {} pages -> {}",
-        paged.pages,
-        out.display()
-    );
+    match windows {
+        Some(n) => println!(
+            "{resource_type}: {total} resources, {} pages in {n} _lastUpdated windows -> {}",
+            paged.pages,
+            out.display()
+        ),
+        None => println!(
+            "{resource_type}: {total} resources, {} pages -> {}",
+            paged.pages,
+            out.display()
+        ),
+    }
     let watermark = paged
         .notes
         .iter()
@@ -346,6 +418,63 @@ fn export_all(
         capped_watermark(watermark, paged.started.as_deref()),
         total,
     ))
+}
+
+/// Page `resource_type` into `tmp`, as one stream or, for a type of at least
+/// `window::MIN_RESOURCES` with `--concurrency` above 1, as `_lastUpdated`
+/// windows side by side. The first page tells which: a type that fits on it
+/// costs no more requests than before; for one that does not, the count
+/// comes from the page's `total` or a count request. Returns how many
+/// windows were used, if any.
+fn download_all(
+    client: &FhirClient,
+    args: &ExportArgs,
+    resource_type: &str,
+    tmp: &Path,
+    report: &mut Report,
+) -> Result<(PageResult, Option<usize>)> {
+    let mut large = None;
+    let mut issues = Report::default();
+    let stream = page_search(
+        client,
+        &args.server,
+        resource_type,
+        &[],
+        tmp,
+        &mut issues,
+        &[],
+        &mut |first| {
+            if args.concurrency < 2 || next_link(first).is_none() {
+                return true;
+            }
+            large = first
+                .get("total")
+                .and_then(Value::as_u64)
+                .or_else(|| count_resources(client, &args.server, resource_type))
+                .filter(|n| *n >= window::MIN_RESOURCES);
+            large.is_none()
+        },
+    )?;
+    if let Some(paged) = stream {
+        report.append(issues);
+        return Ok((paged, None));
+    }
+    let options = window::Options {
+        server: &args.server,
+        resource_type,
+        total: large.expect("paging stops for a large type"),
+        workers: args.concurrency,
+        dir: &args.out,
+    };
+    match window::download(client, &options, tmp, report)? {
+        window::Windowed::Done { paged, windows } => Ok((paged, Some(windows))),
+        window::Windowed::Unsuitable(why) => {
+            println!("{resource_type}: {why}; paging it as one stream");
+            let paged =
+                page_resources(client, &args.server, resource_type, None, tmp, report, &[])?;
+            Ok((paged, None))
+        }
+    }
 }
 
 /// One `$export` a bulk run asks for: its types, sorted, and `_since` unless

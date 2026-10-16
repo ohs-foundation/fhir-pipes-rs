@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS};
+use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
 use crate::extract::google::{self, Credentials};
 
 /// The config file (`fhir-pipes.toml`). Every field is optional.
@@ -52,6 +52,9 @@ pub struct ServerFile {
     /// With `fetch = "bulk"`: seconds to wait for an export before cancelling
     /// it.
     pub bulk_timeout: Option<u64>,
+    /// With `fetch = "search"`: search requests in flight at once (`export
+    /// --concurrency`).
+    pub concurrency: Option<usize>,
     /// HTTP Basic username; the password comes only from FHIR_PIPES_PASSWORD.
     pub username: Option<String>,
     /// Google Application Default Credentials (`--google-auth`).
@@ -230,6 +233,8 @@ pub struct Settings {
     pub auth: AuthArgs,
     pub fetch: Fetch,
     pub bulk_timeout: u64,
+    /// Search requests in flight at once in the views step.
+    pub concurrency: usize,
     pub duckdb: String,
     pub tippecanoe: String,
     pub rclone: String,
@@ -433,6 +438,10 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             .server
             .bulk_timeout
             .unwrap_or(DEFAULT_BULK_TIMEOUT_SECS),
+        concurrency: match file.server.concurrency {
+            Some(0) => bail!("server.concurrency must be at least 1"),
+            n => n.unwrap_or(DEFAULT_EXPORT_CONCURRENCY),
+        },
         duckdb: file.tools.duckdb.unwrap_or_else(|| "duckdb".into()),
         tippecanoe: file.tools.tippecanoe.unwrap_or_else(|| "tippecanoe".into()),
         rclone: file.tools.rclone.unwrap_or_else(|| "rclone".into()),
@@ -524,6 +533,10 @@ mod tests {
         assert_eq!(bulk.fetch, Fetch::Bulk);
         assert_eq!(bulk.bulk_timeout, 60);
         assert!(toml::from_str::<File>("[server]\nfetch = \"jdbc\"").is_err());
+        assert_eq!(search.concurrency, DEFAULT_EXPORT_CONCURRENCY);
+        assert_eq!(s("data = \"d\"\n[server]\nconcurrency = 2").concurrency, 2);
+        let zero: File = toml::from_str("data = \"d\"\n[server]\nconcurrency = 0").unwrap();
+        assert!(settings(zero, PathBuf::from("/b"), Overrides::default()).is_err());
     }
 
     #[test]

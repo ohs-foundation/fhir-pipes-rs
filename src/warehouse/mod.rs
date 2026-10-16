@@ -301,7 +301,11 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
             "fetch:      bulk ($export, waiting up to {} s)",
             s.bulk_timeout
         ),
-        f => println!("fetch:      {}", f.name()),
+        f => println!(
+            "fetch:      {} ({} requests at a time)",
+            f.name(),
+            s.concurrency
+        ),
     }
     println!("data:       {}", s.data.display());
     println!(

@@ -17,7 +17,7 @@
 //! 202 and 429 the caller reads itself) and the output files.
 
 use std::io::Read as _;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
@@ -231,6 +231,85 @@ pub struct FhirClient {
     auth: Authorizer,
     /// `x-goog-user-project`, sent with the Authorization header.
     user_project: Option<HeaderValue>,
+    /// The limit on requests in flight, when the client has one.
+    gate: Option<Gate>,
+}
+
+/// A limit on the requests in flight from all the threads sharing a client
+/// (`export --concurrency`), and a pause they all wait out after a response
+/// with a Retry-After, so parallel downloads back off together. A request
+/// holds its place from sending until its body is read, not while it waits
+/// to retry.
+struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+struct GateState {
+    limit: usize,
+    in_flight: usize,
+    paused_until: Option<Instant>,
+}
+
+/// A place in the gate, given back when dropped.
+struct Pass<'a>(&'a Gate);
+
+impl Gate {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Mutex::new(GateState {
+                limit: limit.max(1),
+                in_flight: 0,
+                paused_until: None,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wait for a pause to end and a place to be free.
+    fn enter(&self) -> Pass<'_> {
+        let mut state = self.lock();
+        loop {
+            let now = Instant::now();
+            if let Some(until) = state.paused_until.filter(|u| *u > now) {
+                state = self
+                    .changed
+                    .wait_timeout(state, until - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            } else if state.in_flight < state.limit {
+                state.in_flight += 1;
+                return Pass(self);
+            } else {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+    }
+
+    /// No request starts for `wait`, or until an earlier pause ends.
+    fn pause(&self, wait: Duration) {
+        let until = Instant::now() + wait;
+        let mut state = self.lock();
+        if state.paused_until.is_none_or(|u| u < until) {
+            state.paused_until = Some(until);
+        }
+    }
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.lock().in_flight -= 1;
+        // All, not one: a thread waiting out a pause must not take the
+        // wake-up meant for one waiting for a place.
+        self.0.changed.notify_all();
+    }
 }
 
 pub fn backoff_delay(attempt: usize, retry_after: Option<f64>) -> Duration {
@@ -323,6 +402,7 @@ impl FhirClient {
             timeout,
             auth: Authorizer::None,
             user_project: None,
+            gate: None,
         };
         client.auth = match auth {
             Auth::None => Authorizer::None,
@@ -384,6 +464,18 @@ impl FhirClient {
             }
         };
         Ok(client)
+    }
+
+    /// At most `limit` requests in flight at once from all the threads using
+    /// this client, and a Retry-After on any response pauses them all.
+    pub fn with_concurrency(mut self, limit: usize) -> Self {
+        self.gate = Some(Gate::new(limit));
+        self
+    }
+
+    /// A place in the gate, when the client has one.
+    fn enter(&self) -> Option<Pass<'_>> {
+        self.gate.as_ref().map(Gate::enter)
     }
 
     /// A renewing authorizer, with its first token fetched now.
@@ -471,9 +563,11 @@ impl FhirClient {
             if let Some(v) = &auth {
                 request = self.authorize(request, v);
             }
+            let pass = self.enter();
             match request.send() {
                 Ok(resp) => return exchanged(resp),
                 Err(e) => {
+                    drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
                         let wait = jittered(backoff_delay(attempt, None));
@@ -624,8 +718,10 @@ impl FhirClient {
     ) -> std::result::Result<T, FetchError> {
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
+            let pass = self.enter();
             match request().send() {
                 Err(e) => {
+                    drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
                         std::thread::sleep(jittered(backoff_delay(attempt, None)));
@@ -645,6 +741,12 @@ impl FhirClient {
                             status,
                             body: read_error_body(resp),
                         });
+                        drop(pass);
+                        if let (Some(gate), Some(_)) = (&self.gate, ra) {
+                            // The server asked for a wait: every thread
+                            // sharing the client waits, not only this one.
+                            gate.pause(delay);
+                        }
                         if attempt < self.retries {
                             std::thread::sleep(delay);
                         }
