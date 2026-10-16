@@ -711,7 +711,7 @@ pub fn rebuild_organization(
     Value::Object(obj)
 }
 
-/// The Organization for a new facility row: the pairing shape bake used,
+/// The Organization for a new facility row: the pairing shape `import location-sites --paired-org` writes,
 /// then the row's columns on top.
 pub fn new_organization(
     org_id: &str,

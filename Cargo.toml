@@ -60,6 +60,11 @@ sqlx-postgres = { workspace = true, optional = true }
 sqlx-core = { workspace = true, optional = true }
 annotate-snippets = "0.12.16"
 glob = "0.3"
+# import location-sites reads CSV.
+csv = { workspace = true }
+# Slugs fold accents (NFKD) the way kiln's Python slugify did; already in the
+# tree through sqlx-postgres (stringprep).
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 assert_cmd = "2"

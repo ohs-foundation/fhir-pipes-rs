@@ -712,6 +712,15 @@ pub fn check(profile: &Profile, ig: &Ig) -> CheckResult {
         };
         c.code_system("[location] type_systems", system, codes, missing);
     }
+    if let Some(url) = &loc.profile {
+        c.structure("[location] profile", url, "Location");
+    }
+    if let Some(system) = &loc.admin_code_system {
+        c.identifier_system("[location] admin_code_system", system, "Location");
+    }
+    if let Some(url) = &profile.organization.profile {
+        c.structure("[organization] profile", url, "Organization");
+    }
     for col in &loc.columns {
         c.column("location", "Location", col);
     }
@@ -843,6 +852,7 @@ fn not_read(profile: &Profile, ig: &Ig) -> Vec<(String, Vec<String>)> {
         read.extend(col.url.as_deref());
         read.extend(col.systems.iter().map(String::as_str));
     }
+    read.extend(loc.admin_code_system.as_deref());
     if let Some(d) = &profile.dhis2 {
         read.insert(&d.country_code_system);
     }

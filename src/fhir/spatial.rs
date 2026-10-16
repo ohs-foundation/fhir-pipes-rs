@@ -3,7 +3,7 @@
 //! The ICR IG's `spatial-index` extension carries, per Location, the scheme
 //! (quadkey | h3 | geohash), the level (quadkey zoom / H3 resolution /
 //! geohash precision) and the cell key. The cell is a pure function of the
-//! position, so fhir-pipes owns it: `bake-points` writes it at import (Python),
+//! position, so fhir-pipes owns it: `import location-sites` writes it at import,
 //! `fhir-pipes index` backfills it onto an existing snapshot as an ordinary
 //! version-checked edit, and `fhir-pipes diff` recomputes it whenever a position
 //! edit comes through. Quadkey and geohash are computed here; H3 needs a

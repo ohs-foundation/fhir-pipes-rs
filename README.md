@@ -128,6 +128,8 @@ data to show what each part does.
 | `inspect` | | Summarise a GeoParquet dataset | [locations.md](docs/locations.md) |
 | `diff` | in | Edited GeoJSON or GeoParquet → changed FHIR resources | [locations.md](docs/locations.md) |
 | `load` | in | Send NDJSON resources to a FHIR server in transaction bundles, with version checks | [locations.md](docs/locations.md#load) |
+| `import location-boundaries` | in | Admin boundaries (GeoJSON, one level) → the admin unit hierarchy as Location NDJSON | [locations.md](docs/locations.md#importing-admin-boundaries-and-sites) |
+| `import location-sites` | in | Facilities, schools or settlements (CSV) → site Locations under that hierarchy, with facility Organizations | [locations.md](docs/locations.md#import-location-sites) |
 | `sync` | in | Copy what `export` downloaded to a second FHIR server: only what changed, deletions on request | [sync.md](docs/sync.md) |
 | `index` | in | Add spatial index identifiers (quadkey, geohash) to Locations | [locations.md](docs/locations.md#index) |
 | `population` | in | Population Groups for admin units from a raster such as WorldPop | [locations.md](docs/locations.md#population) |
@@ -335,9 +337,6 @@ The open items are in [ROADMAP.md](ROADMAP.md#next). The main ones:
 
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
-- `bake` and `bake-points`, which turn GRID3 and CSV files into Locations,
-  are still in the Python package under `python/` (named `kiln`); see
-  [python/README.md](python/README.md).
 
 ## Building and testing
 
@@ -398,12 +397,12 @@ src/
   raster/, population.rs
                   population Groups from a raster
   dhis2/          DHIS2 import
+  import/         import location-boundaries and location-sites: GeoJSON and CSV to Locations
   profile/        profiles: loading, and `profile check` against an IG
 crates/
   sof/            fhir-pipes-sof: the ViewDefinition engine (from octofhir/sof)
   sof-lint/       fhir-pipes-sof-lint: ViewDefinition checks
 tests/            integration tests per command; fixtures under tests/fixtures
-python/           bake and bake-points (still the Python kiln package)
 docs/
   refresh.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
   notes/          the consolidation notes
