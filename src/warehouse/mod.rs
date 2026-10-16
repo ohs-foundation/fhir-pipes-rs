@@ -762,6 +762,11 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
             dir.display()
         )));
     }
+    let named: Vec<_> = all
+        .iter()
+        .map(|v| (v.name.as_str(), &v.definition))
+        .collect();
+    crate::views::check_compiles_blocking(&named)?;
     views::save(&all, &stage.dir("views"))?;
 
     let mut by_type: BTreeMap<&str, Vec<usize>> = BTreeMap::new();

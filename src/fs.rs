@@ -125,27 +125,39 @@ impl AtomicFile {
     }
 
     /// Fsyncs the temporary file, renames it over the target and fsyncs the
-    /// directory (best effort: not every platform or filesystem supports
-    /// fsync on a directory, and that is not worth failing a finished write
-    /// over).
+    /// directory.
     pub fn commit(mut self) -> Result<()> {
         let synced = match self.file.take() {
             Some(file) => file.sync_all(),
-            None => File::open(&self.tmp).and_then(|f| f.sync_all()),
+            // Opened for writing, not truncated: on Windows, sync_all
+            // (FlushFileBuffers) needs a handle with write access.
+            None => std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.tmp)
+                .and_then(|f| f.sync_all()),
         };
         synced.map_err(|e| PipesError::io(&self.tmp, e))?;
         std::fs::rename(&self.tmp, &self.path).map_err(|e| PipesError::io(&self.path, e))?;
         self.keep = true;
-        if let Some(dir) = self.path.parent()
-            && let Ok(d) = File::open(if dir.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                dir
-            })
-        {
-            let _ = d.sync_all();
-        }
+        sync_dir(self.path.parent());
         Ok(())
+    }
+}
+
+/// Fsyncs a directory, so that a rename in it survives a crash. Best
+/// effort: not every filesystem supports it, and that is not worth failing
+/// a finished write over. Windows cannot open a directory as a file, and
+/// NTFS records a rename in its journal, so there it does nothing.
+fn sync_dir(dir: Option<&Path>) {
+    if cfg!(windows) {
+        return;
+    }
+    let dir = match dir {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
     }
 }
 
@@ -219,6 +231,21 @@ mod tests {
     }
 
     #[test]
+    fn adopt_commits_a_closed_file_on_every_platform() {
+        // On Windows the fsync of an adopted file needs a handle opened for
+        // writing; a read-only one fails and the drop then removes the file.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, tmp) = (dir.path().join("out.ndjson"), dir.path().join(".out.tmp"));
+        {
+            let mut f = File::create(&tmp).unwrap();
+            f.write_all(b"{}\n").unwrap();
+        }
+        AtomicFile::adopt(&path, tmp.clone()).commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
     fn adopt_renames_a_file_written_elsewhere_or_removes_it() {
         let dir = tempfile::tempdir().unwrap();
         let (path, tmp) = (dir.path().join("out"), dir.path().join(".out.part"));
@@ -254,11 +281,12 @@ mod tests {
     }
 
     #[test]
-    fn read_state_of_a_directory_is_an_io_error() {
+    fn read_state_of_a_directory_is_an_error() {
+        // An I/O error on Unix; Windows says access is denied.
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
             read_state::<serde_json::Value>(dir.path()),
-            Err(StateError::Io(_))
+            Err(StateError::Io(_) | StateError::Unreadable(_))
         ));
     }
 }

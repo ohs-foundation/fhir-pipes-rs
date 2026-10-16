@@ -222,7 +222,6 @@ pub struct NdjsonWriter {
     /// Length of the file up to the last line written (plain), or the last
     /// member finished (gzip).
     bytes: u64,
-    keep: bool,
 }
 
 impl NdjsonWriter {
@@ -265,13 +264,19 @@ impl NdjsonWriter {
             gz: is_gz(out),
             n: 0,
             bytes,
-            keep: false,
         }
     }
 
     /// Keep the temporary file if the run fails.
+    /// Set on the `AtomicFile` itself, so the file survives however the
+    /// writer is dropped, a failed `finish` included.
     pub fn keep_partial(mut self) -> Self {
-        self.keep = true;
+        if let Some(m) = self.member.as_mut() {
+            m.get_mut().get_mut().keep_on_drop(true);
+        }
+        if let Some(f) = self.file.as_mut() {
+            f.get_mut().keep_on_drop(true);
+        }
         self
     }
 
@@ -351,22 +356,47 @@ impl NdjsonWriter {
     }
 }
 
-impl Drop for NdjsonWriter {
-    /// Unfinished: the `AtomicFile` removes the temporary file as it drops,
-    /// unless `keep_partial` asked to keep it.
-    fn drop(&mut self) {
-        if let Some(m) = self.member.as_mut() {
-            m.get_mut().get_mut().keep_on_drop(self.keep);
-        }
-        if let Some(f) = self.file.as_mut() {
-            f.get_mut().keep_on_drop(self.keep);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_partial_keeps_the_file_when_finish_fails() {
+        for name in ["out.ndjson", "out.ndjson.gz"] {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join(name);
+            // A directory with a file in it: the rename onto it fails.
+            std::fs::create_dir(&out).unwrap();
+            std::fs::write(out.join("x"), "x").unwrap();
+            let mut w = NdjsonWriter::create(&out).unwrap().keep_partial();
+            w.write(&json!({"id": "a"})).unwrap();
+            let bytes = w.sync().unwrap();
+            w.write(&json!({"id": "b"})).unwrap();
+            assert!(w.finish().is_err(), "{name}");
+            let tmp = NdjsonWriter::tmp_path(&out);
+            assert!(tmp.is_file(), "{name}: the partial output is kept");
+            let resumed = NdjsonWriter::resume(&out, bytes).unwrap();
+            let mut text = String::new();
+            resumed
+                .read_back()
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert_eq!(text, "{\"id\":\"a\"}\n", "{name}");
+        }
+    }
+
+    #[test]
+    fn without_keep_partial_a_failed_finish_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.ndjson");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("x"), "x").unwrap();
+        let mut w = NdjsonWriter::create(&out).unwrap();
+        w.write(&json!({"id": "a"})).unwrap();
+        assert!(w.finish().is_err());
+        assert!(!NdjsonWriter::tmp_path(&out).exists());
+    }
 
     #[test]
     fn instance_names_are_short_and_plain() {

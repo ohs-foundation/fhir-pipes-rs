@@ -205,3 +205,68 @@ fn views_findings_exit_1() {
     .unwrap();
     views().arg("validate").arg(&view).assert().code(1);
 }
+
+/// A view whose path does not parse: it fails to compile.
+const BAD_PATH_VIEW: &str = r#"{"resourceType":"ViewDefinition","name":"BadPath","status":"active",
+    "resource":"Observation","select":[{"column":[{"name":"id","path":"id"},
+    {"name":"x","path":"code.where("}]}]}"#;
+
+/// `views run` gives the same exit code for the same fault whatever the
+/// output format and the kind of input.
+#[test]
+fn views_run_exit_codes_do_not_depend_on_the_format_or_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let good_view = fixtures().join("views/Binary-IcrObs.json");
+    let bad_view = d.join("bad-view.json");
+    fs::write(&bad_view, BAD_PATH_VIEW).unwrap();
+    let ndjson = fixtures().join("raw/Observation.ndjson");
+    let first = fs::read_to_string(&ndjson).unwrap();
+    let json = d.join("obs.json");
+    fs::write(&json, first.lines().next().unwrap()).unwrap();
+    let bad_ndjson = d.join("bad.ndjson");
+    fs::write(&bad_ndjson, "{nope\n").unwrap();
+    let bad_json = d.join("bad.json");
+    fs::write(&bad_json, "{nope").unwrap();
+    let cases: Vec<(&str, &Path, PathBuf, i32)> = vec![
+        ("NDJSON", &good_view, ndjson.clone(), 0),
+        ("JSON", &good_view, json.clone(), 0),
+        ("missing NDJSON", &good_view, d.join("none.ndjson"), 2),
+        ("missing JSON", &good_view, d.join("none.json"), 2),
+        ("unparsable NDJSON", &good_view, bad_ndjson, 2),
+        ("unparsable JSON", &good_view, bad_json, 2),
+        ("bad view, NDJSON", &bad_view, ndjson, 2),
+        ("bad view, JSON", &bad_view, json, 2),
+    ];
+    for format in ["csv", "ndjson", "parquet"] {
+        for (what, view, input, code) in &cases {
+            let out = d.join(format!("out.{format}"));
+            let _ = fs::remove_file(&out);
+            let assert = views()
+                .arg("run")
+                .arg(view)
+                .arg("--input")
+                .arg(input)
+                .args(["--output", format, "--out"])
+                .arg(&out)
+                .assert();
+            let got = assert.get_output().status.code();
+            assert_eq!(got, Some(*code), "{what} with --output {format}");
+        }
+    }
+}
+
+#[test]
+fn refresh_view_that_does_not_compile_exits_2() {
+    let (dir, mut c) = refresh(&files_config());
+    let views = dir.path().join("views");
+    fs::create_dir_all(&views).unwrap();
+    fs::write(views.join("bad.json"), BAD_PATH_VIEW).unwrap();
+    c.args(["--only", "views", "--views"])
+        .arg(&views)
+        .arg("--input")
+        .arg(fixtures().join("raw"))
+        .assert()
+        .code(2)
+        .stderr(has("compiling view BadPath"));
+}

@@ -475,7 +475,10 @@ where
                 while !st.1 && deps.iter().any(|&j| !st.0[j]) {
                     st = changed.wait(st).unwrap();
                 }
-                if st.1 {
+                // Stopped while a bundle it references is not committed: it
+                // can never be. A bundle taken before the failure whose
+                // references are committed is posted, as one in flight.
+                if deps.iter().any(|&j| !st.0[j]) {
                     return None;
                 }
             }
