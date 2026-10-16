@@ -33,7 +33,7 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, or by `$export` with `fetch = "bulk"`), run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
-| `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
+| `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
 | `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | |
 | `hooks` | the config's commands, in order | the commands |
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
@@ -265,6 +265,96 @@ A client without `catalog.duckdb` can run `catalog.sql` itself: DuckDB-Wasm
 can fetch the file and run its text, and the duckdb shell can run it with
 `-init` or `.read`.
 
+### Querying with Spark
+
+With `spark = true`, each refresh also writes `catalog.spark.sql`: Spark SQL
+that creates a table for each warehouse table, for a Spark Thrift server such
+as the one the fhir-data-pipes Java pipeline runs. Writing it needs no Spark.
+
+```toml
+[catalog]
+spark = true
+spark_location = "s3a://warehouse"           # how Spark reaches the warehouse directory
+spark_database = "fhir"                      # the default
+spark_extra = "catalog-spark-extra.sql"      # your own Spark SQL, appended
+```
+
+`spark_location` is the warehouse directory as Spark sees it: `s3a://…`,
+`hdfs://…`, `file:/…`, or a path on the Spark machine (`/dwh` when the
+warehouse is mounted there in a container). Unset, it is the warehouse
+directory on this machine, as a `file:` URL. Each table reads
+`<spark_location>/parquet/<table>`.
+
+The file creates the database if it is missing, then, for each table, drops
+the table and creates it again:
+
+```sql
+CREATE DATABASE IF NOT EXISTS `fhir`;
+USE `fhir`;
+
+DROP TABLE IF EXISTS `fhir`.`coverage`;
+CREATE TABLE `fhir`.`coverage` (
+  `id` STRING,
+  `location_id` STRING,
+  `period_start` DATE,
+  `country` STRING
+)
+USING PARQUET
+OPTIONS (recursiveFileLookup 'true', pathGlobFilter 'part-*.parquet')
+LOCATION 's3a://warehouse/parquet/coverage';
+```
+
+Run it after each refresh, with `spark-sql -f catalog.spark.sql` or
+`beeline -u jdbc:hive2://<host>:10000 -f catalog.spark.sql`. A hook runs after
+the catalog step, so it can do this on every refresh:
+
+```toml
+[[hooks]]
+name = "spark"
+run = ["sh", "-c", "beeline -u jdbc:hive2://spark:10000 -f \"$DATA/catalog.spark.sql\""]
+```
+
+`refresh --push` uploads the file with the other catalog files, after the
+tables.
+
+- The tables are external (they have a `LOCATION`), so `DROP TABLE` removes
+  only the definition, never the files. Use a database of their own: the
+  file drops any table in it with a warehouse table's name, and dropping a
+  managed table deletes its data.
+- Dropping and creating the table each run picks up new columns and new
+  files. A query that runs between a table's `DROP` and `CREATE` fails; the
+  gap is a few milliseconds per table. The Java pipeline instead creates a
+  timestamped table per run and points a view at it; fhir-pipes does not,
+  since every run's table would read the same directory and the old tables
+  would pile up in the metastore.
+- The columns and their types are read from the Parquet files when the file
+  is written and listed in the `CREATE TABLE`, so an empty table (one empty
+  file) has its columns too. A column Spark cannot read, such as a `time`
+  column (Spark has no TIME type), is left out, with a comment saying so.
+- The tables are not partitioned in Spark's sense. `country` is a column in
+  the files as well as in the directory names, and Spark does not partition a
+  table whose partition column is in its files. Spark reads every
+  `part-*.parquet` under the table directory instead (other files there, such
+  as a catalog's `items.parquet` or `.json` files, are left out). A filter
+  such as `WHERE country = 'NGA'` is pushed down to the Parquet statistics,
+  so other countries' row groups are skipped, but each file's footer is
+  still read.
+- The Locations table's `geometry` column is WKB in a Parquet GEOMETRY
+  column; the file declares it `BINARY`. Spark 4.1 reads it. Spark 3.5 and
+  4.0 (including the `bitnamilegacy/spark:4.0.0` image in the fhir-data-pipes
+  compose files) cannot read any column of that table: their Parquet reader
+  fails on the GEOMETRY type in the file footer. The view tables work in
+  3.5, 4.0 and 4.1.
+- Your own views go in `spark_extra`, appended after a `USE` of the
+  database, so they can name the tables without the database:
+  `CREATE OR REPLACE VIEW coverage_nga AS SELECT * FROM coverage WHERE country = 'NGA';`.
+  The `extra` file for DuckDB is not used: the two dialects differ.
+
+Superset connects to the Thrift server with the Hive driver (PyHive), as in
+the fhir-data-pipes Superset tutorial, with the database in the URI:
+`hive://hive@<host>:10000/fhir`. The tables then appear under the `fhir`
+schema.
+
 ## Database
 
 With a `[database]` section, each refresh also loads the view tables into
@@ -397,6 +487,8 @@ exclude = [".DS_Store"]
 [catalog]
 base_url = "https://data.example.org/warehouse"
 extra = "catalog-extra.sql"
+spark = true                # also catalog.spark.sql
+spark_location = "s3a://warehouse"
 
 [[hooks]]
 name = "catalog"

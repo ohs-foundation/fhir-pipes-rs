@@ -26,6 +26,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
 | Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
+| Spark SQL tables for a Spark Thrift server: `catalog.spark.sql` with a table per warehouse table over `s3a://`, `hdfs://` or local paths, plus your own Spark SQL; the Locations table needs Spark 4.1 (#31) | `refresh` (`[catalog] spark`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
 | HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `refresh` | next release |
 | Google Cloud Healthcare API FHIR stores: tokens from Application Default Credentials (service account key, gcloud user credentials, metadata server), renewed before expiry; store paths (`projects/…/fhirStores/…`) accepted as the server (#34) | `--google-auth` on `extract`, `export`, `run`, `load`, `refresh` | next release |
@@ -141,7 +142,7 @@ on its own outstanding list, next to fhir-pipes.
 | RFC question | fhir-pipes answer |
 |---|---|
 | A single CLI run by cron, Airflow or CI instead of the Spring Boot and Flink controller? | Yes. `refresh` is one command with a TOML config, meant to be run that way |
-| Query Parquet with DuckDB or PostgreSQL instead of Spark Thrift and Hive? | Yes: Parquet with DuckDB, and the view tables in PostgreSQL (item 2) |
+| Query Parquet with DuckDB or PostgreSQL instead of Spark Thrift and Hive? | Yes: Parquet with DuckDB, and the view tables in PostgreSQL (item 2). Sites that keep a Spark Thrift server get `catalog.spark.sql`, a Spark SQL table per warehouse table (next release) |
 
 ## Decided against for now
 
