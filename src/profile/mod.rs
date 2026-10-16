@@ -73,6 +73,12 @@ pub struct LocationProfile {
     pub type_systems: Vec<String>,
     /// The Location column holding an admin unit's code.
     pub admin_code_column: Option<String>,
+    /// `meta.profile` of the Locations `import` writes; else `[dhis2]
+    /// location_profile`.
+    pub profile: Option<String>,
+    /// The identifier system of the admin codes `import admin` writes; else
+    /// `[dhis2] country_code_system`.
+    pub admin_code_system: Option<String>,
     #[serde(default, rename = "column")]
     pub columns: Vec<Column>,
 }
@@ -85,6 +91,9 @@ pub struct OrganizationProfile {
     /// Prefix of the id of an Organization diff creates (`org-`).
     #[serde(default = "default_org_prefix")]
     pub id_prefix: String,
+    /// `meta.profile` of the facility Organizations `import sites` writes;
+    /// else `[dhis2] facility_organization_profile`.
+    pub profile: Option<String>,
     #[serde(default, rename = "column")]
     pub columns: Vec<Column>,
 }
@@ -333,6 +342,52 @@ impl Profile {
                     self.source
                 ))
             })
+    }
+
+    /// The boundary extension a written Location carries: the first of
+    /// `[location] boundary_extensions`, else the HL7 one.
+    pub fn boundary_extension(&self) -> &str {
+        self.location.boundary_extensions.first().map_or(
+            crate::fhir::location::HL7_BOUNDARY_EXTENSION_URL,
+            String::as_str,
+        )
+    }
+
+    /// `meta.profile` of written Locations: `[location] profile`, else
+    /// `[dhis2] location_profile`.
+    pub fn location_profile(&self) -> Option<&str> {
+        self.location
+            .profile
+            .as_deref()
+            .or(self.dhis2.as_ref().map(|d| d.location_profile.as_str()))
+    }
+
+    /// `meta.profile` of written facility Organizations: `[organization]
+    /// profile`, else `[dhis2] facility_organization_profile`.
+    pub fn organization_profile(&self) -> Option<&str> {
+        self.organization.profile.as_deref().or(self
+            .dhis2
+            .as_ref()
+            .map(|d| d.facility_organization_profile.as_str()))
+    }
+
+    /// The system of written Location type codes: the first of `[location]
+    /// type_systems`, else `[dhis2] location_type_system`.
+    pub fn location_type_system(&self) -> Option<&str> {
+        self.location
+            .type_systems
+            .first()
+            .map(String::as_str)
+            .or(self.dhis2.as_ref().map(|d| d.location_type_system.as_str()))
+    }
+
+    /// The identifier system of written admin codes: `[location]
+    /// admin_code_system`, else `[dhis2] country_code_system`.
+    pub fn admin_code_system(&self) -> Option<&str> {
+        self.location
+            .admin_code_system
+            .as_deref()
+            .or(self.dhis2.as_ref().map(|d| d.country_code_system.as_str()))
     }
 
     fn check(&self) -> std::result::Result<(), String> {

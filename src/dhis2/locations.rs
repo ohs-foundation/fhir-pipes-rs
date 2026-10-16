@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use base64::Engine;
 use serde_json::{Value, json};
 
 use super::api::Dhis2;
@@ -16,13 +15,12 @@ use super::{Instance, check_out, valid_name, write_ndjson};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
-use crate::fhir::location::GEOJSON_CONTENT_TYPE;
+use crate::fhir::location::PHYSICAL_TYPE_SYSTEM;
+use crate::fhir::location::boundary_extension;
 use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
 use crate::report::Report;
 use crate::transform::write_report;
 
-pub const PHYSICAL_TYPE_SYSTEM: &str =
-    "http://terminology.hl7.org/CodeSystem/location-physical-type";
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
 
@@ -162,13 +160,10 @@ pub fn resources(
                 .as_ref()
                 .map(Value::to_string)
                 .unwrap_or_default();
-            loc["extension"] = json!([{
-                "url": opts.instance.boundary_extension,
-                "valueAttachment": {
-                    "contentType": GEOJSON_CONTENT_TYPE,
-                    "data": base64::engine::general_purpose::STANDARD.encode(geojson),
-                },
-            }]);
+            loc["extension"] = json!([boundary_extension(
+                &opts.instance.boundary_extension,
+                geojson.as_bytes()
+            )]);
         }
         Some("Point") => {
             let c = unit
@@ -583,6 +578,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     fn unit(id: &str, level: u32, parent: Option<&str>, geometry: Option<Value>) -> OrgUnit {
         OrgUnit {

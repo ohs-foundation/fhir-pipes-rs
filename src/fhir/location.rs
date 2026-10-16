@@ -15,6 +15,19 @@ pub const HL7_BOUNDARY_EXTENSION_URL: &str =
 /// extension, as ICR's `…/StructureDefinition/location-boundary-geojson` does.
 const BOUNDARY_EXTENSION_SUFFIX: &str = "/StructureDefinition/location-boundary-geojson";
 pub const GEOJSON_CONTENT_TYPE: &str = "application/geo+json";
+pub const PHYSICAL_TYPE_SYSTEM: &str =
+    "http://terminology.hl7.org/CodeSystem/location-physical-type";
+
+/// A boundary attachment extension under `url`, the GeoJSON inlined as base64.
+pub fn boundary_extension(url: &str, geojson: &[u8]) -> Value {
+    serde_json::json!({
+        "url": url,
+        "valueAttachment": {
+            "contentType": GEOJSON_CONTENT_TYPE,
+            "data": base64::engine::general_purpose::STANDARD.encode(geojson),
+        },
+    })
+}
 
 /// A boundary attachment extension: the HL7 one, one a profile names
 /// (`extra`), or any IG's extension named `…/location-boundary-geojson`.

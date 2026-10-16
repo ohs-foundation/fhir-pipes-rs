@@ -2,7 +2,7 @@
 
 A profile tells fhir-pipes about an implementation guide (IG): the extra
 Location and Organization columns to write, the type codes and extensions that
-have a special role, and the URLs the `dhis2` and `population` commands put on
+have a special role, and the URLs the `dhis2`, `population` and `import` commands put on
 the resources they create. It is a TOML file.
 
 Without a profile, fhir-pipes reads base FHIR R4 only. The Location commands
@@ -70,6 +70,7 @@ example `profile: icr (examples/profiles/icr.toml)`.
 | `index` | Refuses: it needs the spatial index extension. | Writes cells under `[location] spatial_index_extension`. |
 | `population` | Refuses: it needs `[population]`. | Writes Groups with that section's profile and extensions. |
 | `dhis2 …` | Refuses: it needs `[dhis2]`. | Mints systems under its base and writes its profiles and extensions. |
+| `import location-boundaries`, `import location-sites` | Refuses: it needs the Location type system (and, for boundaries, `admin_unit_type`). | Writes the profile's type codes, `meta.profile`, boundary and spatial index extensions, and admin code system. |
 | `refresh` | As `run` for the locations step. | As `run` for the locations step. Views and tiles do not use the profile. |
 | `extract`, `export`, `load`, `views` | Not used. | Not used. |
 
@@ -90,12 +91,14 @@ name = "my-ig"            # shown in messages
 
 | Key | Used by | Meaning |
 |---|---|---|
-| `boundary_extensions` | extract, run, refresh, transform, diff, dhis2 | Boundary attachment extensions to read before the HL7 one. `extract` fetches and inlines an attachment `url` under them as it does under the HL7 one. A new boundary written by `diff` or `dhis2` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
+| `boundary_extensions` | extract, run, refresh, transform, diff, dhis2, import | Boundary attachment extensions to read before the HL7 one. `extract` fetches and inlines an attachment `url` under them as it does under the HL7 one. A new boundary written by `diff`, `dhis2` or `import` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
 | `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. ICR's IG has none. |
-| `spatial_index_extension` | transform, diff, index | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
-| `admin_unit_type` | transform, population, dhis2 | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
-| `type_systems` | population | Code systems of the Location type codes. `population --type CODE` selects Locations with that code under any of these, wherever the coding sits in `type`. Empty or absent: a code under any system. |
+| `spatial_index_extension` | transform, diff, index, import | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
+| `admin_unit_type` | transform, population, dhis2, import | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
+| `type_systems` | population, import | Code systems of the Location type codes. `population --type CODE` selects Locations with that code under any of these, wherever the coding sits in `type`. Empty or absent: a code under any system. `import` writes type codes under the first (else under `[dhis2] location_type_system`). |
 | `admin_code_column` | transform | The name of a `[[location.column]]` holding an admin unit's code. It fills `adminN_code`, gives `country` (from the level 0 unit), and is checked for duplicates (`duplicate_<column>` in the report). |
+| `profile` | import | `meta.profile` of the Locations `import` writes. Absent: `[dhis2] location_profile`; with neither, no `meta`. |
+| `admin_code_system` | import | The identifier system of the admin codes `import location-boundaries` writes, unless `--code-system` is given. Absent: `[dhis2] country_code_system`. Make it one of the admin code column's `systems`, so the codes fill `adminN_code`. |
 | `[[location.column]]` | transform, diff | An extra column; see [Column kinds](#column-kinds). Columns appear in this order, after `position_latitude`. |
 
 ### [organization]
@@ -106,7 +109,8 @@ onto the Location's row.
 | Key | Used by | Meaning |
 |---|---|---|
 | `facility_type` | diff, dhis2 | A Location of this type that `diff` creates without a `managingOrganization` gets a new Organization. `dhis2 locations` gives facilities this type. |
-| `id_prefix` | diff, dhis2 | The id of such an Organization: `<id_prefix><location id>`. Default `org-`. |
+| `id_prefix` | diff, dhis2, import | The id of such an Organization: `<id_prefix><location id>`. Default `org-`. `import location-sites --paired-org` uses it too. |
+| `profile` | import | `meta.profile` of the facility Organizations `import location-sites --paired-org` writes. Absent: `[dhis2] facility_organization_profile`; with neither, no `meta`. |
 | `[[organization.column]]` | transform, diff | An extra column read from the Organization, after `organization_identifier`. |
 
 ### [dhis2]
@@ -126,6 +130,12 @@ All required for `fhir-pipes dhis2`.
 
 `dhis2 locations` also needs `[location] admin_unit_type` and
 `[organization] facility_type`.
+
+`[location] profile`, `[location] admin_code_system` and `[organization]
+profile` take precedence over `location_profile`, `country_code_system` and
+`facility_organization_profile` for the `import` commands, so a profile
+without `[dhis2]` can still name them. They are new after 0.4.0: a profile
+that sets them does not load in 0.4.0 or earlier, which refuse unknown keys.
 
 ### [population]
 
@@ -309,7 +319,7 @@ For each URL under the IG's canonical, the check reports:
 | An `extension_code` column's `system`, or `[dhis2] source_system`, is not in the ValueSet the extension is bound to, following the IG's ValueSets it imports. A binding that leads outside the IG is not judged | warning |
 | A code system the profile names is not in the IG, or `admin_unit_type`, `facility_type`, a `known_source_codes` entry or a code `dhis2 reports` writes under `source_system` is not a code in it | error |
 | A later `type_systems` entry (an older URI) is not in the IG | warning |
-| A `meta.profile` (`location_profile`, `group_profile` …) is not in the IG, or constrains another type | error |
+| A `meta.profile` (`[location] profile`, `location_profile`, `group_profile` …) is not in the IG, or constrains another type | error |
 | An identifier system is not sliced in any of the IG's profiles of that resource type (by a `system` pattern on the slice's `system`, or a `patternIdentifier` on the slice) | warning |
 | The IG's denominator source code system has codes `known_source_codes` lacks | warning |
 
