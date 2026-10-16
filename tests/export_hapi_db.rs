@@ -166,9 +166,10 @@ fn reads_current_versions_then_changes_and_deletions() {
             "INSERT INTO {s}.hfj_tag_def VALUES \
              (1, 0, 'http://example.org/tags', 't1', 'Tag one', NULL, NULL), \
              (2, 1, 'https://github.com/hapifhir/hapi-fhir/ns/jpa/profile', 'http://example.org/P', NULL, NULL, NULL), \
-             (3, 2, 'http://terminology.hl7.org/CodeSystem/v3-Confidentiality', 'R', NULL, NULL, NULL)"
+             (3, 2, 'http://terminology.hl7.org/CodeSystem/v3-Confidentiality', 'R', NULL, NULL, NULL), \
+             (4, 0, 'http://example.org/batch', 'b1', NULL, NULL, NULL)"
         ),
-        format!("INSERT INTO {s}.hfj_res_tag (res_id, tag_id) VALUES (1, 1), (1, 2), (2, 3)"),
+        format!("INSERT INTO {s}.hfj_res_tag (res_id, tag_id) VALUES (1, 4), (1, 1), (1, 2), (2, 3)"),
     ]);
     sql(&url, &setup);
     let db = url_for(&url, &s, None);
@@ -192,7 +193,11 @@ fn reads_current_versions_then_changes_and_deletions() {
                 "versionId": "2",
                 "lastUpdated": "2026-01-01T00:00:01.500+00:00",
                 "profile": ["http://example.org/P"],
-                "tag": [{"system": "http://example.org/tags", "code": "t1", "display": "Tag one"}]
+                // By tag_id, as HAPI gives them, not in the order added.
+                "tag": [
+                    {"system": "http://example.org/tags", "code": "t1", "display": "Tag one"},
+                    {"system": "http://example.org/batch", "code": "b1"}
+                ]
             },
             "name": [{"family": "Abc"}],
             "gender": "female"

@@ -250,13 +250,15 @@ impl Layout {
                 "NULL::text".to_string()
             }
         };
+        // In tag_id order, as HAPI returns them (its tag query walks the
+        // (res_id, tag_id) index), not in the order they were added.
         let tags = match self.tags {
             None => "NULL::text".to_string(),
             Some((version, user_selected)) => format!(
                 "CASE WHEN {live} THEN (SELECT json_agg(json_build_object(\
                  'type', d.tag_type, 'system', d.tag_system, 'version', {}, \
                  'code', d.tag_code, 'display', d.tag_display, 'userSelected', {}) \
-                 ORDER BY d.tag_type, t.pid)::text \
+                 ORDER BY d.tag_type, t.tag_id)::text \
                  FROM hfj_res_tag t JOIN hfj_tag_def d ON d.tag_id = t.tag_id \
                  WHERE t.res_id = r.res_id) END",
                 if version { "d.tag_version" } else { "NULL" },
