@@ -12,6 +12,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
 use crate::fhir::location::{GEOJSON_CONTENT_TYPE, is_boundary_extension};
 use crate::fhir::ndjson::NdjsonReader;
+use crate::fs::AtomicFile;
 use crate::report::Report;
 use crate::snapshot::Snapshot;
 use crate::snapshot::instant::later;
@@ -26,18 +27,29 @@ pub struct MergeStats {
     pub watermark: Option<String>,
 }
 
-/// The parts of a merge that stay fixed while it runs, bundled so the
-/// worker function doesn't need a long argument list.
-struct MergeInput<'a> {
-    notes: &'a [PageNote],
-    full: bool,
-    lookup: &'a dyn Fn(&str) -> Option<Vec<u8>>,
-    failures: &'a HashMap<String, String>,
+/// How `merge_file` treats the existing file and the incoming lines. The
+/// default is an incremental merge that drops nothing and inlines no
+/// boundaries.
+#[derive(Default)]
+pub struct MergeOptions<'a> {
+    /// Leave the existing file out, so a full download starts clean.
+    pub full: bool,
+    /// Ids whose existing lines are left out (resources deleted on the
+    /// server), unless an incoming line replaces them, in the same pass.
+    /// `MergeStats::removed` counts them; `total` does not.
+    pub drop: Option<&'a HashSet<&'a str>>,
+    /// Where to find the boundaries to inline. Without it, a note with a
+    /// `boundary_url` is reported as not fetched.
+    pub boundaries: Option<Boundaries<'a>>,
+}
+
+/// The boundary bytes a Location merge inlines, by URL.
+pub struct Boundaries<'a> {
+    pub lookup: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    /// Why a URL was not fetched, for the report.
+    pub failures: &'a HashMap<String, String>,
     /// The profile's boundary extensions, beside the HL7 one.
-    boundary_extensions: &'a [String],
-    /// Ids whose existing lines are left out, unless an incoming line
-    /// replaces them.
-    drop: &'a HashSet<&'a str>,
+    pub extensions: &'a [String],
 }
 
 /// Replace the boundary attachment that carries `url` with inline base64 data.
@@ -119,15 +131,16 @@ pub fn merge(
     report: &mut Report,
     boundary_extensions: &[String],
 ) -> Result<MergeStats> {
-    merge_file(
-        &MergeFiles::locations(snap),
-        notes,
+    let options = MergeOptions {
         full,
-        lookup,
-        failures,
-        report,
-        boundary_extensions,
-    )
+        drop: None,
+        boundaries: Some(Boundaries {
+            lookup,
+            failures,
+            extensions: boundary_extensions,
+        }),
+    };
+    merge_file(&MergeFiles::locations(snap), notes, &options, report)
 }
 
 /// The three files one merge touches, plus the report kind for a line in
@@ -158,71 +171,25 @@ impl MergeFiles {
     }
 }
 
-/// `merge` for any snapshot file. Boundary inlining only ever triggers on
-/// notes that carry a `boundary_url`, which Organizations never do.
+/// `merge` for any snapshot file, as `options` say. Boundary inlining only
+/// ever triggers on notes that carry a `boundary_url`, which Organizations
+/// never do.
 pub fn merge_file(
     files: &MergeFiles,
     notes: &[PageNote],
-    full: bool,
-    lookup: &dyn Fn(&str) -> Option<Vec<u8>>,
-    failures: &HashMap<String, String>,
-    report: &mut Report,
-    boundary_extensions: &[String],
-) -> Result<MergeStats> {
-    let input = MergeInput {
-        notes,
-        full,
-        lookup,
-        failures,
-        boundary_extensions,
-        drop: &HashSet::new(),
-    };
-    merge_cleaning_up(files, &input, report)
-}
-
-/// `merge_file` for a file without boundaries, also leaving out the
-/// existing lines whose id is in `drop` (resources deleted on the server)
-/// in the same pass. `MergeStats::removed` counts them; `total` does not.
-pub fn merge_file_dropping(
-    files: &MergeFiles,
-    notes: &[PageNote],
-    full: bool,
-    drop: &HashSet<&str>,
+    options: &MergeOptions,
     report: &mut Report,
 ) -> Result<MergeStats> {
-    let input = MergeInput {
-        notes,
-        full,
-        lookup: &|_| None,
-        failures: &HashMap::new(),
-        boundary_extensions: &[],
-        drop,
-    };
-    merge_cleaning_up(files, &input, report)
-}
-
-fn merge_cleaning_up(
-    files: &MergeFiles,
-    input: &MergeInput,
-    report: &mut Report,
-) -> Result<MergeStats> {
-    let result = merge_into(files, input, report);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&files.tmp);
-    }
-    result
-}
-
-fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Result<MergeStats> {
     let tmp: &Path = &files.tmp;
-    let incoming_ids: HashSet<&str> = input.notes.iter().map(|n| n.id.as_str()).collect();
+    let incoming_ids: HashSet<&str> = notes.iter().map(|n| n.id.as_str()).collect();
     // Last occurrence of each id in the incoming file wins.
     let mut last_index: HashMap<&str, usize> = HashMap::new();
-    for (i, n) in input.notes.iter().enumerate() {
+    for (i, n) in notes.iter().enumerate() {
         last_index.insert(&n.id, i);
     }
 
-    let file = std::fs::File::create(tmp).map_err(|e| PipesError::io(tmp, e))?;
+    // Removed when dropped by an error return before the commit.
+    let file = AtomicFile::create_at(&files.existing, files.tmp.clone())?;
     let mut out = std::io::BufWriter::new(file);
     let mut stats = MergeStats {
         total: 0,
@@ -233,7 +200,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
     };
     let mut old_ids: HashSet<String> = HashSet::new();
 
-    if !input.full && files.existing.exists() {
+    if !options.full && files.existing.exists() {
         for line in NdjsonReader::open(&files.existing)? {
             let line = line?;
             match id_and_updated(&line.text) {
@@ -244,7 +211,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
                     old_ids.insert(id);
                     continue;
                 }
-                Some((id, _)) if input.drop.contains(id.as_str()) => {
+                Some((id, _)) if options.drop.is_some_and(|d| d.contains(id.as_str())) => {
                     stats.removed += 1;
                     continue;
                 }
@@ -269,7 +236,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
     for (i, line) in NdjsonReader::open(&files.incoming)?.enumerate() {
         let line = line?;
         seen += 1;
-        let Some(note) = input.notes.get(i) else {
+        let Some(note) = notes.get(i) else {
             return Err(PipesError::Environment(
                 "incoming file and page notes disagree; rerun extract".into(),
             ));
@@ -287,18 +254,19 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
             }
             Some(url) => {
                 let mut resource: Value = serde_json::from_str(&line.text)?;
-                match (input.lookup)(url) {
+                let boundaries = options.boundaries.as_ref();
+                match boundaries.and_then(|b| (b.lookup)(url)) {
                     Some(bytes) => {
-                        inline_boundary(&mut resource, url, &bytes, input.boundary_extensions);
+                        let extensions = boundaries.map_or(&[][..], |b| b.extensions);
+                        inline_boundary(&mut resource, url, &bytes, extensions);
                     }
                     None => report.add(
                         "boundary_fetch_failed",
                         &note.id,
                         &format!(
                             "{url}: {}",
-                            input
-                                .failures
-                                .get(url.as_str())
+                            boundaries
+                                .and_then(|b| b.failures.get(url.as_str()))
                                 .map(String::as_str)
                                 .unwrap_or("not fetched")
                         ),
@@ -323,25 +291,14 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
             stats.added += 1;
         }
     }
-    if seen != input.notes.len() {
+    if seen != notes.len() {
         return Err(PipesError::Environment(
             "incoming file and page notes disagree; rerun extract".into(),
         ));
     }
-    out.flush().map_err(|e| PipesError::io(tmp, e))?;
-    let file = out
-        .into_inner()
-        .map_err(|e| PipesError::io(tmp, e.into_error()))?;
-    file.sync_all().map_err(|e| PipesError::io(tmp, e))?;
-    std::fs::rename(tmp, &files.existing).map_err(|e| PipesError::io(tmp, e))?;
-    // Best-effort, as in `State::write`: not every platform/filesystem
-    // supports fsync on a directory, and that's not worth failing an
-    // otherwise-successful merge over.
-    if let Some(dir) = files.existing.parent()
-        && let Ok(d) = std::fs::File::open(dir)
-    {
-        let _ = d.sync_all();
-    }
+    out.into_inner()
+        .map_err(|e| PipesError::io(tmp, e.into_error()))?
+        .commit()?;
     let _ = std::fs::remove_file(&files.incoming);
     Ok(stats)
 }
@@ -380,16 +337,7 @@ mod tests {
         ];
         let mut report = Report::default();
         let files = MergeFiles::organizations(&snap);
-        let stats = merge_file(
-            &files,
-            &notes,
-            false,
-            &|_| None,
-            &HashMap::new(),
-            &mut report,
-            &[],
-        )
-        .unwrap();
+        let stats = merge_file(&files, &notes, &MergeOptions::default(), &mut report).unwrap();
         assert_eq!((stats.total, stats.added, stats.updated), (2, 1, 1));
         assert_eq!(stats.watermark.as_deref(), Some("2026-01-03T00:00:00Z"));
         let text = std::fs::read_to_string(snap.organizations()).unwrap();
@@ -747,14 +695,12 @@ mod tests {
         let notes = vec![note("back", "2026-01-02T00:00:00Z", None)];
         let drop: HashSet<&str> = ["gone", "back", "never"].into();
         let mut report = Report::default();
-        let stats = merge_file_dropping(
-            &MergeFiles::locations(&snap),
-            &notes,
-            false,
-            &drop,
-            &mut report,
-        )
-        .unwrap();
+        let options = MergeOptions {
+            drop: Some(&drop),
+            ..MergeOptions::default()
+        };
+        let stats =
+            merge_file(&MergeFiles::locations(&snap), &notes, &options, &mut report).unwrap();
         assert_eq!(
             (stats.total, stats.added, stats.updated, stats.removed),
             (3, 0, 1, 2)

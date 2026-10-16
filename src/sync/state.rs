@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PipesError, Result};
+use crate::fs::{AtomicFile, StateError, atomic_write, read_state};
 use crate::snapshot::same_server;
 
 const STATE_FILE: &str = ".sync-state.json";
@@ -55,26 +56,25 @@ impl SyncState {
     /// error: starting over would forget what to delete.
     pub fn read(dir: &Path) -> Result<Self> {
         let path = dir.join(STATE_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| {
-                PipesError::Usage(format!(
-                    "{}: not a valid sync state ({e}); fix it, or remove it and the {SYNC_DIR} \
-                     directory to sync everything again",
-                    path.display()
-                ))
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(PipesError::io(&path, e)),
+        match read_state(&path) {
+            Ok(state) => Ok(state.unwrap_or_default()),
+            Err(StateError::Invalid(e)) => Err(PipesError::Usage(format!(
+                "{}: not a valid sync state ({e}); fix it, or remove it and the {SYNC_DIR} \
+                 directory to sync everything again",
+                path.display()
+            ))),
+            Err(StateError::Unreadable(e)) => Err(PipesError::Usage(format!(
+                "{}: not readable: {e}",
+                path.display()
+            ))),
+            Err(StateError::Io(e)) => Err(PipesError::io(&path, e)),
         }
     }
 
     /// Written beside the target and renamed into place.
     pub fn write(&self, dir: &Path) -> Result<()> {
-        let path = dir.join(STATE_FILE);
-        let tmp = dir.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&tmp, text).map_err(|e| PipesError::io(&tmp, e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| PipesError::io(&path, e))
+        atomic_write(&dir.join(STATE_FILE), text)
     }
 
     fn sink(&self, url: &str) -> Option<&SinkState> {
@@ -159,17 +159,17 @@ fn read_synced(path: &Path) -> Result<Synced> {
 fn write_synced(path: &Path, synced: &Synced) -> Result<()> {
     let dir = path.parent().expect("a file in a directory");
     std::fs::create_dir_all(dir).map_err(|e| PipesError::io(dir, e))?;
-    let tmp = crate::fhir::ndjson::with_suffix(path, ".tmp");
     let mut rows: Vec<(&String, &String)> = synced.iter().collect();
     rows.sort_unstable();
-    let file = std::fs::File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
+    let file = AtomicFile::create(path)?;
+    let tmp = file.tmp().to_path_buf();
     let mut w = std::io::BufWriter::new(file);
     for (id, updated) in rows {
         writeln!(w, "{id}\t{updated}").map_err(|e| PipesError::io(&tmp, e))?;
     }
-    w.flush().map_err(|e| PipesError::io(&tmp, e))?;
-    drop(w);
-    std::fs::rename(&tmp, path).map_err(|e| PipesError::io(path, e))
+    w.into_inner()
+        .map_err(|e| PipesError::io(&tmp, e.into_error()))?
+        .commit()
 }
 
 #[cfg(test)]
@@ -210,6 +210,16 @@ mod tests {
         );
         assert!(root.join(".sync/1/Patient.tsv").is_file());
         assert!(root.join(".sync/2/Patient.tsv").is_file());
+    }
+
+    #[test]
+    fn a_state_file_that_is_not_text_is_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(STATE_FILE), b"\xff\xfe").unwrap();
+        assert!(matches!(
+            SyncState::read(dir.path()),
+            Err(PipesError::Usage(_))
+        ));
     }
 
     #[test]

@@ -139,6 +139,13 @@ data to show what each part does.
 Run `fhir-pipes <command> --help` for every option. NDJSON paths ending in
 `.gz` are read and written compressed.
 
+Every command exits 0 on success, 2 for an error you can fix before running
+again (a bad flag, a missing or invalid config file, profile, ViewDefinition
+or input file), and 1 for a failure while it runs (the network, the server,
+the database, a tool such as duckdb or rclone, a hook, a disk write).
+`views validate`, `views lint`, `views test` and `profile check` exit 1 when
+they find problems.
+
 `views` works with ViewDefinitions directly, without a warehouse:
 
 ```sh

@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use crate::cli::Dhis2Command;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{is_gz, read_text, with_suffix};
+use crate::fs::AtomicFile;
 use crate::profile::{Dhis2Profile, Profile};
 
 /// Instance names go into every id, so they are kept short.
@@ -212,17 +213,15 @@ pub fn write_ndjson<'a>(
 /// gzip file, and the length after each is a place an interrupted run can
 /// be cut back to, which the middle of a member is not.
 pub struct NdjsonWriter {
-    out: PathBuf,
     tmp: PathBuf,
-    file: Option<BufWriter<File>>,
+    file: Option<BufWriter<AtomicFile>>,
     /// The gzip member being written, holding the file meanwhile.
-    member: Option<GzEncoder<BufWriter<File>>>,
+    member: Option<GzEncoder<BufWriter<AtomicFile>>>,
     gz: bool,
     n: usize,
     /// Length of the file up to the last line written (plain), or the last
     /// member finished (gzip).
     bytes: u64,
-    keep: bool,
 }
 
 impl NdjsonWriter {
@@ -231,9 +230,8 @@ impl NdjsonWriter {
     }
 
     pub fn create(out: &Path) -> Result<Self> {
-        let tmp = Self::tmp_path(out);
-        let file = File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
-        Ok(Self::new(out, tmp, file, 0))
+        let file = AtomicFile::create_at(out, Self::tmp_path(out))?;
+        Ok(Self::new(out, file, 0))
     }
 
     /// Carries on with the temporary file of an interrupted run: cut back
@@ -255,25 +253,30 @@ impl NdjsonWriter {
         file.set_len(bytes).map_err(|e| PipesError::io(&tmp, e))?;
         file.seek(SeekFrom::End(0))
             .map_err(|e| PipesError::io(&tmp, e))?;
-        Ok(Self::new(out, tmp, file, bytes))
+        Ok(Self::new(out, AtomicFile::with_file(out, tmp, file), bytes))
     }
 
-    fn new(out: &Path, tmp: PathBuf, file: File, bytes: u64) -> Self {
+    fn new(out: &Path, file: AtomicFile, bytes: u64) -> Self {
         Self {
-            out: out.to_path_buf(),
-            tmp,
+            tmp: file.tmp().to_path_buf(),
             file: Some(BufWriter::with_capacity(1 << 20, file)),
             member: None,
             gz: is_gz(out),
             n: 0,
             bytes,
-            keep: false,
         }
     }
 
     /// Keep the temporary file if the run fails.
+    /// Set on the `AtomicFile` itself, so the file survives however the
+    /// writer is dropped, a failed `finish` included.
     pub fn keep_partial(mut self) -> Self {
-        self.keep = true;
+        if let Some(m) = self.member.as_mut() {
+            m.get_mut().get_mut().keep_on_drop(true);
+        }
+        if let Some(f) = self.file.as_mut() {
+            f.get_mut().keep_on_drop(true);
+        }
         self
     }
 
@@ -329,6 +332,7 @@ impl NdjsonWriter {
         let f = self.file.as_mut().expect("synced after finish");
         f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
         f.get_ref()
+            .file()
             .sync_data()
             .map_err(|e| PipesError::io(&self.tmp, e))?;
         Ok(self.bytes)
@@ -345,28 +349,54 @@ impl NdjsonWriter {
                 .finish()
                 .map_err(|e| PipesError::io(&self.tmp, e))?;
         }
-        f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
-        drop(f);
-        std::fs::rename(&self.tmp, &self.out).map_err(|e| PipesError::io(&self.out, e))?;
+        f.into_inner()
+            .map_err(|e| PipesError::io(&self.tmp, e.into_error()))?
+            .commit()?;
         Ok(self.n)
-    }
-}
-
-impl Drop for NdjsonWriter {
-    fn drop(&mut self) {
-        if self.file.is_some() || self.member.is_some() {
-            drop(self.member.take());
-            drop(self.file.take());
-            if !self.keep {
-                let _ = std::fs::remove_file(&self.tmp);
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_partial_keeps_the_file_when_finish_fails() {
+        for name in ["out.ndjson", "out.ndjson.gz"] {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join(name);
+            // A directory with a file in it: the rename onto it fails.
+            std::fs::create_dir(&out).unwrap();
+            std::fs::write(out.join("x"), "x").unwrap();
+            let mut w = NdjsonWriter::create(&out).unwrap().keep_partial();
+            w.write(&json!({"id": "a"})).unwrap();
+            let bytes = w.sync().unwrap();
+            w.write(&json!({"id": "b"})).unwrap();
+            assert!(w.finish().is_err(), "{name}");
+            let tmp = NdjsonWriter::tmp_path(&out);
+            assert!(tmp.is_file(), "{name}: the partial output is kept");
+            let resumed = NdjsonWriter::resume(&out, bytes).unwrap();
+            let mut text = String::new();
+            resumed
+                .read_back()
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert_eq!(text, "{\"id\":\"a\"}\n", "{name}");
+        }
+    }
+
+    #[test]
+    fn without_keep_partial_a_failed_finish_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.ndjson");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("x"), "x").unwrap();
+        let mut w = NdjsonWriter::create(&out).unwrap();
+        w.write(&json!({"id": "a"})).unwrap();
+        assert!(w.finish().is_err());
+        assert!(!NdjsonWriter::tmp_path(&out).exists());
+    }
 
     #[test]
     fn instance_names_are_short_and_plain() {

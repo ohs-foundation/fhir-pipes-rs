@@ -1,0 +1,353 @@
+//! Files written whole or not at all. The content goes to a temporary file
+//! beside the target, which is fsynced and then renamed over the target, so
+//! a reader sees the old file or the new one and never half of one. The
+//! directory is fsynced after the rename where the platform allows it, so
+//! the rename survives a crash right after it. A temporary file that is not
+//! renamed into place is removed when the `AtomicFile` is dropped.
+
+use std::fs::File;
+use std::io::{Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use crate::error::{PipesError, Result};
+use crate::fhir::ndjson::with_suffix;
+
+/// Writes `bytes` to `path` through `<path>.tmp`.
+pub fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    let mut f = AtomicFile::create(path)?;
+    f.write_all(bytes.as_ref())
+        .map_err(|e| PipesError::io(f.tmp(), e))?;
+    f.commit()
+}
+
+/// Why a state file could not be read.
+#[derive(Debug)]
+pub enum StateError {
+    /// Not JSON of the expected shape, or not UTF-8 text.
+    Invalid(String),
+    /// Permission denied.
+    Unreadable(std::io::Error),
+    /// Any other I/O error.
+    Io(std::io::Error),
+}
+
+/// The one way a JSON state file is read (snapshot `state.json`, export
+/// `.export-state.json`, sync `.sync-state.json`): `None` when it does not
+/// exist, the value when it parses, and otherwise why not. What a caller
+/// does with an error is its own choice.
+pub fn read_state<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> std::result::Result<Option<T>, StateError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| StateError::Invalid(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            Err(StateError::Invalid(e.to_string()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(StateError::Unreadable(e))
+        }
+        Err(e) => Err(StateError::Io(e)),
+    }
+}
+
+/// A file being written to a temporary path and renamed to its target by
+/// `commit`. It writes unbuffered; wrap it in a `BufWriter` for many small
+/// writes.
+#[derive(Debug)]
+pub struct AtomicFile {
+    path: PathBuf,
+    tmp: PathBuf,
+    /// None when the temporary file is written by something else (`adopt`).
+    file: Option<File>,
+    /// The temporary file is left in place on drop: renamed, or kept for a
+    /// later run to continue.
+    keep: bool,
+}
+
+impl AtomicFile {
+    /// Creates `<path>.tmp`, truncating any left by an earlier run.
+    pub fn create(path: &Path) -> Result<Self> {
+        Self::create_at(path, with_suffix(path, ".tmp"))
+    }
+
+    /// Creates the temporary file at `tmp`, which must be on the same
+    /// filesystem as `path` (in practice: in the same directory).
+    pub fn create_at(path: &Path, tmp: PathBuf) -> Result<Self> {
+        let file = File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
+        Ok(Self::with_file(path, tmp, file))
+    }
+
+    /// A temporary file already open, such as one reopened to continue an
+    /// interrupted run.
+    pub fn with_file(path: &Path, tmp: PathBuf, file: File) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            tmp,
+            file: Some(file),
+            keep: false,
+        }
+    }
+
+    /// A temporary file written by something else (another function or
+    /// program): `commit` opens it to fsync it before the rename, and drop
+    /// removes it as for any other.
+    pub fn adopt(path: &Path, tmp: PathBuf) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            tmp,
+            file: None,
+            keep: false,
+        }
+    }
+
+    pub fn tmp(&self) -> &Path {
+        &self.tmp
+    }
+
+    pub fn file(&self) -> &File {
+        self.file
+            .as_ref()
+            .expect("an AtomicFile created, not adopted")
+    }
+
+    fn file_mut(&mut self) -> &mut File {
+        self.file
+            .as_mut()
+            .expect("an AtomicFile created, not adopted")
+    }
+
+    /// Leave the temporary file in place when dropped without `commit`.
+    pub fn keep_on_drop(&mut self, keep: bool) {
+        self.keep = keep;
+    }
+
+    /// Fsyncs the temporary file, renames it over the target and fsyncs the
+    /// directory.
+    pub fn commit(mut self) -> Result<()> {
+        let synced = match self.file.take() {
+            Some(file) => file.sync_all(),
+            None => sync_adopted(&self.tmp),
+        };
+        synced.map_err(|e| PipesError::io(&self.tmp, e))?;
+        std::fs::rename(&self.tmp, &self.path).map_err(|e| PipesError::io(&self.path, e))?;
+        self.keep = true;
+        sync_dir(self.path.parent());
+        Ok(())
+    }
+}
+
+/// Fsyncs a temporary file something else wrote. It is opened for writing,
+/// not truncated: on Windows, sync_all (FlushFileBuffers) needs a handle
+/// with write access. A read-only file, such as `fs::copy` makes of a
+/// read-only source, keeps its permissions: on Unix it is fsynced through a
+/// read-only handle, which fsync allows; on Windows its read-only attribute
+/// is cleared for the fsync and set again.
+fn sync_adopted(tmp: &Path) -> std::io::Result<()> {
+    let sync = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp)
+            .and_then(|f| f.sync_all())
+    };
+    match sync() {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            #[cfg(not(windows))]
+            {
+                let _ = e;
+                File::open(tmp).and_then(|f| f.sync_all())
+            }
+            #[cfg(windows)]
+            {
+                let readonly = std::fs::metadata(tmp)?.permissions();
+                if !readonly.readonly() {
+                    return Err(e);
+                }
+                let mut writable = readonly.clone();
+                // Windows only: this clears the read-only attribute of our
+                // own temporary file, which is set again just after.
+                #[allow(clippy::permissions_set_readonly_false)]
+                writable.set_readonly(false);
+                std::fs::set_permissions(tmp, writable)?;
+                let synced = sync();
+                std::fs::set_permissions(tmp, readonly)?;
+                synced
+            }
+        }
+        other => other,
+    }
+}
+
+/// Fsyncs a directory, so that a rename in it survives a crash. Best
+/// effort: not every filesystem supports it, and that is not worth failing
+/// a finished write over. Windows cannot open a directory as a file, and
+/// NTFS records a rename in its journal, so there it does nothing.
+fn sync_dir(dir: Option<&Path>) {
+    if cfg!(windows) {
+        return;
+    }
+    let dir = match dir {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+}
+
+impl Write for AtomicFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file_mut().write(buf)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.file_mut().write_all(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file_mut().flush()
+    }
+}
+
+impl Seek for AtomicFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file_mut().seek(pos)
+    }
+}
+
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_replaces_the_file_and_leaves_no_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.json");
+        std::fs::write(&path, "old").unwrap();
+        atomic_write(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(!dir.path().join("a.json.tmp").exists());
+    }
+
+    #[test]
+    fn dropped_uncommitted_removes_the_tmp_and_keeps_the_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.ndjson");
+        std::fs::write(&path, "old").unwrap();
+        let mut f = AtomicFile::create(&path).unwrap();
+        f.write_all(b"half").unwrap();
+        assert!(f.tmp().exists());
+        drop(f);
+        assert!(!dir.path().join("a.ndjson.tmp").exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+    }
+
+    #[test]
+    fn keep_on_drop_leaves_the_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.ndjson");
+        let mut f = AtomicFile::create(&path).unwrap();
+        f.write_all(b"partial").unwrap();
+        f.keep_on_drop(true);
+        drop(f);
+        let tmp = dir.path().join("a.ndjson.tmp");
+        assert_eq!(std::fs::read_to_string(tmp).unwrap(), "partial");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn adopt_commits_a_read_only_file_and_keeps_it_read_only() {
+        // `fs::copy` of a read-only source makes a read-only copy; main kept
+        // it so, and the commit must not need it writable.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, tmp) = (dir.path().join("out.ndjson"), dir.path().join(".out.tmp"));
+        std::fs::write(&tmp, "{}\n").unwrap();
+        let mut perms = std::fs::metadata(&tmp).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&tmp, perms).unwrap();
+        AtomicFile::adopt(&path, tmp.clone()).commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+        assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(!tmp.exists());
+        make_writable(&path);
+    }
+
+    /// So the temporary directory can be removed on Windows.
+    fn make_writable(path: &Path) {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn adopt_commits_a_closed_file_on_every_platform() {
+        // On Windows the fsync of an adopted file needs a handle opened for
+        // writing; a read-only one fails and the drop then removes the file.
+        let dir = tempfile::tempdir().unwrap();
+        let (path, tmp) = (dir.path().join("out.ndjson"), dir.path().join(".out.tmp"));
+        {
+            let mut f = File::create(&tmp).unwrap();
+            f.write_all(b"{}\n").unwrap();
+        }
+        AtomicFile::adopt(&path, tmp.clone()).commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn adopt_renames_a_file_written_elsewhere_or_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, tmp) = (dir.path().join("out"), dir.path().join(".out.part"));
+        std::fs::write(&tmp, "done").unwrap();
+        AtomicFile::adopt(&path, tmp.clone()).commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "done");
+        assert!(!tmp.exists());
+
+        std::fs::write(&tmp, "failed").unwrap();
+        drop(AtomicFile::adopt(&path, tmp.clone()));
+        assert!(!tmp.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "done");
+    }
+
+    #[test]
+    fn read_state_tells_missing_invalid_and_valid_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        assert!(matches!(read_state::<serde_json::Value>(&path), Ok(None)));
+        std::fs::write(&path, "{nope").unwrap();
+        assert!(matches!(
+            read_state::<serde_json::Value>(&path),
+            Err(StateError::Invalid(_))
+        ));
+        std::fs::write(&path, b"\xff\xfe").unwrap();
+        assert!(matches!(
+            read_state::<serde_json::Value>(&path),
+            Err(StateError::Invalid(_))
+        ));
+        std::fs::write(&path, "{\"a\":1}").unwrap();
+        let v: Option<serde_json::Value> = read_state(&path).unwrap();
+        assert_eq!(v.unwrap()["a"], 1);
+    }
+
+    #[test]
+    fn read_state_of_a_directory_is_an_error() {
+        // An I/O error on Unix; Windows says access is denied.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            read_state::<serde_json::Value>(dir.path()),
+            Err(StateError::Io(_) | StateError::Unreadable(_))
+        ));
+    }
+}

@@ -163,8 +163,8 @@ impl<'a> ViewRows<'a> {
             if only.is_some_and(|t| t != view.resource) {
                 continue;
             }
-            let r = compiled(&mut self.compiled[i], view)
-                .and_then(|c| c.execute_parallel(resources, threads))
+            let r = compiled(&mut self.compiled[i], view, name)?
+                .execute_parallel(resources, threads)
                 .with_context(|| format!("running view {name}"))?;
             match &mut self.results[i] {
                 Some(all) => {
@@ -185,21 +185,27 @@ impl<'a> ViewRows<'a> {
             .zip(self.results)
             .map(|(((name, view), mut c), r)| match r {
                 Some(r) => Ok(r),
-                None => compiled(&mut c, view)
-                    .and_then(|c| c.execute_parallel(&[], threads))
+                None => compiled(&mut c, view, name)?
+                    .execute_parallel(&[], threads)
                     .with_context(|| format!("running view {name}")),
             })
             .collect()
     }
 }
 
-/// The view compiled in `slot`, compiling it on first use.
+/// The view compiled in `slot`, compiling it on first use. A view that does
+/// not compile is the view's fault: a usage error, whatever the input and
+/// the output format.
 fn compiled<'c>(
     slot: &'c mut Option<CompiledView>,
     view: &ViewDefinition,
-) -> fhir_pipes_sof::Result<&'c CompiledView> {
+    name: &str,
+) -> Result<&'c CompiledView> {
     if slot.is_none() {
-        *slot = Some(CompiledView::compile_blocking(view)?);
+        let c = CompiledView::compile_blocking(view)
+            .with_context(|| format!("compiling view {name}"))
+            .map_err(crate::error::usage)?;
+        *slot = Some(c);
     }
     Ok(slot.as_ref().expect("just compiled"))
 }

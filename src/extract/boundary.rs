@@ -1,10 +1,10 @@
 //! Phase two: resolve the distinct boundary URLs on a worker pool into the
 //! cache (or memory with --no-cache). Workers only fetch and write cache
 //! entries; the main thread consumes outcomes in submission order so the
-//! counters and any reports are deterministic. The results channel is
-//! bounded (`workers * 4`), so the `pending` reorder buffer is bounded by
-//! that capacity plus one in-flight item per worker, not by the worker
-//! count alone.
+//! counters and any reports are deterministic. The results channel of
+//! `work::run` is bounded (`workers * 4`), so the `InOrder` reorder buffer is
+//! bounded by that capacity plus one in-flight item per worker, not by the
+//! worker count alone.
 //!
 //! A worker panicking (as opposed to a fetch merely failing) unwinds out of
 //! `thread::scope` and propagates to the caller of `fetch_boundaries`; that
@@ -12,8 +12,6 @@
 //! condition, and should not be swallowed into a `Failed` outcome.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
 
 use base64::Engine;
 
@@ -21,6 +19,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
 use crate::report::Report;
+use crate::work::InOrder;
 
 const PROGRESS_MIN_ITEMS: usize = 50;
 
@@ -127,44 +126,30 @@ pub fn fetch_boundaries(
 ) -> Result<FetchSummary> {
     let total = urls.len();
     let workers = opts.concurrency.max(1).min(total.max(1));
-    let next = AtomicUsize::new(0);
-    let stop = AtomicBool::new(false);
-    let (tx, rx) = mpsc::sync_channel::<(usize, Outcome, Vec<String>)>(workers * 4);
 
     let mut summary = FetchSummary::default();
     let interval = (total / 20).max(1);
     let mut consecutive = 0usize;
     let mut any_success = false;
-    let mut pending: HashMap<usize, (Outcome, Vec<String>)> = HashMap::new();
-    let mut cursor = 0usize;
+    let mut order = InOrder::new(0);
     let mut breaker: Option<String> = None;
 
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            let tx = tx.clone();
-            let next = &next;
-            let stop = &stop;
-            s.spawn(move || {
-                loop {
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= total {
-                        break;
-                    }
-                    let mut errs = Vec::new();
-                    let outcome = resolve_one(client, &urls[i], opts, &mut errs);
-                    if tx.send((i, outcome, errs)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        for (i, outcome, errs) in rx.iter() {
-            pending.insert(i, (outcome, errs));
-            while let Some((outcome, errs)) = pending.remove(&cursor) {
+    crate::work::run(
+        workers,
+        crate::work::indices(0, total),
+        |i| {
+            let mut errs = Vec::new();
+            let outcome = resolve_one(client, &urls[i], opts, &mut errs);
+            (i, outcome, errs)
+        },
+        |(i, outcome, errs)| {
+            // Whatever the still-running workers send after the trip is
+            // dropped.
+            if breaker.is_some() {
+                return false;
+            }
+            order.push(i, (outcome, errs));
+            while let Some((cursor, (outcome, errs))) = order.pop() {
                 let url = &urls[cursor];
                 for e in errs {
                     report.add("cache_error", url, &e);
@@ -192,32 +177,23 @@ pub fn fetch_boundaries(
                             && consecutive >= opts.max_consecutive_failures
                             && breaker.is_none()
                         {
-                            stop.store(true, Ordering::Relaxed);
                             breaker = Some(format!(
                                 "{consecutive} consecutive boundary fetches failed with zero successes; this looks like a systematic problem (server unreachable, wrong token, or a bad base URL), not a handful of bad boundary URLs. Last failure: {detail}. Pass --max-consecutive-failures 0 to disable this check."
                             ));
                         }
                     }
                 }
-                cursor += 1;
-                if total >= PROGRESS_MIN_ITEMS
-                    && (cursor.is_multiple_of(interval) || cursor == total)
-                {
+                let done = cursor + 1;
+                if total >= PROGRESS_MIN_ITEMS && (done.is_multiple_of(interval) || done == total) {
                     eprintln!(
-                        "resolved {cursor}/{total} boundaries ({} failed)",
+                        "resolved {done}/{total} boundaries ({} failed)",
                         summary.failed
                     );
                 }
             }
-            if breaker.is_some() {
-                break;
-            }
-        }
-        // Drain whatever the still-running workers send after the trip so they can exit.
-        if breaker.is_some() {
-            for _ in rx.iter() {}
-        }
-    });
+            breaker.is_none()
+        },
+    );
 
     eprintln!(
         "boundaries: {} cached, {} fetched, {} failed",

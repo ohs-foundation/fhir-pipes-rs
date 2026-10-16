@@ -25,8 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -463,23 +462,17 @@ pub(super) fn parallel<T: Sync, R: Send>(
     workers: usize,
     f: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for _ in 0..workers.clamp(1, items.len().max(1)) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(item) = items.get(i) else { break };
-                    let r = f(item);
-                    results.lock().unwrap_or_else(PoisonError::into_inner)[i] = Some(r);
-                }
-            });
-        }
-    });
+    let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    crate::work::run(
+        workers.clamp(1, items.len().max(1)),
+        crate::work::indices(0, items.len()),
+        |i| (i, f(&items[i])),
+        |(i, r)| {
+            results[i] = Some(r);
+            true
+        },
+    );
     results
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner)
         .into_iter()
         .map(|r| r.expect("every item was run"))
         .collect()
@@ -508,6 +501,8 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     const T0: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 

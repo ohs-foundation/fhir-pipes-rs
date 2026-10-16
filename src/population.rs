@@ -21,8 +21,9 @@ use crate::error::{PipesError, Result};
 use crate::fhir::group::{
     MAX_ID_LEN, MAX_QUANTITY, TargetPopulation, group_id, is_valid_id, target_population_group,
 };
-use crate::fhir::ndjson::{LineAccess, Output, is_gz, with_suffix};
+use crate::fhir::ndjson::{LineAccess, Output, is_gz};
 use crate::fhir::{Boundary, Location};
+use crate::fs::AtomicFile;
 use crate::geometry::parse_boundary;
 use crate::index::hierarchy::Hierarchy;
 use crate::index::{IndexRecord, build_index};
@@ -373,8 +374,9 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
         "{}; pixel-centroid zonal sum over {scope_long}",
         loaded.label
     );
-    let tmp = with_suffix(&args.out, ".tmp");
-    let mut out = Output::create(&tmp, is_gz(&args.out))?;
+    let file = AtomicFile::create(&args.out)?;
+    let tmp = file.tmp().to_path_buf();
+    let mut out = Output::new(file, is_gz(&args.out));
     let (mut measured_n, mut rolled_n) = (0usize, 0usize);
     for (&i, t) in &totals {
         let rec = &index.records[i];
@@ -434,8 +436,9 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
             measured_n += 1;
         }
     }
-    out.finish().map_err(|e| PipesError::io(&tmp, e))?;
-    std::fs::rename(&tmp, &args.out).map_err(|e| PipesError::io(&args.out, e))?;
+    out.finish()
+        .map_err(|e| PipesError::io(&tmp, e))?
+        .commit()?;
 
     let assigned: f64 = totals
         .values()

@@ -13,8 +13,9 @@ use serde_json::Value;
 
 use crate::cli::IndexArgs;
 use crate::error::{PipesError, Result};
-use crate::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
+use crate::fhir::ndjson::{NdjsonReader, Output, is_gz};
 use crate::fhir::spatial::{cells_of, compute_cell, parse_scheme_level, upsert_cell};
+use crate::fs::AtomicFile;
 use crate::report::Report;
 use crate::snapshot::LOCATIONS_FILE;
 
@@ -43,8 +44,9 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
         .collect::<Result<_>>()?;
 
     let mut report = Report::default();
-    let tmp = with_suffix(&args.out, ".tmp");
-    let mut out = Output::create(&tmp, is_gz(&args.out))?;
+    let file = AtomicFile::create(&args.out)?;
+    let tmp = file.tmp().to_path_buf();
+    let mut out = Output::new(file, is_gz(&args.out));
     let (mut seen, mut written) = (0usize, 0usize);
 
     for line in NdjsonReader::open(&ndjson)? {
@@ -103,8 +105,9 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
             report.add("already_indexed", &id, "every requested cell present");
         }
     }
-    out.finish().map_err(|e| PipesError::io(&tmp, e))?;
-    std::fs::rename(&tmp, &args.out).map_err(|e| PipesError::io(&args.out, e))?;
+    out.finish()
+        .map_err(|e| PipesError::io(&tmp, e))?
+        .commit()?;
 
     println!(
         "Wrote {written} of {seen} Locations to {} ({} already indexed, {} without a position)",
