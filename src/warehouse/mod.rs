@@ -635,6 +635,16 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
     for i in order {
         let v = &all[i];
         let result = results[i].take().expect("every view ran");
+        // The partition column is added to every row; a view column of the
+        // same name would be lost beside it.
+        if result.columns.iter().any(|c| c.name == s.partition_column) {
+            bail!(
+                "view {} has a column `{}`, which is the partition column; \
+                 set [partition] column to another name",
+                v.name,
+                s.partition_column
+            );
+        }
         let rule = partition::rule_for(&result, &s.lookups);
         let mut map: Option<&HashMap<String, String>> = None;
         if let Some((l, _)) = rule {
