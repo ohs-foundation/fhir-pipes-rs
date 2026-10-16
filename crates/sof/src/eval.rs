@@ -13,21 +13,30 @@
 //! rule. The SoF-specific functions `getResourceKey()` / `getReferenceKey()`
 //! are registered as custom functions on the engine's registry so they can be
 //! used anywhere in an expression (including over `contained[]`).
+//!
+//! Every path in the view is compiled once, when the view is. Each resource is
+//! converted to the engine's tree form once; the foci of `forEach` and
+//! `repeat` are nodes of that tree, so moving into them copies no JSON.
 
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use octofhir_fhirpath::core::error_code::FP0053;
+use octofhir_fhirpath::core::node::FhirNode;
 use octofhir_fhirpath::evaluator::AsyncNodeEvaluator;
 use octofhir_fhirpath::evaluator::function_registry::{
     EmptyPropagation, FunctionCategory, FunctionMetadata, FunctionSignature, LazyFunctionEvaluator,
     PureFunctionEvaluator,
 };
+use octofhir_fhirpath::evaluator::plan::CompiledPlan;
 use octofhir_fhirpath::{
     Collection, EmptyModelProvider, EvaluationContext, ExpressionNode, FhirPathEngine,
     FhirPathError, FhirPathValue, ModelProvider, create_function_registry,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::column::{ColumnInfo, ColumnType};
 use crate::runner::ViewResult;
@@ -82,24 +91,41 @@ pub fn execute_blocking(view: &ViewDefinition, resources: &[Value]) -> Result<Vi
     })
 }
 
+/// Rows, each its column values in column order.
+type Rows = Vec<Vec<Value>>;
+
+/// Blocks per thread that [`execute_parallel`] aims for, so that a thread that
+/// finishes early has blocks left to take.
+const BLOCKS_PER_THREAD: usize = 16;
+
+/// The most resources in one [`execute_parallel`] block.
+const MAX_BLOCK: usize = 64;
+
 /// Execute a ViewDefinition against in-memory FHIR resources on up to `threads`
 /// OS threads, for non-async callers.
 ///
-/// The view is compiled once and the resources are split into contiguous
-/// chunks, one per thread, each evaluated on its own current-thread Tokio
-/// runtime. Rows come back in input order, the same as [`execute`]. With
-/// `threads <= 1`, or fewer resources than threads, it runs on one thread.
+/// The view is compiled once and the resources are split into small blocks.
+/// Each thread takes the next unclaimed block until none are left, so costly
+/// resources stored together (all of one type, say) are spread over the
+/// threads rather than landing on one. Each thread runs its own current-thread
+/// Tokio runtime. Rows come back in input order, the same as [`execute`]. With
+/// `threads <= 1`, or fewer resources than threads, fewer threads are used.
 ///
 /// # Errors
 ///
-/// Same as [`execute`].
+/// Same as [`execute`]. If several blocks fail, the error of the first of them
+/// in input order is returned; the other threads stop at their next block.
 pub fn execute_parallel(
     view: &ViewDefinition,
     resources: &[Value],
     threads: usize,
 ) -> Result<ViewResult> {
     let threads = threads.clamp(1, resources.len().max(1));
-    let chunk = resources.len().div_ceil(threads).max(1);
+    let block = resources
+        .len()
+        .div_ceil(threads * BLOCKS_PER_THREAD)
+        .clamp(1, MAX_BLOCK);
+    let blocks: Vec<&[Value]> = resources.chunks(block).collect();
     let runtime = || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -114,25 +140,41 @@ pub fn execute_parallel(
             .join()
             .map_err(|_| panicked())?
     })?;
-    let compiled = &compiled;
+    let (compiled, blocks) = (&compiled, &blocks);
+    let next = &AtomicUsize::new(0);
+    let failed = &AtomicBool::new(false);
     std::thread::scope(|s| {
-        let workers: Vec<_> = resources
-            .chunks(chunk)
-            .map(|part| {
-                s.spawn(move || -> Result<Vec<Vec<Value>>> {
+        let workers: Vec<_> = (0..threads.min(blocks.len()))
+            .map(|_| {
+                s.spawn(move || -> Result<Vec<(usize, Result<Rows>)>> {
                     runtime()?.block_on(async {
-                        let mut rows = Vec::new();
-                        for resource in part {
-                            rows.extend(compiled.execute_resource(resource).await?);
+                        let mut done = Vec::new();
+                        while !failed.load(Ordering::Relaxed) {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(part) = blocks.get(i) else { break };
+                            let rows = compiled.execute_block(part).await;
+                            if rows.is_err() {
+                                failed.store(true, Ordering::Relaxed);
+                            }
+                            done.push((i, rows));
                         }
-                        Ok(rows)
+                        Ok(done)
                     })
                 })
             })
             .collect();
-        let mut data = Vec::new();
+        let mut done = Vec::with_capacity(blocks.len());
         for worker in workers {
-            data.extend(worker.join().map_err(|_| panicked())??);
+            done.extend(worker.join().map_err(|_| panicked())??);
+        }
+        done.sort_unstable_by_key(|(i, _)| *i);
+        let parts = done
+            .into_iter()
+            .map(|(_, rows)| rows)
+            .collect::<Result<Vec<_>>>()?;
+        let mut data = Vec::with_capacity(parts.iter().map(Vec::len).sum());
+        for part in parts {
+            data.extend(part);
         }
         let row_count = data.len();
         Ok(ViewResult {
@@ -145,15 +187,14 @@ pub fn execute_parallel(
 
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
-/// Validates the view (columns, name collisions, constants) up front and builds
-/// the FHIRPath engine once, then lets callers stream resources through
-/// [`CompiledView::execute_resource`] without holding the whole dataset in
-/// memory.
+/// Validates the view (columns, name collisions, constants) and compiles every
+/// path up front, building the FHIRPath engine once, then lets callers stream
+/// resources through [`CompiledView::execute_resource`] without holding the
+/// whole dataset in memory.
 pub struct CompiledView {
     ev: Evaluator,
-    selects: Vec<SelectColumn>,
-    where_paths: Vec<String>,
-    shape: Vec<(String, ColumnType)>,
+    selects: Vec<CompiledSelect>,
+    wheres: Vec<Arc<CompiledPlan>>,
     columns: Vec<ColumnInfo>,
 }
 
@@ -188,10 +229,9 @@ impl CompiledView {
             constants,
             engine,
             model,
-            prepared: Default::default(),
         };
 
-        let shape = ev.shape(&view.select)?;
+        let shape = shape(&view.select)?;
         if shape.is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition produces no columns".to_string(),
@@ -206,12 +246,18 @@ impl CompiledView {
             }
         }
 
-        // Validate/normalize every where path up front (constants + ofType
-        // rewrite), so per-resource evaluation just hands strings to the engine.
-        let where_paths = view
+        // Compile every where, forEach, repeat and column path now (constants,
+        // ofType rewrite, parse), so per-resource evaluation runs the compiled
+        // plans with no lookup or parse.
+        let wheres = view
             .where_
             .iter()
-            .map(|w| ev.prepare(&w.path))
+            .map(|w| ev.plan(&ev.prepare(&w.path)?))
+            .collect::<Result<Vec<_>>>()?;
+        let selects = view
+            .select
+            .iter()
+            .map(|s| ev.compile_select(s))
             .collect::<Result<Vec<_>>>()?;
 
         let columns = shape
@@ -221,9 +267,8 @@ impl CompiledView {
 
         Ok(Self {
             ev,
-            selects: view.select.clone(),
-            where_paths,
-            shape,
+            selects,
+            wheres,
             columns,
         })
     }
@@ -247,43 +292,103 @@ impl CompiledView {
         {
             return Ok(Vec::new());
         }
-        for path in &self.where_paths {
-            if !self.ev.eval_where(path, resource).await? {
+        // The resource's one conversion to the engine's tree; every focus
+        // below shares it.
+        let root = FhirPathValue::resource_from_node(FhirNode::from_json(resource));
+        let focus = Focus::new(&root, 0);
+        for plan in &self.wheres {
+            if !self.ev.eval_where(plan, self.ev.ctx(&root, &focus)).await? {
                 return Ok(Vec::new());
             }
         }
 
-        let mut combos = vec![Map::new()];
+        let mut rows = vec![Vec::with_capacity(self.columns.len())];
         for select in &self.selects {
-            let srows = self.ev.eval_select(select, resource, 0).await?;
-            combos = cartesian(&combos, &srows);
+            let srows = self.ev.eval_select(select, &root, &focus).await?;
+            rows = cartesian(rows, srows);
         }
+        Ok(rows)
+    }
 
-        Ok(combos
-            .iter()
-            .map(|row| {
-                self.shape
-                    .iter()
-                    .map(|(name, _)| row.get(name).cloned().unwrap_or(Value::Null))
-                    .collect()
-            })
-            .collect())
+    /// The rows of a run of resources, in order.
+    async fn execute_block(&self, resources: &[Value]) -> Result<Vec<Vec<Value>>> {
+        let mut rows = Vec::new();
+        for resource in resources {
+            rows.extend(self.execute_resource(resource).await?);
+        }
+        Ok(rows)
     }
 }
 
-/// The cartesian product of two row sets, merging each pair of maps.
-fn cartesian(a: &[Map<String, Value>], b: &[Map<String, Value>]) -> Vec<Map<String, Value>> {
-    let mut out = Vec::with_capacity(a.len() * b.len());
-    for x in a {
-        for y in b {
-            let mut merged = x.clone();
-            for (k, v) in y {
-                merged.insert(k.clone(), v.clone());
-            }
-            out.push(merged);
+/// The cartesian product of two row sets, each `left` row followed by each
+/// `right` row. Row parts are column values in column order: a select's
+/// columns are one contiguous run of the view's columns, so joining two parts
+/// is appending one to the other.
+fn cartesian(left: Vec<Vec<Value>>, right: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    if let [only] = left.as_slice()
+        && only.is_empty()
+    {
+        return right;
+    }
+    if let [only] = right.as_slice() {
+        // The common case: one row on the right, appended to each left row in
+        // place.
+        return left
+            .into_iter()
+            .map(|mut row| {
+                row.extend_from_slice(only);
+                row
+            })
+            .collect();
+    }
+    let mut out = Vec::with_capacity(left.len() * right.len());
+    for l in &left {
+        for r in &right {
+            let mut row = Vec::with_capacity(l.len() + r.len());
+            row.extend_from_slice(l);
+            row.extend_from_slice(r);
+            out.push(row);
         }
     }
     out
+}
+
+/// The ordered column shape of a select list, validating `unionAll` branch
+/// consistency.
+fn shape(selects: &[SelectColumn]) -> Result<Vec<(String, ColumnType)>> {
+    let mut cols = Vec::new();
+    for select in selects {
+        cols.extend(shape_of(select)?);
+    }
+    Ok(cols)
+}
+
+fn shape_of(select: &SelectColumn) -> Result<Vec<(String, ColumnType)>> {
+    let mut cols = Vec::new();
+    if let Some(columns) = &select.column {
+        for col in columns {
+            cols.push((col.name.clone(), column_type(col)));
+        }
+    }
+    for nested in &select.select {
+        cols.extend(shape_of(nested)?);
+    }
+    if let Some(branches) = &select.union_all {
+        let mut shapes = branches.iter().map(shape_of).collect::<Result<Vec<_>>>()?;
+        if let Some(first) = shapes.first() {
+            let first_names: Vec<&str> = first.iter().map(|(n, _)| n.as_str()).collect();
+            for other in &shapes[1..] {
+                let names: Vec<&str> = other.iter().map(|(n, _)| n.as_str()).collect();
+                if names != first_names {
+                    return Err(Error::InvalidViewDefinition(
+                        "unionAll branches have mismatched column shape".to_string(),
+                    ));
+                }
+            }
+            cols.extend(shapes.swap_remove(0));
+        }
+    }
+    Ok(cols)
 }
 
 struct Evaluator {
@@ -291,19 +396,55 @@ struct Evaluator {
     constants: std::collections::HashMap<String, String>,
     engine: FhirPathEngine,
     model: Arc<dyn ModelProvider + Send + Sync>,
-    /// Column and forEach paths as the engine sees them, keyed on the path in
-    /// the view. A view has a fixed set of paths but each is evaluated once per
-    /// resource, so preparing (and parsing for a boundary call) once saves a
-    /// parse per path per resource.
-    prepared: std::sync::RwLock<std::collections::HashMap<String, Arc<PreparedPath>>>,
 }
 
-/// A view path ready for evaluation: either a plain prepared expression, or a
-/// `lowBoundary()`/`highBoundary()` call whose base (still unprepared) is
-/// evaluated first and the SoF boundary rules applied to each value.
+/// A view path compiled for the engine: either a plain expression, or a
+/// `lowBoundary()`/`highBoundary()` call whose base is evaluated first and the
+/// SoF boundary rules applied to each value.
 enum PreparedPath {
-    Plain(String),
-    Boundary(String, bool, BoundaryType),
+    Plain(Arc<CompiledPlan>),
+    Boundary(Box<PreparedPath>, bool, BoundaryType),
+}
+
+/// A `select` node with its paths compiled. Its rows are its columns' values
+/// in shape order: its own columns, then each nested select's, then the
+/// `unionAll` branch's.
+struct CompiledSelect {
+    columns: Vec<CompiledColumn>,
+    /// The `forEach` or `forEachOrNull` path, and whether an empty result
+    /// still yields a (null) row. Unused when `repeat` is set.
+    for_each: Option<(PreparedPath, bool)>,
+    repeat: Vec<Arc<CompiledPlan>>,
+    select: Vec<CompiledSelect>,
+    union_all: Option<Vec<CompiledSelect>>,
+    /// The row for an empty `forEachOrNull`.
+    null_row: Vec<Value>,
+}
+
+/// A focus value and its `%rowIndex`, with the evaluation context for them
+/// built on first use and shared by every path evaluated against them: the
+/// `where` filters and top-level columns on the resource, or a select's
+/// columns, `forEach` and nested selects on one element.
+struct Focus<'a> {
+    value: &'a FhirPathValue,
+    rid: i64,
+    ctx: OnceLock<EvaluationContext>,
+}
+
+impl<'a> Focus<'a> {
+    fn new(value: &'a FhirPathValue, rid: i64) -> Self {
+        Self {
+            value,
+            rid,
+            ctx: OnceLock::new(),
+        }
+    }
+}
+
+struct CompiledColumn {
+    name: String,
+    collection: bool,
+    path: PreparedPath,
 }
 
 impl Evaluator {
@@ -316,19 +457,95 @@ impl Evaluator {
         Ok(rewrite_of_type(&substituted))
     }
 
-    /// Evaluate a (prepared) FHIRPath expression against `focus`, with
-    /// `%rowIndex` bound to `rid`, returning the result as a FHIRPath collection
-    /// of JSON values.
-    async fn eval_prepared(&self, path: &str, focus: &Value, rid: i64) -> Result<Vec<Value>> {
-        self.eval_in(path, &self.context(focus, rid)).await
+    /// Parse a prepared expression into a plan the engine runs directly.
+    fn plan(&self, prepared: &str) -> Result<Arc<CompiledPlan>> {
+        self.engine
+            .compile_plan(prepared)
+            .map_err(|e| Error::FhirPath(e.to_string()))
+    }
+
+    /// Compile a column or forEach path.
+    ///
+    /// `lowBoundary()`/`highBoundary()` diverge from the engine's stock
+    /// behaviour, so they are split off here: the base is compiled on its own
+    /// and the SoF precision-boundary rules are applied to each of its values.
+    /// The temporal flavour (`date`/`dateTime`/`time`) is taken from a leading
+    /// `ofType(T)` on the base before the `ofType` rewrite collapses it.
+    fn compile_path(&self, path: &str) -> Result<PreparedPath> {
+        Ok(match boundary_call(path) {
+            Some((base, low, hint)) => {
+                PreparedPath::Boundary(Box::new(self.compile_path(&base)?), low, hint)
+            }
+            None => PreparedPath::Plain(self.plan(&self.prepare(path)?)?),
+        })
+    }
+
+    fn compile_select(&self, select: &SelectColumn) -> Result<CompiledSelect> {
+        let columns = select
+            .column
+            .iter()
+            .flatten()
+            .map(|col| {
+                Ok(CompiledColumn {
+                    name: col.name.clone(),
+                    collection: col.collection.unwrap_or(false),
+                    path: self.compile_path(&col.path)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let repeat = select
+            .repeat
+            .iter()
+            .map(|p| self.plan(&self.prepare(p)?))
+            .collect::<Result<Vec<_>>>()?;
+        // forEach wins when both are given; forEachOrNull's presence alone
+        // decides whether an empty result keeps a row.
+        let for_each = match (repeat.is_empty(), select.for_each.as_deref()) {
+            (false, _) => None,
+            (true, Some(path)) => Some(path),
+            (true, None) => select.for_each_or_null.as_deref(),
+        }
+        .map(|path| self.compile_path(path))
+        .transpose()?
+        .map(|path| (path, select.for_each_or_null.is_some()));
+        let nested = select
+            .select
+            .iter()
+            .map(|s| self.compile_select(s))
+            .collect::<Result<Vec<_>>>()?;
+        let union_all = select
+            .union_all
+            .as_ref()
+            .map(|branches| {
+                branches
+                    .iter()
+                    .map(|b| self.compile_select(b))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let mut null_row = Vec::new();
+        null_fill(select, &mut null_row);
+        Ok(CompiledSelect {
+            columns,
+            for_each,
+            repeat,
+            select: nested,
+            union_all,
+            null_row,
+        })
     }
 
     /// An evaluation context with `focus` as its input and `%rowIndex` bound to
-    /// `rid`. Building one copies the focus and sets up the engine's variables,
-    /// so callers evaluating several paths against the same focus build it once.
-    fn context(&self, focus: &Value, rid: i64) -> EvaluationContext {
+    /// `rid`. Building one sets up the engine's variables, so callers
+    /// evaluating several paths against the same focus build it once.
+    ///
+    /// `root` is the resource being evaluated; `focus` is it or a node within
+    /// it. The context does not bind `root` yet: nested contexts take the focus
+    /// as their root, so `getReferenceKey()` on a `#` reference inside
+    /// `forEach` looks in the focus for `contained` (issue #57).
+    fn context(&self, _root: &FhirPathValue, focus: &FhirPathValue, rid: i64) -> EvaluationContext {
         let ctx = EvaluationContext::new(
-            Collection::from(vec![FhirPathValue::resource(focus.clone())]),
+            Collection::single(focus.clone()),
             self.model.clone(),
             None,
             None,
@@ -340,26 +557,25 @@ impl Evaluator {
         ctx
     }
 
-    /// Evaluate a (prepared) FHIRPath expression in an existing context.
-    async fn eval_in(&self, path: &str, ctx: &EvaluationContext) -> Result<Vec<Value>> {
-        let result = self
-            .engine
-            .evaluate(path, ctx)
-            .await
-            .map_err(|e| Error::FhirPath(e.to_string()))?;
-
-        Ok(collection_to_json(&result.value))
+    /// The context for `focus`, built on first use.
+    fn ctx<'f>(&self, root: &FhirPathValue, focus: &'f Focus<'_>) -> &'f EvaluationContext {
+        focus
+            .ctx
+            .get_or_init(|| self.context(root, focus.value, focus.rid))
     }
 
-    /// Prepare and evaluate a path in one step.
-    ///
-    /// `lowBoundary()`/`highBoundary()` diverge from the engine's stock
-    /// behaviour, so they are intercepted here: the base is evaluated by the
-    /// engine and the SoF precision-boundary rules are applied to each value.
-    /// The temporal flavour (`date`/`dateTime`/`time`) is taken from a leading
-    /// `ofType(T)` on the base before the `ofType` rewrite collapses it.
-    async fn eval_path(&self, path: &str, ctx: &EvaluationContext) -> Result<Vec<Value>> {
-        match &*self.prepared_path(path)? {
+    /// Run a compiled plan in a context.
+    async fn eval_plan(&self, plan: &CompiledPlan, ctx: &EvaluationContext) -> Result<Collection> {
+        self.engine
+            .evaluate_plan(plan, ctx)
+            .await
+            .map(|r| r.value)
+            .map_err(|e| Error::FhirPath(e.to_string()))
+    }
+
+    /// Evaluate a path in a context, as JSON values.
+    async fn eval_path(&self, path: &PreparedPath, ctx: &EvaluationContext) -> Result<Vec<Value>> {
+        match path {
             PreparedPath::Boundary(base, low, hint) => {
                 let base_vals = Box::pin(self.eval_path(base, ctx)).await?;
                 Ok(base_vals
@@ -368,110 +584,65 @@ impl Evaluator {
                     .filter(|v| !v.is_null())
                     .collect())
             }
-            PreparedPath::Plain(prepared) => self.eval_in(prepared, ctx).await,
+            PreparedPath::Plain(plan) => Ok(collection_to_json(&self.eval_plan(plan, ctx).await?)),
         }
     }
 
-    /// The prepared form of a view path, computed on first use and cached.
-    fn prepared_path(&self, path: &str) -> Result<Arc<PreparedPath>> {
-        if let Some(p) = self.prepared.read().expect("prepared cache").get(path) {
-            return Ok(p.clone());
+    /// Evaluate a path in a context, as foci for nested evaluation.
+    async fn eval_foci(
+        &self,
+        path: &PreparedPath,
+        ctx: &EvaluationContext,
+    ) -> Result<Vec<FhirPathValue>> {
+        match path {
+            PreparedPath::Plain(plan) => Ok(focus_values(&self.eval_plan(plan, ctx).await?)),
+            PreparedPath::Boundary(..) => Ok(self
+                .eval_path(path, ctx)
+                .await?
+                .into_iter()
+                .map(FhirPathValue::resource)
+                .collect()),
         }
-        let p = Arc::new(match boundary_call(path) {
-            Some((base, low, hint)) => PreparedPath::Boundary(base, low, hint),
-            None => PreparedPath::Plain(self.prepare(path)?),
-        });
-        self.prepared
-            .write()
-            .expect("prepared cache")
-            .insert(path.to_string(), p.clone());
-        Ok(p)
-    }
-
-    /// The ordered column shape of a select list, validating `unionAll` branch
-    /// consistency.
-    fn shape(&self, selects: &[SelectColumn]) -> Result<Vec<(String, ColumnType)>> {
-        let mut cols = Vec::new();
-        for select in selects {
-            cols.extend(self.shape_of(select)?);
-        }
-        Ok(cols)
-    }
-
-    fn shape_of(&self, select: &SelectColumn) -> Result<Vec<(String, ColumnType)>> {
-        let mut cols = Vec::new();
-        if let Some(columns) = &select.column {
-            for col in columns {
-                cols.push((col.name.clone(), column_type(col)));
-            }
-        }
-        for nested in &select.select {
-            cols.extend(self.shape_of(nested)?);
-        }
-        if let Some(branches) = &select.union_all {
-            let mut shapes = branches
-                .iter()
-                .map(|b| self.shape_of(b))
-                .collect::<Result<Vec<_>>>()?;
-            if let Some(first) = shapes.first() {
-                let first_names: Vec<&str> = first.iter().map(|(n, _)| n.as_str()).collect();
-                for other in &shapes[1..] {
-                    let names: Vec<&str> = other.iter().map(|(n, _)| n.as_str()).collect();
-                    if names != first_names {
-                        return Err(Error::InvalidViewDefinition(
-                            "unionAll branches have mismatched column shape".to_string(),
-                        ));
-                    }
-                }
-                cols.extend(shapes.swap_remove(0));
-            }
-        }
-        Ok(cols)
     }
 
     /// Evaluate a select node against a focus value, yielding partial rows.
     async fn eval_select(
         &self,
-        select: &SelectColumn,
-        ctx: &Value,
-        rid: i64,
-    ) -> Result<Vec<Map<String, Value>>> {
-        let for_each = select.for_each.as_deref();
-        let for_each_or_null = select.for_each_or_null.as_deref();
-
+        select: &CompiledSelect,
+        root: &FhirPathValue,
+        focus: &Focus<'_>,
+    ) -> Result<Vec<Vec<Value>>> {
         // `repeat` recursively traverses the focus, collecting every node reached
         // by transitively re-applying the repeat path(s) (preorder, the focus
         // node itself excluded). %rowIndex tracks position in the flattened list.
         if !select.repeat.is_empty() {
-            let paths = select
-                .repeat
-                .iter()
-                .map(|p| self.prepare(p))
-                .collect::<Result<Vec<_>>>()?;
             let mut foci = Vec::new();
-            self.repeat_collect(&paths, ctx, &mut foci).await?;
+            self.repeat_collect(&select.repeat, root, focus.value, &mut foci)
+                .await?;
             let mut rows = Vec::new();
-            for (idx, focus) in foci.iter().enumerate() {
-                rows.extend(Box::pin(self.eval_level(select, focus, idx as i64)).await?);
+            for (idx, node) in foci.iter().enumerate() {
+                let node = Focus::new(node, idx as i64);
+                rows.extend(Box::pin(self.eval_level(select, root, &node)).await?);
             }
             return Ok(rows);
         }
 
-        if let Some(path) = for_each.or(for_each_or_null) {
-            let elements = self.eval_path(path, &self.context(ctx, rid)).await?;
+        if let Some((path, or_null)) = &select.for_each {
+            let elements = self.eval_foci(path, self.ctx(root, focus)).await?;
             if elements.is_empty() {
-                if for_each_or_null.is_some() {
-                    return Ok(vec![self.null_row(select)]);
+                if *or_null {
+                    return Ok(vec![select.null_row.clone()]);
                 }
                 return Ok(Vec::new());
             }
             let mut rows = Vec::new();
             for (idx, elem) in elements.iter().enumerate() {
-                rows.extend(Box::pin(self.eval_level(select, elem, idx as i64)).await?);
+                let elem = Focus::new(elem, idx as i64);
+                rows.extend(Box::pin(self.eval_level(select, root, &elem)).await?);
             }
             Ok(rows)
         } else {
-            self.eval_level(select, ctx, rid).await
+            self.eval_level(select, root, focus).await
         }
     }
 
@@ -479,30 +650,27 @@ impl Evaluator {
     /// already-focused value (after any forEach has selected the element).
     async fn eval_level(
         &self,
-        select: &SelectColumn,
-        ctx: &Value,
-        rid: i64,
-    ) -> Result<Vec<Map<String, Value>>> {
-        let mut own = Map::new();
-        if let Some(columns) = &select.column {
-            let ectx = self.context(ctx, rid);
-            for col in columns {
-                own.insert(col.name.clone(), self.column_value(col, &ectx).await?);
-            }
+        select: &CompiledSelect,
+        root: &FhirPathValue,
+        focus: &Focus<'_>,
+    ) -> Result<Vec<Vec<Value>>> {
+        let mut own = Vec::with_capacity(select.null_row.len());
+        for col in &select.columns {
+            own.push(self.column_value(col, self.ctx(root, focus)).await?);
         }
         let mut combos = vec![own];
 
         for nested in &select.select {
-            let nrows = Box::pin(self.eval_select(nested, ctx, rid)).await?;
-            combos = cartesian(&combos, &nrows);
+            let nrows = Box::pin(self.eval_select(nested, root, focus)).await?;
+            combos = cartesian(combos, nrows);
         }
 
         if let Some(branches) = &select.union_all {
             let mut branch_rows = Vec::new();
             for branch in branches {
-                branch_rows.extend(Box::pin(self.eval_select(branch, ctx, rid)).await?);
+                branch_rows.extend(Box::pin(self.eval_select(branch, root, focus)).await?);
             }
-            combos = cartesian(&combos, &branch_rows);
+            combos = cartesian(combos, branch_rows);
         }
 
         Ok(combos)
@@ -513,63 +681,43 @@ impl Evaluator {
     /// is not emitted.
     async fn repeat_collect(
         &self,
-        paths: &[String],
-        node: &Value,
-        out: &mut Vec<Value>,
+        plans: &[Arc<CompiledPlan>],
+        root: &FhirPathValue,
+        node: &FhirPathValue,
+        out: &mut Vec<FhirPathValue>,
     ) -> Result<()> {
         // Iterative worklist (preorder) to avoid recursive async lifetimes.
-        let mut stack: Vec<Value> = Vec::new();
-        // Seed in reverse so that, popped LIFO, children come out in source order.
-        let mut seed = Vec::new();
-        for path in paths {
-            seed.extend(self.eval_prepared(path, node, 0).await?);
-        }
-        for child in seed.into_iter().rev() {
-            stack.push(child);
-        }
+        // Pushed in reverse so that, popped LIFO, children come out in source
+        // order.
+        let mut stack: Vec<FhirPathValue> = Vec::new();
+        let seed = self.repeat_children(plans, root, node).await?;
+        stack.extend(seed.into_iter().rev());
         while let Some(current) = stack.pop() {
-            out.push(current.clone());
-            let mut children = Vec::new();
-            for path in paths {
-                children.extend(self.eval_prepared(path, &current, 0).await?);
-            }
-            for child in children.into_iter().rev() {
-                stack.push(child);
-            }
+            let children = self.repeat_children(plans, root, &current).await?;
+            out.push(current);
+            stack.extend(children.into_iter().rev());
         }
         Ok(())
     }
 
-    /// An all-null row for an empty `forEachOrNull`. Per spec, columns whose path
-    /// is `%rowIndex` are bound to 0 rather than null.
-    fn null_row(&self, select: &SelectColumn) -> Map<String, Value> {
-        let mut row = Map::new();
-        self.null_fill(select, &mut row);
-        row
+    /// The results of every `repeat` path applied to `node`, in path order.
+    async fn repeat_children(
+        &self,
+        plans: &[Arc<CompiledPlan>],
+        root: &FhirPathValue,
+        node: &FhirPathValue,
+    ) -> Result<Vec<FhirPathValue>> {
+        let ctx = self.context(root, node, 0);
+        let mut children = Vec::new();
+        for plan in plans {
+            children.extend(focus_values(&self.eval_plan(plan, &ctx).await?));
+        }
+        Ok(children)
     }
 
-    fn null_fill(&self, select: &SelectColumn, row: &mut Map<String, Value>) {
-        if let Some(columns) = &select.column {
-            for col in columns {
-                let v = if col.path.trim() == "%rowIndex" {
-                    Value::Number(0.into())
-                } else {
-                    Value::Null
-                };
-                row.insert(col.name.clone(), v);
-            }
-        }
-        for nested in &select.select {
-            self.null_fill(nested, row);
-        }
-        if let Some(first) = select.union_all.as_ref().and_then(|b| b.first()) {
-            self.null_fill(first, row);
-        }
-    }
-
-    async fn column_value(&self, col: &Column, ctx: &EvaluationContext) -> Result<Value> {
+    async fn column_value(&self, col: &CompiledColumn, ctx: &EvaluationContext) -> Result<Value> {
         let values = self.eval_path(&col.path, ctx).await?;
-        if col.collection.unwrap_or(false) {
+        if col.collection {
             return Ok(Value::Array(values));
         }
         match values.len() {
@@ -585,8 +733,8 @@ impl Evaluator {
     /// Evaluate a top-level `where` filter. The expression must yield a boolean
     /// (or empty); a non-boolean result is an error per the spec. Empty → row
     /// excluded.
-    async fn eval_where(&self, path: &str, resource: &Value) -> Result<bool> {
-        let coll = self.eval_prepared(path, resource, 0).await?;
+    async fn eval_where(&self, plan: &CompiledPlan, ctx: &EvaluationContext) -> Result<bool> {
+        let coll = collection_to_json(&self.eval_plan(plan, ctx).await?);
         if coll.is_empty() {
             return Ok(false);
         }
@@ -597,6 +745,44 @@ impl Evaluator {
         }
         Ok(coll.iter().any(|v| v == &Value::Bool(true)))
     }
+}
+
+/// The all-null row for an empty `forEachOrNull`, in shape order. Per spec,
+/// columns whose path is `%rowIndex` are bound to 0 rather than null.
+fn null_fill(select: &SelectColumn, row: &mut Vec<Value>) {
+    if let Some(columns) = &select.column {
+        for col in columns {
+            row.push(if col.path.trim() == "%rowIndex" {
+                Value::Number(0.into())
+            } else {
+                Value::Null
+            });
+        }
+    }
+    for nested in &select.select {
+        null_fill(nested, row);
+    }
+    if let Some(first) = select.union_all.as_ref().and_then(|b| b.first()) {
+        null_fill(first, row);
+    }
+}
+
+/// The items of a `forEach` or `repeat` result as foci for nested evaluation:
+/// each a resource value over its node, as if built from its JSON, with
+/// null and empty items dropped. A node is shared with the root resource,
+/// not copied; other values (primitives, nested collections) go through JSON.
+fn focus_values(coll: &Collection) -> Vec<FhirPathValue> {
+    coll.iter()
+        .filter_map(|v| match v {
+            FhirPathValue::Resource(node, _, _) if !node.is_null() => {
+                Some(FhirPathValue::resource_from_node(node.clone()))
+            }
+            other => {
+                let json = value_to_json(other);
+                (!json.is_null()).then(|| FhirPathValue::resource(json))
+            }
+        })
+        .collect()
 }
 
 /// Convert a FHIRPath [`Collection`] into a flat `Vec` of JSON values, dropping
@@ -716,15 +902,24 @@ pub(crate) fn ansi_type_tag(col: &Column) -> Option<&str> {
 // references resolving into `contained[]`). The first argument (if any) is a
 // bare type identifier read directly off the AST, never evaluated.
 
+/// A value's tree: the node itself for a resource or element value, else one
+/// built from its JSON form (a primitive has no fields, so lookups find none).
+fn value_node(v: &FhirPathValue) -> Cow<'_, FhirNode> {
+    match v {
+        FhirPathValue::Resource(node, _, _) => Cow::Borrowed(node),
+        other => Cow::Owned(FhirNode::from_json(&other.to_json_value())),
+    }
+}
+
 /// The resource type carried by the contained resource with the given local id,
 /// if the root resource lists it under `contained[]`.
-fn contained_type(root: &Value, local_id: &str) -> Option<String> {
+fn contained_type(root: &FhirNode, local_id: &str) -> Option<String> {
     root.get("contained")
-        .and_then(Value::as_array)
+        .and_then(FhirNode::as_array)
         .into_iter()
         .flatten()
-        .find(|c| c.get("id").and_then(Value::as_str) == Some(local_id))
-        .and_then(|c| c.get("resourceType").and_then(Value::as_str))
+        .find(|c| c.get("id").and_then(FhirNode::as_str) == Some(local_id))
+        .and_then(|c| c.get("resourceType").and_then(FhirNode::as_str))
         .map(str::to_string)
 }
 
@@ -732,15 +927,25 @@ fn contained_type(root: &Value, local_id: &str) -> Option<String> {
 /// references key on the id (filtered by the optional expected type). Fragment
 /// `#id` references resolve into the root resource's `contained[]` and key on
 /// the local id, so the value matches `getResourceKey()` on that contained
-/// resource. Absolute URL and `urn:` references are not keyed.
-fn reference_key(item: &Value, root: &Value, want_type: Option<&str>) -> Option<String> {
+/// resource. Absolute URL and `urn:` references are not keyed. `root` is
+/// called only for a fragment reference.
+fn reference_key<'a>(
+    item: &FhirNode,
+    root: impl FnOnce() -> Option<&'a FhirNode>,
+    want_type: Option<&str>,
+) -> Option<String> {
     let reference = item.get("reference")?.as_str()?;
     if let Some(local) = reference.strip_prefix('#') {
         if local.is_empty() {
             return None;
         }
-        let actual = contained_type(root, local)
-            .or_else(|| item.get("type").and_then(Value::as_str).map(str::to_string));
+        let actual = root()
+            .and_then(|root| contained_type(root, local))
+            .or_else(|| {
+                item.get("type")
+                    .and_then(FhirNode::as_str)
+                    .map(str::to_string)
+            });
         return match (want_type, actual.as_deref()) {
             (Some(t), Some(a)) if t != a => None,
             (Some(_), None) => None,
@@ -763,16 +968,13 @@ fn reference_key(item: &Value, root: &Value, want_type: Option<&str>) -> Option<
     }
 }
 
-/// The root resource JSON from the evaluation context, falling back to the
+/// The root resource from the evaluation context, falling back to the first
 /// function input if no root is set.
-fn root_json(context: &EvaluationContext, input: &Collection) -> Value {
-    if let Some(root) = context.root_resource_value() {
-        root.to_json_value()
-    } else if let Some(first) = input.first() {
-        first.to_json_value()
-    } else {
-        Value::Null
-    }
+fn root_node(context: &EvaluationContext, input: &Collection) -> Option<FhirNode> {
+    let root = context
+        .root_resource_value()
+        .or_else(|| input.first().cloned())?;
+    Some(value_node(&root).into_owned())
 }
 
 struct GetResourceKey;
@@ -790,10 +992,10 @@ impl LazyFunctionEvaluator for GetResourceKey {
         let values: Vec<FhirPathValue> = input
             .iter()
             .filter_map(|v| {
-                v.to_json_value()
+                value_node(v)
                     .get("id")
-                    .and_then(Value::as_str)
-                    .map(|id| FhirPathValue::string(id.to_string()))
+                    .and_then(FhirNode::as_str)
+                    .map(FhirPathValue::string)
             })
             .collect();
         Ok(octofhir_fhirpath::EvaluationResult::from_values(values))
@@ -823,10 +1025,17 @@ impl LazyFunctionEvaluator for GetReferenceKey {
             Some(node) => Some(ast_type_name(node)?),
             None => None,
         };
-        let root = root_json(context, &input);
+        // Looked up only for a `#` reference, and then once.
+        let root = OnceCell::new();
         let values: Vec<FhirPathValue> = input
             .iter()
-            .filter_map(|v| reference_key(&v.to_json_value(), &root, want_type.as_deref()))
+            .filter_map(|v| {
+                reference_key(
+                    &value_node(v),
+                    || root.get_or_init(|| root_node(context, &input)).as_ref(),
+                    want_type.as_deref(),
+                )
+            })
             .map(FhirPathValue::string)
             .collect();
         Ok(octofhir_fhirpath::EvaluationResult::from_values(values))
@@ -1088,4 +1297,143 @@ fn last_day_of_month(year_month: &str) -> String {
         _ => 30,
     };
     format!("{last:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn view(v: Value) -> ViewDefinition {
+        ViewDefinition::from_json(&v).expect("parse ViewDefinition")
+    }
+
+    fn patient(i: usize, names: usize) -> Value {
+        let name: Vec<Value> = (0..names)
+            .map(|n| json!({ "family": format!("f{i}-{n}") }))
+            .collect();
+        json!({ "resourceType": "Patient", "id": format!("p{i}"), "name": name })
+    }
+
+    #[test]
+    fn parallel_rows_match_sequential_with_uneven_cost() {
+        // The costly resources (many names) all come first, as when one
+        // resource type is stored together; Observations are skipped.
+        let resources: Vec<Value> = (0..1000)
+            .map(|i| match i {
+                0..100 => patient(i, 40),
+                _ if i % 3 == 0 => json!({ "resourceType": "Observation", "id": format!("o{i}") }),
+                _ => patient(i, i % 4),
+            })
+            .collect();
+        let v = view(json!({
+            "resource": "Patient",
+            "select": [
+                { "column": [{ "name": "id", "path": "getResourceKey()" }] },
+                { "forEachOrNull": "name", "column": [
+                    { "name": "family", "path": "family" },
+                    { "name": "i", "path": "%rowIndex" }
+                ] }
+            ]
+        }));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let sequential = rt.block_on(execute(&v, &resources)).unwrap();
+        // forEachOrNull keeps one row for a Patient with no names.
+        let expected: usize = (100..1000)
+            .filter(|i| i % 3 != 0)
+            .map(|i| (i % 4).max(1))
+            .sum::<usize>()
+            + 100 * 40;
+        assert_eq!(sequential.row_count, expected);
+        for threads in [1, 3, 8, 64, 5000] {
+            let parallel = execute_parallel(&v, &resources, threads).unwrap();
+            assert_eq!(parallel.data, sequential.data, "{threads} threads");
+        }
+    }
+
+    #[test]
+    fn parallel_returns_an_error_from_any_block() {
+        let mut resources: Vec<Value> = (0..500).map(|i| patient(i, 1)).collect();
+        resources[300] = patient(300, 2);
+        let v = view(json!({
+            "resource": "Patient",
+            "select": [{ "column": [{ "name": "family", "path": "name.family" }] }]
+        }));
+        let err = execute_parallel(&v, &resources, 4).unwrap_err();
+        assert!(err.to_string().contains("multiple values"), "{err}");
+    }
+
+    #[test]
+    fn paths_are_checked_when_the_view_is_compiled() {
+        // Column paths are compiled with the view, so a bad one fails even
+        // when no resource reaches it.
+        for path in ["%missing", "name.where(", "repeat"] {
+            let v = view(json!({
+                "resource": "Patient",
+                "select": [{ "forEach": "contact", "column": [{ "name": "c", "path": path }] }]
+            }));
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(execute(&v, &[patient(1, 1)]));
+            if path == "repeat" {
+                // A plain identifier, not a call: it compiles.
+                assert!(result.is_ok(), "{path}: {result:?}");
+            } else {
+                assert!(result.is_err(), "{path}: {result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nested_foci_keep_contained_keys() {
+        // forEach foci are nodes of the resource; keys read off them match
+        // the ones read off the resource.
+        let resource = json!({
+            "resourceType": "Patient",
+            "id": "p1",
+            "contained": [
+                { "resourceType": "Practitioner", "id": "c1" },
+                { "resourceType": "Organization", "id": "c2" }
+            ],
+            "generalPractitioner": [
+                { "reference": "#c1" },
+                { "reference": "Practitioner/x" }
+            ]
+        });
+        let v = view(json!({
+            "resource": "Patient",
+            "select": [
+                { "column": [
+                    { "name": "gp", "path": "generalPractitioner.getReferenceKey(Practitioner)", "collection": true }
+                ] },
+                { "forEach": "contained", "column": [
+                    { "name": "key", "path": "getResourceKey()" },
+                    { "name": "type", "path": "resourceType" }
+                ] }
+            ]
+        }));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute(&v, &[resource])).unwrap();
+        assert_eq!(
+            result.data,
+            vec![
+                vec![json!(["c1", "x"]), json!("c1"), json!("Practitioner")],
+                vec![json!(["c1", "x"]), json!("c2"), json!("Organization")],
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_resource_future_is_send() {
+        // Callers may spawn per-resource evaluation on a multi-threaded runtime.
+        fn assert_send<T: Send>(_: T) {}
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let compiled = rt
+            .block_on(CompiledView::compile(&view(json!({
+                "resource": "Patient",
+                "select": [{ "column": [{ "name": "id", "path": "id" }] }]
+            }))))
+            .unwrap();
+        let resource = patient(1, 1);
+        assert_send(compiled.execute_resource(&resource));
+    }
 }
