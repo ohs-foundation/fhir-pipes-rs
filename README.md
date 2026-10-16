@@ -483,6 +483,9 @@ cargo build --release --no-default-features        # without PostgreSQL
 `fhir-packages` adds over 100 crates. Asking for an option a build lacks says
 which feature it needs.
 
+The binary uses [mimalloc](https://github.com/microsoft/mimalloc), compiled
+from C source, as its memory allocator in place of the system one.
+
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
 aarch64, statically linked against musl) and Windows (x86_64), as single files
 with no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the

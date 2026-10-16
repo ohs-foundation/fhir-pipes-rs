@@ -25,6 +25,11 @@ mod write;
 
 use clap::Parser;
 
+// mimalloc in place of the system allocator: much less time in malloc and free
+// for view evaluation and the Location transform, and a lower peak RSS.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let cli = cli::Cli::parse();
     let profile = cli.profile.as_deref();
