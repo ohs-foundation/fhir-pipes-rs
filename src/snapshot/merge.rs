@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
+use crate::fhir::head::Head;
 use crate::fhir::location::{GEOJSON_CONTENT_TYPE, is_boundary_extension};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
@@ -69,26 +70,10 @@ fn inline_boundary(resource: &mut Value, url: &str, bytes: &[u8], extra: &[Strin
     false
 }
 
-/// Just enough of a Location to upsert by id and compare watermarks -- a
-/// small typed struct instead of a full `Value` parse, measured 3.6x faster.
-#[derive(serde::Deserialize)]
-struct Head {
-    id: Option<String>,
-    meta: Option<Meta>,
-}
-
-#[derive(serde::Deserialize)]
-struct Meta {
-    #[serde(rename = "lastUpdated")]
-    last_updated: Option<String>,
-}
-
 /// A resource line's id and meta.lastUpdated; `None` without an id.
 pub fn id_and_updated(text: &str) -> Option<(String, Option<String>)> {
-    let head: Head = serde_json::from_str(text).ok()?;
-    let id = head.id?;
-    let updated = head.meta.and_then(|m| m.last_updated);
-    Some((id, updated))
+    let head = Head::parse(text).ok()??;
+    Some((head.id?, head.last_updated))
 }
 
 /// Stream `locations.ndjson` and `.incoming.ndjson` into a new

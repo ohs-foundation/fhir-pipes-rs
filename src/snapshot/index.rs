@@ -4,9 +4,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::Value;
-
 use crate::error::Result;
+use crate::fhir::head::Head;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 
@@ -21,9 +20,7 @@ pub fn index_by_id(
     let mut index = HashMap::new();
     for line in NdjsonReader::open(path)? {
         let line = line?;
-        let id = serde_json::from_str::<Value>(&line.text)
-            .ok()
-            .and_then(|v| v.get("id")?.as_str().map(str::to_string));
+        let id = Head::parse(&line.text).ok().flatten().and_then(|h| h.id);
         match id {
             Some(id) => match index.entry(id) {
                 std::collections::hash_map::Entry::Occupied(e) => report.add(

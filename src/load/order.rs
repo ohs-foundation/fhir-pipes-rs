@@ -17,9 +17,20 @@ use crate::load::bundle::type_and_id;
 /// points at on Location and Organization.
 pub fn parent_key(resource: &Value) -> Option<(&str, &str)> {
     let reference = resource.get("partOf")?.get("reference")?.as_str()?;
+    reference_key(
+        reference,
+        resource.get("resourceType").and_then(Value::as_str),
+    )
+}
+
+/// `parent_key` from the `partOf.reference` and `resourceType` strings.
+pub fn reference_key<'a>(
+    reference: &'a str,
+    resource_type: Option<&'a str>,
+) -> Option<(&'a str, &'a str)> {
     let (t, id) = match type_and_id(reference) {
         Some(key) => key,
-        None => (resource.get("resourceType")?.as_str()?, reference),
+        None => (resource_type?, reference),
     };
     (!t.is_empty() && !id.is_empty()).then_some((t, id))
 }
