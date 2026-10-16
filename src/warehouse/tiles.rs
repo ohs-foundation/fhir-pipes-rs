@@ -22,9 +22,10 @@ const POINT_COLS: &str = "id, name, type, status, admin1_name, admin2_name, admi
     managing_organization, part_of, last_updated,
     round(position_longitude, 5) AS lon, round(position_latitude, 5) AS lat";
 
-pub fn build(s: &Settings) -> Result<()> {
-    let locations = s.parquet_dir().join("locations");
-    let countries = countries(&locations, &s.tile_countries)?;
+/// Build the archives from the Location table at `locations`: the one this run
+/// wrote, else the live one.
+pub fn build(s: &Settings, locations: &Path) -> Result<()> {
+    let countries = countries(locations, &s.tile_countries)?;
     println!("== tiles ({})", countries.join(", "));
     let out = s.data.join("tiles");
     fs::create_dir_all(&out)?;

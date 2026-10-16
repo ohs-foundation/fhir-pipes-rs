@@ -156,7 +156,8 @@ fn default_push_exclude() -> Vec<String> {
     vec![".DS_Store".into()]
 }
 
-/// `[catalog]`: write catalog.sql, a DuckDB view per table (see catalog.rs).
+/// `[catalog]`: write catalog.sql, a DuckDB view per table, and optionally
+/// catalog.spark.sql, a Spark SQL table per table (see catalog.rs).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogFile {
@@ -173,6 +174,17 @@ pub struct CatalogFile {
     /// SQL run before the views when building catalog.duckdb, such as a
     /// `CREATE SECRET` for s3:// (relative to this file).
     pub duckdb_setup: Option<PathBuf>,
+    /// Also write catalog.spark.sql: a Spark SQL table per warehouse table.
+    #[serde(default)]
+    pub spark: bool,
+    /// Where Spark reads the warehouse directory: s3a://, hdfs://, file:, or
+    /// a path on the Spark machine (default: the warehouse directory).
+    pub spark_location: Option<String>,
+    /// The Spark database the tables go in (default `fhir`).
+    pub spark_database: Option<String>,
+    /// Spark SQL appended after the tables, such as views joining them
+    /// (relative to this file).
+    pub spark_extra: Option<PathBuf>,
 }
 
 /// `[catalog]`, with its paths resolved.
@@ -182,6 +194,17 @@ pub struct Catalog {
     pub extra: Option<PathBuf>,
     pub duckdb_file: bool,
     pub duckdb_setup: Option<PathBuf>,
+    /// catalog.spark.sql, when `spark = true`.
+    pub spark: Option<Spark>,
+}
+
+/// The Spark settings of `[catalog]`.
+#[derive(Debug, Clone)]
+pub struct Spark {
+    /// Unset: the warehouse directory, as a file: URL.
+    pub location: Option<String>,
+    pub database: String,
+    pub extra: Option<PathBuf>,
 }
 
 /// `[database]`: load the view tables into PostgreSQL (see database.rs).
@@ -441,12 +464,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         lookups: file.partition.lookup,
         tile_countries: countries,
         push: file.push,
-        catalog: file.catalog.map(|c| Catalog {
-            base_url: c.base_url.filter(|b| !b.is_empty()),
-            extra: c.extra.map(|p| resolve(&base, &p)),
-            duckdb_file: c.duckdb_file,
-            duckdb_setup: c.duckdb_setup.map(|p| resolve(&base, &p)),
-        }),
+        catalog: file.catalog.map(|c| catalog(c, &base)).transpose()?,
         database: file.database.map(|d| Database {
             url_env: d
                 .url_env
@@ -471,6 +489,31 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         reuse_raw: o.reuse_raw,
         full: o.full,
         dry_run: o.dry_run,
+    })
+}
+
+fn catalog(c: CatalogFile, base: &Path) -> Result<Catalog> {
+    let spark = if c.spark {
+        Some(Spark {
+            location: c.spark_location.filter(|l| !l.is_empty()),
+            database: c
+                .spark_database
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "fhir".into()),
+            extra: c.spark_extra.map(|p| resolve(base, &p)),
+        })
+    } else {
+        if c.spark_location.is_some() || c.spark_database.is_some() || c.spark_extra.is_some() {
+            bail!("[catalog] spark_location, spark_database and spark_extra need spark = true");
+        }
+        None
+    };
+    Ok(Catalog {
+        base_url: c.base_url.filter(|b| !b.is_empty()),
+        extra: c.extra.map(|p| resolve(base, &p)),
+        duckdb_file: c.duckdb_file,
+        duckdb_setup: c.duckdb_setup.map(|p| resolve(base, &p)),
+        spark,
     })
 }
 
@@ -553,6 +596,36 @@ mod tests {
             err.to_string().contains("use one way to authenticate"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn spark_settings_default_and_need_spark() {
+        let s = |text: &str| {
+            let file: File = toml::from_str(text).unwrap();
+            settings(file, PathBuf::from("/b"), Overrides::default())
+        };
+        let c = s("data = \"d\"\n[catalog]\n").unwrap().catalog.unwrap();
+        assert!(c.spark.is_none());
+        let spark = s("data = \"d\"\n[catalog]\nspark = true\n")
+            .unwrap()
+            .catalog
+            .unwrap()
+            .spark
+            .unwrap();
+        assert_eq!(spark.location, None);
+        assert_eq!(spark.database, "fhir");
+        assert_eq!(spark.extra, None);
+        let spark = s("data = \"d\"\n[catalog]\nspark = true\nspark_location = \"s3a://b/w\"\nspark_database = \"analytics\"\nspark_extra = \"x.sql\"\n")
+            .unwrap()
+            .catalog
+            .unwrap()
+            .spark
+            .unwrap();
+        assert_eq!(spark.location.as_deref(), Some("s3a://b/w"));
+        assert_eq!(spark.database, "analytics");
+        assert_eq!(spark.extra, Some(PathBuf::from("/b/x.sql")));
+        let err = s("data = \"d\"\n[catalog]\nspark_location = \"s3a://b/w\"\n").unwrap_err();
+        assert!(err.to_string().contains("need spark = true"), "{err}");
     }
 
     #[test]
