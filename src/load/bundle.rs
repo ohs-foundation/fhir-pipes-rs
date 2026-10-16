@@ -1,5 +1,5 @@
 //! Transaction bundles of `PUT <Type>/<id>`, `ifMatch` on every entry that
-//! has a version to check.
+//! has a version to check, and of `DELETE <Type>/<id>` (`sync --delete`).
 
 use std::collections::HashMap;
 
@@ -15,6 +15,8 @@ pub struct Entry {
 
 pub struct Bundle {
     pub entries: Vec<Entry>,
+    /// `(type, id)` of each resource to delete, after the PUTs.
+    pub deletes: Vec<(String, String)>,
 }
 
 pub fn if_match(version: &str) -> String {
@@ -34,8 +36,16 @@ impl Bundle {
                 }
                 json!({"resource": e.resource, "request": request})
             })
+            .chain(self.deletes.iter().map(
+                |(t, id)| json!({"request": {"method": "DELETE", "url": format!("{t}/{id}")}}),
+            ))
             .collect();
         json!({"resourceType": "Bundle", "type": "transaction", "entry": entries})
+    }
+
+    /// Entries of either kind.
+    pub fn size(&self) -> usize {
+        self.entries.len() + self.deletes.len()
     }
 
     /// One line for `--dry-run`: `Location/a update@3, Location/b create`.
@@ -46,6 +56,11 @@ impl Bundle {
                 Some(v) => format!("{}/{} update@{v}", e.resource_type, e.id),
                 None => format!("{}/{} create", e.resource_type, e.id),
             })
+            .chain(
+                self.deletes
+                    .iter()
+                    .map(|(t, id)| format!("{t}/{id} delete")),
+            )
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -125,13 +140,30 @@ pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
         if current.len() == batch_size.max(1) {
             bundles.push(Bundle {
                 entries: std::mem::take(&mut current),
+                deletes: Vec::new(),
             });
         }
     }
     if !current.is_empty() {
-        bundles.push(Bundle { entries: current });
+        bundles.push(Bundle {
+            entries: current,
+            deletes: Vec::new(),
+        });
     }
     bundles
+}
+
+/// `DELETE <resource_type>/<id>` for each id, `batch_size` to a bundle.
+pub fn plan_deletes(resource_type: &str, ids: &[String], batch_size: usize) -> Vec<Bundle> {
+    ids.chunks(batch_size.max(1))
+        .map(|chunk| Bundle {
+            entries: Vec::new(),
+            deletes: chunk
+                .iter()
+                .map(|id| (resource_type.to_string(), id.clone()))
+                .collect(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -164,6 +196,23 @@ mod tests {
         );
         // Within one bundle the transaction itself takes care of it.
         assert_eq!(dependencies(&two), [Vec::<usize>::new()]);
+    }
+
+    #[test]
+    fn deletes_are_entries_without_a_resource() {
+        let ids = ["a".to_string(), "b".to_string(), "c".to_string()];
+        let bundles = plan_deletes("Patient", &ids, 2);
+        assert_eq!(bundles.len(), 2);
+        assert_eq!(bundles[0].size(), 2);
+        assert_eq!(
+            bundles[0].to_json()["entry"],
+            json!([
+                {"request": {"method": "DELETE", "url": "Patient/a"}},
+                {"request": {"method": "DELETE", "url": "Patient/b"}},
+            ])
+        );
+        assert_eq!(bundles[1].describe(), "Patient/c delete");
+        assert!(dependencies(&bundles).iter().all(Vec::is_empty));
     }
 
     #[test]
