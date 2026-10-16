@@ -8,8 +8,9 @@ use anyhow::Result;
 
 use crate::cli::{
     DEFAULT_CONCURRENCY, DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_PARTITION_BY, DEFAULT_RETRIES,
-    DEFAULT_ROW_GROUP_SIZE, DEFAULT_TIMEOUT_SECS, ExportArgs, ExtractArgs, RunArgs,
+    DEFAULT_ROW_GROUP_SIZE, DEFAULT_TIMEOUT_SECS, ExportArgs, ExtractArgs, RunArgs, TransformArgs,
 };
+use crate::transform::SNAPSHOT_FILE;
 
 use super::config::{Fetch, Settings};
 
@@ -18,8 +19,29 @@ use super::config::{Fetch, Settings};
 /// parquet/locations when the run is published). `full` re-extracts every
 /// Location (the incremental extract cannot see deletions).
 /// A snapshot built from files (files.rs) is replaced by a full extract.
-pub fn locations(s: &Settings, out: &Path) -> Result<()> {
+/// With `reuse_raw` and a snapshot there, the snapshot is transformed without
+/// an extract. Returns whether the server was contacted.
+pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
     let snapshot = s.raw_dir().join("locations");
+    if s.reuse_raw && snapshot.join(SNAPSHOT_FILE).is_file() {
+        println!(
+            "== locations (--reuse-raw: {} → {}, no extract)",
+            snapshot.display(),
+            s.parquet_dir().join("locations").display()
+        );
+        crate::transform::run_transform(
+            &TransformArgs {
+                snapshot,
+                out: out.to_path_buf(),
+                country: None,
+                row_group_size: DEFAULT_ROW_GROUP_SIZE,
+                partition_by: DEFAULT_PARTITION_BY.to_string(),
+                keep_without_geometry: false,
+            },
+            s.profile.as_deref(),
+        )?;
+        return Ok(false);
+    }
     let from_files = crate::snapshot::State::read(&snapshot.join(crate::snapshot::STATE_FILE))?
         .is_some_and(|st| st.server == super::files::FILES);
     if from_files && !s.full {
@@ -55,7 +77,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<()> {
         },
         s.profile.as_deref(),
     )?;
-    Ok(())
+    Ok(true)
 }
 
 /// `fhir-pipes export --incremental`: each type to raw/<server>/<Type>.ndjson,
