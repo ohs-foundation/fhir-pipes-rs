@@ -19,6 +19,11 @@ database required, or by generating PostgreSQL.
   - a **PostgreSQL generator** that lowers FHIRPath to SQL over JSONB.
 - **Writers**: CSV, NDJSON, JSON, and Parquet (feature-gated; temporal columns
   as strings by default or native Arrow types with `--parquet-temporal native`).
+  CSV and JSON write each value as it is. Parquet writes an integral number
+  (`5.0`) in an integer column as the integer and, with native temporal
+  types, a dateTime with a time in a `date` column as its date part as
+  written; any other value that does not fit its column's type is written as
+  null and counted per column (`OutputWriter::write_with_summary`).
 - **Offline lint & validation** of ViewDefinitions (FH01–FH10) with rustc-style
   diagnostics, plus JSON and SARIF output for CI.
 - Full support for the v2.1 additions: the `repeat` directive and the

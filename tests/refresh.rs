@@ -1127,6 +1127,14 @@ mod database {
             .success()
             .stdout(has(format!("obs → {s}.obs (3 rows)")))
             .stdout(has(format!("patient → {s}.patient (2 rows)")));
+        // Analyzed after the commit: the planner's row estimate is the count
+        // just loaded (a table only copied into would still say 0).
+        assert_eq!(
+            one(&format!(
+                "SELECT reltuples::bigint::text FROM pg_class WHERE oid = '\"{s}\".obs'::regclass"
+            )),
+            "3"
+        );
         // Only view tables: not locations.
         assert_eq!(
             one(&format!(
@@ -2246,4 +2254,436 @@ fn the_tiles_tools_are_needed_only_when_there_are_locations() {
         .failure()
         .stderr(has("not found: /no/such/duckdb (for tiles)"));
     assert!(!root.join("data/parquet/locations").exists());
+}
+
+/// A view with an integer and a date column and Observations that do not
+/// fit them: 5.0, 5.5 and 2.5, and two dateTimes with a time. Returns (views
+/// directory, input directory).
+fn mismatch_setup(root: &Path) -> (PathBuf, PathBuf) {
+    let views = root.join("mismatch-views");
+    fs::create_dir_all(&views).unwrap();
+    fs::write(
+        views.join("IcrMeasures.json"),
+        json!({"resourceType": "ViewDefinition", "name": "IcrMeasures", "status": "active",
+        "resource": "Observation", "select": [{"column": [
+            {"name": "id", "path": "getResourceKey()", "type": "id"},
+            {"name": "location_id", "path": "subject.getReferenceKey(Location)", "type": "string"},
+            {"name": "n", "path": "value.ofType(Quantity).value", "type": "integer"},
+            {"name": "period_start", "path": "effective.ofType(Period).start", "type": "date"},
+        ]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let measure = |id: &str, value: &str, start: &str| {
+        json!({"resourceType": "Observation", "id": id, "status": "final", "code": {"text": "x"},
+            "subject": {"reference": "Location/loc-bo"},
+            "valueQuantity": {"value": serde_json::from_str::<Value>(value).unwrap()},
+            "effectivePeriod": {"start": start}})
+    };
+    let input = inputs(
+        root,
+        &[(
+            "obs.ndjson",
+            lines(&[
+                measure("o1", "5.0", "2026-06-15T08:30:00+01:00"),
+                measure("o2", "5.5", "2026-06-15T23:30:00-05:00"),
+                measure("o3", "2.5", "2026-06-15"),
+            ]),
+        )],
+    );
+    (views, input)
+}
+
+/// Values that do not match their column's type are counted per table and
+/// column, printed once the views step is done and kept in last-refresh.json.
+#[test]
+fn values_that_do_not_match_their_column_type_are_reported() {
+    let (dir, config) = setup(NOWHERE, "");
+    let root = dir.path();
+    let (views, input) = mismatch_setup(root);
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .arg("--views")
+        .arg(&views)
+        .assert()
+        .success()
+        .stdout(has("values that did not match their column's type:"))
+        .stdout(has(
+            "measures.n: 2 values did not fit integer and were written as null",
+        ))
+        .stdout(has(
+            "measures.period_start: 2 dateTime values written as their date",
+        ));
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("data/raw/test/last-refresh.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        report["type_mismatches"],
+        json!({"measures": {
+            "n": {"type": "integer", "written_as_date": 0, "written_as_null": 2},
+            "period_start": {"type": "date", "written_as_date": 2, "written_as_null": 0},
+        }})
+    );
+    let rows = table_rows(&root.join("data/parquet/measures"));
+    let got: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(_, r)| (get(r, "n"), get(r, "period_start")))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("5", "2026-06-15"),
+            ("null", "2026-06-15"),
+            ("null", "2026-06-15")
+        ]
+    );
+}
+
+/// A relative --data is resolved against the current directory, and the hooks,
+/// which run in the config file's directory, get it as an absolute DATA.
+#[test]
+#[cfg(unix)]
+fn hooks_get_an_absolute_data_directory() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "seen"
+run = ["sh", "-c", "echo \"$DATA\" > data.txt; cp \"$DATA/manifest.json\" seen.json"]
+"#,
+    );
+    let root = dir.path();
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    cmd(&config)
+        .current_dir(&work)
+        .args(["--data", "../data", "--only", "views,hooks", "--reuse-raw"])
+        .assert()
+        .success();
+    let data = fs::read_to_string(root.join("data.txt")).unwrap();
+    assert!(Path::new(data.trim()).is_absolute(), "{data}");
+    assert_eq!(
+        fs::read_to_string(root.join("seen.json")).unwrap(),
+        fs::read_to_string(root.join("data/manifest.json")).unwrap()
+    );
+}
+
+/// A hook's `after` names a step in any case; `push` and `hooks`, which no
+/// hook can run after, are refused before anything runs.
+#[test]
+#[cfg(unix)]
+fn a_hooks_after_matches_its_step_in_any_case() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "after-views"
+after = "Views"
+run = ["sh", "-c", "touch after-views.txt"]
+"#,
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw"])
+        .assert()
+        .success();
+    assert!(dir.path().join("after-views.txt").exists());
+
+    for step in ["push", "hooks"] {
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[[hooks]]\nname = \"h\"\nafter = \"{step}\"\nrun = [\"true\"]\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views,hooks", "--reuse-raw"])
+            .assert()
+            .failure()
+            .stderr(has(format!(
+                "`after = \"{step}\"`: a hook runs after one of"
+            )));
+        assert!(!dir.path().join("data/parquet/obs").exists());
+    }
+}
+
+/// Rows sent to the null partition because the lookup table is missing, or
+/// their key is not in it, are counted in a warning.
+#[test]
+fn rows_without_a_partition_are_counted_in_a_warning() {
+    let (dir, config) = setup_with_raw("");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has(
+            "warning: parquet/obs: 1 of 3 rows in the null partition (1 with a `location_id` not in locations.id)",
+        ));
+
+    fs::remove_dir_all(dir.path().join("data/parquet/locations")).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has(
+            "warning: parquet/obs: 3 of 3 rows in the null partition: there is no lookup table parquet/locations to find `location_id` in",
+        ));
+    // Patient has no lookup rule: no warning for it.
+    let out = cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("parquet/patient: "));
+}
+
+/// views/ is staged and replaced with the tables: a removed view leaves
+/// views/ and the manifest, and a failing run changes neither. The table a
+/// removed view wrote is kept, and listed by --check and after a run.
+#[test]
+fn removed_views_leave_views_and_their_tables_are_listed() {
+    let (dir, config) = setup_with_raw("\n[catalog]\nextra = \"extra.sql\"\n");
+    let root = dir.path();
+    let extra = root.join("extra.sql");
+    fs::write(&extra, "CREATE OR REPLACE VIEW one AS SELECT 1;\n").unwrap();
+    let data = root.join("data");
+    let with_gone = views_with(root, &["IcrGone"], false);
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&with_gone)
+        .assert()
+        .success()
+        .stdout(has("note:").not());
+    assert!(data.join("views/IcrGone.json").is_file());
+    assert!(data.join("parquet/gone").is_dir());
+
+    // A run that fails after the views step leaves views/ as it was.
+    let with_new = root.join("new-views");
+    fs::create_dir_all(&with_new).unwrap();
+    for f in fs::read_dir(fixtures().join("views")).unwrap() {
+        let f = f.unwrap().path();
+        fs::copy(&f, with_new.join(f.file_name().unwrap())).unwrap();
+    }
+    fs::copy(with_gone.join("IcrGone.json"), with_new.join("IcrNew.json")).unwrap();
+    let text = fs::read_to_string(with_new.join("IcrNew.json")).unwrap();
+    fs::write(
+        with_new.join("IcrNew.json"),
+        text.replace("IcrGone", "IcrNew"),
+    )
+    .unwrap();
+    fs::remove_file(&extra).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&with_new)
+        .assert()
+        .failure()
+        .stderr(has("extra.sql"));
+    assert!(data.join("views/IcrGone.json").is_file());
+    assert!(!data.join("views/IcrNew.json").exists());
+    assert_nothing_staged(&data);
+
+    // The fixture views alone: IcrGone leaves views/ and the manifest's
+    // views; its table is kept and named.
+    fs::write(&extra, "CREATE OR REPLACE VIEW one AS SELECT 1;\n").unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has("note: no current view writes parquet/gone; kept"));
+    assert!(!data.join("views/IcrGone.json").exists());
+    assert!(data.join("views/IcrObs.json").is_file());
+    assert!(!data.join(".views.old").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
+    assert!(manifest["views"].get("IcrGone").is_none(), "{manifest}");
+    assert!(manifest["views"].get("IcrObs").is_some());
+    assert_eq!(manifest["tables"]["gone"]["rows"], 2);
+    cmd(&config).arg("--check").assert().success().stdout(has(
+        "unwritten:  gone (in parquet/, written by no current view; kept)",
+    ));
+}
+
+/// A run that downloads nothing records no server it did not contact: the
+/// one in raw/'s export state if there is one, else none.
+#[test]
+fn a_run_that_downloads_nothing_records_the_server_of_the_downloads() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    let read = |p: &str| -> Value {
+        serde_json::from_str(&fs::read_to_string(data.join(p)).unwrap()).unwrap()
+    };
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    assert_eq!(read("manifest.json")["server"], Value::Null);
+    assert_eq!(read("raw/test/last-refresh.json")["server"], Value::Null);
+
+    fs::write(
+        data.join("raw/test/.export-state.json"),
+        r#"{"server": "https://hapi.example.org/fhir", "types": {}}"#,
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    assert_eq!(
+        read("manifest.json")["server"],
+        "https://hapi.example.org/fhir"
+    );
+    assert_eq!(
+        read("raw/test/last-refresh.json")["server"],
+        "https://hapi.example.org/fhir"
+    );
+}
+
+/// --reuse-raw transforms the Location snapshot in raw/ without extracting.
+#[test]
+fn reuse_raw_transforms_the_location_snapshot_without_extracting() {
+    let (dir, config) = setup(NOWHERE, "");
+    let snap = dir.path().join("data/raw/test/locations");
+    fs::create_dir_all(&snap).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot/locations.ndjson"),
+        snap.join("locations.ndjson"),
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "locations", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has("--reuse-raw:"))
+        .stdout(has("no extract"));
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert!(manifest["tables"]["locations"]["rows"].as_i64().unwrap() > 2);
+    assert_eq!(manifest["server"], Value::Null);
+}
+
+/// A fake duckdb that writes one feature to the file a COPY names, and a
+/// fake tippecanoe that writes $TILES to its output.
+#[cfg(unix)]
+fn fake_tile_tools(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let duckdb = dir.join("duckdb");
+    fs::write(
+        &duckdb,
+        r#"#!/bin/sh
+file=$(printf '%s\n' "$2" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
+[ -n "$file" ] && echo '{"type":"Feature"}' > "$file"
+exit 0
+"#,
+    )
+    .unwrap();
+    let tippecanoe = dir.join("tippecanoe");
+    fs::write(
+        &tippecanoe,
+        r#"#!/bin/sh
+while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+printf '%s' "$TILES" > "$out"
+"#,
+    )
+    .unwrap();
+    for p in [&duckdb, &tippecanoe] {
+        fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (duckdb, tippecanoe)
+}
+
+/// tiles/ is staged and replaced with the tables: a run that fails after the
+/// tiles step keeps the previous tiles.
+#[test]
+#[cfg(unix)]
+fn tiles_are_swapped_in_with_the_tables() {
+    let tools = tempfile::tempdir().unwrap();
+    let (duckdb, tippecanoe) = fake_tile_tools(tools.path());
+    let (dir, config) = setup_with_raw(&format!(
+        "\n[tools]\nduckdb = '{}'\ntippecanoe = '{}'\n\n[catalog]\nextra = \"extra.sql\"\n",
+        duckdb.display(),
+        tippecanoe.display()
+    ));
+    let data = dir.path().join("data");
+    fs::create_dir_all(
+        data.join("parquet/locations/country=SLE/geom_type=polygon/type=admin-unit"),
+    )
+    .unwrap();
+    fs::create_dir_all(data.join("tiles")).unwrap();
+    fs::write(data.join("tiles/admin.pmtiles"), "old").unwrap();
+    fs::write(data.join("tiles/catchments.pmtiles"), "old").unwrap();
+
+    // The catalog step fails after the tiles are built.
+    cmd(&config)
+        .args(["--only", "views,tiles", "--reuse-raw"])
+        .env("TILES", "new")
+        .assert()
+        .failure()
+        .stdout(has("→ admin.pmtiles"))
+        .stderr(has("extra.sql"));
+    assert_eq!(
+        fs::read_to_string(data.join("tiles/admin.pmtiles")).unwrap(),
+        "old"
+    );
+    assert!(data.join("tiles/catchments.pmtiles").is_file());
+    assert_nothing_staged(&data);
+
+    fs::write(dir.path().join("extra.sql"), "").unwrap();
+    cmd(&config)
+        .args(["--only", "views,tiles", "--reuse-raw"])
+        .env("TILES", "new")
+        .assert()
+        .success()
+        .stdout(has(", tiles/, views/, then the manifest"));
+    assert_eq!(
+        fs::read_to_string(data.join("tiles/admin.pmtiles")).unwrap(),
+        "new"
+    );
+    // The registry has no catchments now: the old archive is gone with the
+    // rest of the old tiles/.
+    assert!(!data.join("tiles/catchments.pmtiles").exists());
+    assert!(!data.join(".tiles.old").exists());
+    assert_nothing_staged(&data);
+}
+
+#[test]
+fn zero_threads_are_refused() {
+    let (_dir, config) = setup(NOWHERE, "");
+    cmd(&config)
+        .args(["--threads", "0", "--check"])
+        .assert()
+        .failure()
+        .stderr(has("--threads"));
+}
+
+/// The counts are printed before the hooks run, so a failing hook does not
+/// hide them once the tables with the nulls are published. last-refresh.json
+/// is written only by a run that finishes, as before.
+#[test]
+#[cfg(unix)]
+fn a_failing_hook_does_not_hide_the_mismatch_counts() {
+    let (dir, config) = setup(
+        NOWHERE,
+        r#"
+[[hooks]]
+name = "fails"
+after = "views"
+run = ["sh", "-c", "exit 1"]
+"#,
+    );
+    let root = dir.path();
+    let (views, input) = mismatch_setup(root);
+    cmd(&config)
+        .args(["--only", "views,hooks", "--input"])
+        .arg(&input)
+        .arg("--views")
+        .arg(&views)
+        .assert()
+        .failure()
+        .stdout(has("== publish"))
+        .stdout(has(
+            "measures.n: 2 values did not fit integer and were written as null",
+        ))
+        .stdout(has(
+            "measures.period_start: 2 dateTime values written as their date",
+        ));
+    // The tables were published before the hook failed.
+    let rows = table_rows(&root.join("data/parquet/measures"));
+    assert_eq!(rows.len(), 3);
+    assert!(!root.join("data/raw/test/last-refresh.json").exists());
 }

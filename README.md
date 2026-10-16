@@ -150,6 +150,18 @@ fhir-pipes views lint patient_flat.json --shareable                         # th
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
 
+`--output parquet` writes typed columns. An integral number such as `5.0` in
+an `integer` column is written as the integer; `5.5` is not rounded. With
+`--parquet-temporal native`, a dateTime with a time in a `date` column
+(`2026-06-15T23:30:00-05:00`) is written as its date part as written
+(`2026-06-15`, not converted to UTC first), and partial dates (`2026`,
+`2026-06`) are floored to the start of the period. Any other value that does
+not fit its column's type is written as null. Each is counted per column and
+printed on stderr at the end of the run (`IcrObs.value: 3 values did not fit
+integer and were written as null`), so a view whose types do not match the
+data can be fixed; the run does not fail. CSV and NDJSON write every value
+as it is.
+
 A directory of views is read as `refresh` reads it. An `--input` directory is
 read with its subdirectories, skipping hidden files. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
@@ -496,12 +508,16 @@ cargo build --release --no-default-features        # without PostgreSQL
 `fhir-packages` adds over 100 crates. Asking for an option a build lacks says
 which feature it needs.
 
+The binary uses [mimalloc](https://github.com/microsoft/mimalloc), compiled
+from C source, as its memory allocator in place of the system one.
+
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
-aarch64, statically linked against musl) and Windows (x86_64), as single files
-with no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
+aarch64, statically linked against musl) and Windows (x86_64, with the C
+runtime linked statically, set in `.cargo/config.toml`), as single files with
+no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
 release builds are slow, so they run for a version tag (which publishes them),
 when run by hand from the Actions tab, for a change to `Cargo.toml`,
-`Cargo.lock` or the workflows, and weekly.
+`Cargo.lock`, `.cargo/config.toml` or the workflows, and weekly.
 `cargo audit` checks `Cargo.lock` against the RustSec advisories on every PR
 and weekly; `.cargo/audit.toml` lists what fails the check and the advisories
 ignored, each with its reason.

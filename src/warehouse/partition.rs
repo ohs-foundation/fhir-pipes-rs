@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
-use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding};
+use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary};
 use fhir_pipes_sof::{ColumnInfo, ColumnType, ViewResult};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -160,13 +160,14 @@ pub fn rule_for<'a>(result: &ViewResult, lookups: &'a [Lookup]) -> Option<(&'a L
 }
 
 /// Split `result` by partition value and write it to `table_dir`, replacing
-/// what was there only once every file is written. Returns the row count.
+/// what was there only once every file is written. Returns the row count and
+/// the values that did not match their column's type.
 pub fn write(
     result: ViewResult,
     table_dir: &Path,
     column: &str,
     partition_of: impl Fn(&[Value]) -> Option<String>,
-) -> Result<usize> {
+) -> Result<(usize, WriteSummary)> {
     let total = result.data.len();
     let mut groups: BTreeMap<Option<String>, Vec<Vec<Value>>> = BTreeMap::new();
     for row in result.data {
@@ -190,6 +191,7 @@ pub fn write(
     let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
     let mut columns = result.columns;
     columns.push(ColumnInfo::new(column, ColumnType::String));
+    let mut summary = WriteSummary::default();
     for (value, rows) in groups {
         let dir = staging.join(format!(
             "{column}={}",
@@ -211,13 +213,15 @@ pub fn write(
         let path = dir.join("part-0.parquet");
         let mut file =
             fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-        writer
-            .write(&part, &mut file)
-            .with_context(|| format!("writing {}", path.display()))?;
+        summary.merge(
+            writer
+                .write_with_summary(&part, &mut file)
+                .with_context(|| format!("writing {}", path.display()))?,
+        );
     }
     fs::create_dir_all(&staging)?;
     replace(&staging, table_dir)?;
-    Ok(total)
+    Ok((total, summary))
 }
 
 /// Put the table at `staged` in place of `table_dir`: the old one is renamed
@@ -298,10 +302,11 @@ mod tests {
                 vec![json!("c"), Value::Null],
             ],
         );
-        let n = write(r, &table, "country", |row| {
+        let (n, summary) = write(r, &table, "country", |row| {
             row[1].as_str().map(str::to_string)
         })
         .unwrap();
+        assert!(summary.is_empty());
         assert_eq!(n, 3);
         for p in [
             "country=SLE",
@@ -315,6 +320,34 @@ mod tests {
         assert_eq!(lookup.get("b").map(String::as_str), Some("NGA"));
         assert!(!lookup.contains_key("c"));
         assert!(!dir.path().join(".places.new").exists());
+    }
+
+    #[test]
+    fn the_summary_adds_up_every_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = ViewResult {
+            columns: vec![
+                ColumnInfo::new("where", ColumnType::String),
+                ColumnInfo::new("start", ColumnType::Date),
+            ],
+            row_count: 3,
+            data: vec![
+                vec![json!("SLE"), json!("2026-06-15T08:30:00+01:00")],
+                vec![json!("NGA"), json!("2026-06-15T08:30:00+01:00")],
+                vec![json!("NGA"), json!("June")],
+            ],
+        };
+        let (_, summary) = write(r, &dir.path().join("t"), "country", |row| {
+            row[0].as_str().map(str::to_string)
+        })
+        .unwrap();
+        assert_eq!(
+            summary.messages(),
+            [
+                "start: 2 dateTime values written as their date",
+                "start: 1 value did not fit date and was written as null",
+            ]
+        );
     }
 
     #[test]
