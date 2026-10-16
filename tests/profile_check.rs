@@ -186,3 +186,55 @@ fn check_needs_a_profile_and_a_readable_ig() {
         .code(2)
         .stderr(contains("no StructureDefinitions or CodeSystems"));
 }
+
+/// ICR's profile with the optional keys `import` reads, set explicitly.
+fn with_import_keys(location_profile: &str) -> String {
+    std::fs::read_to_string(ICR_PROFILE)
+        .unwrap()
+        .replace(
+            "admin_code_column = \"pcode\"\n",
+            &format!(
+                "admin_code_column = \"pcode\"\nprofile = \"{location_profile}\"\n\
+                 admin_code_system = \"https://icr.healthcampaigns.org/identifiers/national-admin-code\"\n"
+            ),
+        )
+        .replace(
+            "id_prefix = \"org-\"\n",
+            "id_prefix = \"org-\"\nprofile = \"https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization\"\n",
+        )
+}
+
+#[test]
+fn the_import_keys_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.toml");
+    std::fs::write(
+        &good,
+        with_import_keys("https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"),
+    )
+    .unwrap();
+    let a = check(&good).success();
+    assert_eq!(lines(&a, "error"), Vec::<String>::new());
+    assert!(
+        lines(&a, "warning")
+            .iter()
+            .any(|w| w.contains("[location] admin_code_system")),
+        "{:?}",
+        lines(&a, "warning")
+    );
+
+    let bad = dir.path().join("bad.toml");
+    std::fs::write(
+        &bad,
+        with_import_keys(
+            "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization",
+        ),
+    )
+    .unwrap();
+    let a = check(&bad).code(1);
+    let errors = lines(&a, "error").join("\n");
+    assert!(
+        errors.contains("[location] profile: https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization constrains Organization, not Location"),
+        "{errors}"
+    );
+}

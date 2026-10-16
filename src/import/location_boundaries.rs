@@ -277,10 +277,10 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
     let mut claimed: HashMap<String, String> = HashMap::new();
     let mut levels: Vec<Level> = opts.levels.iter().map(|_| Level::default()).collect();
     let leaf = opts.levels.len() - 1;
-    // With --dissolve-parents: unit slug → the polygons of its children.
-    let mut parts: HashMap<String, Vec<Polygon>> = HashMap::new();
-    // Non-leaf unit slug → its parent's slug.
-    let mut parent_of: HashMap<String, String> = HashMap::new();
+    // With --dissolve-parents: every last-level polygon, and for each unit
+    // above the last level the indexes of the polygons below it.
+    let mut leaf_polygons: Vec<Polygon> = Vec::new();
+    let mut below: HashMap<String, Vec<usize>> = HashMap::new();
 
     for feature in features {
         let Some(properties) = feature.get("properties").and_then(Value::as_object) else {
@@ -309,6 +309,9 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
         }
 
         let mut parent = root.clone();
+        // The feature's ancestors, root first. Not recoverable from the leaf
+        // slug: "-" both joins segments and appears inside them.
+        let mut lineage = vec![root.clone()];
         for (index, (level, name)) in opts.levels.iter().zip(&names).enumerate() {
             let code = level
                 .code_prop
@@ -376,7 +379,14 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                 if opts.dissolve_parents
                     && let Some(g) = geometry
                 {
-                    parts.entry(parent.clone()).or_default().extend(polygons(g));
+                    let start = leaf_polygons.len();
+                    leaf_polygons.extend(polygons(g));
+                    for ancestor in &lineage {
+                        below
+                            .entry(ancestor.clone())
+                            .or_default()
+                            .extend(start..leaf_polygons.len());
+                    }
                 }
             } else if !units.index.contains_key(&slug) {
                 units.index.insert(slug.clone(), units.resources.len());
@@ -388,26 +398,30 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                     &aliases,
                     None,
                 ));
-                parent_of.insert(slug.clone(), parent.clone());
             }
+            lineage.push(slug.clone());
             parent = slug;
         }
     }
 
     if opts.dissolve_parents {
-        // Deepest parents first: each unit's union becomes a part of its
-        // parent's, so the country is the union of everything below it.
-        for level in levels[..leaf].iter_mut().rev() {
+        // Each unit's boundary is the union of the last-level polygons below
+        // it, not of its children's unions: unions of unions leave sliver
+        // gaps where neighbours' shared edges were rounded differently.
+        let mut attach = |slug: &str, resource: &mut Value| {
+            let Some(indexes) = below.get(slug) else {
+                return;
+            };
+            let parts: Vec<&Polygon> = indexes.iter().map(|&i| &leaf_polygons[i]).collect();
+            dissolve(slug, &parts, shape, resource, report);
+        };
+        attach(&root, &mut country);
+        for level in &mut levels[..leaf] {
             for resource in &mut level.resources {
                 let slug = resource["id"].as_str().unwrap_or_default().to_string();
-                if let Some(union) = dissolve(&slug, parts.remove(&slug), shape, resource, report)
-                    && let Some(p) = parent_of.get(&slug)
-                {
-                    parts.entry(p.clone()).or_default().extend(union);
-                }
+                attach(&slug, resource);
             }
         }
-        dissolve(&root, parts.remove(&root), shape, &mut country, report);
     }
 
     let mut out = vec![country];
@@ -417,17 +431,15 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
     Ok(out)
 }
 
-/// The union of a unit's children's polygons, attached as its boundary.
-/// Returns the union's polygons for its own parent.
+/// The union of `parts`, attached to `resource` as its boundary.
 fn dissolve(
     slug: &str,
-    children: Option<Vec<Polygon>>,
+    parts: &[&Polygon],
     shape: &Shape,
     resource: &mut Value,
     report: &mut Report,
-) -> Option<Vec<Polygon>> {
-    let children = children?;
-    let union: MultiPolygon = geo::unary_union(children.iter());
+) {
+    let union: MultiPolygon = geo::unary_union(parts.iter().copied());
     let boundary = match union.0.len() {
         0 => {
             report.add(
@@ -436,14 +448,12 @@ fn dissolve(
                 "dissolved boundary is empty, expected Polygon or MultiPolygon; parent left \
                  boundary-less",
             );
-            return None;
+            return;
         }
         1 => Geometry::Polygon(union.0[0].clone()),
         _ => Geometry::MultiPolygon(union),
     };
-    let boundary = orient(boundary);
-    shape.attach_boundary(resource, &geometry_bytes(&boundary));
-    Some(polygons(boundary))
+    shape.attach_boundary(resource, &geometry_bytes(&orient(boundary)));
 }
 
 pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
