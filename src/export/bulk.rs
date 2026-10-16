@@ -23,6 +23,11 @@ const POLL_FIRST: Duration = Duration::from_secs(1);
 const POLL_MAX: Duration = Duration::from_secs(60);
 /// The shortest wait between polls, whatever the server's Retry-After says.
 const POLL_MIN: Duration = Duration::from_secs(1);
+/// The longest wait after a 202, whatever its Retry-After says. HAPI sends
+/// `Retry-After: 120` on every 202, so an export done in 20 s would
+/// otherwise be read two minutes after it started. A status poll is a cheap
+/// request; a Retry-After on a 429 or 5xx is honoured in full.
+const POLL_RUNNING_MAX: Duration = Duration::from_secs(15);
 
 /// An export the server is running. Saved in the export state as soon as the
 /// kick-off answers, so a run that stops before the export is done polls it
@@ -127,7 +132,8 @@ pub fn kick_off(
 
 /// Poll `status_url` until the export is done, has failed, or `deadline`
 /// passes. 202 and 429 mean "not yet": the wait is the server's Retry-After,
-/// or a backoff from POLL_FIRST doubling to POLL_MAX without one. Each new
+/// or a backoff from POLL_FIRST doubling to POLL_MAX without one; after a
+/// 202 it is at most POLL_RUNNING_MAX. Each new
 /// X-Progress is printed. An error status with a `transient` issue, or a 5xx
 /// that is not an OperationOutcome (a gateway's), is waited out the same way.
 /// A connection that fails after the client's retries is an error.
@@ -190,19 +196,31 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
                 got.retry_after()
             }
         };
-        let delay = retry_after
-            .unwrap_or_else(|| {
-                let d = backoff;
-                backoff = (backoff * 2).min(POLL_MAX);
-                d
-            })
-            .max(POLL_MIN);
+        let delay = next_wait(got.status, retry_after, &mut backoff);
         let now = Instant::now();
         if now >= deadline {
             return Ok(Polled::TimedOut);
         }
         // The loop checks the deadline again before the next poll.
         std::thread::sleep(delay.min(deadline - now));
+    }
+}
+
+/// The wait before the next poll, after a "not yet" with `status`: the
+/// server's Retry-After, else `backoff`, which doubles up to POLL_MAX. At
+/// least POLL_MIN, and after a 202 at most POLL_RUNNING_MAX.
+fn next_wait(status: u16, retry_after: Option<Duration>, backoff: &mut Duration) -> Duration {
+    let delay = retry_after
+        .unwrap_or_else(|| {
+            let d = *backoff;
+            *backoff = (*backoff * 2).min(POLL_MAX);
+            d
+        })
+        .max(POLL_MIN);
+    if status == 202 {
+        delay.min(POLL_RUNNING_MAX)
+    } else {
+        delay
     }
 }
 
@@ -412,6 +430,30 @@ mod tests {
             "error processing: no such type; warning informational: slow"
         );
         assert!(issues(&json!({"resourceType": "Bundle"})).is_empty());
+    }
+
+    #[test]
+    fn a_202_waits_at_most_fifteen_seconds_and_a_429_as_long_as_it_asks() {
+        let s = Duration::from_secs;
+        let mut backoff = POLL_FIRST;
+        // HAPI's fixed Retry-After on a running export.
+        assert_eq!(next_wait(202, Some(s(120)), &mut backoff), s(15));
+        assert_eq!(next_wait(202, Some(s(5)), &mut backoff), s(5));
+        assert_eq!(next_wait(202, Some(s(0)), &mut backoff), POLL_MIN);
+        assert_eq!(next_wait(429, Some(s(120)), &mut backoff), s(120));
+        assert_eq!(next_wait(503, Some(s(120)), &mut backoff), s(120));
+        assert_eq!(
+            backoff, POLL_FIRST,
+            "a Retry-After leaves the backoff alone"
+        );
+        // Without one: the backoff, capped after a 202 only.
+        let waits: Vec<Duration> = (0..8).map(|_| next_wait(202, None, &mut backoff)).collect();
+        assert_eq!(
+            waits,
+            [1, 2, 4, 8, 15, 15, 15, 15].map(s),
+            "the backoff doubles to a minute, a 202 waits at most 15 s"
+        );
+        assert_eq!(next_wait(429, None, &mut backoff), POLL_MAX);
     }
 
     #[test]
