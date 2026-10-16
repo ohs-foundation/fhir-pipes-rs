@@ -424,7 +424,8 @@ struct CompiledSelect {
 /// A focus value and its `%rowIndex`, with the evaluation context for them
 /// built on first use and shared by every path evaluated against them: the
 /// `where` filters and top-level columns on the resource, or a select's
-/// columns, `forEach` and nested selects on one element.
+/// columns, `forEach` and nested selects on one element. Each path still runs
+/// in a scope of its own ([`Evaluator::eval_plan`]).
 struct Focus<'a> {
     value: &'a FhirPathValue,
     rid: i64,
@@ -536,8 +537,9 @@ impl Evaluator {
     }
 
     /// An evaluation context with `focus` as its input and `%rowIndex` bound to
-    /// `rid`. Building one sets up the engine's variables, so callers
-    /// evaluating several paths against the same focus build it once.
+    /// `rid`. Building one sets up the engine's shared state, so callers
+    /// evaluating several paths against the same focus build it once and run
+    /// each path in a scope nested under it.
     ///
     /// `root` is the resource being evaluated; `focus` is it or a node within
     /// it. The context does not bind `root` yet: nested contexts take the focus
@@ -564,10 +566,15 @@ impl Evaluator {
             .get_or_init(|| self.context(root, focus.value, focus.rid))
     }
 
-    /// Run a compiled plan in a context.
+    /// Run a compiled plan in its own variable scope under `ctx`.
+    ///
+    /// `defineVariable()` writes into the context it is given, so each path
+    /// gets a nested scope: a variable defined by one path (a `where` filter,
+    /// a column) is not seen by the next, while the focus, `%rowIndex` and the
+    /// engine's caches stay shared.
     async fn eval_plan(&self, plan: &CompiledPlan, ctx: &EvaluationContext) -> Result<Collection> {
         self.engine
-            .evaluate_plan(plan, ctx)
+            .evaluate_plan(plan, &ctx.nest())
             .await
             .map(|r| r.value)
             .map_err(|e| Error::FhirPath(e.to_string()))
@@ -1435,5 +1442,51 @@ mod tests {
             .unwrap();
         let resource = patient(1, 1);
         assert_send(compiled.execute_resource(&resource));
+    }
+
+    #[test]
+    fn define_variable_stays_in_its_own_path() {
+        // defineVariable() writes into the context it runs in; one path's
+        // variable must not make the same definition in another path fail.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let run = |v: Value| rt.block_on(execute(&view(v), &[patient(1, 1)]));
+        let define = json!({ "name": "b", "path": "id.defineVariable('x')" });
+        let cases = [
+            // Sibling top-level selects.
+            json!({
+                "resource": "Patient",
+                "select": [
+                    { "column": [{ "name": "a", "path": "id.defineVariable('x')" }] },
+                    { "column": [define] }
+                ]
+            }),
+            // A where filter and a column.
+            json!({
+                "resource": "Patient",
+                "where": [{ "path": "true.defineVariable('x')" }],
+                "select": [
+                    { "column": [{ "name": "a", "path": "id" }, define] }
+                ]
+            }),
+            // Two columns of one select, and a nested select on the same focus.
+            json!({
+                "resource": "Patient",
+                "select": [{
+                    "column": [{ "name": "a", "path": "id.defineVariable('x')" }],
+                    "select": [{ "column": [define] }]
+                }]
+            }),
+            json!({
+                "resource": "Patient",
+                "select": [{ "column": [
+                    { "name": "a", "path": "id.defineVariable('x')" },
+                    define
+                ] }]
+            }),
+        ];
+        for case in cases {
+            let result = run(case.clone()).unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(result.data, vec![vec![json!("p1"), json!("p1")]], "{case}");
+        }
     }
 }
