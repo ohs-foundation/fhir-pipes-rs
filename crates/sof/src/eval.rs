@@ -105,12 +105,9 @@ const MAX_BLOCK: usize = 64;
 /// Execute a ViewDefinition against in-memory FHIR resources on up to `threads`
 /// OS threads, for non-async callers.
 ///
-/// The view is compiled once and the resources are split into small blocks.
-/// Each thread takes the next unclaimed block until none are left, so costly
-/// resources stored together (all of one type, say) are spread over the
-/// threads rather than landing on one. Each thread runs its own current-thread
-/// Tokio runtime. Rows come back in input order, the same as [`execute`]. With
-/// `threads <= 1`, or fewer resources than threads, fewer threads are used.
+/// Compiles the view ([`CompiledView::compile_blocking`]) and runs it with
+/// [`CompiledView::execute_parallel`]; callers running one view over several
+/// batches of resources can compile it once and call that for each batch.
 ///
 /// # Errors
 ///
@@ -121,69 +118,19 @@ pub fn execute_parallel(
     resources: &[Value],
     threads: usize,
 ) -> Result<ViewResult> {
-    let threads = threads.clamp(1, resources.len().max(1));
-    let block = resources
-        .len()
-        .div_ceil(threads * BLOCKS_PER_THREAD)
-        .clamp(1, MAX_BLOCK);
-    let blocks: Vec<&[Value]> = resources.chunks(block).collect();
-    let runtime = || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))
-    };
-    let panicked = || Error::FhirPath("evaluation thread panicked".to_string());
-    // Compiled on a thread of its own too, so that calling this from inside an
-    // async runtime never starts a runtime on that runtime's thread.
-    let compiled = std::thread::scope(|s| {
-        s.spawn(|| runtime()?.block_on(CompiledView::compile(view)))
-            .join()
-            .map_err(|_| panicked())?
-    })?;
-    let (compiled, blocks) = (&compiled, &blocks);
-    let next = &AtomicUsize::new(0);
-    let failed = &AtomicBool::new(false);
-    std::thread::scope(|s| {
-        let workers: Vec<_> = (0..threads.min(blocks.len()))
-            .map(|_| {
-                s.spawn(move || -> Result<Vec<(usize, Result<Rows>)>> {
-                    runtime()?.block_on(async {
-                        let mut done = Vec::new();
-                        while !failed.load(Ordering::Relaxed) {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(part) = blocks.get(i) else { break };
-                            let rows = compiled.execute_block(part).await;
-                            if rows.is_err() {
-                                failed.store(true, Ordering::Relaxed);
-                            }
-                            done.push((i, rows));
-                        }
-                        Ok(done)
-                    })
-                })
-            })
-            .collect();
-        let mut done = Vec::with_capacity(blocks.len());
-        for worker in workers {
-            done.extend(worker.join().map_err(|_| panicked())??);
-        }
-        done.sort_unstable_by_key(|(i, _)| *i);
-        let parts = done
-            .into_iter()
-            .map(|(_, rows)| rows)
-            .collect::<Result<Vec<_>>>()?;
-        let mut data = Vec::with_capacity(parts.iter().map(Vec::len).sum());
-        for part in parts {
-            data.extend(part);
-        }
-        let row_count = data.len();
-        Ok(ViewResult {
-            columns: compiled.columns().to_vec(),
-            data,
-            row_count,
-        })
-    })
+    CompiledView::compile_blocking(view)?.execute_parallel(resources, threads)
+}
+
+/// A current-thread Tokio runtime for one evaluation thread.
+fn thread_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))
+}
+
+fn thread_panicked() -> Error {
+    Error::FhirPath("evaluation thread panicked".to_string())
 }
 
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
@@ -272,6 +219,89 @@ impl CompiledView {
             selects,
             wheres,
             columns,
+        })
+    }
+
+    /// [`CompiledView::compile`] for non-async callers. Compiles on a thread
+    /// of its own, so that calling this from inside an async runtime never
+    /// starts a runtime on that runtime's thread.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`CompiledView::compile`].
+    pub fn compile_blocking(view: &ViewDefinition) -> Result<Self> {
+        std::thread::scope(|s| {
+            s.spawn(|| thread_runtime()?.block_on(Self::compile(view)))
+                .join()
+                .map_err(|_| thread_panicked())?
+        })
+    }
+
+    /// Execute the view against in-memory FHIR resources on up to `threads`
+    /// OS threads, for non-async callers.
+    ///
+    /// The resources are split into small blocks. Each thread takes the next
+    /// unclaimed block until none are left, so costly resources stored
+    /// together (all of one type, say) are spread over the threads rather
+    /// than landing on one. Each thread runs its own current-thread Tokio
+    /// runtime. Rows come back in input order, the same as [`execute`]. With
+    /// `threads <= 1`, or fewer resources than threads, fewer threads are
+    /// used.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`execute`]. If several blocks fail, the error of the first of
+    /// them in input order is returned; the other threads stop at their next
+    /// block.
+    pub fn execute_parallel(&self, resources: &[Value], threads: usize) -> Result<ViewResult> {
+        let threads = threads.clamp(1, resources.len().max(1));
+        let block = resources
+            .len()
+            .div_ceil(threads * BLOCKS_PER_THREAD)
+            .clamp(1, MAX_BLOCK);
+        let blocks: Vec<&[Value]> = resources.chunks(block).collect();
+        let blocks = &blocks;
+        let next = &AtomicUsize::new(0);
+        let failed = &AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads.min(blocks.len()))
+                .map(|_| {
+                    s.spawn(move || -> Result<Vec<(usize, Result<Rows>)>> {
+                        thread_runtime()?.block_on(async {
+                            let mut done = Vec::new();
+                            while !failed.load(Ordering::Relaxed) {
+                                let i = next.fetch_add(1, Ordering::Relaxed);
+                                let Some(part) = blocks.get(i) else { break };
+                                let rows = self.execute_block(part).await;
+                                if rows.is_err() {
+                                    failed.store(true, Ordering::Relaxed);
+                                }
+                                done.push((i, rows));
+                            }
+                            Ok(done)
+                        })
+                    })
+                })
+                .collect();
+            let mut done = Vec::with_capacity(blocks.len());
+            for worker in workers {
+                done.extend(worker.join().map_err(|_| thread_panicked())??);
+            }
+            done.sort_unstable_by_key(|(i, _)| *i);
+            let parts = done
+                .into_iter()
+                .map(|(_, rows)| rows)
+                .collect::<Result<Vec<_>>>()?;
+            let mut data = Vec::with_capacity(parts.iter().map(Vec::len).sum());
+            for part in parts {
+                data.extend(part);
+            }
+            let row_count = data.len();
+            Ok(ViewResult {
+                columns: self.columns.clone(),
+                data,
+                row_count,
+            })
         })
     }
 
@@ -1598,6 +1628,13 @@ mod tests {
             let parallel = execute_parallel(&v, &resources, threads).unwrap();
             assert_eq!(parallel.data, sequential.data, "{threads} threads");
         }
+        // One compiled view run over consecutive batches gives the same rows.
+        let compiled = CompiledView::compile_blocking(&v).unwrap();
+        let mut batched = Vec::new();
+        for batch in resources.chunks(300) {
+            batched.extend(compiled.execute_parallel(batch, 4).unwrap().data);
+        }
+        assert_eq!(batched, sequential.data);
     }
 
     #[test]
