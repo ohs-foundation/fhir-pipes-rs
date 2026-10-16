@@ -12,9 +12,11 @@ use super::config::Settings;
 use super::partition::{partition_key, table_files};
 use super::stage::Stage;
 
-/// Write manifest.json into the staging directory, describing the tables as
-/// they will be once the run is published, and return its `refreshed_at`.
-pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
+/// Write manifest.json into the staging directory, describing the tables and
+/// views as they will be once the run is published, and return its
+/// `refreshed_at`. `server` is where the data came from, if known
+/// (`recorded_server`).
+pub fn write(s: &Settings, stage: &Stage, server: Option<&str>) -> Result<String> {
     println!("== manifest");
     let refreshed_at = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S+00:00")
@@ -26,7 +28,7 @@ pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
     }
 
     let mut views = Map::new();
-    let mut files: Vec<_> = fs::read_dir(s.views_out_dir())
+    let mut files: Vec<_> = fs::read_dir(stage.read_dir("views"))
         .map(|it| it.filter_map(|e| e.ok().map(|e| e.path())).collect())
         .unwrap_or_default();
     files.retain(|p: &std::path::PathBuf| p.extension().is_some_and(|x| x == "json"));
@@ -61,7 +63,7 @@ pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
 
     let mut manifest = json!({
         "refreshed_at": refreshed_at,
-        "server": s.server_used(),
+        "server": server,
         "server_name": s.server_name,
         "tables": tables,
         "views": views,
@@ -75,6 +77,29 @@ pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
         .with_context(|| format!("writing {}", path.display()))?;
     println!("   {}", serde_json::to_string(&manifest["tables"])?);
     Ok(refreshed_at)
+}
+
+/// The server to record in the manifest and last-refresh.json: the configured
+/// one if the run `contacted` it; else, as when `--reuse-raw` downloads
+/// nothing, the server named in raw/'s export state, else in the Location
+/// snapshot's state; else none. None with a file source.
+pub fn recorded_server(s: &Settings, contacted: bool) -> Option<String> {
+    if s.reads_files() {
+        return None;
+    }
+    if contacted {
+        return Some(s.server.clone());
+    }
+    let server_in = |path: &Path| {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v.get("server")?.as_str().map(str::to_string))
+            .filter(|v| !v.is_empty() && v != super::files::FILES)
+    };
+    let raw = s.raw_dir();
+    server_in(&raw.join(crate::export::STATE_FILE))
+        .or_else(|| server_in(&raw.join("locations").join(crate::snapshot::STATE_FILE)))
 }
 
 /// A partitioned table's row count, from the parquet footers. `column` is the

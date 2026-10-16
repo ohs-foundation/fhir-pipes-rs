@@ -1,8 +1,8 @@
 //! The one HTTP client. Bearer auth, FHIR accept header, and the retry
 //! policy shared by paging, boundary fetches and load's bundle posts:
 //! connection errors, 5xx and 429 are retried with exponential backoff
-//! (0.5 s doubling, clamped to [0, 30] s, a numeric Retry-After replacing
-//! the computed delay); any other status is final. With a limit
+//! (0.5 s doubling, clamped to [0, 30] s, a Retry-After replacing the
+//! computed delay); any other status is final. With a limit
 //! (`with_concurrency`, for `export --concurrency`) the threads sharing a
 //! client keep at most that many requests in flight, and a Retry-After pauses
 //! them all. The Authorization header is chosen for each attempt once it is
@@ -14,19 +14,30 @@
 //! last two cases the client gets a new token shortly before the current one
 //! expires, so a run can outlast any one token.
 //!
+//! Every request asks for gzip (`Accept-Encoding: gzip`) and callers see
+//! the decompressed body, streamed downloads included. The client decodes
+//! gzip itself, with `MultiGzDecoder`, which reads every gzip member of a
+//! body; reqwest's own decoder stops after the first. FHIR GETs (searches,
+//! counts, the Bulk Data kick-off and status polls) also send
+//! `Cache-Control: no-cache`, so a server or proxy does not answer from a
+//! cached search: HAPI otherwise reuses a recent search's results and total.
+//!
 //! `fhir-pipes dhis2` uses the same client against the DHIS2 Web API, with a
 //! complete Authorization value (`ApiToken …` or `Basic …`) and plain JSON.
 //!
 //! `export --bulk` uses it for the Bulk Data kick-off, the status URL (whose
 //! 202 and 429 the caller reads itself) and the output files.
 
-use std::io::Read as _;
+use std::io::Read;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::Method;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{
+    ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE,
+    HeaderMap, HeaderValue, RETRY_AFTER,
+};
 use serde_json::Value;
 
 use super::google::{self, Credentials};
@@ -34,6 +45,10 @@ use crate::error::{PipesError, Result};
 
 const RETRY_BASE: f64 = 0.5;
 const RETRY_MAX: f64 = 30.0;
+/// The longest wait read from a Retry-After. Far more than a server asks
+/// for in practice; it keeps a huge value from overflowing a `Duration` or
+/// an `Instant`.
+const RETRY_AFTER_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 const ERROR_BODY_CAP: usize = 500;
 /// Never read more than this much of an error body off the wire; we only
 /// keep the first ERROR_BODY_CAP chars of it anyway.
@@ -166,6 +181,11 @@ impl Exchange {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).and_then(|v| v.to_str().ok())
     }
+
+    /// The Retry-After header as a wait, read by `parse_retry_after`.
+    pub fn retry_after(&self) -> Option<Duration> {
+        parse_retry_after(self.header("retry-after"))
+    }
 }
 
 impl std::fmt::Debug for Exchange {
@@ -179,6 +199,44 @@ impl std::fmt::Debug for Exchange {
     }
 }
 
+/// A response's body as it was sent, before `Content-Encoding: gzip`.
+/// `MultiGzDecoder` reads every member: concatenated gzip members are one
+/// valid gzip body (RFC 1952 section 2.2), and a decoder that stops after
+/// the first loses the rest without an error. Any other encoding is passed
+/// through as it came; the client only asks for gzip. An empty body is
+/// empty whatever its `Content-Encoding` says (a 202 from a server that
+/// marks every response gzip), as reqwest's decoder treated it.
+fn decoded(resp: Response) -> Box<dyn Read> {
+    use std::io::BufRead as _;
+    let gzip = resp
+        .headers()
+        .get(CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip")
+        });
+    if !gzip {
+        return Box::new(resp);
+    }
+    let mut body = std::io::BufReader::new(resp);
+    // After a read error here the decoder fails too: the same error again,
+    // or a truncated stream.
+    if body.fill_buf().is_ok_and(|b| b.is_empty()) {
+        return Box::new(std::io::empty());
+    }
+    Box::new(flate2::bufread::MultiGzDecoder::new(body))
+}
+
+/// The whole decoded body.
+fn read_body(resp: Response) -> std::result::Result<Vec<u8>, FetchError> {
+    let mut body = Vec::new();
+    decoded(resp)
+        .read_to_end(&mut body)
+        .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?;
+    Ok(body)
+}
+
 /// A 2xx response's body and `Date`.
 fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
     let date = resp
@@ -186,13 +244,10 @@ fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
         .get(reqwest::header::DATE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    match resp.bytes() {
-        Ok(b) => Ok(Fetched {
-            body: b.to_vec(),
-            date,
-        }),
-        Err(e) => Err(FetchError::Transport(format!("reading body: {e}"))),
-    }
+    Ok(Fetched {
+        body: read_body(resp)?,
+        date,
+    })
 }
 
 /// Any response, with its status and headers.
@@ -201,12 +256,12 @@ fn exchanged(resp: Response) -> std::result::Result<Exchange, FetchError> {
     let headers = resp.headers().clone();
     let mut truncated = false;
     let body = if (200..300).contains(&status) {
-        resp.bytes()
-            .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?
-            .to_vec()
+        read_body(resp)?
     } else {
         let mut buf = Vec::new();
-        let _ = resp.take(EXCHANGE_BODY_LIMIT + 1).read_to_end(&mut buf);
+        let _ = decoded(resp)
+            .take(EXCHANGE_BODY_LIMIT + 1)
+            .read_to_end(&mut buf);
         if buf.len() as u64 > EXCHANGE_BODY_LIMIT {
             buf.truncate(EXCHANGE_BODY_LIMIT as usize);
             truncated = true;
@@ -329,14 +384,36 @@ impl Drop for Pass<'_> {
     }
 }
 
-pub fn backoff_delay(attempt: usize, retry_after: Option<f64>) -> Duration {
-    let secs =
-        retry_after.unwrap_or_else(|| RETRY_BASE * 2f64.powi(attempt.saturating_sub(1) as i32));
-    Duration::from_secs_f64(secs.clamp(0.0, RETRY_MAX))
+/// The wait before retry `attempt + 1`: the server's Retry-After, or 0.5 s
+/// doubling with each attempt; either way at most RETRY_MAX.
+pub fn backoff_delay(attempt: usize, retry_after: Option<Duration>) -> Duration {
+    let max = Duration::from_secs_f64(RETRY_MAX);
+    retry_after.map_or_else(
+        || {
+            let secs = RETRY_BASE * 2f64.powi(attempt.saturating_sub(1) as i32);
+            Duration::from_secs_f64(secs.clamp(0.0, RETRY_MAX))
+        },
+        |wait| wait.min(max),
+    )
 }
 
-pub fn parse_retry_after(value: Option<&str>) -> Option<f64> {
-    value?.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+/// A Retry-After value as a wait: delay-seconds or an HTTP-date (RFC 9110
+/// section 10.2.3), clamped to [0, RETRY_AFTER_MAX]. Fractional seconds are
+/// accepted, a negative number or a date in the past is no wait, and NaN or
+/// anything else unreadable is None. The one parser for every caller, so no
+/// server value can panic a `Duration` conversion.
+pub fn parse_retry_after(value: Option<&str>) -> Option<Duration> {
+    let value = value?.trim();
+    if let Ok(secs) = value.parse::<f64>() {
+        if secs.is_nan() {
+            return None;
+        }
+        let secs = secs.clamp(0.0, RETRY_AFTER_MAX.as_secs_f64());
+        return Some(Duration::from_secs_f64(secs));
+    }
+    let at = httpdate::parse_http_date(value).ok()?;
+    let wait = at.duration_since(SystemTime::now()).unwrap_or_default();
+    Some(wait.min(RETRY_AFTER_MAX))
 }
 
 fn cap(body: String) -> String {
@@ -348,7 +425,9 @@ fn cap(body: String) -> String {
 /// "error" doesn't make us buffer it all just to report a status code.
 fn read_error_body(resp: Response) -> String {
     let mut buf = Vec::new();
-    let _ = resp.take(ERROR_BODY_READ_LIMIT).read_to_end(&mut buf);
+    let _ = decoded(resp)
+        .take(ERROR_BODY_READ_LIMIT)
+        .read_to_end(&mut buf);
     cap(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -375,9 +454,18 @@ fn jitter_factor() -> f64 {
         static RNG: std::cell::Cell<u64> = std::cell::Cell::new(seed());
     }
 
+    /// A different seed in every thread: `RandomState` keys come from the
+    /// OS's random source, once per thread, and the thread id and the clock
+    /// are hashed in as well.
     fn seed() -> u64 {
-        let t = std::time::Instant::now();
-        (t.elapsed().as_nanos() as u64) | 1
+        use std::hash::BuildHasher as _;
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        std::collections::hash_map::RandomState::new()
+            .hash_one((std::thread::current().id(), nanos))
+            | 1
     }
 
     fn xorshift(mut x: u64) -> u64 {
@@ -407,7 +495,16 @@ impl FhirClient {
         ensure_crypto_provider();
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/fhir+json"));
+        // Decoded by `decoded`, not by reqwest: reqwest's decoder reads only
+        // the first gzip member. Its decoders are turned off here, not only
+        // left out of Cargo.toml, because another crate in the build can
+        // enable them (octofhir-fhir-model does, with `fhir-packages`).
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
         let http = Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .no_deflate()
             .default_headers(headers)
             .timeout(timeout)
             .user_agent(concat!("fhir-pipes/", env!("CARGO_PKG_VERSION")))
@@ -508,7 +605,13 @@ impl FhirClient {
 
     /// GET with the retry policy. Sleeps between attempts.
     pub fn get(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
-        self.send(|| self.http.get(url), fetched)
+        self.send(|| self.fhir_get(url), fetched)
+    }
+
+    /// A FHIR GET: `no-cache`, so a search or count is not answered from a
+    /// cached search (HAPI reuses one by default) or a proxy's copy.
+    fn fhir_get(&self, url: &str) -> RequestBuilder {
+        self.http.get(url).header(CACHE_CONTROL, "no-cache")
     }
 
     /// GET a plain JSON API (DHIS2) with the retry policy. `no-cache` because
@@ -544,7 +647,7 @@ impl FhirClient {
     /// `get` is; the 202 comes back with its headers, for `Content-Location`.
     pub fn get_async(&self, url: &str) -> std::result::Result<Exchange, FetchError> {
         self.send(
-            || self.http.get(url).header("prefer", "respond-async"),
+            || self.fhir_get(url).header("prefer", "respond-async"),
             exchanged,
         )
     }
@@ -559,7 +662,9 @@ impl FhirClient {
 
     /// `exchange`, with every attempt and the waits between them ending by
     /// `deadline`: each attempt keeps the client's own timeout, cut short
-    /// when less time is left, and no retry starts after the deadline.
+    /// when less time is left, and no retry starts after the deadline. A GET
+    /// (a Bulk Data status poll) sends `no-cache`. A Retry-After on the
+    /// response is the caller's to read, with `Exchange::retry_after`.
     pub fn exchange_by(
         &self,
         method: Method,
@@ -569,7 +674,11 @@ impl FhirClient {
         let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let mut last = None;
         for attempt in 1..=self.retries {
-            let mut request = self.http.request(method.clone(), url);
+            let mut request = if method == Method::GET {
+                self.fhir_get(url)
+            } else {
+                self.http.request(method.clone(), url)
+            };
             let pass = self.enter();
             // After the wait for a place, which can outlast a token.
             if let Some(v) = self.authorization()? {
@@ -603,7 +712,9 @@ impl FhirClient {
     /// have written part of the file. The Authorization header is sent only
     /// when `authorize`: a Bulk Data output kept elsewhere (a signed storage
     /// URL) must not get the server's token. `timeout` replaces the client's,
-    /// for a file that takes longer than a search page should.
+    /// for a file that takes longer than a search page should. A gzipped
+    /// file reaches `read` decompressed. No `no-cache`: an export's files do
+    /// not change, and a signed storage URL is best sent as it is.
     pub fn download<T>(
         &self,
         url: &str,
@@ -617,8 +728,9 @@ impl FhirClient {
                 .header(ACCEPT, "application/fhir+ndjson")
                 .timeout(timeout)
         };
-        let body = |mut resp: Response| {
-            read(&mut resp).map_err(|e| FetchError::Transport(format!("reading body: {e}")))
+        let body = |resp: Response| {
+            read(&mut decoded(resp))
+                .map_err(|e| FetchError::Transport(format!("reading body: {e}")))
         };
         let attempt = if authorize {
             Attempt::Authorized
@@ -723,8 +835,9 @@ impl FhirClient {
     }
 
     /// The retry loop. Any 2xx is a success, handed to `success`; 429 and
-    /// 5xx retry with backoff (a numeric Retry-After replaces the computed
-    /// delay); any other status is final on the first response.
+    /// 5xx retry with backoff (a Retry-After, seconds or an HTTP-date,
+    /// replaces the computed delay); any other status is final on the first
+    /// response.
     fn retrying<T>(
         &self,
         kind: Attempt,
@@ -759,7 +872,7 @@ impl FhirClient {
                     if status == 429 || status >= 500 {
                         let ra = parse_retry_after(
                             resp.headers()
-                                .get("retry-after")
+                                .get(RETRY_AFTER)
                                 .and_then(|v| v.to_str().ok()),
                         );
                         let delay = backoff_delay(attempt, ra);
@@ -963,20 +1076,252 @@ mod tests {
         assert_eq!(backoff_delay(2, None).as_millis(), 1000);
         assert_eq!(backoff_delay(3, None).as_millis(), 2000);
         assert_eq!(backoff_delay(20, None).as_secs(), 30);
-        assert_eq!(backoff_delay(1, Some(7.0)).as_secs(), 7);
-        assert_eq!(backoff_delay(1, Some(99999.0)).as_secs(), 30);
-        assert_eq!(backoff_delay(1, Some(-5.0)).as_secs(), 0);
+        assert_eq!(backoff_delay(1, Some(Duration::from_secs(7))).as_secs(), 7);
+        assert_eq!(backoff_delay(1, Some(RETRY_AFTER_MAX)).as_secs(), 30);
+        assert_eq!(backoff_delay(1, Some(Duration::ZERO)).as_secs(), 0);
     }
 
     #[test]
-    fn retry_after_parses_numeric_seconds_only() {
-        assert_eq!(parse_retry_after(Some("7")), Some(7.0));
-        assert_eq!(parse_retry_after(Some("1.5")), Some(1.5));
-        assert_eq!(
-            parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
-            None
-        );
+    fn retry_after_reads_seconds_and_http_dates_and_clamps() {
+        let secs = |v: &str| parse_retry_after(Some(v));
+        assert_eq!(secs("7"), Some(Duration::from_secs(7)));
+        assert_eq!(secs(" 1.5 "), Some(Duration::from_millis(1500)));
+        // Out of range: never a panic, clamped to [0, RETRY_AFTER_MAX].
+        assert_eq!(secs("1e300"), Some(RETRY_AFTER_MAX));
+        assert_eq!(secs("inf"), Some(RETRY_AFTER_MAX));
+        assert_eq!(secs("-5"), Some(Duration::ZERO));
+        assert_eq!(secs("-1e300"), Some(Duration::ZERO));
+        assert_eq!(secs("-inf"), Some(Duration::ZERO));
+        assert_eq!(secs("NaN"), None);
+        assert_eq!(secs("soon"), None);
+        assert_eq!(secs(""), None);
         assert_eq!(parse_retry_after(None), None);
+        // An HTTP-date: the time until then, nothing for one in the past,
+        // RETRY_AFTER_MAX for one far ahead.
+        assert_eq!(secs("Sun, 06 Nov 1994 08:49:37 GMT"), Some(Duration::ZERO));
+        assert_eq!(secs("Fri, 31 Dec 9999 23:59:59 GMT"), Some(RETRY_AFTER_MAX));
+        let soon = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(120));
+        let wait = secs(&soon).unwrap();
+        assert!(
+            wait > Duration::from_secs(110) && wait <= Duration::from_secs(120),
+            "{wait:?}"
+        );
+    }
+
+    #[test]
+    fn each_thread_draws_its_own_jitter() {
+        // Seeded from the clock's elapsed nanoseconds, every thread's first
+        // factor was about 0, so retries after a shared 5xx stayed in step.
+        let threads: Vec<_> = (0..8).map(|_| std::thread::spawn(jitter_factor)).collect();
+        let mut firsts: Vec<f64> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(firsts.iter().all(|f| (0.0..1.0).contains(f)), "{firsts:?}");
+        firsts.sort_by(f64::total_cmp);
+        assert!(firsts[7] - firsts[0] > 0.01, "{firsts:?}");
+        firsts.dedup();
+        assert_eq!(firsts.len(), 8, "{firsts:?}");
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    /// `parts` as one gzip body of a member each (RFC 1952 section 2.2).
+    fn gzip_members(parts: &[&[u8]]) -> Vec<u8> {
+        parts.iter().flat_map(|p| gzip(p)).collect()
+    }
+
+    #[test]
+    fn every_member_of_a_multi_member_gzip_page_is_read() {
+        let page = br#"{"resourceType":"Bundle","type":"searchset","total":2}"#;
+        let (a, b) = page.split_at(20);
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Patient"))
+                .times(1)
+                .respond_with(
+                    status_code(200)
+                        .insert_header("content-encoding", "gzip")
+                        .body(gzip_members(&[a, b])),
+                ),
+        );
+        let got = client(1).get(&server.url_str("/fhir/Patient")).unwrap();
+        assert_eq!(got.body, page);
+    }
+
+    #[test]
+    fn a_server_that_ignores_accept_encoding_is_read_as_sent() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/plain"),
+                request::headers(contains(("accept-encoding", matches("gzip")))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body("plain text")),
+        );
+        let got = client(1).get(&server.url_str("/plain")).unwrap();
+        assert_eq!(got.body, b"plain text");
+    }
+
+    #[test]
+    fn an_empty_gzip_body_and_a_gzipped_error_are_decoded() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/empty"))
+                .times(1)
+                .respond_with(status_code(202).insert_header("content-encoding", "gzip")),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/missing"))
+                .times(1)
+                .respond_with(
+                    status_code(404)
+                        .insert_header("content-encoding", "gzip")
+                        .body(gzip_members(&[b"no such ", b"resource"])),
+                ),
+        );
+        let c = client(1);
+        let got = c.exchange(Method::GET, &server.url_str("/empty")).unwrap();
+        assert_eq!((got.status, got.body.len()), (202, 0));
+        let err = c.get(&server.url_str("/missing")).unwrap_err();
+        assert!(
+            matches!(err, FetchError::Status { status: 404, ref body } if body == "no such resource"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_gzip_body_is_an_error() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/bad"))
+                .times(1)
+                .respond_with(
+                    status_code(200)
+                        .insert_header("content-encoding", "gzip")
+                        .body("not gzip"),
+                ),
+        );
+        let err = client(1).get(&server.url_str("/bad")).unwrap_err();
+        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_search_asks_for_gzip_and_no_cache_and_gets_the_decompressed_body() {
+        let page = br#"{"resourceType":"Bundle","type":"searchset","total":2}"#;
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("accept-encoding", matches("gzip")))),
+                request::headers(contains(("cache-control", "no-cache"))),
+            ])
+            .times(1)
+            .respond_with(
+                status_code(200)
+                    .insert_header("content-encoding", "gzip")
+                    .body(gzip(page)),
+            ),
+        );
+        let got = client(1).get(&server.url_str("/fhir/Patient")).unwrap();
+        assert_eq!(got.body, page);
+    }
+
+    #[test]
+    fn a_bulk_kick_off_and_status_poll_send_no_cache_and_a_delete_does_not() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/$export"),
+                request::headers(contains(("accept-encoding", matches("gzip")))),
+                request::headers(contains(("cache-control", "no-cache"))),
+                request::headers(contains(("prefer", "respond-async"))),
+            ])
+            .times(1)
+            .respond_with(status_code(202).insert_header("content-location", "/status")),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/status"),
+                request::headers(contains(("accept-encoding", matches("gzip")))),
+                request::headers(contains(("cache-control", "no-cache"))),
+            ])
+            .times(1)
+            .respond_with(
+                status_code(200)
+                    .insert_header("content-encoding", "gzip")
+                    .body(gzip_members(&[br#"{"outp"#, br#"ut":[]}"#])),
+            ),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("DELETE", "/status"),
+                request::headers(not(contains(key("cache-control")))),
+            ])
+            .times(1)
+            .respond_with(status_code(202)),
+        );
+        let c = client(1);
+        assert_eq!(
+            c.get_async(&server.url_str("/fhir/$export"))
+                .unwrap()
+                .status,
+            202
+        );
+        let polled = c.exchange(Method::GET, &server.url_str("/status")).unwrap();
+        assert_eq!(polled.body, br#"{"output":[]}"#);
+        c.exchange(Method::DELETE, &server.url_str("/status"))
+            .unwrap();
+    }
+
+    #[test]
+    fn every_member_of_a_gzipped_download_reaches_the_reader() {
+        let lines = "{\"resourceType\":\"Patient\",\"id\":\"a\"}\n".repeat(1000);
+        let (head, tail) = lines.as_bytes().split_at(lines.len() / 2);
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/files/p.ndjson"),
+                request::headers(contains(("accept", "application/fhir+ndjson"))),
+                request::headers(contains(("accept-encoding", matches("gzip")))),
+            ])
+            .times(1)
+            .respond_with(
+                status_code(200)
+                    .insert_header("content-encoding", "gzip")
+                    .body(gzip_members(&[head, tail])),
+            ),
+        );
+        let got = client(1)
+            .download(
+                &server.url_str("/files/p.ndjson"),
+                false,
+                Duration::from_secs(5),
+                |body| {
+                    let mut text = String::new();
+                    body.read_to_string(&mut text)?;
+                    Ok(text)
+                },
+            )
+            .unwrap();
+        assert_eq!(got, lines);
+    }
+
+    #[test]
+    fn a_token_request_does_not_send_no_cache() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::headers(not(contains(key("cache-control")))),
+            ])
+            .times(1)
+            .respond_with(token("abc", 3600)),
+        );
+        FhirClient::new(credentials(&server), 1, Duration::from_secs(5)).unwrap();
     }
 
     #[test]
@@ -1372,24 +1717,41 @@ mod tests {
     }
 
     #[test]
-    fn an_http_date_retry_after_falls_back_to_backoff() {
+    fn an_http_date_retry_after_is_honoured() {
+        // Two seconds ahead, to whole seconds: a wait of more than one.
+        let at = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(2));
         let server = Server::run();
         server.expect(
             Expectation::matching(request::method_path("GET", "/d"))
                 .times(2)
                 .respond_with(cycle![
-                    status_code(503).append_header("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+                    status_code(503).append_header("Retry-After", at.as_str()),
                     status_code(200).body("ok")
                 ]),
         );
         let t = std::time::Instant::now();
         client(3).get(&server.url("/d").to_string()).unwrap();
         let elapsed = t.elapsed();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(200),
-            "{elapsed:?}"
+        assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+        assert!(elapsed <= Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    #[test]
+    fn a_huge_retry_after_is_clamped_to_the_backoff_ceiling() {
+        // One attempt, so the clamped wait is not slept; the point is that
+        // the value does not panic the conversion or the gate's pause.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/h"))
+                .times(1)
+                .respond_with(status_code(503).append_header("Retry-After", "1e300")),
         );
-        assert!(elapsed <= std::time::Duration::from_secs(5), "{elapsed:?}");
+        let c = client(1).with_concurrency(2);
+        let err = c.get(&server.url_str("/h")).unwrap_err();
+        assert!(
+            matches!(err, FetchError::Status { status: 503, .. }),
+            "{err:?}"
+        );
     }
 
     #[test]

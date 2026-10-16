@@ -1127,6 +1127,14 @@ mod database {
             .success()
             .stdout(has(format!("obs → {s}.obs (3 rows)")))
             .stdout(has(format!("patient → {s}.patient (2 rows)")));
+        // Analyzed after the commit: the planner's row estimate is the count
+        // just loaded (a table only copied into would still say 0).
+        assert_eq!(
+            one(&format!(
+                "SELECT reltuples::bigint::text FROM pg_class WHERE oid = '\"{s}\".obs'::regclass"
+            )),
+            "3"
+        );
         // Only view tables: not locations.
         assert_eq!(
             one(&format!(
@@ -2246,4 +2254,314 @@ fn the_tiles_tools_are_needed_only_when_there_are_locations() {
         .failure()
         .stderr(has("not found: /no/such/duckdb (for tiles)"));
     assert!(!root.join("data/parquet/locations").exists());
+}
+
+/// A relative --data is resolved against the current directory, and the hooks,
+/// which run in the config file's directory, get it as an absolute DATA.
+#[test]
+#[cfg(unix)]
+fn hooks_get_an_absolute_data_directory() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "seen"
+run = ["sh", "-c", "echo \"$DATA\" > data.txt; cp \"$DATA/manifest.json\" seen.json"]
+"#,
+    );
+    let root = dir.path();
+    let work = root.join("work");
+    fs::create_dir_all(&work).unwrap();
+    cmd(&config)
+        .current_dir(&work)
+        .args(["--data", "../data", "--only", "views,hooks", "--reuse-raw"])
+        .assert()
+        .success();
+    let data = fs::read_to_string(root.join("data.txt")).unwrap();
+    assert!(Path::new(data.trim()).is_absolute(), "{data}");
+    assert_eq!(
+        fs::read_to_string(root.join("seen.json")).unwrap(),
+        fs::read_to_string(root.join("data/manifest.json")).unwrap()
+    );
+}
+
+/// A hook's `after` names a step in any case; `push` and `hooks`, which no
+/// hook can run after, are refused before anything runs.
+#[test]
+#[cfg(unix)]
+fn a_hooks_after_matches_its_step_in_any_case() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "after-views"
+after = "Views"
+run = ["sh", "-c", "touch after-views.txt"]
+"#,
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw"])
+        .assert()
+        .success();
+    assert!(dir.path().join("after-views.txt").exists());
+
+    for step in ["push", "hooks"] {
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[[hooks]]\nname = \"h\"\nafter = \"{step}\"\nrun = [\"true\"]\n"
+        ));
+        cmd(&config)
+            .args(["--only", "views,hooks", "--reuse-raw"])
+            .assert()
+            .failure()
+            .stderr(has(format!(
+                "`after = \"{step}\"`: a hook runs after one of"
+            )));
+        assert!(!dir.path().join("data/parquet/obs").exists());
+    }
+}
+
+/// Rows sent to the null partition because the lookup table is missing, or
+/// their key is not in it, are counted in a warning.
+#[test]
+fn rows_without_a_partition_are_counted_in_a_warning() {
+    let (dir, config) = setup_with_raw("");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has(
+            "warning: parquet/obs: 1 of 3 rows in the null partition (1 with a `location_id` not in locations.id)",
+        ));
+
+    fs::remove_dir_all(dir.path().join("data/parquet/locations")).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has(
+            "warning: parquet/obs: 3 of 3 rows in the null partition: there is no lookup table parquet/locations to find `location_id` in",
+        ));
+    // Patient has no lookup rule: no warning for it.
+    let out = cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("parquet/patient: "));
+}
+
+/// views/ is staged and replaced with the tables: a removed view leaves
+/// views/ and the manifest, and a failing run changes neither. The table a
+/// removed view wrote is kept, and listed by --check and after a run.
+#[test]
+fn removed_views_leave_views_and_their_tables_are_listed() {
+    let (dir, config) = setup_with_raw("\n[catalog]\nextra = \"extra.sql\"\n");
+    let root = dir.path();
+    let extra = root.join("extra.sql");
+    fs::write(&extra, "CREATE OR REPLACE VIEW one AS SELECT 1;\n").unwrap();
+    let data = root.join("data");
+    let with_gone = views_with(root, &["IcrGone"], false);
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&with_gone)
+        .assert()
+        .success()
+        .stdout(has("note:").not());
+    assert!(data.join("views/IcrGone.json").is_file());
+    assert!(data.join("parquet/gone").is_dir());
+
+    // A run that fails after the views step leaves views/ as it was.
+    let with_new = root.join("new-views");
+    fs::create_dir_all(&with_new).unwrap();
+    for f in fs::read_dir(fixtures().join("views")).unwrap() {
+        let f = f.unwrap().path();
+        fs::copy(&f, with_new.join(f.file_name().unwrap())).unwrap();
+    }
+    fs::copy(with_gone.join("IcrGone.json"), with_new.join("IcrNew.json")).unwrap();
+    let text = fs::read_to_string(with_new.join("IcrNew.json")).unwrap();
+    fs::write(
+        with_new.join("IcrNew.json"),
+        text.replace("IcrGone", "IcrNew"),
+    )
+    .unwrap();
+    fs::remove_file(&extra).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&with_new)
+        .assert()
+        .failure()
+        .stderr(has("extra.sql"));
+    assert!(data.join("views/IcrGone.json").is_file());
+    assert!(!data.join("views/IcrNew.json").exists());
+    assert_nothing_staged(&data);
+
+    // The fixture views alone: IcrGone leaves views/ and the manifest's
+    // views; its table is kept and named.
+    fs::write(&extra, "CREATE OR REPLACE VIEW one AS SELECT 1;\n").unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has("note: no current view writes parquet/gone; kept"));
+    assert!(!data.join("views/IcrGone.json").exists());
+    assert!(data.join("views/IcrObs.json").is_file());
+    assert!(!data.join(".views.old").exists());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
+    assert!(manifest["views"].get("IcrGone").is_none(), "{manifest}");
+    assert!(manifest["views"].get("IcrObs").is_some());
+    assert_eq!(manifest["tables"]["gone"]["rows"], 2);
+    cmd(&config).arg("--check").assert().success().stdout(has(
+        "unwritten:  gone (in parquet/, written by no current view; kept)",
+    ));
+}
+
+/// A run that downloads nothing records no server it did not contact: the
+/// one in raw/'s export state if there is one, else none.
+#[test]
+fn a_run_that_downloads_nothing_records_the_server_of_the_downloads() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    let read = |p: &str| -> Value {
+        serde_json::from_str(&fs::read_to_string(data.join(p)).unwrap()).unwrap()
+    };
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    assert_eq!(read("manifest.json")["server"], Value::Null);
+    assert_eq!(read("raw/test/last-refresh.json")["server"], Value::Null);
+
+    fs::write(
+        data.join("raw/test/.export-state.json"),
+        r#"{"server": "https://hapi.example.org/fhir", "types": {}}"#,
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    assert_eq!(
+        read("manifest.json")["server"],
+        "https://hapi.example.org/fhir"
+    );
+    assert_eq!(
+        read("raw/test/last-refresh.json")["server"],
+        "https://hapi.example.org/fhir"
+    );
+}
+
+/// --reuse-raw transforms the Location snapshot in raw/ without extracting.
+#[test]
+fn reuse_raw_transforms_the_location_snapshot_without_extracting() {
+    let (dir, config) = setup(NOWHERE, "");
+    let snap = dir.path().join("data/raw/test/locations");
+    fs::create_dir_all(&snap).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot/locations.ndjson"),
+        snap.join("locations.ndjson"),
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "locations", "--reuse-raw"])
+        .assert()
+        .success()
+        .stdout(has("--reuse-raw:"))
+        .stdout(has("no extract"));
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert!(manifest["tables"]["locations"]["rows"].as_i64().unwrap() > 2);
+    assert_eq!(manifest["server"], Value::Null);
+}
+
+/// A fake duckdb that writes one feature to the file a COPY names, and a
+/// fake tippecanoe that writes $TILES to its output.
+#[cfg(unix)]
+fn fake_tile_tools(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let duckdb = dir.join("duckdb");
+    fs::write(
+        &duckdb,
+        r#"#!/bin/sh
+file=$(printf '%s\n' "$2" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
+[ -n "$file" ] && echo '{"type":"Feature"}' > "$file"
+exit 0
+"#,
+    )
+    .unwrap();
+    let tippecanoe = dir.join("tippecanoe");
+    fs::write(
+        &tippecanoe,
+        r#"#!/bin/sh
+while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+printf '%s' "$TILES" > "$out"
+"#,
+    )
+    .unwrap();
+    for p in [&duckdb, &tippecanoe] {
+        fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (duckdb, tippecanoe)
+}
+
+/// tiles/ is staged and replaced with the tables: a run that fails after the
+/// tiles step keeps the previous tiles.
+#[test]
+#[cfg(unix)]
+fn tiles_are_swapped_in_with_the_tables() {
+    let tools = tempfile::tempdir().unwrap();
+    let (duckdb, tippecanoe) = fake_tile_tools(tools.path());
+    let (dir, config) = setup_with_raw(&format!(
+        "\n[tools]\nduckdb = '{}'\ntippecanoe = '{}'\n\n[catalog]\nextra = \"extra.sql\"\n",
+        duckdb.display(),
+        tippecanoe.display()
+    ));
+    let data = dir.path().join("data");
+    fs::create_dir_all(
+        data.join("parquet/locations/country=SLE/geom_type=polygon/type=admin-unit"),
+    )
+    .unwrap();
+    fs::create_dir_all(data.join("tiles")).unwrap();
+    fs::write(data.join("tiles/admin.pmtiles"), "old").unwrap();
+    fs::write(data.join("tiles/catchments.pmtiles"), "old").unwrap();
+
+    // The catalog step fails after the tiles are built.
+    cmd(&config)
+        .args(["--only", "views,tiles", "--reuse-raw"])
+        .env("TILES", "new")
+        .assert()
+        .failure()
+        .stdout(has("→ admin.pmtiles"))
+        .stderr(has("extra.sql"));
+    assert_eq!(
+        fs::read_to_string(data.join("tiles/admin.pmtiles")).unwrap(),
+        "old"
+    );
+    assert!(data.join("tiles/catchments.pmtiles").is_file());
+    assert_nothing_staged(&data);
+
+    fs::write(dir.path().join("extra.sql"), "").unwrap();
+    cmd(&config)
+        .args(["--only", "views,tiles", "--reuse-raw"])
+        .env("TILES", "new")
+        .assert()
+        .success()
+        .stdout(has(", tiles/, views/, then the manifest"));
+    assert_eq!(
+        fs::read_to_string(data.join("tiles/admin.pmtiles")).unwrap(),
+        "new"
+    );
+    // The registry has no catchments now: the old archive is gone with the
+    // rest of the old tiles/.
+    assert!(!data.join("tiles/catchments.pmtiles").exists());
+    assert!(!data.join(".tiles.old").exists());
+    assert_nothing_staged(&data);
+}
+
+#[test]
+fn zero_threads_are_refused() {
+    let (_dir, config) = setup(NOWHERE, "");
+    cmd(&config)
+        .args(["--threads", "0", "--check"])
+        .assert()
+        .failure()
+        .stderr(has("--threads"));
 }

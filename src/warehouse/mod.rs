@@ -20,10 +20,10 @@
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 //!
-//! The tables, the manifest and catalog.sql are written to staging directories
-//! (stage.rs) and swapped in together after the database step, so a run that
-//! fails before then leaves the previous run's warehouse as it was. The hooks
-//! and the push work on the published warehouse.
+//! The tables, views/, tiles/, the manifest and catalog.sql are written to
+//! staging directories (stage.rs) and swapped in together after the database
+//! step, so a run that fails before then leaves the previous run's warehouse
+//! as it was. The hooks and the push work on the published warehouse.
 
 mod catalog;
 mod config;
@@ -39,6 +39,7 @@ mod tiles;
 mod tools;
 pub(crate) mod views;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -111,9 +112,11 @@ pub struct RefreshArgs {
     #[arg(long, value_delimiter = ',')]
     countries: Vec<String>,
     /// Threads for reading and evaluating (default: the number of CPUs).
-    #[arg(long)]
+    #[arg(long, value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
     threads: Option<usize>,
-    /// Reuse downloaded NDJSON where present instead of downloading again.
+    /// Reuse downloaded NDJSON where present instead of downloading again,
+    /// and the Location snapshot in raw/<server>/locations, where there is
+    /// one, instead of extracting.
     #[arg(long, env = "FHIR_PIPES_REUSE_RAW")]
     reuse_raw: bool,
     /// Download everything again (Locations and every resource type the views
@@ -273,7 +276,9 @@ fn hook_program(s: &Settings, program: &str) -> String {
 fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Vec<(String, String)>> {
     let mut t = Vec::new();
     if steps.contains(&Step::Views) && s.views.is_none() {
-        bail!("no views directory: pass --views, set VIEWS, or set `views` in the config");
+        bail!(
+            "no views directory: pass --views, set FHIR_PIPES_VIEWS, or set `views` in the config"
+        );
     }
     if steps.contains(&Step::Tiles) {
         t.push((s.duckdb.clone(), "tiles".into()));
@@ -293,11 +298,6 @@ fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Vec<(String, S
     }
     if steps.contains(&Step::Hooks) {
         for h in &s.hooks {
-            if let Some(after) = &h.after
-                && Step::from_str(after, true).is_err()
-            {
-                bail!("hook {}: unknown step `{after}` in `after`", h.name);
-            }
             let Some(program) = h.run.first() else {
                 bail!("hook {} has an empty `run`", h.name);
             };
@@ -406,6 +406,32 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
         let found = tools::find(tool).map_or("NOT FOUND".to_string(), |p| p.display().to_string());
         println!("tool:       {tool} ({why}): {found}");
     }
+    if let Some(dir) = &s.views {
+        match views::discover(dir, &s.strip_prefix)
+            .and_then(|vs| unwritten_tables(s, vs.into_iter().map(|v| v.table).collect()))
+        {
+            Ok(t) if t.is_empty() => {}
+            Ok(t) => println!(
+                "unwritten:  {} (in parquet/, written by no current view; kept)",
+                t.join(", ")
+            ),
+            Err(e) => println!("unwritten:  cannot tell: {e:#}"),
+        }
+    }
+}
+
+/// The tables in parquet/ that no current view writes (`written`), leaving
+/// out `locations` and the lookup tables, which need not come from a view.
+/// A view that was removed or renamed leaves its table behind: refresh keeps
+/// it, and it stays in the manifest and the catalog, until it is removed by
+/// hand.
+fn unwritten_tables(s: &Settings, written: BTreeSet<String>) -> Result<Vec<String>> {
+    Ok(stage::table_names(&s.parquet_dir())?
+        .into_iter()
+        .filter(|t| {
+            t != "locations" && !written.contains(t) && !s.lookups.iter().any(|l| &l.table == t)
+        })
+        .collect())
 }
 
 /// `tiles_tools`: the tiles step's tools, when they are checked only once the
@@ -414,6 +440,9 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     let started = Instant::now();
     let mut timings: Vec<(&str, f64)> = Vec::new();
     let mut ran: BTreeSet<Step> = BTreeSet::new();
+    // Whether the run downloaded anything from the server, for the server
+    // the manifest records.
+    let mut contacted = false;
     std::fs::create_dir_all(s.raw_dir())?;
     std::fs::create_dir_all(s.parquet_dir())?;
     let stage = stage::Stage::new(s)?;
@@ -432,7 +461,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         let built = if s.reads_files() {
             files::locations(s, stage.tables_dir())?
         } else {
-            fhir::locations(s, stage.tables_dir())?;
+            contacted |= fhir::locations(s, stage.tables_dir())?;
             true
         };
         if built {
@@ -457,12 +486,13 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         let tiles = tiles_wanted.then(|| {
             scope.spawn(|| {
                 let t = Instant::now();
-                tiles::build(s, &stage.read("locations")).map(|()| t.elapsed().as_secs_f64())
+                tiles::build(s, &stage.read("locations"), &stage.dir("tiles"))
+                    .map(|()| t.elapsed().as_secs_f64())
             })
         });
         let views = steps.contains(&Step::Views).then(|| {
             let t = Instant::now();
-            views_step(s, &stage).map(|()| t.elapsed().as_secs_f64())
+            views_step(s, &stage).map(|done| (done, t.elapsed().as_secs_f64()))
         });
         let tiles = tiles.map(|h| {
             h.join()
@@ -470,10 +500,15 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         });
         (views, tiles)
     });
+    let mut view_tables = None;
     if let Some(v) = views {
-        timings.push(("views", v.context("views")?));
+        let (done, secs) = v.context("views")?;
+        timings.push(("views", secs));
         ran.insert(Step::Views);
+        contacted |= done.downloaded;
+        view_tables = Some(done.tables);
     }
+    let server = manifest::recorded_server(s, contacted);
     if let Some(t) = tiles {
         timings.push(("tiles", t.context("tiles")?));
         ran.insert(Step::Tiles);
@@ -484,7 +519,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         .to_string();
     if steps.contains(&Step::Manifest) {
         let t = Instant::now();
-        refreshed_at = manifest::write(s, &stage)?;
+        refreshed_at = manifest::write(s, &stage, server.as_deref())?;
         timings.push(("manifest", t.elapsed().as_secs_f64()));
         ran.insert(Step::Manifest);
     }
@@ -520,8 +555,9 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     if !stage.is_empty()? {
         let t = Instant::now();
         println!("== publish");
-        let n = stage.publish()?;
-        println!("   {n} table(s), then the manifest and catalog");
+        let (n, dirs) = stage.publish()?;
+        let dirs: String = dirs.iter().map(|d| format!(", {d}/")).collect();
+        println!("   {n} table(s){dirs}, then the manifest and catalog");
         // DuckDB reads each table's schema from its files when it creates a
         // view, so a catalog.duckdb with relative paths can only be built once
         // the tables are in place. If that fails the run stops here, with the
@@ -539,10 +575,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     if steps.contains(&Step::Hooks) {
         let t = Instant::now();
         for h in &s.hooks {
-            let wanted = h
-                .after
-                .as_deref()
-                .is_none_or(|a| ran.iter().any(|r| r.name() == a));
+            let wanted = h.after.is_none_or(|a| ran.contains(&a));
             if wanted {
                 push::hook(s, h, &hook_program(s, &h.run[0]), &refreshed_at)?;
             }
@@ -554,6 +587,21 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         let t = Instant::now();
         push::push(s)?;
         timings.push(("push", t.elapsed().as_secs_f64()));
+    }
+
+    if let Some(written) = view_tables {
+        let unwritten = unwritten_tables(s, written)?;
+        if !unwritten.is_empty() {
+            println!(
+                "note: no current view writes {}; kept, and still in the manifest and \
+                 the catalog. Remove a table's directory by hand if it is no longer wanted.",
+                unwritten
+                    .iter()
+                    .map(|t| format!("parquet/{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
 
     let total = started.elapsed().as_secs_f64();
@@ -568,7 +616,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     );
     let mut report = json!({
         "refreshed_at": refreshed_at,
-        "server": s.server_used(),
+        "server": server,
         "seconds": total,
         "steps": timings.iter().map(|(n, t)| (n.to_string(), json!(t))).collect::<serde_json::Map<_, _>>(),
     });
@@ -608,17 +656,25 @@ fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
     }
 }
 
+/// What the views step did.
+struct ViewsDone {
+    /// Whether anything was downloaded from the server.
+    downloaded: bool,
+    /// The tables the views wrote.
+    tables: BTreeSet<String>,
+}
+
 /// Download each resource type the views read, run each type's views on one
 /// read of it, then write each view's table, partitioned by the lookup rules,
-/// to the staging directory.
-fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
+/// to the staging directory, and the views to the staged views/.
+fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
     let dir = s.views.as_ref().context("no views directory")?;
     println!("== views ({})", dir.display());
     let all = views::discover(dir, &s.strip_prefix)?;
     if all.is_empty() {
         bail!("no ViewDefinitions in {}", dir.display());
     }
-    views::save(&all, &s.views_out_dir())?;
+    views::save(&all, &stage.dir("views"))?;
 
     let mut by_type: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, v) in all.iter().enumerate() {
@@ -634,7 +690,8 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
                 || !ndjson(t).exists()
         })
         .collect();
-    if !s.reads_files() {
+    let downloaded = !s.reads_files() && !download.is_empty();
+    if downloaded {
         fhir::export(s, &download)?;
     }
 
@@ -682,9 +739,11 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
         }
         let rule = partition::rule_for(&result, &s.lookups);
         let mut map: Option<&HashMap<String, String>> = None;
+        let mut lookup_table = None;
         if let Some((l, _)) = rule {
             let table_dir = stage.read(&l.table);
             let key = l.table_key.clone().unwrap_or_else(|| l.key.clone());
+            lookup_table = Some((l, key.clone(), table_dir.is_dir()));
             if table_dir.is_dir() {
                 let cache_key = (l.table.clone(), key.clone());
                 if !lookups.contains_key(&cache_key) {
@@ -696,16 +755,60 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
             }
         }
         let col = rule.map(|(_, c)| c);
+        // Rows whose key is null, and rows whose key is not in the lookup
+        // table (or is not text: the lookup's keys are read as text), for
+        // the warning below.
+        let no_key = Cell::new(0usize);
+        let not_found = Cell::new(0usize);
         let n = partition::write(result, &stage.table(&v.table), &s.partition_column, |row| {
-            let (Some(map), Some(c)) = (map, col) else {
+            let c = col?;
+            if row[c].is_null() {
+                no_key.set(no_key.get() + 1);
                 return None;
-            };
-            row[c].as_str().and_then(|k| map.get(k)).cloned()
+            }
+            let found = map.and_then(|m| row[c].as_str().and_then(|k| m.get(k)).cloned());
+            if found.is_none() {
+                not_found.set(not_found.get() + 1);
+            }
+            found
         })?;
         println!(
             "   {} ({}) → parquet/{} ({n} rows)",
             v.name, v.resource, v.table
         );
+        if let Some((l, key, present)) = lookup_table {
+            let (no_key, not_found) = (no_key.get(), not_found.get());
+            if !present {
+                println!(
+                    "   warning: parquet/{}: {} of {n} rows in the null partition: there is no \
+                     lookup table parquet/{} to find `{}` in",
+                    v.table,
+                    no_key + not_found,
+                    l.table,
+                    l.key
+                );
+            } else if no_key + not_found > 0 {
+                let mut why = Vec::new();
+                if not_found > 0 {
+                    why.push(format!(
+                        "{not_found} with a `{}` not in {}.{key}",
+                        l.key, l.table
+                    ));
+                }
+                if no_key > 0 {
+                    why.push(format!("{no_key} without a `{}`", l.key));
+                }
+                println!(
+                    "   warning: parquet/{}: {} of {n} rows in the null partition ({})",
+                    v.table,
+                    no_key + not_found,
+                    why.join(", ")
+                );
+            }
+        }
     }
-    Ok(())
+    Ok(ViewsDone {
+        downloaded,
+        tables: all.into_iter().map(|v| v.table).collect(),
+    })
 }
