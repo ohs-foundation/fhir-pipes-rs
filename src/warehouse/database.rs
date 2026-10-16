@@ -39,7 +39,8 @@ pub fn load(s: &Settings, d: &Database, tables: &[(String, PathBuf)]) -> Result<
         .with_context(|| format!("[database] needs the connection string in ${}", d.url_env))?;
     let mut plans = Vec::new();
     for (table, dir) in tables {
-        plans.push(plan(dir, table, &s.partition_column)?);
+        let column = super::partition::partition_key(dir, &s.partition_column);
+        plans.push(plan(dir, table, &column)?);
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
