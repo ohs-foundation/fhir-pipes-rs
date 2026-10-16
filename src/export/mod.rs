@@ -109,7 +109,7 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
     std::fs::create_dir_all(&args.out)
         .map_err(|e| PipesError::Usage(format!("--out {}: {e}", args.out.display())))?;
     let client = FhirClient::new(
-        args.auth.auth(),
+        args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
     )?;

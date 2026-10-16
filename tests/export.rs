@@ -6,6 +6,7 @@ use std::process::Command;
 use assert_cmd::assert::Assert;
 use assert_cmd::prelude::*;
 use httptest::{Expectation, Server, all_of, matchers::*, responders::*};
+use predicates::prelude::*;
 use serde_json::{Value, json};
 
 fn fhir_pipes() -> Command {
@@ -17,6 +18,7 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_TOKEN_URL",
         "FHIR_PIPES_USERNAME",
         "FHIR_PIPES_PASSWORD",
+        "FHIR_PIPES_GOOGLE_AUTH",
     ] {
         c.env_remove(var);
     }
@@ -535,4 +537,160 @@ fn basic_auth_needs_a_password_and_no_other_credentials() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("cannot be used with"));
+}
+
+/// A service account key file with the test-only key under
+/// tests/fixtures/google, whose tokens come from `token_uri`.
+fn service_account_file(dir: &Path, token_uri: &str) -> std::path::PathBuf {
+    let key = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/google/test-only-service-account-key.pem"),
+    )
+    .unwrap();
+    let path = dir.join("key.json");
+    std::fs::write(
+        &path,
+        json!({
+            "type": "service_account",
+            "private_key_id": "test-key-id",
+            "private_key": key,
+            "client_email": "pipes-test@test-project.iam.gserviceaccount.com",
+            "token_uri": token_uri,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn google_auth_signs_in_with_a_service_account_key() {
+    let server = Server::run();
+    let base = server.url_str("/fhir");
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/token"),
+            request::body(url_decoded(contains((
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:jwt-bearer"
+            )))),
+            request::body(url_decoded(contains(key("assertion")))),
+        ])
+        .times(1)
+        .respond_with(json_encoded(json!({
+            "access_token": "ya29.test",
+            "expires_in": 3599,
+            "token_type": "Bearer",
+        }))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Patient"),
+            request::headers(contains(("authorization", "Bearer ya29.test"))),
+        ])
+        .times(2)
+        .respond_with(status_code(200).body(bundle(
+            vec![json!({"resourceType": "Patient", "id": "p1"})],
+            None,
+        ))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let key = service_account_file(dir.path(), &server.url_str("/token"));
+    let out = dir.path().join("out");
+    let a = fhir_pipes()
+        .args([
+            "export",
+            "--server",
+            &base,
+            "--google-auth",
+            "--type",
+            "Patient",
+        ])
+        .arg("--out")
+        .arg(&out)
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &key)
+        .assert()
+        .success();
+    assert_eq!(read_ndjson(&out.join("Patient.ndjson")).len(), 1);
+    let printed = format!("{}{}", stdout(&a), stderr(&a));
+    for secret in ["ya29.test", "PRIVATE KEY"] {
+        assert!(!printed.contains(secret), "{printed}");
+    }
+
+    // FHIR_PIPES_GOOGLE_AUTH=1 is the same as the flag.
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/token"))
+            .times(1)
+            .respond_with(json_encoded(
+                json!({"access_token": "ya29.test", "expires_in": 3599}),
+            )),
+    );
+    fhir_pipes()
+        .args(["export", "--server", &base, "--type", "Patient"])
+        .arg("--out")
+        .arg(&out)
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &key)
+        .env("FHIR_PIPES_GOOGLE_AUTH", "1")
+        .assert()
+        .success();
+}
+
+#[test]
+fn google_auth_excludes_the_other_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let export = || {
+        let mut c = fhir_pipes();
+        c.args([
+            "export",
+            "--server",
+            "http://127.0.0.1:9/fhir",
+            "--type",
+            "Patient",
+        ])
+        .arg("--out")
+        .arg(dir.path());
+        c
+    };
+    export()
+        .args(["--google-auth", "--token", "tok"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("cannot be used with --token"));
+    export()
+        .args(["--username", "admin", "--password", "x"])
+        .env("FHIR_PIPES_GOOGLE_AUTH", "true")
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("cannot be used with --username"));
+    // FHIR_PIPES_GOOGLE_AUTH=0 turns it off rather than conflicting.
+    export()
+        .args(["--token", "tok", "--retries", "1"])
+        .env("FHIR_PIPES_GOOGLE_AUTH", "0")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with").not());
+}
+
+#[test]
+fn a_missing_google_key_file_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    fhir_pipes()
+        .args([
+            "export",
+            "--server",
+            "projects/p/locations/l/datasets/d/fhirStores/s",
+            "--google-auth",
+            "--type",
+            "Patient",
+        ])
+        .arg("--out")
+        .arg(dir.path())
+        .env(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            dir.path().join("missing.json"),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("GOOGLE_APPLICATION_CREDENTIALS"))
+        .stderr(predicates::str::contains("missing.json"));
 }

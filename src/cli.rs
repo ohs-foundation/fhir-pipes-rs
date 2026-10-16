@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::error::{PipesError, Result};
 use crate::extract::client::Auth;
+use crate::extract::google::{Credentials, parse_server};
 
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
 pub const DEFAULT_PARTITION_BY: &str = "country,geom_type,type";
@@ -419,8 +421,8 @@ pub struct InspectArgs {
 }
 
 /// How the FHIR commands authenticate: no header, a fixed bearer token, HTTP
-/// Basic, or an OAuth client id and secret that fhir-pipes trades for tokens
-/// itself.
+/// Basic, an OAuth client id and secret that fhir-pipes trades for tokens
+/// itself, or Google Application Default Credentials.
 #[derive(clap::Args, Debug, Clone)]
 pub struct AuthArgs {
     /// Bearer token; falls back to $FHIR_PIPES_TOKEN
@@ -461,28 +463,70 @@ pub struct AuthArgs {
         requires = "username"
     )]
     pub password: Option<String>,
+    /// Google Application Default Credentials, for a Cloud Healthcare API FHIR store: the key file named by $GOOGLE_APPLICATION_CREDENTIALS, else gcloud's application default credentials, else the metadata server on Google Cloud. Tokens are renewed before they expire. Falls back to $FHIR_PIPES_GOOGLE_AUTH
+    #[arg(
+        long,
+        env = "FHIR_PIPES_GOOGLE_AUTH",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub google_auth: bool,
 }
 
 impl AuthArgs {
-    pub fn auth(&self) -> Auth {
-        match (&self.client_id, &self.client_secret, &self.token_url) {
-            (Some(id), Some(secret), Some(url)) => Auth::ClientCredentials {
-                token_url: url.clone(),
-                client_id: id.clone(),
-                client_secret: secret.clone(),
-            },
-            _ => match (&self.username, &self.password) {
-                (Some(user), Some(password)) => Auth::basic(user, password),
-                _ => self.token.clone().map_or(Auth::None, Auth::Token),
-            },
+    /// No authentication.
+    pub fn none() -> Self {
+        AuthArgs {
+            token: None,
+            client_id: None,
+            client_secret: None,
+            token_url: None,
+            username: None,
+            password: None,
+            google_auth: false,
         }
+    }
+
+    /// With `--google-auth`, finds the credentials (reading a key file if
+    /// there is one), so a bad file fails here.
+    pub fn auth(&self) -> Result<Auth> {
+        if self.google_auth {
+            // Checked here rather than with clap's conflicts_with, which would
+            // also refuse FHIR_PIPES_GOOGLE_AUTH=0 beside a token.
+            let other = [
+                (self.token.is_some(), "--token"),
+                (self.client_id.is_some(), "--client-id"),
+                (self.username.is_some(), "--username"),
+            ]
+            .into_iter()
+            .find_map(|(set, flag)| set.then_some(flag));
+            if let Some(flag) = other {
+                return Err(PipesError::Usage(format!(
+                    "use one way to authenticate: --google-auth (or FHIR_PIPES_GOOGLE_AUTH) \
+                     cannot be used with {flag} (or its environment variable)"
+                )));
+            }
+            return Ok(Auth::Google(Credentials::application_default()?));
+        }
+        Ok(
+            match (&self.client_id, &self.client_secret, &self.token_url) {
+                (Some(id), Some(secret), Some(url)) => Auth::ClientCredentials {
+                    token_url: url.clone(),
+                    client_id: id.clone(),
+                    client_secret: secret.clone(),
+                },
+                _ => match (&self.username, &self.password) {
+                    (Some(user), Some(password)) => Auth::basic(user, password),
+                    _ => self.token.clone().map_or(Auth::None, Auth::Token),
+                },
+            },
+        )
     }
 }
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct ExtractArgs {
-    /// Base URL of the FHIR server (Location is appended)
-    #[arg(long)]
+    /// Base URL of the FHIR server (Location is appended), or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
+    #[arg(long, value_parser = parse_server)]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
@@ -520,8 +564,8 @@ pub struct ExtractArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct ExportArgs {
-    /// Base URL of the FHIR server (the resource type is appended)
-    #[arg(long)]
+    /// Base URL of the FHIR server (the resource type is appended), or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
+    #[arg(long, value_parser = parse_server)]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
@@ -608,8 +652,8 @@ pub struct DiffArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct LoadArgs {
-    /// Base URL of the FHIR server
-    #[arg(long)]
+    /// Base URL of the FHIR server, or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
+    #[arg(long, value_parser = parse_server)]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
