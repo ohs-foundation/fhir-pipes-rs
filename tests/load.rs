@@ -620,3 +620,257 @@ fn basic_auth_authorises_the_preflight_and_every_bundle() {
         .assert()
         .success();
 }
+
+/// Records the URL of every entry of every POSTed bundle, in arrival order.
+#[derive(Clone, Default)]
+struct Recorded(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Matcher<Req> for Recorded {
+    fn matches(&mut self, req: &Req, _ctx: &mut ExecutionContext) -> bool {
+        let Ok(b) = serde_json::from_slice::<Value>(req.body()) else {
+            return false;
+        };
+        let mut urls = self.0.lock().unwrap();
+        for e in b["entry"].as_array().into_iter().flatten() {
+            urls.push(e["request"]["url"].as_str().unwrap_or("?").to_string());
+        }
+        true
+    }
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("Recorded(..)")
+    }
+}
+
+/// Bundles beyond the first window (here four bundles of one) are read
+/// again from the file in the planned order: parents first, Organizations
+/// before Locations, siblings in file order, plain or gzip.
+#[test]
+fn every_window_is_read_again_in_the_planned_order() {
+    use std::io::Write;
+    let mut org = json!({"resourceType": "Organization", "id": "org", "meta": {"versionId": "4"}});
+    org["name"] = json!("org");
+    let resources = [
+        loc("clinic-b", Some("2"), Some("ward-b")),
+        loc("clinic-a", None, Some("ward-a")),
+        loc("ward-a", Some("1"), Some("state")),
+        org,
+        loc("lone", Some("1"), None),
+        loc("ward-b", Some("1"), Some("state")),
+        loc("state", Some("3"), None),
+        loc("site", None, Some("clinic-a")),
+    ];
+    let expected = [
+        "Organization/org",
+        "Location/lone",
+        "Location/state",
+        "Location/ward-a",
+        "Location/ward-b",
+        "Location/clinic-b",
+        "Location/clinic-a",
+        "Location/site",
+    ];
+    for gz in [false, true] {
+        let server = Server::run();
+        let dir = tempfile::tempdir().unwrap();
+        let input = if gz {
+            let path = dir.path().join("changes.ndjson.gz");
+            let mut w = flate2::write::GzEncoder::new(
+                std::fs::File::create(&path).unwrap(),
+                flate2::Compression::default(),
+            );
+            for r in &resources {
+                writeln!(w, "{r}").unwrap();
+            }
+            w.finish().unwrap();
+            path
+        } else {
+            write_ndjson(dir.path(), &resources)
+        };
+        expect_metadata(&server, true);
+        let recorded = Recorded::default();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/fhir"),
+                recorded.clone()
+            ])
+            .times(8)
+            .respond_with(ok(transaction_response())),
+        );
+        let a = load(&server, &input, &["--batch-size", "1"]).success();
+        assert_eq!(*recorded.0.lock().unwrap(), expected, "gz {gz}");
+        let err = stderr(&a);
+        assert!(err.contains("bundle 8/8 committed (1 resources)"), "{err}");
+        assert!(
+            stdout(&a).contains("Loaded 8 resources in 8 bundle(s)"),
+            "{}",
+            stdout(&a)
+        );
+        // The dry run gives the same order from the first pass alone.
+        let dry = load(
+            &server_for_dry_run(),
+            &input,
+            &["--dry-run", "--batch-size", "3"],
+        )
+        .success();
+        let out = stdout(&dry);
+        assert!(
+            out.contains(
+                "bundle 2/3: Location/ward-a update@1, Location/ward-b update@1, Location/clinic-b update@2\n\
+                 bundle 3/3: Location/clinic-a create, Location/site create"
+            ),
+            "{out}"
+        );
+    }
+}
+
+fn server_for_dry_run() -> Server {
+    let server = Server::run();
+    expect_metadata(&server, true);
+    server
+}
+
+/// Write `text` to `path`, gzip when `gz`.
+fn put_text(path: &Path, text: &str, gz: bool) {
+    use std::io::Write;
+    if gz {
+        let mut w = flate2::write::GzEncoder::new(
+            std::fs::File::create(path).unwrap(),
+            flate2::Compression::default(),
+        );
+        w.write_all(text.as_bytes()).unwrap();
+        w.finish().unwrap();
+    } else {
+        std::fs::write(path, text).unwrap();
+    }
+}
+
+/// Notes that a request arrived.
+#[derive(Clone, Default)]
+struct Arrived(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Matcher<Req> for Arrived {
+    fn matches(&mut self, _req: &Req, _ctx: &mut ExecutionContext) -> bool {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("Arrived(..)")
+    }
+}
+
+/// Run load on `input` with bundles of one, and once `arrived` (a request
+/// the server holds for a while), replace the input with `replacement`.
+fn load_while_replacing(
+    server: &Server,
+    input: &Path,
+    arrived: &Arrived,
+    replacement: &str,
+    gz: bool,
+) -> std::process::Output {
+    let child = fhir_pipes()
+        .args(["load", "--server", &server.url("/fhir").to_string(), "--in"])
+        .arg(input)
+        .args(["--batch-size", "1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !arrived.0.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(started.elapsed().as_secs() < 60, "the request never came");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    put_text(input, replacement, gz);
+    child.wait_with_output().unwrap()
+}
+
+/// The input changed after it was planned: during the preflight a
+/// versioned Location lost its versionId, so the plan's If-Match and the
+/// preflight's update-as-create check no longer describe it. Nothing is
+/// sent, and it is an environment error (exit 1).
+#[test]
+fn an_input_changed_during_the_preflight_is_not_sent() {
+    for gz in [false, true] {
+        let server = Server::run();
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir
+            .path()
+            .join(if gz { "in.ndjson.gz" } else { "in.ndjson" });
+        let versioned = loc("a", Some("1"), None);
+        put_text(&input, &format!("{versioned}\n"), gz);
+        let arrived = Arrived::default();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/metadata"),
+                arrived.clone()
+            ])
+            .respond_with(delay_and_then(
+                std::time::Duration::from_millis(500),
+                ok(capability(false)),
+            )),
+        );
+        server.expect(
+            Expectation::matching(any_bundle())
+                .times(0)
+                .respond_with(status_code(200)),
+        );
+        let out = load_while_replacing(
+            &server,
+            &input,
+            &arrived,
+            &format!("{}\n", loc("a", None, None)),
+            gz,
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "gz {gz}: {err}");
+        assert!(
+            err.contains("changed while it was being loaded"),
+            "gz {gz}: {err}"
+        );
+    }
+}
+
+/// The input replaced by a JSON document after the first bundle
+/// committed: an environment error (exit 1) that says the file changed
+/// and that committed bundles stay committed, not a usage error.
+#[test]
+fn an_input_replaced_after_a_commit_is_an_environment_error() {
+    for gz in [false, true] {
+        let server = Server::run();
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir
+            .path()
+            .join(if gz { "in.ndjson.gz" } else { "in.ndjson" });
+        // Child first, so its bundle needs the file read again from the top.
+        let text = format!(
+            "{}\n{}\n",
+            loc("b", Some("1"), Some("a")),
+            loc("a", Some("1"), None)
+        );
+        put_text(&input, &text, gz);
+        expect_metadata(&server, true);
+        let arrived = Arrived::default();
+        server.expect(
+            Expectation::matching(all_of![any_bundle(), arrived.clone()])
+                .times(1)
+                .respond_with(delay_and_then(
+                    std::time::Duration::from_millis(500),
+                    ok(transaction_response()),
+                )),
+        );
+        let out = load_while_replacing(
+            &server,
+            &input,
+            &arrived,
+            "[{\"resourceType\": \"Location\"}]\n",
+            gz,
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "gz {gz}: {err}");
+        assert!(err.contains("bundle 1/2 committed"), "gz {gz}: {err}");
+        assert!(
+            err.contains("changed while it was being loaded") && err.contains("stay committed"),
+            "gz {gz}: {err}"
+        );
+    }
+}

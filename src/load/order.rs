@@ -6,24 +6,14 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
-
 use crate::error::{PipesError, Result};
 use crate::load::bundle::type_and_id;
 
-/// The `partOf` parent as (type, id): the last two segments of
-/// `partOf.reference`, without any `/_history/<v>`. A bare id, with no type
-/// segment, is taken to be the resource's own type, which is what `partOf`
-/// points at on Location and Organization.
-pub fn parent_key(resource: &Value) -> Option<(&str, &str)> {
-    let reference = resource.get("partOf")?.get("reference")?.as_str()?;
-    reference_key(
-        reference,
-        resource.get("resourceType").and_then(Value::as_str),
-    )
-}
-
-/// `parent_key` from the `partOf.reference` and `resourceType` strings.
+/// The `partOf` parent as (type, id), from `partOf.reference` and the
+/// resource's own type: the last two segments of the reference, without
+/// any `/_history/<v>`. A bare id, with no type segment, is taken to be the
+/// resource's own type, which is what `partOf` points at on Location and
+/// Organization.
 pub fn reference_key<'a>(
     reference: &'a str,
     resource_type: Option<&'a str>,
@@ -68,47 +58,71 @@ pub fn depths(parents: &[Option<usize>], label: &dyn Fn(usize) -> String) -> Res
         .collect())
 }
 
-pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
+/// One resource as ordering sees it.
+pub struct Node<'a> {
+    pub resource_type: &'a str,
+    pub id: &'a str,
+    /// The `partOf` parent, from `reference_key`.
+    pub parent: Option<(&'a str, &'a str)>,
+}
+
+/// The order to load `nodes` in, as indexes into it: non-Locations, then
+/// Locations, each by depth and then in input order.
+pub fn parents_first(nodes: &[Node]) -> Result<Vec<usize>> {
     // Keyed by type and id: a Location and an Organization may share an id.
-    let by_key: HashMap<(&str, &str), usize> = resources
+    let by_key: HashMap<(&str, &str), usize> = nodes
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| {
-            let t = r.get("resourceType")?.as_str()?;
-            let id = r.get("id")?.as_str()?;
-            Some(((t, id), i))
-        })
+        .map(|(i, n)| ((n.resource_type, n.id), i))
         .collect();
-    let parents: Vec<Option<usize>> = resources
+    let parents: Vec<Option<usize>> = nodes
         .iter()
-        .map(|r| parent_key(r).and_then(|p| by_key.get(&p).copied()))
+        .map(|n| n.parent.and_then(|p| by_key.get(&p).copied()))
         .collect();
-    let label = |i: usize| {
-        let r = &resources[i];
-        format!(
-            "{}/{}",
-            r["resourceType"].as_str().unwrap_or("?"),
-            r["id"].as_str().unwrap_or("?")
-        )
-    };
+    let label = |i: usize| format!("{}/{}", nodes[i].resource_type, nodes[i].id);
     let depths = depths(&parents, &label)?;
-    let is_location =
-        |i: usize| resources[i].get("resourceType").and_then(Value::as_str) == Some("Location");
-    let mut keyed: Vec<(bool, usize, usize)> = (0..resources.len())
-        .map(|i| (is_location(i), depths[i], i))
+    let mut keyed: Vec<(bool, usize, usize)> = (0..nodes.len())
+        .map(|i| (nodes[i].resource_type == "Location", depths[i], i))
         .collect();
     keyed.sort_by_key(|&(l, d, i)| (l, d, i));
-    let mut slots: Vec<Option<Value>> = resources.into_iter().map(Some).collect();
-    Ok(keyed
-        .into_iter()
-        .map(|(_, _, i)| slots[i].take().expect("each index once"))
-        .collect())
+    Ok(keyed.into_iter().map(|(_, _, i)| i).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    /// `parents_first` over whole resources, returning them in order.
+    fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
+        let str_at = |r: &Value, p: &str| r.pointer(p).and_then(Value::as_str).map(str::to_string);
+        let fields: Vec<(String, String, Option<String>)> = resources
+            .iter()
+            .map(|r| {
+                (
+                    str_at(r, "/resourceType").unwrap(),
+                    str_at(r, "/id").unwrap(),
+                    str_at(r, "/partOf/reference"),
+                )
+            })
+            .collect();
+        let nodes: Vec<Node> = fields
+            .iter()
+            .map(|(t, id, part_of)| Node {
+                resource_type: t,
+                id,
+                parent: part_of
+                    .as_deref()
+                    .and_then(|r| reference_key(r, Some(t.as_str()))),
+            })
+            .collect();
+        let order = parents_first(&nodes)?;
+        let mut slots: Vec<Option<Value>> = resources.into_iter().map(Some).collect();
+        Ok(order
+            .into_iter()
+            .map(|i| slots[i].take().unwrap())
+            .collect())
+    }
 
     fn loc(id: &str, parent: Option<&str>) -> Value {
         let mut r = json!({"resourceType": "Location", "id": id});

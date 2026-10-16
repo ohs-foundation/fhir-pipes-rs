@@ -1,5 +1,5 @@
-//! The few fields of a resource line that indexing and planning a sync
-//! need, read without building a `Value` of the whole line: about four
+//! The few fields of a resource line that indexing and planning a sync or
+//! a load need, read without building a `Value` of the whole line: about four
 //! times faster on MeasureReports. The result is what reading the line as a
 //! `Value` gives, for every line: every other field is parsed and dropped
 //! (so a line `Value` rejects, such as one with a number out of range, is
@@ -16,12 +16,13 @@ use serde::Deserialize;
 use serde::de::{Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-/// `resourceType`, `id`, `meta.lastUpdated` and `partOf.reference`, when
-/// each is a string.
+/// `resourceType`, `id`, `meta.versionId`, `meta.lastUpdated` and
+/// `partOf.reference`, when each is a string.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Head {
     pub resource_type: Option<String>,
     pub id: Option<String>,
+    pub version_id: Option<String>,
     pub last_updated: Option<String>,
     pub part_of: Option<String>,
 }
@@ -50,6 +51,7 @@ fn by_value(text: &str) -> serde_json::Result<Option<Head>> {
     Ok(Some(Head {
         resource_type: s("/resourceType"),
         id: s("/id"),
+        version_id: s("/meta/versionId"),
         last_updated: s("/meta/lastUpdated"),
         part_of: s("/partOf/reference"),
     }))
@@ -72,6 +74,8 @@ enum Key {
     Meta,
     #[serde(rename = "partOf")]
     PartOf,
+    #[serde(rename = "versionId")]
+    VersionId,
     #[serde(rename = "lastUpdated")]
     LastUpdated,
     #[serde(rename = "reference")]
@@ -91,12 +95,16 @@ struct Str(Option<String>);
 /// The line: `None` unless it is an object.
 struct Top(Option<Head>);
 
-/// An object's string field `K` (`meta.lastUpdated`, `partOf.reference`);
-/// `None` for anything else.
-struct Field<const K: u8>(Option<String>);
+/// `partOf.reference`; `None` for anything else.
+struct Reference(Option<String>);
 
-const LAST_UPDATED: u8 = 0;
-const REFERENCE: u8 = 1;
+/// `meta.versionId` and `meta.lastUpdated`; both `None` for anything but
+/// an object.
+#[derive(Default)]
+struct Meta {
+    version_id: Option<String>,
+    last_updated: Option<String>,
+}
 
 /// The visits every reader here shares: scalars are "not what was asked
 /// for", and arrays are parsed and dropped. Objects are each reader's own.
@@ -193,35 +201,64 @@ impl<'de> Deserialize<'de> for Str {
     }
 }
 
-impl<'de, const K: u8> Deserialize<'de> for Field<K> {
+impl<'de> Deserialize<'de> for Reference {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V<const K: u8>;
-        impl<'de, const K: u8> Visitor<'de> for V<K> {
-            type Value = Field<K>;
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Reference;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("any JSON value")
             }
-            fn visit_str<E>(self, _: &str) -> Result<Field<K>, E> {
-                Ok(Field(None))
+            fn visit_str<E>(self, _: &str) -> Result<Reference, E> {
+                Ok(Reference(None))
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Field<K>, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Reference, A::Error> {
                 let mut found = None;
                 while let Some(key) = map.next_key::<Key>()? {
                     raw_value_key::<A>(&key)?;
-                    match (K, key) {
-                        (LAST_UPDATED, Key::LastUpdated) | (REFERENCE, Key::Reference) => {
-                            found = map.next_value::<Str>()?.0;
-                        }
+                    match key {
+                        Key::Reference => found = map.next_value::<Str>()?.0,
                         _ => {
                             map.next_value::<Skip>()?;
                         }
                     }
                 }
-                Ok(Field(found))
+                Ok(Reference(found))
             }
-            other_values!(Field(None));
+            other_values!(Reference(None));
         }
-        d.deserialize_any(V::<K>)
+        d.deserialize_any(V)
+    }
+}
+
+impl<'de> Deserialize<'de> for Meta {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Meta;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+            fn visit_str<E>(self, _: &str) -> Result<Meta, E> {
+                Ok(Meta::default())
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Meta, A::Error> {
+                let mut meta = Meta::default();
+                while let Some(key) = map.next_key::<Key>()? {
+                    raw_value_key::<A>(&key)?;
+                    match key {
+                        Key::VersionId => meta.version_id = map.next_value::<Str>()?.0,
+                        Key::LastUpdated => meta.last_updated = map.next_value::<Str>()?.0,
+                        _ => {
+                            map.next_value::<Skip>()?;
+                        }
+                    }
+                }
+                Ok(meta)
+            }
+            other_values!(Meta::default());
+        }
+        d.deserialize_any(V)
     }
 }
 
@@ -245,9 +282,11 @@ impl<'de> Deserialize<'de> for Top {
                         Key::ResourceType => head.resource_type = map.next_value::<Str>()?.0,
                         Key::Id => head.id = map.next_value::<Str>()?.0,
                         Key::Meta => {
-                            head.last_updated = map.next_value::<Field<LAST_UPDATED>>()?.0;
+                            let meta = map.next_value::<Meta>()?;
+                            head.version_id = meta.version_id;
+                            head.last_updated = meta.last_updated;
                         }
-                        Key::PartOf => head.part_of = map.next_value::<Field<REFERENCE>>()?.0,
+                        Key::PartOf => head.part_of = map.next_value::<Reference>()?.0,
                         _ => {
                             map.next_value::<Skip>()?;
                         }
@@ -273,6 +312,8 @@ mod tests {
             r#"{"id":"a\n","meta":{"lastUpdated":"2026"},"resourceType":"Patient"}"#,
             r#"{"id":5,"resourceType":["x"],"meta":"m","partOf":{"reference":{"x":1}}}"#,
             r#"{"id":null,"meta":{"lastUpdated":7},"partOf":[1,{"a":[]}]}"#,
+            r#"{"id":"a","meta":{"versionId":3,"lastUpdated":"x","tag":[{"versionId":"t"}]}}"#,
+            r#"{"id":"a","meta":{"versionId":"W/\"2\""},"partOf":{"versionId":"p"}}"#,
             r#"{"meta":null,"partOf":null,"n":1.5e300,"b":true}"#,
             r#"{}"#,
             r#"["a"]"#,
@@ -294,6 +335,8 @@ mod tests {
             r#"{"id":"a","meta":{"lastUpdated":"b"},"meta":{"lastUpdated":"c"}}"#,
             r#"{"id":"a","meta":{"lastUpdated":"b"},"meta":{"versionId":"2"}}"#,
             r#"{"id":"a","meta":{"lastUpdated":"b","lastUpdated":"c"}}"#,
+            r#"{"id":"a","meta":{"versionId":"1","versionId":"2"}}"#,
+            r#"{"id":"a","meta":{"versionId":"1"},"meta":{"lastUpdated":"b"}}"#,
             r#"{"partOf":{"reference":"Location/x"},"partOf":"y"}"#,
             r#"{"partOf":{"reference":"a","reference":"b"}}"#,
         ] {
