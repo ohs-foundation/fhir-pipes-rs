@@ -83,6 +83,10 @@ pub enum Fetch {
     Search,
     /// A Bulk Data `$export` (`export --bulk`).
     Bulk,
+    /// The HAPI server's PostgreSQL database (`export --hapi-db`), its
+    /// connection string in $FHIR_PIPES_HAPI_DATABASE_URL.
+    #[serde(rename = "hapi-db")]
+    HapiDb,
 }
 
 impl Fetch {
@@ -90,6 +94,7 @@ impl Fetch {
         match self {
             Fetch::Search => "search",
             Fetch::Bulk => "bulk",
+            Fetch::HapiDb => "hapi-db",
         }
     }
 }
@@ -634,6 +639,9 @@ mod tests {
         assert_eq!(s("data = \"d\"\n[server]\nconcurrency = 2").concurrency, 2);
         let zero: File = toml::from_str("data = \"d\"\n[server]\nconcurrency = 0").unwrap();
         assert!(settings(zero, PathBuf::from("/b"), Overrides::default()).is_err());
+        let db = s("data = \"d\"\n[server]\nfetch = \"hapi-db\"");
+        assert_eq!(db.fetch, Fetch::HapiDb);
+        assert_eq!(db.fetch.name(), "hapi-db");
     }
 
     #[test]

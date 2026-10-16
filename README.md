@@ -216,7 +216,7 @@ Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
 type. The limit covers types and windows together. A `Retry-After` on a 429
 or 5xx holds back every request, not only the one that got it.
 `--concurrency 1` downloads one type at a time, one page at a time.
-`--concurrency` does not apply to `--bulk`.
+`--concurrency` does not apply to `--bulk` or `--hapi-db`.
 
 The Java pipeline instead pages HAPI in parallel with `_getpagesoffset`.
 fhir-pipes does not, since that relies on HAPI's search cache, which
@@ -285,6 +285,85 @@ Only system-level export is supported. `Group/[id]/$export` and
 `Patient/$export` are not supported yet. Files are downloaded one after
 another. HAPI asks clients to wait two minutes between polls, so even a small
 export from HAPI takes about two minutes.
+
+### Reading a HAPI server's database
+
+With `--hapi-db`, `export` reads the resources from the PostgreSQL database of
+a HAPI FHIR JPA server instead of its API, as fhir-data-pipes'
+`--fhirFetchMode=HAPI_JDBC` does. It writes the same `OUT/<TYPE>.ndjson`
+files, so `refresh` and the views read them unchanged. The connection string
+comes only from `FHIR_PIPES_HAPI_DATABASE_URL`, never from a flag or a file:
+
+```sh
+export FHIR_PIPES_HAPI_DATABASE_URL='postgres://fhir_pipes_ro:...@hapi-db.example.org:5432/hapi?sslmode=require'
+fhir-pipes export --hapi-db --incremental --type Patient --type Observation --out raw/
+```
+
+This reads HAPI's internal tables, not a FHIR API, so it ties fhir-pipes to
+HAPI's database schema, which HAPI changes between releases. It was tested
+with HAPI 8.12 on PostgreSQL 17. Before reading, fhir-pipes checks for the
+tables and columns it needs, and refuses a database that lacks them, naming
+what it found. Search and `--bulk` do not depend on the server's internals;
+use `--hapi-db` when paging the API is too slow for the data, or to see
+deletions on a HAPI server without Bulk Data export.
+
+- Each resource is the current version of an `hfj_resource` row that is not
+  deleted, read from `hfj_res_ver`. The text is `res_text_vc` (JSON, as HAPI 8
+  writes it) or the `res_text` large object (JSON, or gzipped JSON as `JSONC`,
+  as older releases wrote it).
+- The id comes from `hfj_resource.fhir_id` (HAPI 7 and later). In a database
+  without that column, a client-assigned id comes from `hfj_forced_id`, and a
+  server-assigned one is the numeric `res_id`.
+- HAPI stores a resource without its `id` and `meta`. `meta.versionId` and
+  `meta.lastUpdated` come from the row, `meta.source` from
+  `hfj_res_ver.source_uri` and `request_id`, and profiles, security labels
+  and tags from `hfj_res_tag` and `hfj_tag_def`. Against HAPI 8.12 the lines
+  are byte for byte the ones `export` writes from a search.
+- `res_updated` has no time zone. HAPI writes it in its JVM's time zone, which
+  is UTC in the HAPI Docker images, and fhir-pipes reads it as UTC. On a HAPI
+  server running in another time zone, `meta.lastUpdated` is wrong by the
+  offset.
+- All types are read in one read-only, repeatable-read transaction through a
+  cursor, 1000 rows at a time, so a run sees one consistent state of the
+  database and memory does not grow with the table. The types are read one
+  after another on one connection; `--concurrency` is not used.
+- `.export-state.json` keeps a `res_updated` watermark per type under
+  `hapi_db`, apart from the search and bulk watermarks. With `--incremental`,
+  a run reads the rows updated after the watermark, merges them into the file
+  by id, and removes the resources deleted since (a delete sets
+  `res_deleted_at`). If the merged file's count then differs from the
+  database's, as after an `$expunge`, the type is read in full. Files written
+  from a search, a bulk export, another database or another schema are read
+  in full the first time.
+- The watermark is never later than the database's clock when the run began,
+  less five minutes, so a resource HAPI was still writing then is read by the
+  next run, as with search.
+- The resources of every partition of a partitioned HAPI server go into the
+  same files.
+- Only PostgreSQL is supported, not the MySQL, MS SQL Server or Oracle
+  databases HAPI can also use.
+
+A read-only role for it:
+
+```sql
+CREATE ROLE fhir_pipes_ro LOGIN PASSWORD '...';
+ALTER ROLE fhir_pipes_ro SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE hapi TO fhir_pipes_ro;
+GRANT USAGE ON SCHEMA public TO fhir_pipes_ro;
+GRANT SELECT ON hfj_resource, hfj_res_ver, hfj_res_tag, hfj_tag_def TO fhir_pipes_ro;
+GRANT SELECT ON hfj_forced_id TO fhir_pipes_ro;   -- where the table exists
+-- Only for resources older HAPI releases stored as large objects; run as a superuser:
+GRANT SELECT ON pg_catalog.pg_largeobject TO fhir_pipes_ro;
+```
+
+Reading a large object with `lo_get` needs SELECT on that object, which
+`pg_read_all_data` does not give, so fhir-pipes reads `pg_largeobject`
+directly when the role may. If HAPI's tables are in a schema other than
+`public`, add `options=-c%20search_path%3D<schema>` to the connection string,
+or set the role's default `search_path`. The state file records the schema
+`hfj_resource` was found in, so a run against another schema reads in full.
+`refresh` reads this way with `fetch = "hapi-db"` (see
+[docs/refresh.md](docs/refresh.md#reading-the-hapi-servers-database)).
 
 ## Connecting to a FHIR server
 
@@ -424,7 +503,7 @@ src/
   main.rs, cli.rs, error.rs
   warehouse/      refresh: config, views, partitioning, manifest, tiles, hooks, push
   views/          views: run, sql, validate, lint, test
-  export/         export: search paging, and Bulk Data $export (bulk.rs)
+  export/         export: search paging, Bulk Data $export (bulk.rs), HAPI database (hapi_db.rs)
   extract/        FHIR client with retry and OAuth, paging, boundary fetch and cache
   snapshot/       state.json, merge by id
   load/           parents-first ordering, transaction bundles with ifMatch

@@ -329,6 +329,15 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
                 "fetch:      bulk ($export, waiting up to {} s)",
                 s.bulk_timeout
             ),
+            config::Fetch::HapiDb => println!(
+                "fetch:      hapi-db (the HAPI server's database, from ${}{})",
+                crate::export::HAPI_DB_URL_ENV,
+                if std::env::var(crate::export::HAPI_DB_URL_ENV).is_ok_and(|v| !v.is_empty()) {
+                    ""
+                } else {
+                    ", which is not set"
+                }
+            ),
             f => println!(
                 "fetch:      {} ({} requests at a time)",
                 f.name(),
