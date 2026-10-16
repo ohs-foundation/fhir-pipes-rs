@@ -59,6 +59,7 @@ tokio = { workspace = true }
 sqlx-postgres = { workspace = true, optional = true }
 sqlx-core = { workspace = true, optional = true }
 annotate-snippets = "0.12.16"
+glob = "0.3"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -59,14 +59,17 @@ pub fn write(s: &Settings, stage: &Stage) -> Result<String> {
             .collect();
     extract.insert("fhir_pipes_version".into(), version);
 
-    let manifest = json!({
+    let mut manifest = json!({
         "refreshed_at": refreshed_at,
-        "server": s.server,
+        "server": s.server_used(),
         "server_name": s.server_name,
         "tables": tables,
         "views": views,
         "extract": extract,
     });
+    if s.from_files() {
+        manifest["files"] = json!(s.inputs());
+    }
     let path = stage.file("manifest.json");
     fs::write(&path, serde_json::to_string_pretty(&manifest)?)
         .with_context(|| format!("writing {}", path.display()))?;

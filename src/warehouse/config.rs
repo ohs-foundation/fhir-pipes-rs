@@ -25,6 +25,8 @@ pub struct File {
     /// file) or an https URL. See docs/profiles.md.
     pub profile: Option<String>,
     #[serde(default)]
+    pub source: SourceFile,
+    #[serde(default)]
     pub server: ServerFile,
     #[serde(default)]
     pub tools: ToolsFile,
@@ -39,6 +41,17 @@ pub struct File {
     pub database: Option<DatabaseFile>,
     #[serde(default)]
     pub hooks: Vec<Hook>,
+}
+
+/// `[source]`: where the resources come from when not from the server.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFile {
+    /// NDJSON, Bundle and resource files, directories of them, or glob
+    /// patterns, relative to this file. Set, the run reads these instead of a
+    /// FHIR server (see files.rs).
+    #[serde(default)]
+    pub files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -224,6 +237,9 @@ pub struct Hook {
 pub struct Settings {
     pub data: PathBuf,
     pub views: Option<PathBuf>,
+    /// The file source: files, directories and glob patterns, resolved. Empty:
+    /// the resources come from the server.
+    pub files: Vec<PathBuf>,
     pub server: String,
     pub server_name: String,
     /// How to authenticate to the FHIR server, as the other commands take it.
@@ -252,6 +268,23 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Whether the run reads files instead of a FHIR server.
+    pub fn from_files(&self) -> bool {
+        !self.files.is_empty()
+    }
+
+    /// The server the run reads, for the manifest, last-refresh.json and the
+    /// hooks' FHIR_BASE; none with a file source.
+    pub fn server_used(&self) -> Option<&str> {
+        (!self.from_files()).then_some(self.server.as_str())
+    }
+
+    /// The file source's inputs as given, for the manifest and
+    /// last-refresh.json; empty when the run reads a server.
+    pub fn inputs(&self) -> Vec<String> {
+        self.files.iter().map(|p| p.display().to_string()).collect()
+    }
+
     /// How the run authenticates, for `--check`.
     pub fn auth_kind(&self) -> &'static str {
         if self.auth.google_auth {
@@ -333,6 +366,8 @@ pub struct Overrides {
     pub profile: Option<String>,
     pub data: Option<PathBuf>,
     pub views: Option<PathBuf>,
+    /// `--input`: replaces the file's `source.files`.
+    pub input: Vec<PathBuf>,
     pub server: Option<String>,
     pub server_name: Option<String>,
     pub token: Option<String>,
@@ -362,6 +397,15 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         }
     };
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
+    let files = if o.input.is_empty() {
+        file.source
+            .files
+            .iter()
+            .map(|p| resolve(&base, p))
+            .collect()
+    } else {
+        o.input
+    };
     let username = o.username.or(file.server.username);
     let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
     let kinds: Vec<&str> = [
@@ -418,15 +462,19 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     Ok(Settings {
         data,
         views,
+        server_name: o.server_name.or(file.server.name).unwrap_or_else(|| {
+            if files.is_empty() {
+                "hapi-local".into()
+            } else {
+                "files".into()
+            }
+        }),
+        files,
         server: google::server_url(
             &o.server
                 .or(file.server.base)
                 .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
         ),
-        server_name: o
-            .server_name
-            .or(file.server.name)
-            .unwrap_or_else(|| "hapi-local".into()),
         auth,
         fetch: file.server.fetch.unwrap_or_default(),
         bulk_timeout: file
@@ -610,6 +658,40 @@ mod tests {
             s.server,
             "https://healthcare.googleapis.com/v1/projects/p/locations/l/datasets/d/fhirStores/s/fhir"
         );
+    }
+
+    #[test]
+    fn a_file_source_comes_from_the_file_or_the_flag() {
+        let file: File =
+            toml::from_str("data = \"d\"\n[source]\nfiles = [\"../fhir\", \"/abs/*.ndjson\"]")
+                .unwrap();
+        let s = settings(file, PathBuf::from("/repo/tools"), Overrides::default()).unwrap();
+        assert!(s.from_files());
+        assert_eq!(
+            s.files,
+            [
+                PathBuf::from("/repo/tools/../fhir"),
+                PathBuf::from("/abs/*.ndjson")
+            ]
+        );
+        assert_eq!(s.server_name, "files");
+
+        // --input replaces the file's list and is taken as given.
+        let file: File =
+            toml::from_str("data = \"d\"\n[source]\nfiles = [\"x\"]\n[server]\nname = \"synthea\"")
+                .unwrap();
+        let o = Overrides {
+            input: vec![PathBuf::from("in")],
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert_eq!(s.files, [PathBuf::from("in")]);
+        assert_eq!(s.server_name, "synthea");
+
+        let file: File = toml::from_str("data = \"d\"").unwrap();
+        let s = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap();
+        assert!(!s.from_files());
+        assert_eq!(s.server_name, "hapi-local");
     }
 
     #[test]

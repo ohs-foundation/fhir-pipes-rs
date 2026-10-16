@@ -119,7 +119,7 @@ pub fn hook(s: &Settings, h: &Hook, program: &str, refreshed_at: &str) -> Result
             .args(&h.run[1..])
             .current_dir(&s.base_dir)
             .env("DATA", &s.data)
-            .env("FHIR_BASE", &s.server)
+            .env("FHIR_BASE", s.server_used().unwrap_or(""))
             .env("SERVER_NAME", &s.server_name)
             .env("REFRESHED_AT", refreshed_at),
     )
