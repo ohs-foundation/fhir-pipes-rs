@@ -90,20 +90,21 @@ struct TypeState {
 }
 
 impl ExportState {
-    /// The state in `dir`, or an empty one. An unreadable state file means
-    /// a full download, not a failed run.
+    /// The state in `dir`, or an empty one. A state file that cannot be read
+    /// or parsed means a full download, with a warning, not a failed run:
+    /// the state only lets the next run download less, and a full download
+    /// replaces every file it describes.
     fn read(dir: &Path) -> Self {
         let path = dir.join(STATE_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-                eprintln!(
-                    "{}: not a valid export state ({e}); downloading in full",
-                    path.display()
-                );
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
+        let why = match crate::fs::read_state(&path) {
+            Ok(state) => return state.unwrap_or_default(),
+            Err(crate::fs::StateError::Invalid(e)) => format!("not a valid export state ({e})"),
+            Err(crate::fs::StateError::Unreadable(e) | crate::fs::StateError::Io(e)) => {
+                format!("not readable ({e})")
+            }
+        };
+        eprintln!("{}: {why}; downloading in full", path.display());
+        Self::default()
     }
 
     /// Written beside the target and renamed into place.
@@ -999,6 +1000,16 @@ fn download_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_file_that_cannot_be_read_means_a_full_download() {
+        let dir = tempfile::tempdir().unwrap();
+        for bytes in [&b"{nope"[..], &b"\xff\xfe"[..]] {
+            std::fs::write(dir.path().join(STATE_FILE), bytes).unwrap();
+            let state = ExportState::read(dir.path());
+            assert!(state.server.is_empty() && state.types.is_empty());
+        }
+    }
 
     #[test]
     fn type_names_are_plain_words() {

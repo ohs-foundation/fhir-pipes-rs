@@ -20,6 +20,39 @@ pub fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
     f.commit()
 }
 
+/// Why a state file could not be read.
+#[derive(Debug)]
+pub enum StateError {
+    /// Not JSON of the expected shape, or not UTF-8 text.
+    Invalid(String),
+    /// Permission denied.
+    Unreadable(std::io::Error),
+    /// Any other I/O error.
+    Io(std::io::Error),
+}
+
+/// The one way a JSON state file is read (snapshot `state.json`, export
+/// `.export-state.json`, sync `.sync-state.json`): `None` when it does not
+/// exist, the value when it parses, and otherwise why not. What a caller
+/// does with an error is its own choice.
+pub fn read_state<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> std::result::Result<Option<T>, StateError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| StateError::Invalid(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            Err(StateError::Invalid(e.to_string()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(StateError::Unreadable(e))
+        }
+        Err(e) => Err(StateError::Io(e)),
+    }
+}
+
 /// A file being written to a temporary path and renamed to its target by
 /// `commit`. It writes unbuffered; wrap it in a `BufWriter` for many small
 /// writes.
@@ -198,5 +231,34 @@ mod tests {
         drop(AtomicFile::adopt(&path, tmp.clone()));
         assert!(!tmp.exists());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "done");
+    }
+
+    #[test]
+    fn read_state_tells_missing_invalid_and_valid_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        assert!(matches!(read_state::<serde_json::Value>(&path), Ok(None)));
+        std::fs::write(&path, "{nope").unwrap();
+        assert!(matches!(
+            read_state::<serde_json::Value>(&path),
+            Err(StateError::Invalid(_))
+        ));
+        std::fs::write(&path, b"\xff\xfe").unwrap();
+        assert!(matches!(
+            read_state::<serde_json::Value>(&path),
+            Err(StateError::Invalid(_))
+        ));
+        std::fs::write(&path, "{\"a\":1}").unwrap();
+        let v: Option<serde_json::Value> = read_state(&path).unwrap();
+        assert_eq!(v.unwrap()["a"], 1);
+    }
+
+    #[test]
+    fn read_state_of_a_directory_is_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            read_state::<serde_json::Value>(dir.path()),
+            Err(StateError::Io(_))
+        ));
     }
 }
