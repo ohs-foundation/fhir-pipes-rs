@@ -30,8 +30,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -51,6 +51,7 @@ use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::transform::write_report;
+use crate::work::InOrder;
 
 /// DHIS2 UIDs are 11 characters.
 const UID_LEN: usize = 11;
@@ -1546,53 +1547,53 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
     // memory stays at a few units, not the whole export.
     let workers = args.concurrency.min(total - start).max(1);
     let window = workers * 2;
-    let next = AtomicUsize::new(start);
     let stop = AtomicBool::new(false);
     let written = (Mutex::new(start), Condvar::new());
-    let (tx, rx) = mpsc::sync_channel::<(usize, Result<Fetched>)>(window);
     let started = Instant::now();
     let mut failure: Option<PipesError> = None;
     let mut cursor = start;
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            let tx = tx.clone();
-            let (api, units, next, stop, written) = (&api, &units, &next, &stop, &written);
-            s.spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= total {
-                        break;
-                    }
-                    {
-                        let (lock, ready) = written;
-                        let mut done = lock.lock().unwrap();
-                        while i >= *done + window && !stop.load(Ordering::Relaxed) {
-                            done = ready.wait(done).unwrap();
-                        }
-                    }
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let fetched = fetch_unit(api, values, &args.breakdowns, &units[i]);
-                    if tx.send((i, fetched)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        let mut pending: HashMap<usize, Fetched> = HashMap::new();
-        for (i, fetched) in rx.iter() {
-            match fetched {
-                Ok(f) => {
-                    pending.insert(i, f);
-                }
-                Err(e) => {
-                    failure = Some(e);
-                    break;
+    let mut order = InOrder::new(start);
+    // Stops the workers, including any waiting for the window to move.
+    let halt = || {
+        // Set under the lock so a worker about to wait sees it.
+        let guard = written.0.lock().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        drop(guard);
+        written.1.notify_all();
+    };
+    crate::work::run(
+        workers,
+        crate::work::indices(start, total),
+        |i| {
+            {
+                let (lock, ready) = &written;
+                let mut done = lock.lock().unwrap();
+                while i >= *done + window && !stop.load(Ordering::Relaxed) {
+                    done = ready.wait(done).unwrap();
                 }
             }
-            while let Some(f) = pending.remove(&cursor) {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            Some((i, fetch_unit(&api, values, &args.breakdowns, &units[i])))
+        },
+        |fetched| {
+            // After a failure, what workers still mid-request send is dropped.
+            if failure.is_some() {
+                return false;
+            }
+            let Some((i, fetched)) = fetched else {
+                return true;
+            };
+            match fetched {
+                Ok(f) => order.push(i, f),
+                Err(e) => {
+                    failure = Some(e);
+                    halt();
+                    return false;
+                }
+            }
+            while let Some((_, f)) = order.pop() {
                 match w
                     .unit(f)
                     .and_then(|values| w.save(cursor + 1).map(|_| values))
@@ -1610,27 +1611,17 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
                     ),
                     Err(e) => {
                         failure = Some(e);
-                        break;
+                        halt();
+                        return false;
                     }
                 }
                 cursor += 1;
                 *written.0.lock().unwrap() = cursor;
                 written.1.notify_all();
             }
-            if failure.is_some() {
-                break;
-            }
-        }
-        if failure.is_some() {
-            // Set under the lock so a worker about to wait sees it.
-            let guard = written.0.lock().unwrap();
-            stop.store(true, Ordering::Relaxed);
-            drop(guard);
-            written.1.notify_all();
-            // Let workers still mid-request finish and exit.
-            for _ in rx.iter() {}
-        }
-    });
+            true
+        },
+    );
     if let Some(e) = failure {
         eprintln!(
             "{cursor} of {total} batches written to {}; run again with --resume to continue from there",

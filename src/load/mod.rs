@@ -27,7 +27,7 @@ pub mod order;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Condvar, Mutex, mpsc};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -439,85 +439,75 @@ where
     B: Borrow<Bundle> + Send,
     F: FnMut(usize) -> Result<(B, Vec<usize>)> + Send,
 {
-    // The next bundle to make, and how.
-    let source = Mutex::new((0usize, next));
     // Which bundles are committed, and whether to stop.
     let state = (Mutex::new((vec![false; count], false)), Condvar::new());
-    let (tx, rx) = mpsc::channel::<(usize, Result<usize>)>();
     let mut failure: Option<PipesError> = None;
-    std::thread::scope(|s| {
-        for _ in 0..concurrency.clamp(1, count.max(1)) {
-            let tx = tx.clone();
-            let (source, state) = (&source, &state);
-            s.spawn(move || {
-                loop {
-                    let (i, made) = {
-                        let mut src = source.lock().unwrap();
-                        let i = src.0;
-                        if i >= count || state.0.lock().unwrap().1 {
-                            break;
-                        }
-                        src.0 += 1;
-                        let made = (src.1)(i);
-                        if made.is_err() {
-                            // Before the next worker can make another.
-                            state.0.lock().unwrap().1 = true;
-                        }
-                        (i, made)
-                    };
-                    let (bundle, deps) = match made {
-                        Ok(made) => made,
-                        Err(e) => {
-                            state.1.notify_all();
-                            let _ = tx.send((i, Err(e)));
-                            break;
-                        }
-                    };
-                    let bundle = bundle.borrow();
-                    {
-                        let (lock, changed) = state;
-                        let mut st = lock.lock().unwrap();
-                        while !st.1 && deps.iter().any(|&j| !st.0[j]) {
-                            st = changed.wait(st).unwrap();
-                        }
-                        if st.1 {
-                            break;
-                        }
-                    }
-                    let r = post(client, base, bundle, progress.first + i + 1, progress.total);
-                    // Recorded before the next bundle is taken, so one worker
-                    // stops right after a failure, as a sequential load does.
-                    {
-                        let mut st = state.0.lock().unwrap();
-                        match r {
-                            Ok(()) => st.0[i] = true,
-                            Err(_) => st.1 = true,
-                        }
-                    }
-                    state.1.notify_all();
-                    if tx.send((i, r.map(|()| bundle.size()))).is_err() {
-                        break;
-                    }
-                }
-            });
+    // Called by `work::run` one call at a time, so bundles are made in order.
+    let mut i = 0usize;
+    let mut make = next;
+    let take = || {
+        if i >= count || state.0.lock().unwrap().1 {
+            return None;
         }
-        drop(tx);
-        for (i, r) in rx.iter() {
-            match r {
-                Ok(size) => eprintln!(
+        let made = make(i);
+        if made.is_err() {
+            // Before the next worker can make another.
+            state.0.lock().unwrap().1 = true;
+        }
+        i += 1;
+        Some((i - 1, made))
+    };
+    crate::work::run(
+        concurrency.clamp(1, count.max(1)),
+        take,
+        |(i, made)| {
+            let (bundle, deps) = match made {
+                Ok(made) => made,
+                Err(e) => {
+                    state.1.notify_all();
+                    return Some((i, Err(e)));
+                }
+            };
+            let bundle = bundle.borrow();
+            {
+                let (lock, changed) = &state;
+                let mut st = lock.lock().unwrap();
+                while !st.1 && deps.iter().any(|&j| !st.0[j]) {
+                    st = changed.wait(st).unwrap();
+                }
+                if st.1 {
+                    return None;
+                }
+            }
+            let r = post(client, base, bundle, progress.first + i + 1, progress.total);
+            // Recorded before the next bundle is taken, so one worker
+            // stops right after a failure, as a sequential load does.
+            {
+                let mut st = state.0.lock().unwrap();
+                match r {
+                    Ok(()) => st.0[i] = true,
+                    Err(_) => st.1 = true,
+                }
+            }
+            state.1.notify_all();
+            Some((i, r.map(|()| bundle.size())))
+        },
+        |done| {
+            match done {
+                Some((i, Ok(size))) => eprintln!(
                     "{}bundle {}/{} committed ({size} resources)",
                     progress.label,
                     progress.first + i + 1,
                     progress.total,
                 ),
-                Err(e) => {
-                    if failure.is_none() {
-                        failure = Some(e);
-                    }
+                Some((_, Err(e))) => {
+                    failure.get_or_insert(e);
                 }
+                None => {}
             }
-        }
-    });
+            true
+        },
+    );
     let committed = state.0.into_inner().unwrap().0;
     Posted { committed, failure }
 }

@@ -35,8 +35,7 @@ mod window;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -217,40 +216,29 @@ fn export_search(
         .iter()
         .map(|t| state.types.get(*t).filter(|_| args.incremental).cloned())
         .collect();
-    let next = AtomicUsize::new(0);
-    let stop = AtomicBool::new(false);
-    let (tx, rx) = mpsc::channel::<(usize, Result<TypeState>, Report)>();
     let mut reports: Vec<Option<Report>> = (0..types.len()).map(|_| None).collect();
     let mut failure = None;
-    std::thread::scope(|s| {
-        for _ in 0..args.concurrency.clamp(1, types.len().max(1)) {
-            let tx = tx.clone();
-            let (next, stop, previous) = (&next, &stop, &previous);
-            s.spawn(move || {
-                while !stop.load(Ordering::Relaxed) {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(t) = types.get(i) else { break };
-                    let mut issues = Report::default();
-                    let done = export_type(client, args, t, previous[i].as_ref(), &mut issues);
-                    if tx.send((i, done, issues)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-        for (i, done, issues) in rx {
+    crate::work::run(
+        args.concurrency.clamp(1, types.len().max(1)),
+        crate::work::indices(0, types.len()),
+        |i| {
+            let mut issues = Report::default();
+            let done = export_type(client, args, types[i], previous[i].as_ref(), &mut issues);
+            (i, done, issues)
+        },
+        |(i, done, issues)| {
             reports[i] = Some(issues);
             let written = done.and_then(|done| {
                 state.types.insert(types[i].to_string(), done);
                 state.write(&args.out)
             });
             if let Err(e) = written {
-                stop.store(true, Ordering::Relaxed);
                 failure.get_or_insert(e);
+                return false;
             }
-        }
-    });
+            true
+        },
+    );
     for issues in reports.into_iter().flatten() {
         report.append(issues);
     }

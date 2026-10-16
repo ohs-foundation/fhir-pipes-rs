@@ -22,6 +22,7 @@ mod sync;
 mod transform;
 mod views;
 mod warehouse;
+mod work;
 mod write;
 
 use clap::Parser;
