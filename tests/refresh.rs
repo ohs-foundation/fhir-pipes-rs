@@ -1998,7 +1998,8 @@ fn check_shows_the_file_source() {
         .success()
         .stdout(has("source:     files, no server (raw/test)"))
         .stdout(has("input:      ").and(has("input: 2 files")))
-        .stdout(has("exports/*.ndjson: input pattern").and(has("matches nothing")))
+        // The pattern is shown as a path, with `\` on Windows.
+        .stdout(has("*.ndjson: input pattern").and(has("matches nothing")))
         .stdout(has("server:").not())
         .stdout(has("auth:").not());
 }
