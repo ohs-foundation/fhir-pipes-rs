@@ -51,7 +51,11 @@ impl OrgUnit {
             report.add("missing_id", "<unknown>", "org unit has no id");
             return None;
         };
-        let Some(level) = v.get("level").and_then(Value::as_u64) else {
+        let Some(level) = v
+            .get("level")
+            .and_then(Value::as_u64)
+            .and_then(|l| u32::try_from(l).ok())
+        else {
             report.add("malformed_field", &id, "org unit has no level");
             return None;
         };
@@ -59,7 +63,7 @@ impl OrgUnit {
             name: s("name").unwrap_or_else(|| id.clone()),
             code: s("code"),
             short_name: s("shortName"),
-            level: level as u32,
+            level,
             parent: v
                 .pointer("/parent/id")
                 .and_then(Value::as_str)
@@ -268,12 +272,31 @@ pub fn resources(
     out
 }
 
-fn polygons(geometry: &Value) -> Option<geo::MultiPolygon<f64>> {
-    let g: geojson::Geometry = serde_json::from_value(geometry.clone()).ok()?;
-    match geo::Geometry::<f64>::try_from(g).ok()? {
-        geo::Geometry::Polygon(p) => Some(geo::MultiPolygon(vec![p])),
-        geo::Geometry::MultiPolygon(mp) => Some(mp),
-        _ => None,
+/// A unit's Polygon or MultiPolygon geometry; `None` for any other kind. One
+/// that cannot be read (e.g. a position with fewer than 2 numbers) is
+/// reported as `bad_geometry` against `id`.
+fn polygons(geometry: &Value, id: &str, report: &mut Report) -> Option<geo::MultiPolygon<f64>> {
+    if !matches!(
+        geometry.get("type").and_then(Value::as_str),
+        Some("Polygon" | "MultiPolygon")
+    ) {
+        return None;
+    }
+    let parsed = serde_json::from_value::<geojson::Geometry>(geometry.clone())
+        .map_err(|e| e.to_string())
+        .and_then(crate::geometry::convert);
+    match parsed {
+        Ok((geo::Geometry::Polygon(p), _)) => Some(geo::MultiPolygon(vec![p])),
+        Ok((geo::Geometry::MultiPolygon(mp), _)) => Some(mp),
+        Ok(_) => None,
+        Err(e) => {
+            report.add(
+                "bad_geometry",
+                id,
+                &format!("unreadable boundary ({e}); not used for its parent's boundary"),
+            );
+            None
+        }
     }
 }
 
@@ -298,7 +321,10 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
         };
         let parts: Vec<geo::MultiPolygon<f64>> = kids
             .iter()
-            .filter_map(|&k| units[k].geometry.as_ref().and_then(polygons))
+            .filter_map(|&k| {
+                let g = units[k].geometry.as_ref()?;
+                polygons(g, &units[k].id, report)
+            })
             .collect();
         if parts.is_empty() {
             continue;
@@ -758,11 +784,31 @@ mod tests {
         let mut report = Report::default();
         fill_missing_boundaries(&mut units, 3, &mut report);
         let g = units[0].geometry.as_ref().expect("country filled");
-        let mp = polygons(g).unwrap();
+        let mp = polygons(g, "c", &mut report).unwrap();
         use geo::Area;
         assert!((mp.unsigned_area() - 2.0).abs() < 1e-9);
         // A unit whose only child is a facility point stays without a boundary.
         assert!(units[3].geometry.is_none());
+        assert_eq!(report.count("boundary_from_children"), 1);
+    }
+
+    #[test]
+    fn a_child_boundary_with_a_short_position_is_reported_not_a_panic() {
+        let square = json!({"type":"Polygon","coordinates":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0],[0.0,0.0]]]});
+        let short = json!({"type":"Polygon","coordinates":[[[1.0],[2,0],[2,2],[1.0]]]});
+        let mut units = vec![
+            unit("c", 1, None, None),
+            unit("a", 2, Some("c"), Some(square)),
+            unit("b", 2, Some("c"), Some(short)),
+        ];
+        let mut report = Report::default();
+        fill_missing_boundaries(&mut units, 3, &mut report);
+        let g = units[0].geometry.as_ref().expect("country filled");
+        let mut r = Report::default();
+        let mp = polygons(g, "c", &mut r).unwrap();
+        use geo::Area;
+        assert!((mp.unsigned_area() - 1.0).abs() < 1e-9);
+        assert_eq!(report.count("bad_geometry"), 1);
         assert_eq!(report.count("boundary_from_children"), 1);
     }
 

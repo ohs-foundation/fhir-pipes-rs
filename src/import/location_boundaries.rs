@@ -598,7 +598,7 @@ mod tests {
             .decode(data)
             .unwrap();
         let g: geojson::Geometry = serde_json::from_slice(&bytes).unwrap();
-        Geometry::try_from(g).unwrap()
+        crate::geometry::convert(g).unwrap().0
     }
 
     #[test]
