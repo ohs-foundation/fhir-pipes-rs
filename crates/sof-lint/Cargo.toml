@@ -20,7 +20,6 @@ banshee_hir = { workspace = true, optional = true }
 banshee_parser = { workspace = true, optional = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -33,7 +32,6 @@ packages = [
     "dep:banshee_hir",
     "dep:banshee_parser",
     "dep:thiserror",
-    "dep:tracing",
 ]
 
 [dev-dependencies]

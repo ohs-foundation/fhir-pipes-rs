@@ -1,0 +1,18 @@
+# cargo audit (the audit job in .github/workflows/ci.yml). A vulnerability
+# always fails; so do an unmaintained or unsound crate, unless ignored here
+# with the reason.
+
+[advisories]
+ignore = [
+    # atomic-polyfill is unmaintained. It is in Cargo.lock only because
+    # geo-types lists rstar 0.8 to 0.11 (through heapless 0.7) as optional
+    # dependencies; we use rstar 0.12, and no build compiles atomic-polyfill.
+    "RUSTSEC-2023-0089",
+]
+
+[output]
+deny = ["unmaintained", "unsound"]
+quiet = false
+# A yanked crate is reported but does not fail: octofhir-canonical-manager
+# 0.2.3 (fhir-packages only) needs zip 7, and every zip 7 release is yanked.
+# Remove this note and add "yanked" to deny when it moves to zip 9.
