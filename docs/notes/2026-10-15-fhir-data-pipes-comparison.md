@@ -11,8 +11,12 @@ Compared on 2026-10-15:
   `experimental/` and the `exp/rust-fhir-pipes` branch, which
   [ROADMAP.md](../../ROADMAP.md#compared-with-the-fhir-data-pipes-rust-rfc)
   covers.
-- fhir-pipes `main` at `f4b2d59` (v0.4.0, plus the Bundle and catalog
-  changes since).
+- fhir-pipes `main` at `a3745d1` (v0.4.0, plus the Bundle and catalog
+  changes, HTTP Basic auth, Bulk Data `$export` and the PostgreSQL step since),
+  and #40 (PostgreSQL in the release binaries, with TLS).
+
+First written on 2026-10-15; updated after #36, #37, #39 and #40 closed
+three of the gaps it found.
 
 Status in the tables:
 
@@ -26,9 +30,10 @@ Status in the tables:
 ## Summary
 
 fhir-pipes already covers the core of the Java pipeline for a site that reads
-FHIR over search and wants SQL-on-FHIR view tables in Parquet: fetching with
-search and OAuth, incremental runs, running ViewDefinitions (with a more
-complete FHIRPath engine), writing Parquet, and pushing it to object storage.
+FHIR over search or Bulk Data `$export` and wants SQL-on-FHIR view tables in
+Parquet or PostgreSQL: fetching with OAuth or Basic auth, incremental runs,
+running ViewDefinitions (with a more complete FHIRPath engine), writing
+Parquet, loading PostgreSQL, and pushing to object storage.
 It does this as one binary instead of Beam, Flink, Spring Boot and a Spark
 Thrift server.
 
@@ -37,23 +42,27 @@ The gaps that matter for replacing the Java pipeline at existing sites:
 1. **Nested Parquet-on-FHIR tables.** The Java pipeline's base output.
    Existing queries, the Spark Thrift tables and the Superset tutorial read
    them. On hold until a user needs them (ROADMAP).
-2. **Writing view tables into PostgreSQL.** The Java pipeline upserts view
-   rows into a sink database (`sinkDbConfigPath`), which the single-machine
-   tutorial and dashboards use.
-3. **Bulk Data `$export` as a source.** The Java pipeline's second fetch mode,
-   and the one its docs expect to become the main one.
-4. **HTTP Basic auth.** The Java pipeline's default for OpenMRS and HAPI test
-   servers; fhir-pipes has only bearer tokens and OAuth client credentials.
-5. **FHIR-to-FHIR sync.** The Java pipeline can copy resources to a second
+2. **FHIR-to-FHIR sync.** The Java pipeline can copy resources to a second
    FHIR server or a Google Cloud FHIR store. fhir-pipes' `load` checks
    versions against the same server, so it cannot copy to another.
-6. **Running on a schedule with an API.** The Java controller runs
+3. **Running on a schedule with an API.** The Java controller runs
    incremental runs and snapshot purges on cron schedules (full runs are
    started from its web page or API), keeps timestamped snapshots, and has a
    web page, a REST API and Prometheus metrics. fhir-pipes runs from cron or CI
    and keeps one current warehouse.
-7. **A Docker image.** Existing sites deploy the Java pipeline as an image and
+4. **A Docker image.** Existing sites deploy the Java pipeline as an image and
    compose files.
+
+Closed since the first version of this comparison:
+
+- **Writing view tables into PostgreSQL** (#25): `refresh` with `[database]`
+  replaces every view table in one transaction (#39), and the release
+  binaries include it, with TLS (#40). Upserting only changed rows is #38.
+- **Bulk Data `$export` as a source** (#27): `export --bulk` and
+  `refresh` with `fetch = "bulk"` (#37), with resume, a timeout that cancels
+  the export, and `deleted[]` applied.
+- **HTTP Basic auth** (#26): `--username` / `--password` on every FHIR
+  command (#36).
 
 Sources specific to HAPI and OpenMRS (reading their databases directly) are a
 smaller gap: both servers work over FHIR search, which fhir-pipes supports.
@@ -70,7 +79,7 @@ linting.
 | FHIR search | `FHIR_SEARCH` (default). First query with `_total=accurate`, `_count=batchSize` (default 100), `_summary=data`; pages fetched in parallel by generating `_getpagesoffset` segments, which only works on HAPI (`FhirSearchUtil`) | `export`, `extract`, `refresh`. Follows `next` links with `_count=1000`, so it works on any server that pages with links; pages of one type are fetched one after another | Same, slower on large servers |
 | Resource types | `resourceList` (default `Patient,Encounter,Observation`) | `export --type`; `refresh` downloads the types its views read | Same |
 | Incremental fetch | `--since` → `_lastUpdated=ge` (search), `_since` (bulk), `res_updated >` (HAPI JDBC). The controller reads `since` from the last snapshot | Watermark per type in `.export-state.json`, `_lastUpdated=ge`, merged by id. When the first response has an HTTP `Date`, the watermark is never later than that time less five minutes; without one, it is the greatest `meta.lastUpdated` seen | Same |
-| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | None | Missing |
+| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | `export --bulk`, `refresh` `fetch = "bulk"` (#37): system-level kick-off with `_type` and `_since`; polls with `Retry-After`; `--bulk-timeout` cancels the export with `DELETE`; the status URL is saved, so an interrupted run resumes; outputs downloaded with the token when `requiresAccessToken`; merged by id; `deleted[]` applied; the count check still runs. No Group or Patient export | Same; fhir-pipes also applies `deleted[]` and resumes |
 | HAPI database | `HAPI_JDBC`: reads `hfj_resource`/`hfj_res_ver` in PostgreSQL (or MySQL) directly, in chunks; rebuilds `meta` from the tag tables; the only mode that sees deletions | None | Missing |
 | OpenMRS database | `OPENMRS_JDBC`: reads uuids from OpenMRS MySQL tables, then fetches them from the FHIR2 module with `_id=` searches. No incremental mode | None. OpenMRS works through FHIR search (`/openmrs/ws/fhir2/R4`), untested | Missing (search untested) |
 | `--activePeriod` | Fetches resources in a date range, then each matched patient's history. Marked in the code as possibly to be removed | None | Not needed |
@@ -84,7 +93,7 @@ linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | OAuth client credentials | Token endpoint, client id and secret; token cached and renewed before expiry | Same, renewed a minute before expiry; the secret only from the environment | Same |
-| HTTP Basic | `fhirServerUserName` / `fhirServerPassword`, also for the sink server | None | Missing |
+| HTTP Basic | `fhirServerUserName` / `fhirServerPassword`, also for the sink server | `--username` / `--password` (`FHIR_PIPES_USERNAME`, `FHIR_PIPES_PASSWORD`) on every FHIR command; `refresh` reads the password only from the environment (#36) | Same |
 | Fixed bearer token | None | `--token` / `FHIR_PIPES_TOKEN` | fhir-pipes only |
 | Google Cloud credentials | Application Default Credentials for the GCP FHIR store sink | None | Missing (only needed with that sink) |
 | SMART discovery, renewal on 401 | Neither (TODO in the code) | Neither | Same |
@@ -112,7 +121,7 @@ linting.
 | Engine | HAPI FHIRPath per FHIR version. Runs a copy of the official SQL-on-FHIR v2 tests in CI (`SQLonFHIRv2Test`), skipping 5 cases (`join()` with no separator, date `lowBoundary`/`highBoundary`, one validation case) and with `fn_reference_keys.json` adapted; listed in the spec's implementations registry | `crates/sof` on `octofhir-fhirpath`; passes all 144 cases of the v2.1 suite in memory, with no skips, in CI | Same; fhir-pipes has no skipped cases |
 | Constructs | `select`, `column`, `forEach`, `forEachOrNull`, `unionAll`, `where`, `constant`, `getResourceKey()`, `getReferenceKey()` | The same, as the spec's test cases cover them | Same |
 | Views to Parquet | `outputParquetViewPath` / `createParquetViews`: one directory per view in each snapshot | `refresh`: one Hive-partitioned table per view (partition looked up through another table), dates and times as Parquet date and timestamp types | Same, different layout |
-| Views to a database | `sinkDbConfigPath`: `CREATE TABLE` per view, rows upserted by resource id (delete then insert), `--recreateSinkTables`. The docs name PostgreSQL and MySQL, but the SQL is PostgreSQL's (`CREATE INDEX IF NOT EXISTS`, `TIMESTAMP WITH TIME ZONE`, `JSONB`, `ON CONFLICT`) with no MySQL variant. Without views, one `(id, datab JSONB)` table per type | `views sql --ddl` writes `CREATE TABLE` (ANSI, PostgreSQL, DuckDB types); `views run --db` reads FHIR from PostgreSQL JSONB. Nothing writes rows to a database | Missing |
+| Views to a database | `sinkDbConfigPath`: `CREATE TABLE` per view, rows upserted by resource id (delete then insert), `--recreateSinkTables`. The docs name PostgreSQL and MySQL, but the SQL is PostgreSQL's (`CREATE INDEX IF NOT EXISTS`, `TIMESTAMP WITH TIME ZONE`, `JSONB`, `ON CONFLICT`) with no MySQL variant. Without views, one `(id, datab JSONB)` table per type | `refresh` with `[database]` (#39, #40): every view table, or those listed, replaced in one transaction (`DELETE` then `COPY`); types from the Parquet; tables created, and recreated when their columns change; an index on `id`; an advisory lock so overlapping loads take turns; TLS through `sslmode`. No upsert of only the changed rows (#38) and no raw JSONB mode | Same, replacing rather than upserting |
 | Regenerate views without fetching | Controller `VIEWS` run: from the current snapshot into a new `VIEWS_TIMESTAMP_*` directory, sink tables recreated | `refresh --only views --reuse-raw` | Same |
 | Try a view on one resource | `POST /test-view` and a web editor | `views run view.json --input resource.json` (CSV to the terminal); `views validate`, `views lint` | Same, without a web page |
 | Predefined views | 12 views in `docker/config/views/`, plus Spark SQL versions (`*_flat.sql`) | The same 12 run unchanged; used as an acceptance test | Same |
@@ -123,7 +132,7 @@ linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Incremental merge | Fetch changes into `incremental_run/`, then `ParquetMerger` (Beam/Flink) rewrites the whole warehouse into a new snapshot, latest `meta.lastUpdated` per id winning | Changes merged by id into the per-type NDJSON; every view table is rewritten from the whole download | Same outcome; both rewrite the tables |
-| Deletions | Only `HAPI_JDBC` incremental runs see them (tombstones tagged `REMOVE`, also deleted from the sink server and database). Search and bulk export runs keep deleted resources | A type whose count on the server differs from the file's after the merge is downloaded in full, which drops deleted resources | fhir-pipes handles more cases; costs a full download of that type |
+| Deletions | Only `HAPI_JDBC` incremental runs see them (tombstones tagged `REMOVE`, also deleted from the sink server and database). Search and bulk export runs keep deleted resources | A type whose count on the server differs from the file's after the merge is downloaded in full, which drops deleted resources; a bulk export also removes the resources its `deleted[]` lists (#37) | fhir-pipes handles more cases; the count check costs a full download of that type |
 | Schema changes between runs | The merger needs the same schema; a changed profile needs a full run | Tables are rewritten every run | Not needed |
 
 ## 7. Snapshots and retention
@@ -161,7 +170,7 @@ linting.
 | Parquet location | Local, `gs://`, `s3://` written directly (Beam file systems); HDFS with the Spark profile | Local, then `refresh --push` mirrors to any rclone remote (R2, S3, GCS, Azure, …) | Same, through rclone |
 | Second FHIR server | `sinkFhirServerUrl`: each page sent as a transaction Bundle of `PUT`s; deletions forwarded in HAPI_JDBC mode; can run with Parquet off for pure FHIR-to-FHIR sync | `load` sends transaction Bundles, but with `If-Match` from the source's `meta.versionId`, which only matches on the same server | Missing (needs a copy mode without version checks) |
 | Google Cloud FHIR store | `fhirSinkPath` as a store path; Application Default Credentials | None | Missing |
-| Database | See section 5 | See section 5 | Missing |
+| Database | See section 5 | See section 5 | Same |
 | CSV, BigQuery, Kafka | None | `views run --output csv` | — |
 
 ## 11. Query side
@@ -196,6 +205,8 @@ linting.
   table.
 - A DuckDB catalog of the warehouse.
 - Bearer-token auth, retries with backoff and `Retry-After`, and a check of the server's count after incremental downloads.
+- Bulk Data `$export` that applies `deleted[]`, resumes an interrupted export, and cancels one that runs too long.
+- The view tables loaded into PostgreSQL in one transaction, so readers never see a mix of runs.
 
 ## Potential features
 
@@ -207,9 +218,9 @@ ROADMAP once agreed.
 
 | Feature | Why | Size | Issue |
 |---|---|---|---|
-| Write view tables into PostgreSQL | The single-machine setup and its dashboards read view tables from PostgreSQL. Upsert by resource id, as the Java sink does, or replace each table | Medium | #25 |
-| HTTP Basic auth | OpenMRS and many HAPI deployments use it | Small | #26 |
-| Bulk Data `$export` source | Second fetch mode in the Java pipeline; faster for large servers that support it. Use `deleted[]`, which the Java pipeline ignores | Medium | #27 |
+| Write view tables into PostgreSQL | The single-machine setup and its dashboards read view tables from PostgreSQL. Upsert by resource id, as the Java sink does, or replace each table | Medium | #25, done (#39, #40); upsert is #38 |
+| HTTP Basic auth | OpenMRS and many HAPI deployments use it | Small | #26, done (#36) |
+| Bulk Data `$export` source | Second fetch mode in the Java pipeline; faster for large servers that support it. Use `deleted[]`, which the Java pipeline ignores | Medium | #27, done (#37) |
 | Copy to a second FHIR server | FHIR-to-FHIR sync (Shared Health Record use case): `load` without `If-Match`, or a `sync` command; forward deletions | Small to medium | #28 |
 | Docker image and a compose example | How existing sites deploy | Small |  |
 | Nested Parquet-on-FHIR | Existing queries and Spark tables read it. On hold until a site needs it | Large |  |
