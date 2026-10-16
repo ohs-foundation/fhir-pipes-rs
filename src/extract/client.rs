@@ -570,16 +570,18 @@ impl FhirClient {
         let mut last = None;
         for attempt in 1..=self.retries {
             let mut request = self.http.request(method.clone(), url);
+            let pass = self.enter();
+            // After the wait for a place, which can outlast a token.
+            if let Some(v) = self.authorization()? {
+                request = self.authorize(request, &v);
+            }
+            // After both: the wait and a token renewal take from the time
+            // left, and a request must not start after the deadline.
             if let Some(left) = left() {
                 if left.is_zero() {
                     break;
                 }
                 request = request.timeout(self.timeout.min(left));
-            }
-            let pass = self.enter();
-            // After the wait for a place, which can outlast a token.
-            if let Some(v) = self.authorization()? {
-                request = self.authorize(request, &v);
             }
             match request.send() {
                 Ok(resp) => return exchanged(resp),
@@ -914,6 +916,45 @@ mod tests {
                 .expect("the queued request finished, not stuck behind its own renewal");
             got.unwrap();
         });
+    }
+
+    #[test]
+    fn a_token_renewal_that_uses_up_the_deadline_stops_the_exchange() {
+        // The first token is due at once; renewing it takes 900 ms, more
+        // than the exchange's 400 ms. The status URL must not be asked after
+        // the deadline.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(2)
+                .respond_with(cycle![
+                    json_encoded(serde_json::json!({"access_token": "tok-1", "expires_in": 0})),
+                    delay_and_then(
+                        Duration::from_millis(900),
+                        json_encoded(serde_json::json!({"access_token": "tok-2", "expires_in": 0})),
+                    ),
+                ]),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/status"))
+                .times(0)
+                .respond_with(status_code(200)),
+        );
+        let client = FhirClient::new(
+            Auth::ClientCredentials {
+                token_url: server.url_str("/token"),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            3,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(400);
+        let err = client
+            .exchange_by(Method::GET, &server.url_str("/status"), Some(deadline))
+            .unwrap_err();
+        assert!(err.to_string().contains("deadline"), "{err}");
     }
 
     #[test]
