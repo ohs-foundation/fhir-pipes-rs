@@ -51,6 +51,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 |---|---|---|
 | Edited GeoJSON or GeoParquet → the changed FHIR resources | `diff` | 0.3.0 |
 | Send NDJSON to a FHIR server in transaction bundles, with version checks | `load` | 0.3.0 |
+| Admin boundaries (GeoJSON) → the admin unit hierarchy, and facilities, schools or settlements (CSV) → site Locations under it with facility Organizations and spatial index cells. Ported from kiln's Python `bake` and `bake-points`; the Python package is removed (#44) | `import location-boundaries`, `import location-sites` | next release |
 | Spatial index identifiers (quadkey, geohash) on Locations | `index` | 0.3.0 |
 | Population Groups for admin units or catchments from a raster such as WorldPop | `population` | 0.3.0 |
 | DHIS2 org units → Locations, indicators → Measures, values → MeasureReports | `dhis2 locations`, `measures`, `reports` | 0.3.0 |
@@ -76,7 +77,6 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Item | Status | Notes |
 |---|---|---|
 | Profile builder: write a starting profile from an IG | Planned | A `profile build` subcommand, reusing the IG loader in `src/profile/check.rs` |
-| Port `bake` and `bake-points` (GRID3 and CSV → Locations) from Python | Planned | Still in `python/` |
 | Move the FHIR client, paging, snapshot merge and loader into their own crate | Planned | Step 1 of the consolidation plan |
 | Put geo, rasters and DHIS2 behind Cargo features | Planned | So an analytics-only build stays small; only `postgres` (on by default) and `fhir-packages` are optional today |
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
