@@ -7,6 +7,7 @@ mod export;
 mod extract;
 mod fhir;
 mod geometry;
+mod import;
 mod index;
 mod inspect;
 mod load;
@@ -16,6 +17,7 @@ mod raster;
 mod report;
 mod run;
 mod snapshot;
+mod sync;
 mod transform;
 mod views;
 mod warehouse;
@@ -55,12 +57,14 @@ fn main() {
         cli::Command::Run(args) => run::run(&args, profile),
         cli::Command::Diff(args) => diff::run_diff(&args, profile),
         cli::Command::Load(args) => load::run_load(&args),
+        cli::Command::Sync(args) => sync::run_sync(&args),
         cli::Command::Index(args) => cells::run_index(&args, profile),
         cli::Command::Population(args) => population::run_population(&args, profile),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd, profile),
         cli::Command::Profile(cli::ProfileCommand::Check(args)) => {
             profile::check::run(&args, profile)
         }
+        cli::Command::Import(cmd) => import::run(&cmd, profile),
         cli::Command::Refresh(_) | cli::Command::Views(_) => unreachable!("handled above"),
     };
     if let Err(err) = result {
