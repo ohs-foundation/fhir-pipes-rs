@@ -120,6 +120,33 @@ The table is the view's name in snake case minus a configured prefix
 (`IcrIndicatorValue` → `indicator_value`). Dates, dateTimes, instants and times
 are parquet date and timestamp types, not text.
 
+A value that does not match its column's type is written as follows:
+
+- an integral number (`5.0`) in an `integer` or `integer64` column (FHIR
+  `integer`, `positiveInt`, `unsignedInt`, `integer64`) is written as the
+  integer; `5.5` is not rounded and is written as null;
+- a dateTime with a time (`2026-06-15T23:30:00-05:00`) in a `date` column is
+  written as its date part as written (`2026-06-15`), without converting to
+  UTC first. Switch the column to `dateTime` to keep the time;
+- a partial date (`2026`, `2026-06`) is floored to the start of the period:
+  `2026-01-01`, `2026-06-01`. In a `dateTime` or `instant` column, a partial
+  or date-only value is midnight UTC on that day. These are not counted;
+- anything else that cannot be converted (a string in an `integer` column, an
+  unparseable date) is written as null.
+
+The values written as their date or as null are counted per column and
+printed as soon as the views step is done, before the later steps run, so
+a hook or push that fails afterwards does not hide them:
+
+```
+values that did not match their column's type:
+   indicator_value.period_start: 12 dateTime values written as their date
+   obs.value: 3 values did not fit integer and were written as null
+```
+
+The run does not fail. The counts are also in `last-refresh.json` (see
+below).
+
 Every row gets a partition column (default `country`), looked up through
 another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
@@ -588,7 +615,21 @@ before the hooks, in any case: `locations`, `views`, `tiles`, `manifest`,
 `catalog` or `database`. A config whose hook names `hooks`, `push` or an
 unknown step is refused before anything runs.
 
-Each run writes its step timings to `raw/<server>/last-refresh.json`.
+Each run that finishes writes its step timings to
+`raw/<server>/last-refresh.json`; a run that stops at an error does not. When
+the views step ran, `type_mismatches` lists, per table and column, the values
+that did not match the column's type ([Tables](#tables)):
+
+```json
+"type_mismatches": {
+  "indicator_value": {
+    "period_start": {"type": "date", "written_as_date": 12, "written_as_null": 0}
+  }
+}
+```
+
+Tables and columns without any are left out, so `{}` means every value was
+written as it is.
 
 The manifest's and `last-refresh.json`'s `server` is the configured server
 when the run downloaded from it. A run that downloads nothing (with

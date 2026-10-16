@@ -18,7 +18,22 @@ All notable changes to this project are documented here. The format follows
   reduced-precision FHIR values are floored to the start of the period they
   name (`2026` → `2026-01-01`, `2026-03` → `2026-03-01`, a date-only
   `dateTime` → midnight UTC); offsets are normalized to UTC; unparseable
-  values are written as null and logged at `warn`.
+  values are written as null.
+- **`OutputWriter::write_with_summary` and `WriteSummary`** — the Parquet
+  writer returns, per column, the values it did not write as they are,
+  instead of logging them at `warn` (which nothing showed). CSV and JSON
+  return an empty summary.
+
+### Changed
+
+- **Parquet: values that do not match their column's type.** An integral
+  number (`5.0`) in an `integer` or `integer64` column is written as the
+  integer instead of null; `5.5` is still null. With
+  `TemporalEncoding::Native`, a `dateTime` with a time in a `date` column
+  (`2026-06-15T23:30:00-05:00`) is written as its date part as written
+  (`2026-06-15`, not converted to UTC) instead of null. Anything else that
+  cannot be converted is still null, and is now counted in the
+  `WriteSummary`.
 
 ## [0.1.2]
 

@@ -401,3 +401,113 @@ fn input_directories_skip_symlinked_directories() {
         "{out}"
     );
 }
+
+/// Values that do not match their column's type, written with native
+/// temporal types and read back: an integral decimal is written as the
+/// integer, a dateTime in a date column as its date as written, and what
+/// cannot be converted as null, with a count per column on stderr.
+#[test]
+fn parquet_values_that_do_not_match_their_column_type() {
+    use arrow::array::{Array, Date32Array, Int64Array, StringArray, TimestampMicrosecondArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let view = dir.path().join("view.json");
+    fs::write(
+        &view,
+        serde_json::json!({"resourceType": "ViewDefinition", "name": "Measures", "status": "active",
+            "resource": "Observation", "select": [{"column": [
+                {"name": "id", "path": "id", "type": "id"},
+                {"name": "n", "path": "value.ofType(Quantity).value", "type": "integer"},
+                {"name": "start", "path": "effective.ofType(Period).start", "type": "date"},
+                {"name": "end", "path": "effective.ofType(Period).end", "type": "dateTime"},
+            ]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let obs = |id: &str, value: &str, start: &str, end: &str| {
+        format!(
+            r#"{{"resourceType": "Observation", "id": "{id}", "status": "final", "code": {{"text": "x"}},
+                "valueQuantity": {{"value": {value}}}, "effectivePeriod": {{"start": "{start}", "end": "{end}"}}}}"#
+        )
+        .replace('\n', " ")
+            + "\n"
+    };
+    let input = dir.path().join("obs.ndjson");
+    fs::write(
+        &input,
+        [
+            obs("a", "5.0", "2026-06-15T23:30:00-05:00", "2026-06-15"),
+            obs("b", "5.5", "2026-06", "2026"),
+            obs("c", "-3", "2026-06-15", "2026-06-15T08:30:00+01:00"),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let out = dir.path().join("out.parquet");
+    views()
+        .arg("run")
+        .arg(&view)
+        .arg("--input")
+        .arg(&input)
+        .args([
+            "--output",
+            "parquet",
+            "--parquet-temporal",
+            "native",
+            "--out",
+        ])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(contains("values that did not match their column's type:"))
+        .stderr(contains(
+            "Measures.n: 1 value did not fit integer and was written as null",
+        ))
+        .stderr(contains(
+            "Measures.start: 1 dateTime value written as its date",
+        ));
+
+    let batch = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(&out).unwrap())
+        .unwrap()
+        .build()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let col = |name: &str| batch.column_by_name(name).unwrap().clone();
+    let ids = col("id");
+    let ids = ids.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!((ids.value(0), ids.value(1), ids.value(2)), ("a", "b", "c"));
+
+    let n = col("n");
+    let n = n.as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(n.value(0), 5);
+    assert!(n.is_null(1), "5.5 is not rounded");
+    assert_eq!(n.value(2), -3);
+
+    // Days since 1970-01-01.
+    let day = |y, m, d| {
+        (chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+            - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+        .num_days() as i32
+    };
+    let start = col("start");
+    let start = start.as_any().downcast_ref::<Date32Array>().unwrap();
+    // The date as written, not 2026-06-16 in UTC.
+    assert_eq!(start.value(0), day(2026, 6, 15));
+    // A partial date is floored to the start of the month.
+    assert_eq!(start.value(1), day(2026, 6, 1));
+    assert_eq!(start.value(2), day(2026, 6, 15));
+
+    let micros = |y, m, d, h: i64| i64::from(day(y, m, d)) * 86_400_000_000 + h * 3_600_000_000;
+    let end = col("end");
+    let end = end
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    // Date-only and partial values are midnight UTC; an offset is converted.
+    assert_eq!(end.value(0), micros(2026, 6, 15, 0));
+    assert_eq!(end.value(1), micros(2026, 1, 1, 0));
+    assert_eq!(end.value(2), micros(2026, 6, 15, 7) + 30 * 60_000_000);
+}
