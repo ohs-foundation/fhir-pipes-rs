@@ -632,15 +632,29 @@ impl FhirClient {
     /// POST a FHIR JSON body with the same retry policy. The body is cloned
     /// per attempt; bundles are small next to a boundary fetch.
     pub fn post_json(&self, url: &str, body: Vec<u8>) -> std::result::Result<Fetched, FetchError> {
-        self.send(
+        self.post_json_counted(url, body).0
+    }
+
+    /// `post_json`, with how many times the body was sent. After a timeout
+    /// or a 5xx the server may have committed an earlier attempt, so the
+    /// final answer can be about the server's own copy of this body.
+    pub fn post_json_counted(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+    ) -> (std::result::Result<Fetched, FetchError>, usize) {
+        let sent = std::cell::Cell::new(0usize);
+        let got = self.send(
             || {
+                sent.set(sent.get() + 1);
                 self.http
                     .post(url)
                     .header(CONTENT_TYPE, "application/fhir+json")
                     .body(body.clone())
             },
             fetched,
-        )
+        );
+        (got, sent.get())
     }
 
     /// GET with `Prefer: respond-async`, the Bulk Data kick-off. Retried as

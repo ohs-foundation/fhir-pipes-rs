@@ -122,8 +122,8 @@ fn probe_conflicts(client: &FhirClient, base: &str, bundle: &Bundle) -> Vec<Stri
 
 /// Posts one bundle; the error says what was and was not written.
 fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> Result<()> {
-    let body = b.to_bytes();
-    match client.post_json(base, body) {
+    let (got, sent) = client.post_json_counted(base, b.to_bytes());
+    match got {
         Ok(_) => Ok(()),
         Err(FetchError::Status {
             status: status @ (409 | 412),
@@ -139,11 +139,24 @@ fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> 
                     conflicts.join("\n  ")
                 )
             };
-            Err(PipesError::Environment(format!(
-                "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
-                 These resources changed on the server after the snapshot was taken: \
-                 run extract, re-apply the edit, and diff again."
-            )))
+            Err(PipesError::Environment(if sent > 1 {
+                // The first attempt timed out or got a 5xx; the server may
+                // have committed it, and this answer is about its own writes.
+                format!(
+                    "bundle {n}/{count} rejected with HTTP {status} after it was sent {sent} times. \
+                     An earlier attempt timed out or failed with a server error and may have been \
+                     committed, in which case the conflicts below are that attempt's own writes. {detail}\n\
+                     Check these resources on the server: if they hold the edit, the bundle is \
+                     loaded; if not, they changed after the snapshot was taken: run extract, \
+                     re-apply the edit, and diff again."
+                )
+            } else {
+                format!(
+                    "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
+                     These resources changed on the server after the snapshot was taken: \
+                     run extract, re-apply the edit, and diff again."
+                )
+            }))
         }
         Err(e) => Err(PipesError::Environment(format!(
             "bundle {n}/{count} failed: {e}; bundles committed before it stay committed, re-running is safe"

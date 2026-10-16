@@ -1051,6 +1051,13 @@ PUT by id with a version check. The fix is to extract again, re-apply the
 edit, and diff again. This is what makes it safe for a GIS user to edit a
 copy that might be a day old.
 
+A bundle is sent again after a timeout or a 5xx. When the first attempt was
+committed but its answer was lost, the retry conflicts with that attempt's
+own writes. A 412 or 409 after more than one attempt says so: the error
+gives the number of attempts and says the earlier one may have been
+committed. Check the named resources on the server before extracting
+again; if they hold the edit, the bundle was loaded.
+
 Organizations are posted before Locations, so a new pair resolves within
 the run.
 
