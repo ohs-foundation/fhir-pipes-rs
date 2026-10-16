@@ -16,7 +16,9 @@
 //! bundle's resources again as a worker takes the bundle, so only the
 //! bundles being posted are held. Within Locations, and within the other
 //! types, the resources at one `partOf` depth go in file order, so the
-//! second pass reads the file once per such group.
+//! second pass reads the file once per such group. It checks that the file
+//! is unchanged (size and modification time at each open, and each
+//! resource's type, id, version and `partOf`), since the plan rests on it.
 
 pub mod bundle;
 pub mod capability;
@@ -46,6 +48,8 @@ struct Planned {
     id: String,
     /// `meta.versionId`; `None` is a create.
     version: Option<String>,
+    /// `partOf.reference`, which placed it in the order.
+    part_of: Option<String>,
     line: usize,
 }
 
@@ -55,6 +59,26 @@ pub struct LoadPlan {
     resources: Vec<Planned>,
     /// Indexes into `resources`, in the order they are loaded.
     order: Vec<usize>,
+    /// The input's length and modification time when it was planned.
+    stamp: Stamp,
+}
+
+type Stamp = (u64, std::time::SystemTime);
+
+/// The length and modification time of `path`, to tell whether it changed.
+fn stamp(path: &Path) -> Result<Stamp> {
+    let m = std::fs::metadata(path).map_err(|e| PipesError::io(path, e))?;
+    Ok((m.len(), m.modified().map_err(|e| PipesError::io(path, e))?))
+}
+
+/// The input changed after it was planned: an environment error, since the
+/// plan (order, versions, preflight) no longer describes it.
+fn changed(path: &Path, what: &str) -> PipesError {
+    PipesError::Environment(format!(
+        "{} changed while it was being loaded: {what}; bundles committed before this stay \
+         committed, and re-running on the file as it is now is safe",
+        path.display()
+    ))
 }
 
 impl LoadPlan {
@@ -117,11 +141,10 @@ impl LoadPlan {
 /// and `id`, and no `<Type>/<id>` may repeat; the plan is ordered parents
 /// first (`order::parents_first`), and a `partOf` cycle is an error.
 pub fn read_plan(path: &Path) -> Result<LoadPlan> {
+    let before = stamp(path)?;
     let mut types: Vec<String> = Vec::new();
     let mut type_index: HashMap<String, usize> = HashMap::new();
     let mut resources: Vec<Planned> = Vec::new();
-    // `partOf.reference` of each resource, until the order is known.
-    let mut part_of: Vec<Option<String>> = Vec::new();
     let mut seen: HashSet<(usize, String)> = HashSet::new();
     for line in NdjsonReader::open(path)? {
         let line = line?;
@@ -157,33 +180,39 @@ pub fn read_plan(path: &Path) -> Result<LoadPlan> {
                 line.number
             )));
         }
-        part_of.push(head.part_of);
         resources.push(Planned {
             resource_type: t,
             id,
             version: head.version_id,
+            part_of: head.part_of,
             line: line.number,
         });
     }
     drop(seen);
     let nodes: Vec<Node> = resources
         .iter()
-        .zip(&part_of)
-        .map(|(r, p)| {
+        .map(|r| {
             let t = types[r.resource_type].as_str();
             Node {
                 resource_type: t,
                 id: &r.id,
-                parent: p.as_deref().and_then(|p| reference_key(p, Some(t))),
+                parent: r.part_of.as_deref().and_then(|p| reference_key(p, Some(t))),
             }
         })
         .collect();
     let order = parents_first(&nodes)?;
     drop(nodes);
+    if stamp(path)? != before {
+        return Err(PipesError::Environment(format!(
+            "{} changed while it was being read; nothing was sent, run again",
+            path.display()
+        )));
+    }
     Ok(LoadPlan {
         types,
         resources,
         order,
+        stamp: before,
     })
 }
 
@@ -205,40 +234,53 @@ impl<'a> Reread<'a> {
         }
     }
 
-    /// The resource on line `r.line`, checked to be the one planned.
+    /// The resource on line `r.line`, checked to be the one planned: the
+    /// same type, id, `meta.versionId` and `partOf.reference`, so the
+    /// order, the preflight and the version checks still hold. Anything
+    /// else, including a file that no longer reads, is a changed file.
     fn resource(&mut self, plan: &LoadPlan, r: &Planned) -> Result<Value> {
         let resource_type = &plan.types[r.resource_type];
-        let changed = || {
-            PipesError::Environment(format!(
-                "{} changed while it was being loaded: line {} is no longer {resource_type}/{}; \
-                 bundles committed before this stay committed, re-running is safe",
-                self.path.display(),
-                r.line,
-                r.id
-            ))
+        let not_planned = || {
+            changed(
+                self.path,
+                &format!(
+                    "line {} is no longer the {resource_type}/{} it was planned as",
+                    r.line, r.id
+                ),
+            )
         };
-        let line = self.line(r.line)?.ok_or_else(changed)?;
-        let value: Value = serde_json::from_str(&line.text).map_err(|_| changed())?;
-        let same = value.get("resourceType").and_then(Value::as_str) == Some(resource_type)
-            && value.get("id").and_then(Value::as_str) == Some(r.id.as_str());
+        let line = self.line(plan, r.line)?.ok_or_else(not_planned)?;
+        let value: Value = serde_json::from_str(&line.text).map_err(|_| not_planned())?;
+        let str_at = |p: &str| value.pointer(p).and_then(Value::as_str);
+        let same = str_at("/resourceType") == Some(resource_type)
+            && str_at("/id") == Some(r.id.as_str())
+            && str_at("/meta/versionId") == r.version.as_deref()
+            && str_at("/partOf/reference") == r.part_of.as_deref();
         if !same {
-            return Err(changed());
+            return Err(not_planned());
         }
         Ok(value)
     }
 
-    /// Line `n`, or `None` when the file no longer has a line `n`.
-    fn line(&mut self, n: usize) -> Result<Option<Line>> {
+    /// Line `n`, or `None` when the file no longer has a line `n`. The file
+    /// is checked against the plan's stamp each time it is opened, and an
+    /// error reading it is a changed file: the first pass read all of it.
+    fn line(&mut self, plan: &LoadPlan, n: usize) -> Result<Option<Line>> {
         if n <= self.at {
             self.reader = None;
         }
         if self.reader.is_none() {
-            self.reader = Some(NdjsonReader::open(self.path)?);
+            if stamp(self.path).ok() != Some(plan.stamp) {
+                return Err(changed(self.path, "its size or modification time differs"));
+            }
+            let reader = NdjsonReader::open(self.path)
+                .map_err(|e| changed(self.path, &format!("reading it again: {e}")))?;
+            self.reader = Some(reader);
             self.at = 0;
         }
         let reader = self.reader.as_mut().expect("opened above");
         for line in reader {
-            let line = line?;
+            let line = line.map_err(|e| changed(self.path, &format!("reading it again: {e}")))?;
             self.at = line.number;
             if line.number == n {
                 return Ok(Some(line));
@@ -595,11 +637,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn write(path: &Path, resources: &[Value]) {
-        let text: String = resources.iter().map(|r| format!("{r}\n")).collect();
-        std::fs::write(path, text).unwrap();
-    }
-
     fn loc(id: &str, parent: Option<&str>) -> Value {
         let mut r = json!({"resourceType": "Location", "id": id, "meta": {"versionId": "1"}});
         if let Some(p) = parent {
@@ -690,30 +727,111 @@ mod tests {
         );
     }
 
+    /// The text of `resources`, one per line.
+    fn ndjson(resources: &[Value]) -> Vec<u8> {
+        resources
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    /// Write `text` to `path`, gzip without compression when `gz` (so the
+    /// file's size follows the text's).
+    fn put(path: &Path, text: &[u8], gz: bool) {
+        use std::io::Write;
+        if gz {
+            let mut w = flate2::write::GzEncoder::new(
+                std::fs::File::create(path).unwrap(),
+                flate2::Compression::none(),
+            );
+            w.write_all(text).unwrap();
+            w.finish().unwrap();
+        } else {
+            std::fs::write(path, text).unwrap();
+        }
+    }
+
+    /// Replace the file's text with `text` of the same length and give it
+    /// back its modification time, so only reading it again can tell.
+    fn swap_unseen(path: &Path, text: &[u8], gz: bool) {
+        let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+        let len = std::fs::metadata(path).unwrap().len();
+        put(path, text, gz);
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(modified).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), len, "same size");
+    }
+
+    fn is_changed_file(r: Result<Vec<Value>>) -> String {
+        match r {
+            Err(PipesError::Environment(m)) if m.contains("changed while it was being loaded") => m,
+            Err(e) => panic!("not a changed-file error: {e}"),
+            Ok(_) => panic!("the change went unnoticed"),
+        }
+    }
+
     #[test]
-    fn a_file_changed_between_the_passes_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("in.ndjson");
-        write(&path, &[loc("b", Some("a")), loc("a", None)]);
-        let plan = read_plan(&path).unwrap();
-        // Another resource on the planned line.
-        write(&path, &[loc("b", Some("a")), loc("x", None)]);
-        let err = reread_all(&path, &plan).unwrap_err();
-        assert!(
-            matches!(&err, PipesError::Environment(m)
-                if m.contains("changed while it was being loaded: line 2 is no longer Location/a")),
-            "{err}"
-        );
-        // The planned line gone.
-        write(&path, &[loc("b", Some("a"))]);
-        let err = reread_all(&path, &plan).unwrap_err();
-        assert!(
-            matches!(&err, PipesError::Environment(m) if m.contains("line 2")),
-            "{err}"
-        );
-        // No longer JSON.
-        std::fs::write(&path, "{\"x\":\n{\"y\":\n").unwrap();
-        let err = reread_all(&path, &plan).unwrap_err();
-        assert!(matches!(&err, PipesError::Environment(_)), "{err}");
+    fn a_file_changed_between_the_passes_is_an_environment_error() {
+        let child = loc("b", Some("a"));
+        let parent = loc("a", None);
+        let original = ndjson(&[child.clone(), parent.clone()]);
+        let text = String::from_utf8(original.clone()).unwrap();
+        let same_length: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "another resource",
+                text.replace("\"id\":\"a\"", "\"id\":\"x\"").into_bytes(),
+            ),
+            // The preflight took it for an update and the order is by partOf.
+            (
+                "no versionId",
+                text.replace("versionId", "versionIx").into_bytes(),
+            ),
+            (
+                "another version",
+                text.replacen("\"versionId\":\"1\"", "\"versionId\":\"2\"", 2)
+                    .into_bytes(),
+            ),
+            (
+                "another parent",
+                text.replace("Location/a", "Location/z").into_bytes(),
+            ),
+            ("a JSON document", {
+                let mut t = b"[".to_vec();
+                t.extend_from_slice(&original[1..]);
+                t
+            }),
+            ("invalid UTF-8", {
+                let mut t = original.clone();
+                let at = t.iter().position(|&b| b == b'L').unwrap();
+                t[at] = 0xff;
+                t
+            }),
+            ("not JSON", text.replace('{', "(").into_bytes()),
+        ];
+        for gz in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir
+                .path()
+                .join(if gz { "in.ndjson.gz" } else { "in.ndjson" });
+            for (what, text) in &same_length {
+                put(&path, &original, gz);
+                let plan = read_plan(&path).unwrap();
+                assert_eq!(
+                    reread_all(&path, &plan).unwrap(),
+                    [parent.clone(), child.clone()]
+                );
+                swap_unseen(&path, text, gz);
+                let m = is_changed_file(reread_all(&path, &plan));
+                assert!(m.contains("committed"), "{what}, gz {gz}: {m}");
+            }
+            // Any other change shows in the size or modification time,
+            // before anything is read.
+            put(&path, &original, gz);
+            let plan = read_plan(&path).unwrap();
+            put(&path, &ndjson(std::slice::from_ref(&child)), gz);
+            let m = is_changed_file(reread_all(&path, &plan));
+            assert!(m.contains("size or modification time"), "gz {gz}: {m}");
+        }
     }
 }
