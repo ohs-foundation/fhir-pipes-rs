@@ -33,8 +33,11 @@ geo-types = "0.7"
 wkb = "0.9"
 base64 = "0.22"
 sha2 = "0.11"
-# gzip: every request asks for compression; responses are decompressed.
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "gzip", "rustls-no-provider"] }
+# No `gzip` feature: the client asks for gzip and decodes it itself with
+# flate2's MultiGzDecoder, since reqwest's decoder reads only the first
+# member of a multi-member gzip body. The client also turns reqwest's
+# decoders off, in case another dependency enables them.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # RS256 signing of Google service account token requests (--google-auth);
 # already in the tree through rustls.

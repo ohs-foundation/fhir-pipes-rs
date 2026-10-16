@@ -15,7 +15,9 @@
 //! expires, so a run can outlast any one token.
 //!
 //! Every request asks for gzip (`Accept-Encoding: gzip`) and callers see
-//! the decompressed body, streamed downloads included. FHIR GETs (searches,
+//! the decompressed body, streamed downloads included. The client decodes
+//! gzip itself, with `MultiGzDecoder`, which reads every gzip member of a
+//! body; reqwest's own decoder stops after the first. FHIR GETs (searches,
 //! counts, the Bulk Data kick-off and status polls) also send
 //! `Cache-Control: no-cache`, so a server or proxy does not answer from a
 //! cached search: HAPI otherwise reuses a recent search's results and total.
@@ -26,14 +28,15 @@
 //! `export --bulk` uses it for the Bulk Data kick-off, the status URL (whose
 //! 202 and 429 the caller reads itself) and the output files.
 
-use std::io::Read as _;
+use std::io::Read;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::Method;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::header::{
-    ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER,
+    ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE,
+    HeaderMap, HeaderValue, RETRY_AFTER,
 };
 use serde_json::Value;
 
@@ -196,6 +199,44 @@ impl std::fmt::Debug for Exchange {
     }
 }
 
+/// A response's body as it was sent, before `Content-Encoding: gzip`.
+/// `MultiGzDecoder` reads every member: concatenated gzip members are one
+/// valid gzip body (RFC 1952 section 2.2), and a decoder that stops after
+/// the first loses the rest without an error. Any other encoding is passed
+/// through as it came; the client only asks for gzip. An empty body is
+/// empty whatever its `Content-Encoding` says (a 202 from a server that
+/// marks every response gzip), as reqwest's decoder treated it.
+fn decoded(resp: Response) -> Box<dyn Read> {
+    use std::io::BufRead as _;
+    let gzip = resp
+        .headers()
+        .get(CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip")
+        });
+    if !gzip {
+        return Box::new(resp);
+    }
+    let mut body = std::io::BufReader::new(resp);
+    // After a read error here the decoder fails too: the same error again,
+    // or a truncated stream.
+    if body.fill_buf().is_ok_and(|b| b.is_empty()) {
+        return Box::new(std::io::empty());
+    }
+    Box::new(flate2::bufread::MultiGzDecoder::new(body))
+}
+
+/// The whole decoded body.
+fn read_body(resp: Response) -> std::result::Result<Vec<u8>, FetchError> {
+    let mut body = Vec::new();
+    decoded(resp)
+        .read_to_end(&mut body)
+        .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?;
+    Ok(body)
+}
+
 /// A 2xx response's body and `Date`.
 fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
     let date = resp
@@ -203,13 +244,10 @@ fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
         .get(reqwest::header::DATE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    match resp.bytes() {
-        Ok(b) => Ok(Fetched {
-            body: b.to_vec(),
-            date,
-        }),
-        Err(e) => Err(FetchError::Transport(format!("reading body: {e}"))),
-    }
+    Ok(Fetched {
+        body: read_body(resp)?,
+        date,
+    })
 }
 
 /// Any response, with its status and headers.
@@ -218,12 +256,12 @@ fn exchanged(resp: Response) -> std::result::Result<Exchange, FetchError> {
     let headers = resp.headers().clone();
     let mut truncated = false;
     let body = if (200..300).contains(&status) {
-        resp.bytes()
-            .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?
-            .to_vec()
+        read_body(resp)?
     } else {
         let mut buf = Vec::new();
-        let _ = resp.take(EXCHANGE_BODY_LIMIT + 1).read_to_end(&mut buf);
+        let _ = decoded(resp)
+            .take(EXCHANGE_BODY_LIMIT + 1)
+            .read_to_end(&mut buf);
         if buf.len() as u64 > EXCHANGE_BODY_LIMIT {
             buf.truncate(EXCHANGE_BODY_LIMIT as usize);
             truncated = true;
@@ -387,7 +425,9 @@ fn cap(body: String) -> String {
 /// "error" doesn't make us buffer it all just to report a status code.
 fn read_error_body(resp: Response) -> String {
     let mut buf = Vec::new();
-    let _ = resp.take(ERROR_BODY_READ_LIMIT).read_to_end(&mut buf);
+    let _ = decoded(resp)
+        .take(ERROR_BODY_READ_LIMIT)
+        .read_to_end(&mut buf);
     cap(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -455,7 +495,16 @@ impl FhirClient {
         ensure_crypto_provider();
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/fhir+json"));
+        // Decoded by `decoded`, not by reqwest: reqwest's decoder reads only
+        // the first gzip member. Its decoders are turned off here, not only
+        // left out of Cargo.toml, because another crate in the build can
+        // enable them (octofhir-fhir-model does, with `fhir-packages`).
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
         let http = Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .no_deflate()
             .default_headers(headers)
             .timeout(timeout)
             .user_agent(concat!("fhir-pipes/", env!("CARGO_PKG_VERSION")))
@@ -679,8 +728,9 @@ impl FhirClient {
                 .header(ACCEPT, "application/fhir+ndjson")
                 .timeout(timeout)
         };
-        let body = |mut resp: Response| {
-            read(&mut resp).map_err(|e| FetchError::Transport(format!("reading body: {e}")))
+        let body = |resp: Response| {
+            read(&mut decoded(resp))
+                .map_err(|e| FetchError::Transport(format!("reading body: {e}")))
         };
         let attempt = if authorize {
             Attempt::Authorized
@@ -1078,6 +1128,87 @@ mod tests {
         e.finish().unwrap()
     }
 
+    /// `parts` as one gzip body of a member each (RFC 1952 section 2.2).
+    fn gzip_members(parts: &[&[u8]]) -> Vec<u8> {
+        parts.iter().flat_map(|p| gzip(p)).collect()
+    }
+
+    #[test]
+    fn every_member_of_a_multi_member_gzip_page_is_read() {
+        let page = br#"{"resourceType":"Bundle","type":"searchset","total":2}"#;
+        let (a, b) = page.split_at(20);
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Patient"))
+                .times(1)
+                .respond_with(
+                    status_code(200)
+                        .insert_header("content-encoding", "gzip")
+                        .body(gzip_members(&[a, b])),
+                ),
+        );
+        let got = client(1).get(&server.url_str("/fhir/Patient")).unwrap();
+        assert_eq!(got.body, page);
+    }
+
+    #[test]
+    fn a_server_that_ignores_accept_encoding_is_read_as_sent() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/plain"),
+                request::headers(contains(("accept-encoding", matches("gzip")))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body("plain text")),
+        );
+        let got = client(1).get(&server.url_str("/plain")).unwrap();
+        assert_eq!(got.body, b"plain text");
+    }
+
+    #[test]
+    fn an_empty_gzip_body_and_a_gzipped_error_are_decoded() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/empty"))
+                .times(1)
+                .respond_with(status_code(202).insert_header("content-encoding", "gzip")),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/missing"))
+                .times(1)
+                .respond_with(
+                    status_code(404)
+                        .insert_header("content-encoding", "gzip")
+                        .body(gzip_members(&[b"no such ", b"resource"])),
+                ),
+        );
+        let c = client(1);
+        let got = c.exchange(Method::GET, &server.url_str("/empty")).unwrap();
+        assert_eq!((got.status, got.body.len()), (202, 0));
+        let err = c.get(&server.url_str("/missing")).unwrap_err();
+        assert!(
+            matches!(err, FetchError::Status { status: 404, ref body } if body == "no such resource"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_gzip_body_is_an_error() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/bad"))
+                .times(1)
+                .respond_with(
+                    status_code(200)
+                        .insert_header("content-encoding", "gzip")
+                        .body("not gzip"),
+                ),
+        );
+        let err = client(1).get(&server.url_str("/bad")).unwrap_err();
+        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+
     #[test]
     fn a_search_asks_for_gzip_and_no_cache_and_gets_the_decompressed_body() {
         let page = br#"{"resourceType":"Bundle","type":"searchset","total":2}"#;
@@ -1122,7 +1253,7 @@ mod tests {
             .respond_with(
                 status_code(200)
                     .insert_header("content-encoding", "gzip")
-                    .body(gzip(br#"{"output":[]}"#)),
+                    .body(gzip_members(&[br#"{"outp"#, br#"ut":[]}"#])),
             ),
         );
         server.expect(
@@ -1147,8 +1278,9 @@ mod tests {
     }
 
     #[test]
-    fn a_gzipped_download_reaches_the_reader_decompressed() {
+    fn every_member_of_a_gzipped_download_reaches_the_reader() {
         let lines = "{\"resourceType\":\"Patient\",\"id\":\"a\"}\n".repeat(1000);
+        let (head, tail) = lines.as_bytes().split_at(lines.len() / 2);
         let server = Server::run();
         server.expect(
             Expectation::matching(all_of![
@@ -1160,7 +1292,7 @@ mod tests {
             .respond_with(
                 status_code(200)
                     .insert_header("content-encoding", "gzip")
-                    .body(gzip(lines.as_bytes())),
+                    .body(gzip_members(&[head, tail])),
             ),
         );
         let got = client(1)
