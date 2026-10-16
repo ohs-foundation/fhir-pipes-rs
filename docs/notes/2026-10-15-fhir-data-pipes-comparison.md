@@ -85,9 +85,11 @@ Changed by the code review (#63 to #69):
   return a cached page or total for up to a minute (#64). It also asks for
   gzip, which cut a 14,120-Group download from ICR from about 40 MB to
   0.9 MB.
-- **Bulk Data.** The wait between status checks is capped at 15 s, whatever
-  `Retry-After` the server sends; HAPI always sends 120 s, so a 5,000-Patient
-  export went from 120 s to 30 s. Output files download in parallel (#69).
+- **Bulk Data.** After a `202`, the wait before the next status check is
+  capped at 15 s, whatever `Retry-After` the server sends; HAPI always sends
+  120 s, so a 5,000-Patient export went from 120 s to 30 s. A longer
+  `Retry-After` on a `429` or `5xx` is still honoured. Output files download
+  in parallel (#69).
 - **Allocator.** The release binaries use mimalloc (#67). On Linux, where
   the binaries are built for musl, the ICR views step went from 84.6 s to
   4.9 s.
@@ -111,7 +113,7 @@ into FHIR, release binaries for five platforms, and view linting.
 | FHIR search | `FHIR_SEARCH` (default). First query with `_total=accurate`, `_count=batchSize` (default 100), `_summary=data`, `Cache-Control: no-cache`; pages fetched in parallel by generating `_getpagesoffset` segments, which only works on HAPI (`FhirSearchUtil`) | `export`, `extract`, `refresh`. Follows `next` links with `_count=1000`, so it works on any server that pages with links; types, and `_lastUpdated` windows of a large type, are fetched in parallel (#46). Sends `Cache-Control: no-cache` and asks for gzip (#64) | Same |
 | Resource types | `resourceList` (default `Patient,Encounter,Observation`) | `export --type`; `refresh` downloads the types its views read | Same |
 | Incremental fetch | `--since` → `_lastUpdated=ge` (search), `_since` (bulk), `res_updated >` (HAPI JDBC). The controller reads `since` from the last snapshot | Watermark per type in `.export-state.json`, `_lastUpdated=ge`, merged by id. When the first response has an HTTP `Date`, the watermark is never later than that time less five minutes; without one, it is the greatest `meta.lastUpdated` seen | Same |
-| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | `export --bulk`, `refresh` `fetch = "bulk"` (#37): system-level kick-off with `_type` and `_since`; polls with `Retry-After`, at most 15 s apart (#69); `--bulk-timeout` cancels the export with `DELETE`; the status URL is saved, so an interrupted run resumes; outputs downloaded in parallel (`--concurrency`, #69), with the token when `requiresAccessToken`; merged by id; `deleted[]` applied; the count check still runs. No Group or Patient export | Same; fhir-pipes also applies `deleted[]` and resumes |
+| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | `export --bulk`, `refresh` `fetch = "bulk"` (#37): system-level kick-off with `_type` and `_since`; polls with `Retry-After`, at most 15 s apart after a `202` (#69); `--bulk-timeout` cancels the export with `DELETE`; the status URL is saved, so an interrupted run resumes; outputs downloaded in parallel (`--concurrency`, #69), with the token when `requiresAccessToken`; merged by id; `deleted[]` applied; the count check still runs. No Group or Patient export | Same; fhir-pipes also applies `deleted[]` and resumes |
 | HAPI database | `HAPI_JDBC`: reads `hfj_resource`/`hfj_res_ver` in PostgreSQL (or MySQL) directly, in chunks; rebuilds `meta` from the tag tables; the only mode that sees deletions | `export --hapi-db`, `refresh` `fetch = "hapi-db"` (#49): reads `hfj_resource`/`hfj_res_ver` and the tag tables in PostgreSQL, in one read-only transaction streamed by cursor; HAPI 7/8 `fhir_id` and older `hfj_forced_id` layouts; incremental on `res_updated`, deletions included. On HAPI 8.12 the files are byte-identical to search, about 12 times faster. PostgreSQL only; one connection | Same; ties fhir-pipes to HAPI's schema |
 | OpenMRS database | `OPENMRS_JDBC`: reads uuids from OpenMRS MySQL tables, then fetches them from the FHIR2 module with `_id=` searches. No incremental mode | None. OpenMRS works through FHIR search (`/openmrs/ws/fhir2/R4`), untested | Missing (search untested) |
 | `--activePeriod` | Fetches resources in a date range, then each matched patient's history. Marked in the code as possibly to be removed | None | Not needed |
@@ -124,7 +126,7 @@ into FHIR, release binaries for five platforms, and view linting.
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
-| OAuth client credentials | Token endpoint, client id and secret; token cached and renewed before expiry | Same, renewed a minute before expiry; the secret only from the environment | Same |
+| OAuth client credentials | Token endpoint, client id and secret; token cached and renewed before expiry | Same, renewed a minute before expiry; the secret from `--client-secret` or `FHIR_PIPES_CLIENT_SECRET`, and for `refresh` only from the environment | Same |
 | HTTP Basic | `fhirServerUserName` / `fhirServerPassword`, also for the sink server | `--username` / `--password` (`FHIR_PIPES_USERNAME`, `FHIR_PIPES_PASSWORD`) on every FHIR command; `refresh` reads the password only from the environment (#36) | Same |
 | Fixed bearer token | None | `--token` / `FHIR_PIPES_TOKEN` | fhir-pipes only |
 | Google Cloud credentials | Application Default Credentials for the GCP FHIR store sink | `--google-auth` (#41): Application Default Credentials (service account key, gcloud user credentials, metadata server), renewed before expiry, on every FHIR command, for a source or a sink | Same |
@@ -219,7 +221,7 @@ into FHIR, release binaries for five platforms, and view linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Distribution | Docker image (`us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main`), jars, compose files for HAPI, OpenMRS, Spark, OpenHIM | Release binaries for macOS, Linux (static musl) and Windows (C runtime linked in, no redistributable needed) with checksums; `cargo install` | Missing: no image or compose files |
-| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 884 tests (904 with all features) on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite, fake FHIR servers, and PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
+| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 884 tests with default features on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite and fake FHIR servers; on Linux also 904 with all features and the database tests against PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
 | Docs | mkdocs site: concepts, installation (Docker, controller, pipeline), tutorials (single machine, test servers, Superset, GCP), schema | README, ROADMAP, `docs/` per command, profile walkthrough | Partial: no install-with-Docker or dashboard tutorials |
 | Licence | Apache-2.0, Google CLA | Apache-2.0 (sof crates MIT OR Apache-2.0) | Same; CLA needed to contribute |
 
