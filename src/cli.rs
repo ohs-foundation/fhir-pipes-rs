@@ -31,6 +31,9 @@ pub const DEFAULT_ANALYTICS_MAX_ROWS: usize = 20_000;
 /// Analytics requests in flight at once. Each one is a database query on
 /// the DHIS2 server, so this stays low.
 pub const DEFAULT_ANALYTICS_CONCURRENCY: usize = 4;
+/// `sync --delete` refuses to delete more than this share of a type's
+/// synced resources in one run.
+pub const DEFAULT_MAX_DELETE_SHARE: f64 = 0.2;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -77,6 +80,8 @@ pub enum Command {
     Diff(DiffArgs),
     /// Send changed resources to a FHIR server as version-checked transaction bundles
     Load(LoadArgs),
+    /// Copy what `export` downloaded to a second FHIR server: only what changed since the last sync to it, with deletions on request
+    Sync(SyncArgs),
     /// Backfill spatial-index cells (quadkey, geohash) onto snapshot Locations that lack them; writes the changed resources as FHIR NDJSON for `fhir-pipes load` (offline)
     Index(IndexArgs),
     /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `fhir-pipes load` (offline once the raster is cached)
@@ -684,4 +689,53 @@ pub struct LoadArgs {
     /// Total timeout per HTTP request, in seconds
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct SyncArgs {
+    /// Base URL of the sink FHIR server the resources are copied to, or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S). The auth options are for this server
+    #[arg(long, value_parser = parse_server)]
+    pub server: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+    /// Directory an `export` wrote: one <TYPE>.ndjson per type
+    #[arg(long)]
+    pub from: PathBuf,
+    /// Resource type to copy; repeat for several, parents' types first (e.g. Organization, Location, Patient, Encounter). Default: every <TYPE>.ndjson in --from, in name order
+    #[arg(long = "type", value_name = "TYPE")]
+    pub types: Vec<String>,
+    /// Send every resource, not only those changed since the last sync to this server
+    #[arg(long)]
+    pub full: bool,
+    /// Delete from the server the resources an earlier sync sent that are no longer in the download
+    #[arg(long)]
+    pub delete: bool,
+    /// With --delete: refuse to delete more than this share (0 to 1) of a type's synced resources in one run
+    #[arg(long, default_value_t = DEFAULT_MAX_DELETE_SHARE, value_parser = parse_share)]
+    pub max_delete_share: f64,
+    /// With --delete: delete even when that is more than --max-delete-share
+    #[arg(long, requires = "delete")]
+    pub force_delete: bool,
+    /// Run the preflight and print what would be sent and deleted, without sending
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Resources per transaction bundle
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    pub batch_size: usize,
+    /// Bundles posted at once
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: usize,
+    /// Attempts per request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
+}
+
+fn parse_share(s: &str) -> std::result::Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if (0.0..=1.0).contains(&v) => Ok(v),
+        _ => Err(format!("{s}: not a share between 0 and 1")),
+    }
 }

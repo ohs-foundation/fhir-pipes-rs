@@ -9,7 +9,8 @@
 //!              (fhir-pipes-sof), partition each table by a looked-up column
 //!   tiles      the registry → PMTiles (duckdb + tippecanoe); runs beside views
 //!   manifest   manifest.json: row counts, views, the extract state
-//!   catalog    catalog.sql: a DuckDB view per table; only with [catalog]
+//!   catalog    catalog.sql: a DuckDB view per table, and catalog.spark.sql
+//!              with spark = true; only with [catalog]
 //!   database   the view tables into PostgreSQL; only with [database] and a
 //!              build with the postgres feature
 //!   hooks      commands from the config (e.g. a catalog build)
@@ -353,6 +354,16 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
                 ""
             }
         );
+        if let Some(spark) = &c.spark {
+            println!(
+                "spark:      database {}, {}",
+                spark.database,
+                spark
+                    .location
+                    .as_deref()
+                    .unwrap_or("the warehouse directory")
+            );
+        }
     }
     for (tool, why) in needed {
         let found = tools::find(tool).map_or("NOT FOUND".to_string(), |p| p.display().to_string());

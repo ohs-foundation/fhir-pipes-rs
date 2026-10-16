@@ -9,7 +9,8 @@ dependencies.
   is `locations`, which turns the Location registry into GeoParquet for GIS
   tools.
 - **Into FHIR:** load resources into a FHIR server with version-checked
-  writes, including edits made in a GIS tool and data imported from DHIS2.
+  writes, including edits made in a GIS tool and data imported from DHIS2,
+  and copy what was downloaded from one FHIR server to another.
 
 fhir-pipes is intended to move into
 [fhir-data-pipes](https://github.com/ohs-foundation/fhir-data-pipes) as a
@@ -80,7 +81,7 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 
 A full refresh can also extract and transform the Location registry, build
 map tiles, write a DuckDB catalog (a view per table, which a dashboard can
-attach by URL), load the view tables into PostgreSQL, run your own commands afterwards, and push the warehouse to object
+attach by URL) and Spark SQL tables for a Spark Thrift server, load the view tables into PostgreSQL, run your own commands afterwards, and push the warehouse to object
 storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
 partitioning and hooks.
 
@@ -124,6 +125,7 @@ data to show what each part does.
 | `inspect` | | Summarise a GeoParquet dataset | [locations.md](docs/locations.md) |
 | `diff` | in | Edited GeoJSON or GeoParquet → changed FHIR resources | [locations.md](docs/locations.md) |
 | `load` | in | Send NDJSON resources to a FHIR server in transaction bundles, with version checks | [locations.md](docs/locations.md#load) |
+| `sync` | in | Copy what `export` downloaded to a second FHIR server: only what changed, deletions on request | [sync.md](docs/sync.md) |
 | `index` | in | Add spatial index identifiers (quadkey, geohash) to Locations | [locations.md](docs/locations.md#index) |
 | `population` | in | Population Groups for admin units from a raster such as WorldPop | [locations.md](docs/locations.md#population) |
 | `dhis2 locations`, `measures`, `reports` | in | DHIS2 org units, indicators and data → FHIR NDJSON | [dhis2.md](docs/dhis2.md) |
@@ -214,6 +216,24 @@ or 5xx holds back every request, not only the one that got it.
 The Java pipeline instead pages HAPI in parallel with `_getpagesoffset`.
 fhir-pipes does not, since that relies on HAPI's search cache, which
 expires, and on behaviour HAPI does not document.
+
+### Copying to a second FHIR server
+
+`sync` copies a directory `export` wrote to another FHIR server (the sink),
+as the Java pipeline does with `sinkFhirServerUrl`:
+
+```sh
+fhir-pipes export --server $SOURCE --incremental --out raw/ --type Patient --type Encounter
+fhir-pipes sync --server $SINK --from raw/ --type Patient --type Encounter
+```
+
+It sends transaction Bundles of `PUT <Type>/<id>` without `ifMatch` and
+without the source's `meta.versionId` and `meta.lastUpdated`. A record per
+sink in `raw/.sync-state.json` and `raw/.sync/` means each run sends only the
+resources that are new or whose `meta.lastUpdated` changed. With `--delete`,
+resources gone from the download are deleted from the sink, unless that is
+more than `--max-delete-share` (a fifth) of a type. `--dry-run` prints the
+plan. The auth options are the sink's. See [docs/sync.md](docs/sync.md).
 
 ### Bulk Data $export
 
@@ -342,7 +362,7 @@ fhir-pipes export --google-auth \
 
 The account needs an IAM role on the store or its dataset:
 `roles/healthcare.fhirResourceReader` to read (`export`, `extract`,
-`refresh`), `roles/healthcare.fhirResourceEditor` to write (`load`).
+`refresh`), `roles/healthcare.fhirResourceEditor` to write (`load`, `sync`).
 `export --bulk` uses the server's `$export`; the Healthcare API's own export
 to Cloud Storage is not used.
 
@@ -406,6 +426,7 @@ src/
   extract/        FHIR client with retry and OAuth, paging, boundary fetch and cache
   snapshot/       state.json, merge by id
   load/           parents-first ordering, transaction bundles with ifMatch
+  sync/           sync: copy an export directory to a second FHIR server
   fhir/           resource parsing, NDJSON reading and writing
   transform.rs, index/, geometry/, write/, inspect.rs, run.rs
                   the locations transform: hierarchy, geometry, GeoParquet
@@ -421,7 +442,7 @@ crates/
 tests/            integration tests per command; fixtures under tests/fixtures
 python/           bake and bake-points (still the Python kiln package)
 docs/
-  refresh.md, locations.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
+  refresh.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
   notes/          the consolidation notes
   superpowers/    kiln's design specs, plans and spikes
 ```
