@@ -45,6 +45,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use fhir_pipes_sof::output::WriteSummary;
 use serde_json::json;
 
 use config::Settings;
@@ -462,7 +463,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         });
         let views = steps.contains(&Step::Views).then(|| {
             let t = Instant::now();
-            views_step(s, &stage).map(|()| t.elapsed().as_secs_f64())
+            views_step(s, &stage).map(|m| (t.elapsed().as_secs_f64(), m))
         });
         let tiles = tiles.map(|h| {
             h.join()
@@ -470,9 +471,12 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         });
         (views, tiles)
     });
+    let mut mismatches = None;
     if let Some(v) = views {
-        timings.push(("views", v.context("views")?));
+        let (secs, m) = v.context("views")?;
+        timings.push(("views", secs));
         ran.insert(Step::Views);
+        mismatches = Some(m);
     }
     if let Some(t) = tiles {
         timings.push(("tiles", t.context("tiles")?));
@@ -556,6 +560,24 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         timings.push(("push", t.elapsed().as_secs_f64()));
     }
 
+    // Said last, where it is seen: the values the views step could not write
+    // as they are.
+    let lines: Vec<String> = mismatches
+        .iter()
+        .flatten()
+        .flat_map(|(table, m)| {
+            m.messages()
+                .into_iter()
+                .map(move |l| format!("{table}.{l}"))
+        })
+        .collect();
+    if !lines.is_empty() {
+        println!("values that did not match their column's type:");
+        for l in &lines {
+            println!("   {l}");
+        }
+    }
+
     let total = started.elapsed().as_secs_f64();
     println!(
         "done → {} in {total:.1}s ({})",
@@ -575,11 +597,41 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     if s.reads_files() {
         report["files"] = json!(s.inputs());
     }
+    if let Some(m) = &mismatches {
+        report["type_mismatches"] = mismatch_report(m);
+    }
     std::fs::write(
         s.raw_dir().join("last-refresh.json"),
         serde_json::to_string_pretty(&report)?,
     )?;
     Ok(())
+}
+
+/// The views step's type mismatches for last-refresh.json: table → column →
+/// its type and counts. Tables and columns without any are left out.
+fn mismatch_report(m: &[(String, WriteSummary)]) -> serde_json::Value {
+    let tables: serde_json::Map<String, serde_json::Value> = m
+        .iter()
+        .filter(|(_, w)| !w.is_empty())
+        .map(|(table, w)| {
+            let columns: serde_json::Map<String, serde_json::Value> = w
+                .columns
+                .iter()
+                .map(|c| {
+                    (
+                        c.name.clone(),
+                        json!({
+                            "type": c.col_type.to_string(),
+                            "written_as_date": c.written_as_date,
+                            "written_as_null": c.written_as_null,
+                        }),
+                    )
+                })
+                .collect();
+            (table.clone(), columns.into())
+        })
+        .collect();
+    tables.into()
 }
 
 /// The view tables [database] loads: every table a view writes, or those
@@ -610,8 +662,9 @@ fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
 
 /// Download each resource type the views read, run each type's views on one
 /// read of it, then write each view's table, partitioned by the lookup rules,
-/// to the staging directory.
-fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
+/// to the staging directory. Returns each table's values that did not match
+/// their column's type, in the order the tables were written.
+fn views_step(s: &Settings, stage: &stage::Stage) -> Result<Vec<(String, WriteSummary)>> {
     let dir = s.views.as_ref().context("no views directory")?;
     println!("== views ({})", dir.display());
     let all = views::discover(dir, &s.strip_prefix)?;
@@ -667,6 +720,7 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
     order.sort_by_key(|&i| !sources.contains(all[i].table.as_str()));
 
     let mut lookups: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
+    let mut mismatches = Vec::new();
     for i in order {
         let v = &all[i];
         let result = results[i].take().expect("every view ran");
@@ -696,16 +750,18 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
             }
         }
         let col = rule.map(|(_, c)| c);
-        let n = partition::write(result, &stage.table(&v.table), &s.partition_column, |row| {
-            let (Some(map), Some(c)) = (map, col) else {
-                return None;
-            };
-            row[c].as_str().and_then(|k| map.get(k)).cloned()
-        })?;
+        let (n, summary) =
+            partition::write(result, &stage.table(&v.table), &s.partition_column, |row| {
+                let (Some(map), Some(c)) = (map, col) else {
+                    return None;
+                };
+                row[c].as_str().and_then(|k| map.get(k)).cloned()
+            })?;
         println!(
             "   {} ({}) → parquet/{} ({n} rows)",
             v.name, v.resource, v.table
         );
+        mismatches.push((v.table.clone(), summary));
     }
-    Ok(())
+    Ok(mismatches)
 }

@@ -150,6 +150,18 @@ fhir-pipes views lint patient_flat.json --shareable                         # th
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
 
+`--output parquet` writes typed columns. An integral number such as `5.0` in
+an `integer` column is written as the integer; `5.5` is not rounded. With
+`--parquet-temporal native`, a dateTime with a time in a `date` column
+(`2026-06-15T23:30:00-05:00`) is written as its date part as written
+(`2026-06-15`, not converted to UTC first), and partial dates (`2026`,
+`2026-06`) are floored to the start of the period. Any other value that does
+not fit its column's type is written as null. Each is counted per column and
+printed on stderr at the end of the run (`IcrObs.value: 3 values did not fit
+integer and were written as null`), so a view whose types do not match the
+data can be fixed; the run does not fail. CSV and NDJSON write every value
+as it is.
+
 A directory of views is read as `refresh` reads it. An `--input` directory is
 read with its subdirectories, skipping hidden files. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from

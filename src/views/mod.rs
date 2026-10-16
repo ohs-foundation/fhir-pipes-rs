@@ -17,7 +17,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding, get_writer};
+use fhir_pipes_sof::output::{
+    OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
+};
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_shareable, validate_structure};
 
@@ -62,7 +64,8 @@ enum ViewsCommand {
         /// Parquet only: how date, dateTime, instant and time columns are
         /// encoded. `text` keeps the FHIR string (the spec default); `native`
         /// writes Arrow Date32 / Timestamp(µs, UTC) / Time64(µs), flooring
-        /// partial dates (`2026`, `2026-03`) to the start of the period.
+        /// partial dates (`2026`, `2026-03`) to the start of the period and
+        /// writing a dateTime in a date column as its date part as written.
         #[arg(long, default_value = "text", value_parser = ["text", "native"])]
         parquet_temporal: String,
         /// Threads for parsing --input and evaluating views on it (default:
@@ -274,6 +277,22 @@ fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputW
         return Ok(Box::new(ParquetWriter::new().with_temporal(temporal)));
     }
     get_writer(format).context("choosing the output format")
+}
+
+/// Print, on stderr, the values each view's writer could not write as they
+/// are: `view.column: 3 values did not fit integer and were written as null`.
+fn report_mismatches(views: &[(&str, WriteSummary)]) {
+    let lines: Vec<String> = views
+        .iter()
+        .flat_map(|(view, s)| s.messages().into_iter().map(move |l| format!("{view}.{l}")))
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    eprintln!("values that did not match their column's type:");
+    for l in lines {
+        eprintln!("   {l}");
+    }
 }
 
 /// The default --ddl table name: the view's name, else `<resource>_view`.
@@ -879,6 +898,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 fs::create_dir_all(out_dir)
                     .with_context(|| format!("creating {}", out_dir.display()))?;
                 let ext = output_extension(output);
+                let mut mismatches = Vec::new();
                 for (name, view) in &views {
                     let result = run_view(&source, view, threads).await?;
                     let path = out_dir.join(format!("{name}.{ext}"));
@@ -886,18 +906,23 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                         fs::File::create(&path)
                             .with_context(|| format!("creating {}", path.display()))?,
                     );
-                    writer
-                        .write(&result, &mut sink)
+                    let summary = writer
+                        .write_with_summary(&result, &mut sink)
                         .with_context(|| format!("writing {}", path.display()))?;
                     sink.flush().ok();
                     eprintln!("{name} → {} ({} rows)", path.display(), result.row_count);
+                    mismatches.push((name.as_str(), summary));
                 }
+                report_mismatches(&mismatches);
             } else {
-                let (_, view) = &views[0];
+                let (name, view) = &views[0];
                 let result = run_view(&source, view, threads).await?;
                 let mut sink = open_sink(out.as_ref())?;
-                writer.write(&result, &mut sink).context("writing output")?;
+                let summary = writer
+                    .write_with_summary(&result, &mut sink)
+                    .context("writing output")?;
                 sink.flush().ok();
+                report_mismatches(&[(name.as_str(), summary)]);
             }
         }
         ViewsCommand::Validate { view, json, sarif } => {

@@ -2247,3 +2247,80 @@ fn the_tiles_tools_are_needed_only_when_there_are_locations() {
         .stderr(has("not found: /no/such/duckdb (for tiles)"));
     assert!(!root.join("data/parquet/locations").exists());
 }
+
+/// Values that do not match their column's type are counted per table and
+/// column, printed at the end of the run and kept in last-refresh.json.
+#[test]
+fn values_that_do_not_match_their_column_type_are_reported() {
+    let (dir, config) = setup(NOWHERE, "");
+    let root = dir.path();
+    let views = root.join("mismatch-views");
+    fs::create_dir_all(&views).unwrap();
+    fs::write(
+        views.join("IcrMeasures.json"),
+        json!({"resourceType": "ViewDefinition", "name": "IcrMeasures", "status": "active",
+        "resource": "Observation", "select": [{"column": [
+            {"name": "id", "path": "getResourceKey()", "type": "id"},
+            {"name": "location_id", "path": "subject.getReferenceKey(Location)", "type": "string"},
+            {"name": "n", "path": "value.ofType(Quantity).value", "type": "integer"},
+            {"name": "period_start", "path": "effective.ofType(Period).start", "type": "date"},
+        ]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let measure = |id: &str, value: &str, start: &str| {
+        json!({"resourceType": "Observation", "id": id, "status": "final", "code": {"text": "x"},
+            "subject": {"reference": "Location/loc-bo"},
+            "valueQuantity": {"value": serde_json::from_str::<Value>(value).unwrap()},
+            "effectivePeriod": {"start": start}})
+    };
+    let input = inputs(
+        root,
+        &[(
+            "obs.ndjson",
+            lines(&[
+                measure("o1", "5.0", "2026-06-15T08:30:00+01:00"),
+                measure("o2", "5.5", "2026-06-15T23:30:00-05:00"),
+                measure("o3", "2.5", "2026-06-15"),
+            ]),
+        )],
+    );
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .arg("--views")
+        .arg(&views)
+        .assert()
+        .success()
+        .stdout(has("values that did not match their column's type:"))
+        .stdout(has(
+            "measures.n: 2 values did not fit integer and were written as null",
+        ))
+        .stdout(has(
+            "measures.period_start: 2 dateTime values written as their date",
+        ));
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("data/raw/test/last-refresh.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        report["type_mismatches"],
+        json!({"measures": {
+            "n": {"type": "integer", "written_as_date": 0, "written_as_null": 2},
+            "period_start": {"type": "date", "written_as_date": 2, "written_as_null": 0},
+        }})
+    );
+    let rows = table_rows(&root.join("data/parquet/measures"));
+    let got: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(_, r)| (get(r, "n"), get(r, "period_start")))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("5", "2026-06-15"),
+            ("null", "2026-06-15"),
+            ("null", "2026-06-15")
+        ]
+    );
+}
