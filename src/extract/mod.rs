@@ -6,13 +6,12 @@ pub mod client;
 pub mod google;
 pub mod page;
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::cli::ExtractArgs;
 use crate::error::{PipesError, Result};
-use crate::extract::boundary::{FetchOptions, fetch_boundaries, read_for_merge};
+use crate::extract::boundary::{FetchOptions, fetch_boundaries};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
 use crate::extract::page::{count_resources, page_locations, page_resources};
@@ -184,24 +183,13 @@ fn run_phases(
     let summary = fetch_boundaries(&client, &urls, &opts, &mut report)?;
 
     // The merge reads boundary bytes back by URL: from memory with
-    // --no-cache (or after a cache write failed), from the cache otherwise,
-    // each cached entry read and checked once, here. What came from the
-    // cache and what failed its check are noted for the report.
+    // --no-cache (or after a cache write failed), from the cache otherwise.
     let in_memory: HashMap<String, Vec<u8>> = summary.in_memory;
-    let from_cache: RefCell<HashSet<String>> = RefCell::default();
-    let cache_errors: RefCell<Vec<(String, String)>> = RefCell::default();
     let lookup = |url: &str| -> Option<Vec<u8>> {
         if let Some(b) = in_memory.get(url) {
             return Some(b.clone());
         }
-        let (bytes, error) = read_for_merge(&client, cache.as_ref()?, url);
-        if let Some(e) = error {
-            cache_errors.borrow_mut().push((url.to_string(), e));
-        }
-        if bytes.is_some() {
-            from_cache.borrow_mut().insert(url.to_string());
-        }
-        bytes
+        cache.as_ref().and_then(|c| c.read(url).ok().flatten())
     };
     let stats = merge(
         snap,
@@ -212,10 +200,6 @@ fn run_phases(
         &mut report,
         boundary_extensions,
     )?;
-    for (url, e) in cache_errors.into_inner() {
-        report.add("cache_error", &url, &e);
-    }
-    let from_cache = from_cache.into_inner();
 
     // --refresh skips cache reads, so a URL can both fail its refetch and
     // still have a last-known-good copy in the cache, which the merge above
@@ -223,6 +207,7 @@ fn run_phases(
     // for a fresh one. Without --refresh a failed URL is never in the cache
     // (the worker reads it before fetching), so this finds nothing.
     if args.refresh {
+        let mut have_cached: HashMap<&str, bool> = HashMap::new();
         for note in &paged.notes {
             let Some(url) = note.boundary_url.as_deref() else {
                 continue;
@@ -230,7 +215,12 @@ fn run_phases(
             let Some(reason) = summary.failures.get(url) else {
                 continue;
             };
-            if from_cache.contains(url) {
+            let cached = *have_cached.entry(url).or_insert_with(|| {
+                cache
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.read(url), Ok(Some(_))))
+            });
+            if cached {
                 report.add(
                     "boundary_stale_from_cache",
                     &note.id,

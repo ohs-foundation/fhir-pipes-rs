@@ -544,6 +544,80 @@ fn circuit_breaker_aborts_and_keeps_the_old_snapshot() {
 }
 
 #[test]
+fn damaged_cache_entries_that_cannot_be_fetched_again_trip_the_breaker() {
+    let server = Server::run();
+    expect_no_organizations(&server);
+    let snap = tempfile::tempdir().unwrap();
+    let resources: Vec<Value> = (0..3)
+        .map(|i| {
+            loc(
+                &format!("x{i}"),
+                "2026-02-01T00:00:00Z",
+                Some(&server.url(&format!("/b/x{i}.geojson")).to_string()),
+            )
+        })
+        .collect();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(2)
+            .respond_with(ok(bundle(resources, None))),
+    );
+    // Fetched and cached on the first run; refused (401) after that.
+    server.expect(
+        Expectation::matching(request::path(matches("^/b/")))
+            .times(3..)
+            .respond_with(cycle![
+                status_code(200).body(GEOJSON),
+                status_code(200).body(GEOJSON),
+                status_code(200).body(GEOJSON),
+                status_code(401),
+                status_code(401),
+                status_code(401),
+            ]),
+    );
+    extract(&server, snap.path(), &[]).success();
+    let before = std::fs::read(snap.path().join("locations.ndjson")).unwrap();
+    let state_before = std::fs::read(snap.path().join("state.json")).unwrap();
+    let mut damaged = 0;
+    for entry in std::fs::read_dir(snap.path().join("boundaries")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "bin") {
+            std::fs::write(&path, b"damaged").unwrap();
+            damaged += 1;
+        }
+    }
+    assert_eq!(damaged, 3);
+
+    let assert = extract(
+        &server,
+        snap.path(),
+        &[
+            "--full",
+            "--retries",
+            "1",
+            "--concurrency",
+            "1",
+            "--max-consecutive-failures",
+            "2",
+        ],
+    )
+    .failure()
+    .code(1);
+    let err = stderr(&assert);
+    assert!(err.contains("consecutive"), "{err}");
+    assert_eq!(
+        std::fs::read(snap.path().join("locations.ndjson")).unwrap(),
+        before,
+        "nothing published"
+    );
+    assert_eq!(
+        std::fs::read(snap.path().join("state.json")).unwrap(),
+        state_before,
+        "the watermark is not advanced"
+    );
+}
+
+#[test]
 fn conflicting_flags_and_a_bad_since_are_usage_errors() {
     let server = Server::run();
     expect_no_organizations(&server);
