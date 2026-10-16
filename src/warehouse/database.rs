@@ -158,6 +158,9 @@ fn pg_type(t: &DataType) -> Option<&'static str> {
 }
 
 async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
+    // TLS (sslmode=require and up) uses rustls with the same provider as the
+    // FHIR client.
+    crate::extract::client::ensure_crypto_provider();
     let mut conn = PgConnection::connect(url)
         .await
         .context("connecting to the database")?;
