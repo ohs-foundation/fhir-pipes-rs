@@ -489,6 +489,9 @@ with no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
 release builds are slow, so they run for a version tag (which publishes them),
 when run by hand from the Actions tab, for a change to `Cargo.toml`,
 `Cargo.lock` or the workflows, and weekly.
+`cargo audit` checks `Cargo.lock` against the RustSec advisories on every PR
+and weekly; `.cargo/audit.toml` lists what fails the check and the advisories
+ignored, each with its reason.
 
 Some tests check output with DuckDB when it is on `PATH` and skip that check
 otherwise. DuckDB is never linked into fhir-pipes. The SQL-on-FHIR
