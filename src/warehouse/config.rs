@@ -341,7 +341,9 @@ pub struct Overrides {
     pub token_url: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub google_auth: bool,
+    /// Given on the command line or in the environment, true or false; the
+    /// file's `server.google_auth` applies only when this is unset.
+    pub google_auth: Option<bool>,
     pub countries: Vec<String>,
     pub threads: Option<usize>,
     pub reuse_raw: bool,
@@ -361,7 +363,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     };
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
     let username = o.username.or(file.server.username);
-    let google_auth = o.google_auth || file.server.google_auth.unwrap_or(false);
+    let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
     let kinds: Vec<&str> = [
         (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
         (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
@@ -562,7 +564,7 @@ mod tests {
 
         let file: File = toml::from_str("data = \"d\"").unwrap();
         let o = Overrides {
-            google_auth: true,
+            google_auth: Some(true),
             ..Default::default()
         };
         assert!(
@@ -582,6 +584,19 @@ mod tests {
             err.to_string().contains("FHIR_PIPES_TOKEN") && err.to_string().contains("Google"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn an_explicit_false_turns_off_the_files_google_auth() {
+        let file: File = toml::from_str("data = \"d\"\n[server]\ngoogle_auth = true").unwrap();
+        let o = Overrides {
+            google_auth: Some(false),
+            token: Some("t".into()),
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert!(!s.auth.google_auth);
+        assert_eq!(s.auth_kind(), "bearer token");
     }
 
     #[test]

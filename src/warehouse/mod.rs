@@ -67,13 +67,18 @@ pub struct RefreshArgs {
     #[arg(long, env = "FHIR_PIPES_USERNAME")]
     username: Option<String>,
     /// Google Application Default Credentials, for a Cloud Healthcare API
-    /// FHIR store (as `server.google_auth = true`).
+    /// FHIR store (as `server.google_auth = true`). `--google-auth=false` or
+    /// FHIR_PIPES_GOOGLE_AUTH=0 turns off the config file's setting.
     #[arg(
         long,
         env = "FHIR_PIPES_GOOGLE_AUTH",
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
         value_parser = clap::builder::BoolishValueParser::new()
     )]
-    google_auth: bool,
+    google_auth: Option<bool>,
     /// Run only these steps (comma-separated). The manifest is added when a
     /// data step is among them.
     #[arg(long, value_delimiter = ',')]

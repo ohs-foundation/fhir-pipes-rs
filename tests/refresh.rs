@@ -1340,6 +1340,42 @@ fn locations_are_extracted_with_google_auth() {
         .stderr(has("use one way to authenticate"));
 }
 
+/// The environment wins over the config file, false as well as true.
+#[test]
+fn google_auth_false_in_the_environment_overrides_the_config() {
+    let (_dir, config) = setup(NOWHERE, "");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("name = \"test\"\n", "name = \"test\"\ngoogle_auth = true\n");
+    fs::write(&config, text).unwrap();
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .env("FHIR_PIPES_GOOGLE_AUTH", "0")
+        .assert()
+        .success()
+        .stdout(has("auth:       none"));
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .env("FHIR_PIPES_GOOGLE_AUTH", "0")
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .success()
+        .stdout(has("auth:       bearer token"));
+    cmd(&config)
+        .args(["--only", "locations", "--check", "--google-auth=false"])
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .success()
+        .stdout(has("auth:       bearer token"));
+    // Without the override, the file's setting still excludes a token.
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .failure()
+        .stderr(has("use one way to authenticate"));
+}
+
 #[test]
 fn a_store_path_is_expanded_in_check() {
     let (_dir, config) = setup("projects/p/locations/l/datasets/d/fhirStores/s", "");

@@ -210,7 +210,7 @@ the file are relative to the file.
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
-| `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth |
+| `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
 | `--countries` | | `tiles.countries` | every country |
 | `--threads` | | | number of CPUs |
 | `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
