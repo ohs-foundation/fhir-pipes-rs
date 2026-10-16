@@ -620,7 +620,14 @@ mod tests {
     fn file_paths_resolve_against_the_file() {
         let file: File = toml::from_str("data = \"../data\"\nviews = \"/abs/views\"").unwrap();
         let s = settings(file, PathBuf::from("/repo/tools"), Overrides::default()).unwrap();
-        assert_eq!(s.data, PathBuf::from("/repo/tools/../data"));
+        // `data` is made absolute: as is on Unix; on Windows `/repo` gets the
+        // current drive and `..` is resolved, as std::path::absolute does.
+        if cfg!(windows) {
+            assert!(s.data.is_absolute(), "{}", s.data.display());
+            assert!(s.data.ends_with(r"repo\data"), "{}", s.data.display());
+        } else {
+            assert_eq!(s.data, PathBuf::from("/repo/tools/../data"));
+        }
         assert_eq!(s.views, Some(PathBuf::from("/abs/views")));
     }
 
@@ -842,7 +849,14 @@ mod tests {
         };
         let s = settings(file, PathBuf::from("/b"), o).unwrap();
         assert!(s.data.is_absolute(), "{}", s.data.display());
-        assert_eq!(s.data, std::env::current_dir().unwrap().join("../data"));
+        // On Windows std::path::absolute resolves `..`; on Unix it keeps it.
+        let cwd = std::env::current_dir().unwrap();
+        let expected = if cfg!(windows) {
+            cwd.parent().unwrap().join("data")
+        } else {
+            cwd.join("../data")
+        };
+        assert_eq!(s.data, expected);
     }
 
     #[test]
