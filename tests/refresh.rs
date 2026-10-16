@@ -2687,3 +2687,67 @@ run = ["sh", "-c", "exit 1"]
     assert_eq!(rows.len(), 3);
     assert!(!root.join("data/raw/test/last-refresh.json").exists());
 }
+
+/// A table other views look their partition up in is written before them
+/// even when the type it comes from sorts after theirs: here a Patient
+/// view's table gives the Observations their country.
+#[test]
+fn a_lookup_table_from_a_later_type_is_written_first() {
+    let (dir, config) = setup_with_raw(
+        "\n[[partition.lookup]]\nkey = \"patient_key\"\ntable = \"patient_place\"\n",
+    );
+    let views = dir.path().join("lookup-views");
+    fs::create_dir_all(&views).unwrap();
+    let view = |name: &str, resource: &str, columns: &str| {
+        format!(
+            r#"{{"resourceType": "ViewDefinition", "name": "{name}", "status": "active",
+                "resource": "{resource}", "select": [{{"column": [{columns}]}}]}}"#
+        )
+    };
+    fs::write(
+        views.join("a.json"),
+        view(
+            "IcrObsByPatient",
+            "Observation",
+            r#"{"name": "id", "path": "getResourceKey()"},
+               {"name": "patient_key", "path": "'p1'"}"#,
+        ),
+    )
+    .unwrap();
+    fs::write(
+        views.join("b.json"),
+        view(
+            "IcrPatientPlace",
+            "Patient",
+            r#"{"name": "patient_key", "path": "getResourceKey()"},
+               {"name": "location_id", "path": "'loc-bo'"}"#,
+        ),
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--views"])
+        .arg(&views)
+        .assert()
+        .success()
+        .stdout(has("parquet/patient_place"))
+        .stdout(has("parquet/obs_by_patient (3 rows)"));
+    let out = String::from_utf8(
+        cmd(&config)
+            .args(["--only", "views", "--reuse-raw", "--views"])
+            .arg(&views)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let place = out.find("parquet/patient_place").unwrap();
+    let obs = out.find("parquet/obs_by_patient").unwrap();
+    assert!(place < obs, "{out}");
+    assert!(!out.contains("warning: parquet/obs_by_patient"), "{out}");
+    let rows = table_rows(&dir.path().join("data/parquet/obs_by_patient"));
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter().all(|(part, _)| part == "country=SLE"),
+        "{rows:?}"
+    );
+}

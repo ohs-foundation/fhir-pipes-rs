@@ -9,6 +9,8 @@ use fhir_pipes_sof::{ViewDefinition, ViewResult, execute_parallel};
 use fhir_pipes_sof_lint::{Severity, validate_structure};
 use serde_json::Value;
 
+use crate::views::ndjson;
+
 /// A ViewDefinition found in the views directory.
 #[derive(Debug, Clone)]
 pub struct View {
@@ -123,51 +125,90 @@ pub fn save(views: &[View], dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read an NDJSON file on `threads` threads, in line order. Blank lines are
-/// skipped; an error names the first bad line.
-pub fn read_ndjson(path: &Path, threads: usize) -> Result<Vec<Value>> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let lines: Vec<(usize, &str)> = text
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| !l.trim().is_empty())
-        .collect();
-    let chunk = lines.len().div_ceil(threads.max(1)).max(1);
-    std::thread::scope(|s| {
-        let workers: Vec<_> = lines
-            .chunks(chunk)
-            .map(|part| {
-                s.spawn(move || {
-                    part.iter()
-                        .map(|(i, line)| {
-                            serde_json::from_str(line).with_context(|| {
-                                format!("parsing {} line {}", path.display(), i + 1)
-                            })
-                        })
-                        .collect::<Result<Vec<Value>>>()
-                })
-            })
-            .collect();
-        let mut values = Vec::with_capacity(lines.len());
-        for w in workers {
-            values.extend(
-                w.join()
-                    .map_err(|_| anyhow::anyhow!("parsing thread panicked"))??,
-            );
-        }
-        Ok(values)
-    })
+/// Several views' rows, run a chunk of resources at a time: each chunk's
+/// rows are appended to what the chunks before it gave, so the rows come in
+/// the order of the resources, as from one run over them all.
+pub struct ViewRows<'a> {
+    views: Vec<(&'a str, &'a ViewDefinition)>,
+    results: Vec<Option<ViewResult>>,
 }
 
-/// Run every view that reads `resources`' type against them.
-pub fn run(views: &[&View], resources: &[Value], threads: usize) -> Result<Vec<ViewResult>> {
-    views
-        .iter()
-        .map(|v| {
-            execute_parallel(&v.definition, resources, threads)
-                .with_context(|| format!("running view {}", v.name))
-        })
-        .collect()
+impl<'a> ViewRows<'a> {
+    /// `views`: each view's name (for messages) and definition.
+    pub fn new(views: Vec<(&'a str, &'a ViewDefinition)>) -> Self {
+        let results = views.iter().map(|_| None).collect();
+        Self { views, results }
+    }
+
+    /// Run every view on `resources` and keep the rows. A view skips the
+    /// resources of other types than its own.
+    pub fn add(&mut self, resources: &[Value], threads: usize) -> Result<()> {
+        self.run(resources, threads, None)
+    }
+
+    /// Run the views that read `rtype` on `resources`, all of that type.
+    pub fn add_typed(&mut self, rtype: &str, resources: &[Value], threads: usize) -> Result<()> {
+        self.run(resources, threads, Some(rtype))
+    }
+
+    fn run(&mut self, resources: &[Value], threads: usize, only: Option<&str>) -> Result<()> {
+        for (i, (name, view)) in self.views.iter().enumerate() {
+            if only.is_some_and(|t| t != view.resource) {
+                continue;
+            }
+            let r = execute_parallel(view, resources, threads)
+                .with_context(|| format!("running view {name}"))?;
+            match &mut self.results[i] {
+                Some(all) => {
+                    all.row_count += r.row_count;
+                    all.data.extend(r.data);
+                }
+                slot => *slot = Some(r),
+            }
+        }
+        Ok(())
+    }
+
+    /// Each view's rows, in the order of the views. A view that never ran
+    /// (no resources) is run on none, which gives its columns, or its error.
+    pub fn finish(self, threads: usize) -> Result<Vec<ViewResult>> {
+        self.views
+            .iter()
+            .zip(self.results)
+            .map(|((name, view), r)| match r {
+                Some(r) => Ok(r),
+                None => execute_parallel(view, &[], threads)
+                    .with_context(|| format!("running view {name}")),
+            })
+            .collect()
+    }
+}
+
+/// Run `views` over the NDJSON file at `path`, a chunk of lines at a time,
+/// on `threads` threads. Returns the number of resources read and each
+/// view's rows, in file order.
+pub fn run_file(views: &[&View], path: &Path, threads: usize) -> Result<(usize, Vec<ViewResult>)> {
+    run_lines(views, ndjson::open(path)?, threads)
+}
+
+fn run_lines<R: std::io::BufRead>(
+    views: &[&View],
+    lines: ndjson::Lines<R>,
+    threads: usize,
+) -> Result<(usize, Vec<ViewResult>)> {
+    let mut rows = ViewRows::new(
+        views
+            .iter()
+            .map(|v| (v.name.as_str(), &v.definition))
+            .collect(),
+    );
+    let mut count = 0;
+    for chunk in lines {
+        let resources = chunk?.values(threads)?;
+        count += resources.len();
+        rows.add(&resources, threads)?;
+    }
+    Ok((count, rows.finish(threads)?))
 }
 
 #[cfg(test)]
@@ -229,17 +270,89 @@ mod tests {
         assert!(discover(dir.path(), &["icr_".into()]).is_err());
     }
 
+    fn view(name: &str, resource: &str, select: Value) -> View {
+        let json = serde_json::json!({"resourceType": "ViewDefinition", "name": name,
+            "resource": resource, "status": "active", "select": select});
+        View {
+            name: name.into(),
+            resource: resource.into(),
+            table: table_name(name, &[]),
+            definition: ViewDefinition::from_json(&json).unwrap(),
+            json,
+        }
+    }
+
+    /// Rows from a chunk at a time are the rows of one run over the whole
+    /// file, in file order, for a view with one row per resource and for one
+    /// with a row per repeated element.
     #[test]
-    fn ndjson_keeps_order_and_names_bad_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("x.ndjson");
-        let text: String = (0..50).map(|i| format!("{{\"n\":{i}}}\n\n")).collect();
-        fs::write(&p, text).unwrap();
-        let values = read_ndjson(&p, 4).unwrap();
-        assert_eq!(values.len(), 50);
-        assert!(values.iter().enumerate().all(|(i, v)| v["n"] == i));
-        fs::write(&p, "{}\n{oops\n").unwrap();
-        let err = format!("{:#}", read_ndjson(&p, 2).unwrap_err());
-        assert!(err.contains("line 2"), "{err}");
+    fn chunks_give_the_rows_of_one_run_in_file_order() {
+        let ids = view(
+            "Ids",
+            "Patient",
+            serde_json::json!([{"column": [{"name": "id", "path": "id"}]}]),
+        );
+        let names = view(
+            "Names",
+            "Patient",
+            serde_json::json!([{"column": [{"name": "id", "path": "id"}]},
+                {"forEach": "name", "column": [{"name": "family", "path": "family"}]}]),
+        );
+        let other = view(
+            "Obs",
+            "Observation",
+            serde_json::json!([{"column": [{"name": "id", "path": "id"}]}]),
+        );
+        let text: String = (0..103)
+            .map(|i| {
+                let r = if i % 10 == 3 {
+                    serde_json::json!({"resourceType": "Observation", "id": format!("o{i}")})
+                } else {
+                    let names: Vec<Value> = (0..i % 3)
+                        .map(|n| serde_json::json!({"family": format!("f{i}-{n}")}))
+                        .collect();
+                    serde_json::json!({"resourceType": "Patient", "id": format!("p{i}"), "name": names})
+                };
+                format!("{r}\n\n")
+            })
+            .collect();
+        let views = [&ids, &names, &other];
+        let resources: Vec<Value> = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let whole: Vec<ViewResult> = views
+            .iter()
+            .map(|v| execute_parallel(&v.definition, &resources, 1).unwrap())
+            .collect();
+        for (lines, threads) in [(1, 1), (7, 3), (50, 8), (1000, 2)] {
+            let source = ndjson::Lines::new(text.as_bytes(), "x").with_limits(lines, usize::MAX);
+            let (n, chunked) = run_lines(&views, source, threads).unwrap();
+            assert_eq!(n, 103);
+            for (a, b) in chunked.iter().zip(&whole) {
+                assert_eq!(a.data, b.data, "{lines} lines a chunk");
+                assert_eq!(a.row_count, b.row_count);
+                assert_eq!(a.columns.len(), b.columns.len());
+            }
+        }
+        assert_eq!(whole[0].row_count, 93);
+        assert_eq!(whole[2].row_count, 10);
+    }
+
+    #[test]
+    fn a_view_with_no_resources_has_its_columns_and_a_bad_line_is_named() {
+        let ids = view(
+            "Ids",
+            "Patient",
+            serde_json::json!([{"column": [{"name": "id", "path": "id"}, {"name": "n", "path": "1"}]}]),
+        );
+        let (n, r) = run_lines(&[&ids], ndjson::Lines::new(&b"\n"[..], "x"), 2).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(r[0].columns.len(), 2);
+        assert!(r[0].data.is_empty());
+        let source = ndjson::Lines::new(&b"{}\n{oops\n"[..], "x.ndjson");
+        let err = format!("{:#}", run_lines(&[&ids], source, 2).err().unwrap());
+        assert!(err.contains("x.ndjson line 2"), "{err}");
     }
 }

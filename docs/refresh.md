@@ -30,7 +30,7 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 | Step | What it does | Needs |
 |---|---|---|
 | `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations`; with `--reuse-raw` and a snapshot there, transformed without an extract | |
-| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, write each view's table | |
+| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, 20,000 lines at a time, and write the type's tables as soon as its views are done | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `manifest` | `manifest.json`: time, server (see below), each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
@@ -164,7 +164,9 @@ by `country` whatever the view tables use. The manifest, the catalog, the
 database step and the partition lookups read each table by its own
 first-level partition directories, so a lookup through `locations` gives the
 Location's country as the row's partition value either way. Tables other views look up in are written first, and are read
-back from staging. Tables are swapped in at the end of the run (see [What a
+back from staging: the resource types whose views write them run first, and
+their tables are written before any other. Every other type's tables are
+written as soon as its views are done. Tables are swapped in at the end of the run (see [What a
 failed run leaves behind](#what-a-failed-run-leaves-behind)).
 
 The views directory can be any directory of JSON files: files whose
@@ -275,7 +277,11 @@ The steps then run as for a server:
   appears more than once (same type and id) is kept once: the copy with the
   latest `meta.lastUpdated`, or, on a tie or when neither has one, the copy
   read last (the later file in path order). A `<Type>.ndjson` from an earlier
-  run, of a type the files no longer have, is removed.
+  run, of a type the files no longer have, is removed. The inputs are read
+  twice rather than held in memory: first to find each resource's type, id
+  and `meta.lastUpdated` and which copy is kept, then to copy the kept ones.
+  A resource on an NDJSON line of its own is copied as it is written there;
+  one from a Bundle, an array or a JSON file is written out again.
 - `locations`: the files' Location resources, and their Organizations if
   there are any, become the snapshot `raw/<name>/locations`, which is
   transformed into `parquet/locations` as after an extract. Boundaries given

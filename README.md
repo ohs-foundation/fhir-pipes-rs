@@ -163,7 +163,9 @@ data can be fixed; the run does not fail. CSV and NDJSON write every value
 as it is.
 
 A directory of views is read as `refresh` reads it. An `--input` directory is
-read with its subdirectories, skipping hidden files. In a Bundle, a reference
+read with its subdirectories, skipping hidden files. An NDJSON file is read
+20,000 lines at a time, and resources of a type no view reads are dropped as
+they are read; only the rows are kept until they are written. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
 Synthea have, is rewritten to that entry's `Type/id`, as a FHIR server would
 store it, so `getReferenceKey()` and joins work on Bundle files. `views run --db URL` runs

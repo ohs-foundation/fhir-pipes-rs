@@ -10,8 +10,9 @@
 //!   test      run SQL-on-FHIR test-case files
 
 mod diagnostic;
+pub(crate) mod ndjson;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ use fhir_pipes_sof::output::{
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_shareable, validate_structure};
 
-use crate::warehouse::views::{discover, parse_view};
+use crate::warehouse::views::{ViewRows, discover, parse_view};
 
 #[derive(clap::Args, Debug)]
 pub struct ViewsArgs {
@@ -187,9 +188,10 @@ fn load_views(path: &Path) -> Result<Vec<(String, ViewDefinition)>> {
     }
 }
 
-/// Where `run` reads resources from, shared by every view in one run.
+/// Where `run` gets each view's rows from.
 enum Source {
-    Files(Vec<serde_json::Value>),
+    /// Every view's rows, already run over the files, in view order.
+    Files(Vec<Option<ViewResult>>),
     #[cfg(feature = "postgres")]
     Db(sqlx_postgres::PgPool),
 }
@@ -243,14 +245,11 @@ async fn package_findings(
     )
 }
 
-async fn run_view(source: &Source, view: &ViewDefinition, threads: usize) -> Result<ViewResult> {
+/// View `i`'s rows: from the run over the files, or from the database.
+#[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
+async fn view_rows(source: &mut Source, i: usize, view: &ViewDefinition) -> Result<ViewResult> {
     match source {
-        // Evaluation runs on threads of its own; block_in_place lets this
-        // runtime worker wait for them without stalling other tasks.
-        Source::Files(resources) => tokio::task::block_in_place(|| {
-            fhir_pipes_sof::execute_parallel(view, resources, threads)
-        })
-        .context("running view"),
+        Source::Files(results) => Ok(results[i].take().expect("each view's rows are taken once")),
         #[cfg(feature = "postgres")]
         Source::Db(pool) => fhir_pipes_sof::ViewRunner::new(pool.clone())
             .run(view)
@@ -303,11 +302,39 @@ fn default_table_name(view: &ViewDefinition) -> String {
         .unwrap_or_else(|| format!("{}_view", view.resource.to_lowercase()))
 }
 
-/// FHIR resources from a file, a directory of files (searched recursively), or
-/// `-` for stdin. NDJSON (`.ndjson`), single resources, arrays of resources and
-/// Bundles are read.
-fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>> {
-    if path.as_os_str() == "-" {
+/// Run `views` over the FHIR resources in a file, a directory of files
+/// (searched recursively), or `-` for stdin, or over `given` (stdin, already
+/// read). NDJSON (`.ndjson`), single resources, arrays of resources and
+/// Bundles are read, an NDJSON file a chunk of lines at a time. Resources of
+/// a type no view reads are dropped as they are read. Returns each view's
+/// rows, in view order, the rows in the order of the resources.
+fn run_on_files(
+    views: &[(String, ViewDefinition)],
+    path: &Path,
+    given: Option<Vec<serde_json::Value>>,
+    threads: usize,
+) -> Result<Vec<Option<ViewResult>>> {
+    let wanted: HashSet<&str> = views.iter().map(|(_, v)| v.resource.as_str()).collect();
+    let mut rows = ViewRows::new(views.iter().map(|(n, v)| (n.as_str(), v)).collect());
+    let mut add = |resources: Vec<serde_json::Value>| -> Result<()> {
+        let mut by_type: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+        for r in resources {
+            if let Some(t) = r.get("resourceType").and_then(|t| t.as_str())
+                && wanted.contains(t)
+            {
+                by_type.entry(t.to_string()).or_default().push(r);
+            }
+        }
+        for (t, resources) in by_type {
+            rows.add_typed(&t, &resources, threads)?;
+        }
+        Ok(())
+    };
+    let count = if let Some(resources) = given {
+        let n = resources.len();
+        add(resources)?;
+        n
+    } else if path.as_os_str() == "-" {
         let mut text = String::new();
         io::Read::read_to_string(&mut io::stdin(), &mut text)
             .context("reading FHIR resources from stdin")?;
@@ -316,21 +343,51 @@ fn load_resources(path: &Path, threads: usize) -> Result<Vec<serde_json::Value>>
         if resources.is_empty() {
             bail!("no FHIR resources on stdin");
         }
-        return Ok(resources);
-    }
-    let mut resources = Vec::new();
-    for file in resource_files(path)? {
-        load_file(&file, &mut resources, threads)?;
-    }
-    if resources.is_empty() {
+        let n = resources.len();
+        add(resources)?;
+        n
+    } else {
+        for_each_chunk(&resource_files(path)?, threads, &mut add)?
+    };
+    if count == 0 {
         bail!("no FHIR resources in {}", path.display());
     }
-    Ok(resources)
+    Ok(rows.finish(threads)?.into_iter().map(Some).collect())
+}
+
+/// Read `files` in order and hand their resources to `f` a chunk at a time:
+/// an NDJSON file (by its `.ndjson` extension) a chunk of lines at a time,
+/// parsed on `threads` threads, any other file whole. A Bundle or an array
+/// is handed on as its resources. Returns the number of resources.
+fn for_each_chunk(
+    files: &[PathBuf],
+    threads: usize,
+    mut f: impl FnMut(Vec<serde_json::Value>) -> Result<()>,
+) -> Result<usize> {
+    let mut count = 0;
+    for file in files {
+        if file.extension().is_some_and(|x| x == "ndjson") {
+            for chunk in ndjson::open(file)? {
+                let mut resources = Vec::new();
+                for value in chunk?.values(threads)? {
+                    push_resource(value, &mut resources);
+                }
+                count += resources.len();
+                f(resources)?;
+            }
+        } else {
+            let mut resources = Vec::new();
+            load_json_file(file, &mut resources)?;
+            count += resources.len();
+            f(resources)?;
+        }
+    }
+    Ok(count)
 }
 
 /// The files `path` names: itself if it is a file, else the resource files
 /// under it (`collect_resource_files`), sorted by path. `refresh` reads its
-/// file source through this and `load_file`.
+/// file source through this.
 pub(crate) fn resource_files(path: &Path) -> Result<Vec<PathBuf>> {
     if !path.is_dir() {
         return Ok(vec![path.to_path_buf()]);
@@ -374,60 +431,14 @@ fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// The resources in one file, appended to `out`: NDJSON by its `.ndjson`
-/// extension, otherwise one JSON resource, array or Bundle (`push_resource`).
-pub(crate) fn load_file(
-    path: &Path,
-    out: &mut Vec<serde_json::Value>,
-    threads: usize,
-) -> Result<()> {
+/// The resources in one JSON file, a resource, an array or a Bundle
+/// (`push_resource`), appended to `out`.
+pub(crate) fn load_json_file(path: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    if path.extension().is_some_and(|x| x == "ndjson") {
-        for value in
-            parse_ndjson(&text, threads).with_context(|| format!("parsing {}", path.display()))?
-        {
-            push_resource(value, out);
-        }
-    } else {
-        let value: serde_json::Value =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        push_resource(value, out);
-    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    push_resource(value, out);
     Ok(())
-}
-
-/// Parse NDJSON on up to `threads` threads, keeping line order. Blank lines
-/// are skipped; an error names the first bad line.
-fn parse_ndjson(text: &str, threads: usize) -> Result<Vec<serde_json::Value>> {
-    let lines: Vec<(usize, &str)> = text
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| !l.trim().is_empty())
-        .collect();
-    let chunk = lines.len().div_ceil(threads.max(1)).max(1);
-    std::thread::scope(|s| {
-        let workers: Vec<_> = lines
-            .chunks(chunk)
-            .map(|part| {
-                s.spawn(move || {
-                    part.iter()
-                        .map(|(i, line)| {
-                            serde_json::from_str(line).with_context(|| format!("line {}", i + 1))
-                        })
-                        .collect::<Result<Vec<serde_json::Value>>>()
-                })
-            })
-            .collect();
-        let mut values = Vec::with_capacity(lines.len());
-        for worker in workers {
-            values.extend(
-                worker
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("parsing thread panicked"))??,
-            );
-        }
-        Ok(values)
-    })
 }
 
 /// The next non-blank line of `reader` and its 1-based number, counting from
@@ -544,7 +555,7 @@ fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<(
 /// (`urn:uuid:…`, as in a transaction Bundle) is rewritten to that entry's
 /// `Type/id`, as a server would store it, so `getReferenceKey()` and joins
 /// work on Bundle files. An entry without an id is left as is.
-fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
+pub(crate) fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
     match value {
         serde_json::Value::Array(items) => {
             for item in items {
@@ -879,11 +890,13 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             }
 
             let views = load_views(view)?;
-            let source = match (input, db) {
-                (Some(_), _) if stdin_resources.is_some() => {
-                    Source::Files(stdin_resources.take().expect("checked"))
-                }
-                (Some(path), _) => Source::Files(load_resources(path, threads)?),
+            let mut source = match (input, db) {
+                // Evaluation runs on threads of its own; block_in_place lets
+                // this runtime worker wait for them without stalling other
+                // tasks.
+                (Some(path), _) => Source::Files(tokio::task::block_in_place(|| {
+                    run_on_files(&views, path, stdin_resources.take(), threads)
+                })?),
                 (None, Some(db)) => connect(db).await?,
                 (None, None) => {
                     bail!("pass --input <file|dir|-> to run on files, or --db <url>")
@@ -899,8 +912,8 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                     .with_context(|| format!("creating {}", out_dir.display()))?;
                 let ext = output_extension(output);
                 let mut mismatches = Vec::new();
-                for (name, view) in &views {
-                    let result = run_view(&source, view, threads).await?;
+                for (i, (name, view)) in views.iter().enumerate() {
+                    let result = view_rows(&mut source, i, view).await?;
                     let path = out_dir.join(format!("{name}.{ext}"));
                     let mut sink: Box<dyn Write> = Box::new(
                         fs::File::create(&path)
@@ -916,7 +929,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 report_mismatches(&mismatches);
             } else {
                 let (name, view) = &views[0];
-                let result = run_view(&source, view, threads).await?;
+                let result = view_rows(&mut source, 0, view).await?;
                 let mut sink = open_sink(out.as_ref())?;
                 let summary = writer
                     .write_with_summary(&result, &mut sink)
