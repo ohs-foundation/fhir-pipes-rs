@@ -14,13 +14,18 @@
 //! unit. Reported (that feature only): a missing name, an unusable geometry
 //! (the unit is written without a boundary).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use geo::orient::{Direction, Orient};
 use geo::{Geometry, LineString, MultiPolygon, Polygon};
+use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 
 use super::{LocationBoundariesArgs, Shape, slugify, split_pair, text_of};
+use crate::dhis2::NdjsonWriter;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::profile::Profile;
@@ -85,9 +90,10 @@ const ACCEPTED_CRS_NAMES: [&str; 5] = [
     "OGC:CRS84",
 ];
 
-/// Refuses a collection whose `crs` is not WGS84; none at all is WGS84.
-pub fn check_crs(collection: &Value) -> Result<()> {
-    let Some(crs) = collection.get("crs").filter(|c| !c.is_null()) else {
+/// Refuses a collection whose `crs` member is not WGS84; none at all is
+/// WGS84.
+pub fn check_crs(crs: Option<&Value>) -> Result<()> {
+    let Some(crs) = crs.filter(|c| !c.is_null()) else {
         return Ok(());
     };
     let name = crs
@@ -210,7 +216,8 @@ pub struct Options<'a> {
     pub shape: &'a Shape,
 }
 
-/// The units of one level, in the order features first name them.
+/// The units of one level above the last, in the order features first name
+/// them.
 #[derive(Default)]
 struct Level {
     resources: Vec<Value>,
@@ -230,66 +237,62 @@ fn read_aliases(properties: &serde_json::Map<String, Value>, prop: Option<&Strin
         .collect()
 }
 
-/// The Locations for `collection`: the country, then each level in order.
-pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<Vec<Value>> {
-    if collection.get("type").and_then(Value::as_str) != Some("FeatureCollection") {
-        return Err(PipesError::Usage(
-            "input is not a GeoJSON FeatureCollection".into(),
-        ));
-    }
-    check_crs(collection)?;
-    let features: Vec<&Value> = collection
-        .get("features")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|f| f.is_object())
-        .collect();
-    for level in &opts.levels {
-        let used = features.iter().any(|f| {
-            !text_of(f.get("properties").and_then(|p| p.get(&level.name_prop))).is_empty()
-        });
-        if !used {
-            return Err(PipesError::Usage(format!(
-                "--level {}: property {:?} is empty on every feature -- likely a mapping typo",
-                level.name, level.name_prop
-            )));
+/// What `build` keeps while it reads the features one at a time.
+struct Builder<'o, 'r, F> {
+    opts: &'o Options<'o>,
+    report: &'r mut Report,
+    root: String,
+    /// Whether each level's name property is non-empty on some feature.
+    used: Vec<bool>,
+    /// slug → the name that claimed it, to refuse two names on one slug.
+    claimed: HashMap<String, String>,
+    /// The levels above the last.
+    levels: Vec<Level>,
+    /// The last level's slugs, to refuse a duplicate.
+    leaves: HashSet<String>,
+    /// Takes each last-level unit as it is made.
+    leaf: F,
+    leaf_error: Option<PipesError>,
+    /// With --dissolve-parents: every last-level polygon, and for each unit
+    /// above the last level the indexes of the polygons below it.
+    leaf_polygons: Vec<Polygon>,
+    below: HashMap<String, Vec<usize>>,
+    /// The first fatal problem in a feature. The features after it are not
+    /// built, as the whole-file build stopped there.
+    fatal: Option<PipesError>,
+    /// The collection's `type` and `crs` members.
+    kind: Option<Value>,
+    crs: Option<Value>,
+}
+
+impl<F: FnMut(&Value) -> Result<()>> Builder<'_, '_, F> {
+    fn feature(&mut self, feature: Value) {
+        if !feature.is_object() {
+            return;
+        }
+        let properties = feature.get("properties");
+        for (used, level) in self.used.iter_mut().zip(&self.opts.levels) {
+            if !*used && !text_of(properties.and_then(|p| p.get(&level.name_prop))).is_empty() {
+                *used = true;
+            }
+        }
+        if self.fatal.is_some() || !is_valid_id(&self.root) {
+            return;
+        }
+        if let Err(e) = self.add(&feature) {
+            self.fatal = Some(e);
         }
     }
 
-    let shape = opts.shape;
-    let (country_name, country_code) = &opts.country;
-    let root = slugify(country_code);
-    if !is_valid_id(&root) {
-        return Err(PipesError::Usage(format!(
-            "--country code {country_code:?} does not make a FHIR id"
-        )));
-    }
-    let mut country = shape.admin_unit(
-        &root,
-        country_name,
-        None,
-        &[(opts.code_system.clone(), country_code.clone())],
-        &[],
-        None,
-    );
-    // slug → the name that claimed it, to refuse two names on one slug.
-    let mut claimed: HashMap<String, String> = HashMap::new();
-    let mut levels: Vec<Level> = opts.levels.iter().map(|_| Level::default()).collect();
-    let leaf = opts.levels.len() - 1;
-    // With --dissolve-parents: every last-level polygon, and for each unit
-    // above the last level the indexes of the polygons below it.
-    let mut leaf_polygons: Vec<Polygon> = Vec::new();
-    let mut below: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for feature in features {
+    fn add(&mut self, feature: &Value) -> Result<()> {
+        let opts = self.opts;
         let Some(properties) = feature.get("properties").and_then(Value::as_object) else {
-            report.add(
+            self.report.add(
                 "missing_field",
                 "<unknown>",
                 "feature has no properties object",
             );
-            continue;
+            return Ok(());
         };
         let names: Vec<String> = opts
             .levels
@@ -297,7 +300,7 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
             .map(|l| text_of(properties.get(&l.name_prop)).trim().to_string())
             .collect();
         if let Some(i) = names.iter().position(String::is_empty) {
-            report.add(
+            self.report.add(
                 "missing_field",
                 "<unknown>",
                 &format!(
@@ -305,13 +308,14 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                     opts.levels[i].name
                 ),
             );
-            continue;
+            return Ok(());
         }
 
-        let mut parent = root.clone();
+        let leaf = opts.levels.len() - 1;
+        let mut parent = self.root.clone();
         // The feature's ancestors, root first. Not recoverable from the leaf
         // slug: "-" both joins segments and appears inside them.
-        let mut lineage = vec![root.clone()];
+        let mut lineage = vec![self.root.clone()];
         for (index, (level, name)) in opts.levels.iter().zip(&names).enumerate() {
             let code = level
                 .code_prop
@@ -320,7 +324,7 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                 .filter(|c| !c.is_empty());
             let segment = slugify(code.as_deref().unwrap_or(name));
             if segment.is_empty() {
-                report.add(
+                self.report.add(
                     "missing_field",
                     "<unknown>",
                     &format!("{} name slugs to nothing", level.name),
@@ -329,7 +333,7 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
             }
             let slug = format!("{parent}-{segment}");
             if !is_valid_id(&slug) {
-                report.add(
+                self.report.add(
                     "invalid_id",
                     &slug,
                     &format!(
@@ -339,7 +343,7 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                 );
                 break;
             }
-            match claimed.get(&slug) {
+            match self.claimed.get(&slug) {
                 Some(already) if already != name => {
                     return Err(PipesError::Usage(format!(
                         "slug collision: {} {name:?} and {already:?} both slug to {slug:?} \
@@ -349,7 +353,7 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                 }
                 Some(_) => {}
                 None => {
-                    claimed.insert(slug.clone(), name.clone());
+                    self.claimed.insert(slug.clone(), name.clone());
                 }
             }
             let identifiers = [(
@@ -357,103 +361,259 @@ pub fn build(collection: &Value, opts: &Options, report: &mut Report) -> Result<
                 code.unwrap_or_else(|| slug.clone()),
             )];
             let aliases = read_aliases(properties, opts.aliases.get(&level.name));
-            let units = &mut levels[index];
             if index == leaf {
-                if units.index.contains_key(&slug) {
+                if !self.leaves.insert(slug.clone()) {
                     return Err(PipesError::Usage(format!(
                         "duplicate feature: {} {name:?} ({slug:?}) appears more than once",
                         level.name
                     )));
                 }
-                let geometry = feature_shape(feature.get("geometry"), &slug, report);
+                let geometry = feature_shape(feature.get("geometry"), &slug, self.report);
                 let boundary = geometry.as_ref().map(geometry_bytes);
-                units.index.insert(slug.clone(), units.resources.len());
-                units.resources.push(shape.admin_unit(
+                let resource = opts.shape.admin_unit(
                     &slug,
                     name,
                     Some(&parent),
                     &identifiers,
                     &aliases,
                     boundary.as_deref(),
-                ));
+                );
+                if self.leaf_error.is_none()
+                    && let Err(e) = (self.leaf)(&resource)
+                {
+                    self.leaf_error = Some(e);
+                }
                 if opts.dissolve_parents
                     && let Some(g) = geometry
                 {
-                    let start = leaf_polygons.len();
-                    leaf_polygons.extend(polygons(g));
+                    let start = self.leaf_polygons.len();
+                    self.leaf_polygons.extend(polygons(g));
                     for ancestor in &lineage {
-                        below
+                        self.below
                             .entry(ancestor.clone())
                             .or_default()
-                            .extend(start..leaf_polygons.len());
+                            .extend(start..self.leaf_polygons.len());
                     }
                 }
-            } else if !units.index.contains_key(&slug) {
-                units.index.insert(slug.clone(), units.resources.len());
-                units.resources.push(shape.admin_unit(
-                    &slug,
-                    name,
-                    Some(&parent),
-                    &identifiers,
-                    &aliases,
-                    None,
-                ));
+            } else {
+                let units = &mut self.levels[index];
+                if !units.index.contains_key(&slug) {
+                    units.index.insert(slug.clone(), units.resources.len());
+                    units.resources.push(opts.shape.admin_unit(
+                        &slug,
+                        name,
+                        Some(&parent),
+                        &identifiers,
+                        &aliases,
+                        None,
+                    ));
+                }
             }
             lineage.push(slug.clone());
             parent = slug;
         }
+        Ok(())
     }
 
-    if opts.dissolve_parents {
-        // Each unit's boundary is the union of the last-level polygons below
-        // it, not of its children's unions: unions of unions leave sliver
-        // gaps where neighbours' shared edges were rounded differently.
-        let mut attach = |slug: &str, resource: &mut Value| {
-            let Some(indexes) = below.get(slug) else {
-                return;
-            };
-            let parts: Vec<&Polygon> = indexes.iter().map(|&i| &leaf_polygons[i]).collect();
-            dissolve(slug, &parts, shape, resource, report);
-        };
-        attach(&root, &mut country);
-        for level in &mut levels[..leaf] {
-            for resource in &mut level.resources {
-                let slug = resource["id"].as_str().unwrap_or_default().to_string();
-                attach(&slug, resource);
+    /// The checks the whole-file build made before its first feature, then
+    /// the first fatal feature, then the country and the levels above the
+    /// last, dissolved if asked.
+    fn finish(self) -> Result<Vec<Value>> {
+        let opts = self.opts;
+        if self.kind.as_ref().and_then(Value::as_str) != Some("FeatureCollection") {
+            return Err(PipesError::Usage(
+                "input is not a GeoJSON FeatureCollection".into(),
+            ));
+        }
+        check_crs(self.crs.as_ref())?;
+        if let Some((level, _)) = opts.levels.iter().zip(&self.used).find(|(_, used)| !**used) {
+            return Err(PipesError::Usage(format!(
+                "--level {}: property {:?} is empty on every feature -- likely a mapping typo",
+                level.name, level.name_prop
+            )));
+        }
+        let (country_name, country_code) = &opts.country;
+        let root = self.root;
+        if !is_valid_id(&root) {
+            return Err(PipesError::Usage(format!(
+                "--country code {country_code:?} does not make a FHIR id"
+            )));
+        }
+        if let Some(e) = self.fatal.or(self.leaf_error) {
+            return Err(e);
+        }
+        let shape = opts.shape;
+        let mut country = shape.admin_unit(
+            &root,
+            country_name,
+            None,
+            &[(opts.code_system.clone(), country_code.clone())],
+            &[],
+            None,
+        );
+        let mut levels = self.levels;
+        if opts.dissolve_parents {
+            // Each unit's boundary is the union of the last-level polygons
+            // below it, not of its children's unions: unions of unions leave
+            // sliver gaps where neighbours' shared edges were rounded
+            // differently. The only child of a unit has the same polygons
+            // below it, so it reuses its parent's union.
+            let (below, leaf_polygons, report) = (&self.below, &self.leaf_polygons, self.report);
+            let mut groups: Vec<Vec<&mut Value>> = vec![vec![&mut country]];
+            groups.extend(levels.iter_mut().map(|l| l.resources.iter_mut().collect()));
+            let mut previous: HashMap<&[usize], Option<Vec<u8>>> = HashMap::new();
+            for group in groups {
+                let mut current = HashMap::new();
+                for resource in group {
+                    let slug = resource["id"].as_str().unwrap_or_default().to_string();
+                    let Some(indexes) = below.get(&slug) else {
+                        continue;
+                    };
+                    let boundary = match previous.get(indexes.as_slice()) {
+                        Some(b) => b.clone(),
+                        None => dissolve(indexes.iter().map(|&i| &leaf_polygons[i])),
+                    };
+                    match &boundary {
+                        Some(bytes) => shape.attach_boundary(resource, bytes),
+                        None => report.add(
+                            "geometry_invalid",
+                            &slug,
+                            "dissolved boundary is empty, expected Polygon or MultiPolygon; \
+                             parent left boundary-less",
+                        ),
+                    }
+                    current.insert(indexes.as_slice(), boundary);
+                }
+                previous = current;
             }
         }
-    }
 
-    let mut out = vec![country];
-    for level in levels {
-        out.extend(level.resources);
+        let mut out = vec![country];
+        for level in levels {
+            out.extend(level.resources);
+        }
+        Ok(out)
     }
-    Ok(out)
 }
 
-/// The union of `parts`, attached to `resource` as its boundary.
-fn dissolve(
-    slug: &str,
-    parts: &[&Polygon],
-    shape: &Shape,
-    resource: &mut Value,
-    report: &mut Report,
-) {
-    let union: MultiPolygon = geo::unary_union(parts.iter().copied());
-    let boundary = match union.0.len() {
-        0 => {
-            report.add(
-                "geometry_invalid",
-                slug,
-                "dissolved boundary is empty, expected Polygon or MultiPolygon; parent left \
-                 boundary-less",
-            );
-            return;
+/// The top-level object, read member by member so that `features` is
+/// read one feature at a time.
+struct Collection<'b, 'o, 'r, F>(&'b mut Builder<'o, 'r, F>);
+
+impl<'de, F: FnMut(&Value) -> Result<()>> DeserializeSeed<'de> for Collection<'_, '_, '_, F> {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<(), D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de, F: FnMut(&Value) -> Result<()>> Visitor<'de> for Collection<'_, '_, '_, F> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a GeoJSON FeatureCollection")
+    }
+    other_json_types_are_default!();
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+        while seq.next_element::<Value>()?.is_some() {}
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<(), A::Error> {
+        let mut features = false;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "type" => self.0.kind = Some(map.next_value()?),
+                "crs" => self.0.crs = Some(map.next_value()?),
+                "features" => {
+                    // A second list would replace the first as a Value read
+                    // does, but the first has been built by then.
+                    if features {
+                        return Err(A::Error::custom("\"features\" appears more than once"));
+                    }
+                    features = true;
+                    map.next_value_seed(Features(&mut *self.0))?;
+                }
+                _ => {
+                    map.next_value::<Value>()?;
+                }
+            }
         }
+        Ok(())
+    }
+}
+
+/// `features`, each one handed to the builder as it is read.
+struct Features<'b, 'o, 'r, F>(&'b mut Builder<'o, 'r, F>);
+
+impl<'de, F: FnMut(&Value) -> Result<()>> DeserializeSeed<'de> for Features<'_, '_, '_, F> {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<(), D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de, F: FnMut(&Value) -> Result<()>> Visitor<'de> for Features<'_, '_, '_, F> {
+    type Value = ();
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a list of features")
+    }
+    other_json_types_are_default!();
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+        while let Some(feature) = seq.next_element::<Value>()? {
+            self.0.feature(feature);
+        }
+        Ok(())
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<(), A::Error> {
+        while map.next_entry::<String, Value>()?.is_some() {}
+        Ok(())
+    }
+}
+
+/// The Locations for the FeatureCollection read from `input` (`name` in
+/// messages): the country, then each level in order. The last level's
+/// units go to `leaf` as each is made, the rest are returned, as the
+/// levels above the last are complete only once every feature is read.
+pub fn build(
+    input: impl std::io::Read,
+    name: &Path,
+    opts: &Options,
+    report: &mut Report,
+    leaf: impl FnMut(&Value) -> Result<()>,
+) -> Result<Vec<Value>> {
+    let leaf_level = opts.levels.len() - 1;
+    let mut builder = Builder {
+        opts,
+        report,
+        root: slugify(&opts.country.1),
+        used: vec![false; opts.levels.len()],
+        claimed: HashMap::new(),
+        levels: (0..leaf_level).map(|_| Level::default()).collect(),
+        leaves: HashSet::new(),
+        leaf,
+        leaf_error: None,
+        leaf_polygons: Vec::new(),
+        below: HashMap::new(),
+        fatal: None,
+        kind: None,
+        crs: None,
+    };
+    let mut de = serde_json::Deserializer::from_reader(input);
+    Collection(&mut builder)
+        .deserialize(&mut de)
+        .and_then(|()| de.end())
+        .map_err(|e| PipesError::Usage(format!("{} is not valid JSON: {e}", name.display())))?;
+    builder.finish()
+}
+
+/// The union of `parts` as boundary GeoJSON; None when it is empty.
+fn dissolve<'a>(parts: impl Iterator<Item = &'a Polygon>) -> Option<Vec<u8>> {
+    let union: MultiPolygon = geo::unary_union(parts);
+    let boundary = match union.0.len() {
+        0 => return None,
         1 => Geometry::Polygon(union.0[0].clone()),
         _ => Geometry::MultiPolygon(union),
     };
-    shape.attach_boundary(resource, &geometry_bytes(&orient(boundary)));
+    Some(geometry_bytes(&orient(boundary)))
 }
 
 pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
@@ -490,13 +650,41 @@ pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
     };
     let file = std::fs::File::open(&args.input)
         .map_err(|e| PipesError::Usage(format!("--in {}: {e}", args.input.display())))?;
-    let collection: Value =
-        serde_json::from_reader(std::io::BufReader::new(file)).map_err(|e| {
-            PipesError::Usage(format!("{} is not valid JSON: {e}", args.input.display()))
-        })?;
+    // The last level comes after the levels above it, which are complete
+    // only at the end: its lines wait in a temporary file next to --out,
+    // removed when dropped.
+    let dir = match args.out.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let spill = tempfile::tempfile_in(dir).map_err(|e| PipesError::io(dir, e))?;
+    let mut leaves = BufWriter::new(spill);
     let mut report = Report::default();
-    let resources = build(&collection, &opts, &mut report)?;
-    let n = crate::dhis2::write_ndjson(&args.out, &resources)?;
+    let parents = build(BufReader::new(file), &args.input, &opts, &mut report, |r| {
+        serde_json::to_writer(&mut leaves, r)?;
+        leaves.write_all(b"\n").map_err(|e| PipesError::io(dir, e))
+    })?;
+    let mut spill = leaves
+        .into_inner()
+        .map_err(|e| PipesError::io(dir, e.into_error()))?;
+    spill
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| PipesError::io(dir, e))?;
+    let mut out = NdjsonWriter::create(&args.out)?;
+    for r in &parents {
+        out.write(r)?;
+    }
+    let mut spill = BufReader::new(spill);
+    let mut line = Vec::new();
+    while spill
+        .read_until(b'\n', &mut line)
+        .map_err(|e| PipesError::io(dir, e))?
+        > 0
+    {
+        out.write_line(&line)?;
+        line.clear();
+    }
+    let n = out.finish()?;
     println!("Wrote {n} Locations to {}", args.out.display());
     println!("{}", report.summary());
     if let Some(path) = &args.report {
@@ -564,7 +752,20 @@ mod tests {
             dissolve_parents: dissolve,
             shape: &shape,
         };
-        build(&collection(features), &opts, report)
+        let input = collection(features).to_string();
+        let mut leaves = Vec::new();
+        let mut out = build(
+            input.as_bytes(),
+            Path::new("test.geojson"),
+            &opts,
+            report,
+            |r| {
+                leaves.push(r.clone());
+                Ok(())
+            },
+        )?;
+        out.extend(leaves);
+        Ok(out)
     }
 
     fn by_id(resources: &[Value]) -> HashMap<String, Value> {
@@ -628,7 +829,7 @@ mod tests {
 
     #[test]
     fn crs_must_be_wgs84_or_absent() {
-        assert!(check_crs(&json!({"type": "FeatureCollection"})).is_ok());
+        assert!(check_crs(json!({"type": "FeatureCollection"}).get("crs")).is_ok());
         for name in [
             "EPSG:4326",
             "urn:ogc:def:crs:EPSG::4326",
@@ -636,10 +837,10 @@ mod tests {
             "CRS84",
         ] {
             let c = json!({"crs": {"type": "name", "properties": {"name": name}}});
-            assert!(check_crs(&c).is_ok(), "{name}");
+            assert!(check_crs(c.get("crs")).is_ok(), "{name}");
         }
         let c = json!({"crs": {"type": "name", "properties": {"name": "EPSG:3857"}}});
-        assert!(check_crs(&c).is_err());
+        assert!(check_crs(c.get("crs")).is_err());
     }
 
     #[test]
@@ -807,7 +1008,82 @@ mod tests {
             dissolve_parents: false,
             shape: &shape,
         };
-        assert!(build(&json!({"type": "Feature"}), &opts, &mut Report::default()).is_err());
+        assert!(build_text(r#"{"type": "Feature"}"#, &opts).is_err());
+    }
+
+    /// `build` over `text`, the last level appended.
+    fn build_text(text: &str, opts: &Options) -> Result<Vec<Value>> {
+        let mut leaves = Vec::new();
+        let mut out = build(
+            text.as_bytes(),
+            Path::new("test.geojson"),
+            opts,
+            &mut Report::default(),
+            |r| {
+                leaves.push(r.clone());
+                Ok(())
+            },
+        )?;
+        out.extend(leaves);
+        Ok(out)
+    }
+
+    #[test]
+    fn errors_come_in_the_order_a_whole_file_read_gave_them() {
+        // The features are read before the members after them, yet a
+        // problem with the collection itself still wins over one in a
+        // feature, and invalid JSON over both.
+        let shape = icr_shape();
+        let opts = Options {
+            country: ("Nigeria".into(), "NGA".into()),
+            levels: levels(),
+            aliases: HashMap::new(),
+            code_system: CODE_SYSTEM.into(),
+            dissolve_parents: false,
+            shape: &shape,
+        };
+        let twice = json!([feature(json!({})), feature(json!({}))]);
+        let message = |text: String| build_text(&text, &opts).unwrap_err().to_string();
+        assert!(
+            message(format!(
+                r#"{{"features": {twice}, "type": "FeatureCollection"}}"#
+            ))
+            .contains("duplicate")
+        );
+        assert!(
+            message(format!(r#"{{"features": {twice}, "type": "Feature"}}"#))
+                .contains("not a GeoJSON FeatureCollection")
+        );
+        assert!(message(format!(
+            r#"{{"features": {twice}, "type": "FeatureCollection", "crs": {{"properties": {{"name": "EPSG:3857"}}}}}}"#
+        ))
+        .contains("not WGS84"));
+        assert!(
+            message(format!(
+                r#"{{"type": "FeatureCollection", "features": {twice}, "x": ]"#
+            ))
+            .contains("test.geojson is not valid JSON")
+        );
+        // A second `features` is refused rather than built on top of the first.
+        assert!(
+            message(format!(
+                r#"{{"type": "FeatureCollection", "features": [], "features": {twice}}}"#
+            ))
+            .contains("\"features\" appears more than once")
+        );
+        // `features` that is not a list has no features, so every level is empty.
+        assert!(
+            message(r#"{"type": "FeatureCollection", "features": {"a": 1}}"#.into())
+                .contains("is empty on every feature")
+        );
+        // A repeated `type` keeps the last; non-object features are skipped.
+        let one = feature(json!({}));
+        let out = build_text(
+            &format!(r#"{{"type": "Feature", "features": [1, {one}, null], "type": "FeatureCollection"}}"#),
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 4);
     }
 
     #[test]

@@ -290,15 +290,20 @@ impl NdjsonWriter {
     pub fn write(&mut self, r: &Value) -> Result<()> {
         let mut line = serde_json::to_vec(r)?;
         line.push(b'\n');
+        self.write_line(&line)
+    }
+
+    /// One line already serialised, ending in a newline.
+    pub fn write_line(&mut self, line: &[u8]) -> Result<()> {
         let written = if self.gz {
             if self.member.is_none() {
                 let file = self.file.take().expect("written after finish");
                 self.member = Some(GzEncoder::new(file, Compression::default()));
             }
-            self.member.as_mut().map(|m| m.write_all(&line))
+            self.member.as_mut().map(|m| m.write_all(line))
         } else {
             self.bytes += line.len() as u64;
-            self.file.as_mut().map(|f| f.write_all(&line))
+            self.file.as_mut().map(|f| f.write_all(line))
         };
         written
             .expect("written after finish")

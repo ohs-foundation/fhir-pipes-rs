@@ -452,31 +452,6 @@ struct UnitLine {
     entries: Vec<Unit>,
 }
 
-/// Visitor methods for the JSON types a field reader does not want: the
-/// value is consumed and the default returned.
-macro_rules! other_types_are_default {
-    () => {
-        fn visit_bool<E>(self, _: bool) -> std::result::Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_i64<E>(self, _: i64) -> std::result::Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_u64<E>(self, _: u64) -> std::result::Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_f64<E>(self, _: f64) -> std::result::Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_str<E>(self, _: &str) -> std::result::Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
-            Ok(Default::default())
-        }
-    };
-}
-
 fn skip_seq<'de, A: SeqAccess<'de>>(mut seq: A) -> std::result::Result<(), A::Error> {
     while seq.next_element::<IgnoredAny>()?.is_some() {}
     Ok(())
@@ -524,7 +499,7 @@ impl<'de> Deserialize<'de> for Unit {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("any JSON value")
             }
-            other_types_are_default!();
+            other_json_types_are_default!();
             fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> std::result::Result<Unit, A::Error> {
                 skip_seq(seq).map(|()| Unit::default())
             }
@@ -556,7 +531,7 @@ impl<'de> Deserialize<'de> for Entry {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("any JSON value")
             }
-            other_types_are_default!();
+            other_json_types_are_default!();
             fn visit_seq<A: SeqAccess<'de>>(
                 self,
                 seq: A,
@@ -593,7 +568,7 @@ impl<'de> Deserialize<'de> for Entries {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("any JSON value")
             }
-            other_types_are_default!();
+            other_json_types_are_default!();
             fn visit_seq<A: SeqAccess<'de>>(
                 self,
                 mut seq: A,
@@ -623,7 +598,7 @@ impl<'de> Deserialize<'de> for UnitLine {
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("any JSON value")
             }
-            other_types_are_default!();
+            other_json_types_are_default!();
             fn visit_seq<A: SeqAccess<'de>>(
                 self,
                 seq: A,
