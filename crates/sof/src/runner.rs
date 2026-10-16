@@ -132,11 +132,6 @@ pub struct ViewResult {
 }
 
 impl ViewResult {
-    /// Check if the result set is empty.
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
     /// Convert the result to a JSON array of objects.
     pub fn to_json_array(&self) -> Vec<Value> {
         self.data
@@ -178,20 +173,5 @@ mod tests {
         assert_eq!(json_array[0]["name"], "Alice");
         assert_eq!(json_array[1]["id"], "2");
         assert_eq!(json_array[1]["name"], "Bob");
-    }
-
-    #[test]
-    fn test_view_result_is_empty() {
-        let empty_result = ViewResult {
-            columns: vec![ColumnInfo::new("id", ColumnType::String)],
-            data: vec![],
-        };
-        assert!(empty_result.is_empty());
-
-        let non_empty = ViewResult {
-            columns: vec![ColumnInfo::new("id", ColumnType::String)],
-            data: vec![vec![json!("1")]],
-        };
-        assert!(!non_empty.is_empty());
     }
 }

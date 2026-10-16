@@ -56,8 +56,9 @@ changes.
   and `JsonArrayWriter`. The writers are now unit structs.
 - `SqlExecutor` and `run_with`; `ViewRunner::with_generator`, `explain` and
   `pool`.
-- `ViewResult::row_count` (use `data.len()`), `row_as_object`,
-  `column_values` and `column_count`.
+- `ViewResult::row_count` (use `data.len()`), `is_empty`, `row_as_object`,
+  `column_values` and `column_count`; `GeneratedSql::ctes`, which was always
+  empty.
 - `ColumnInfo::nullable`, `description`, `with_nullable` and
   `with_description`; `ColumnType::null_representation`.
 - `ViewDefinition::parse` (use `from_json`) and `column_names`;

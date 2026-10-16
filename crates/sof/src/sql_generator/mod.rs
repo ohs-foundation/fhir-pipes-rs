@@ -134,11 +134,7 @@ impl SqlGenerator {
             })
             .collect();
 
-        Ok(GeneratedSql {
-            sql,
-            columns,
-            ctes: Vec::new(),
-        })
+        Ok(GeneratedSql { sql, columns })
     }
 
     fn render_plan(&self, table: &str, plan: &Plan, where_sql: &[String]) -> String {
@@ -215,9 +211,6 @@ pub struct GeneratedSql {
 
     /// Column information for the result set.
     pub columns: Vec<GeneratedColumn>,
-
-    /// Common Table Expressions (CTEs) to prepend to the query.
-    pub ctes: Vec<String>,
 }
 
 /// A generated column with its SQL expression and metadata.
