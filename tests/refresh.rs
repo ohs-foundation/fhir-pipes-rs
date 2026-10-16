@@ -1673,3 +1673,263 @@ fn a_store_path_is_expanded_in_check() {
             "server:     https://healthcare.googleapis.com/v1/projects/p/locations/l/datasets/d/fhirStores/s/fhir",
         ));
 }
+
+/// Write `files` (relative path → text) under `dir/input`; returns that
+/// directory.
+fn inputs(dir: &Path, files: &[(&str, String)]) -> PathBuf {
+    let input = dir.join("input");
+    for (name, text) in files {
+        let path = input.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    input
+}
+
+fn lines(resources: &[Value]) -> String {
+    resources.iter().map(|r| format!("{r}\n")).collect()
+}
+
+fn obs(id: &str, value: i64, updated: Option<&str>) -> Value {
+    let mut o = json!({"resourceType": "Observation", "id": id, "status": "final",
+        "code": {"text": "x"}, "subject": {"reference": "Location/loc-bo"}, "valueInteger": value});
+    if let Some(at) = updated {
+        o["meta"] = json!({"lastUpdated": at});
+    }
+    o
+}
+
+/// The rows of every part of a table, with their partition directory.
+fn table_rows(table: &Path) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out = Vec::new();
+    let mut parts: Vec<PathBuf> = fs::read_dir(table)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    parts.sort();
+    for part in parts {
+        let name = part.file_name().unwrap().to_string_lossy().into_owned();
+        for row in rows(&part.join("part-0.parquet")) {
+            out.push((name.clone(), row));
+        }
+    }
+    out
+}
+
+#[test]
+fn refresh_reads_ndjson_and_bundles_from_files_without_a_server() {
+    let (dir, config) = setup(NOWHERE, "");
+    let root = dir.path();
+    // A transaction Bundle: the Observation names its subject by the
+    // Location entry's urn:uuid, resolved to Location/loc-bo.
+    let transaction = json!({"resourceType": "Bundle", "type": "transaction", "entry": [
+        {"fullUrl": "urn:uuid:7f3a", "resource": {"resourceType": "Location", "id": "loc-bo", "name": "Bo"}},
+        {"fullUrl": "urn:uuid:91c2", "resource": {"resourceType": "Observation", "id": "o4",
+            "status": "final", "code": {"text": "x"}, "subject": {"reference": "urn:uuid:7f3a"},
+            "valueInteger": 4}},
+        // o2 again, updated later than in a.ndjson: this one is kept.
+        {"fullUrl": "urn:uuid:5d0e", "resource": obs("o2", 50, Some("2026-02-01T00:00:00Z"))},
+    ]});
+    let input = inputs(
+        root,
+        &[
+            (
+                "a.ndjson",
+                lines(&[
+                    obs("o1", 30, Some("2026-03-01T00:00:00Z")),
+                    obs("o2", 5, Some("2026-01-01T00:00:00Z")),
+                    json!({"resourceType": "Patient", "id": "p1", "birthDate": "2020-05-01"}),
+                ]),
+            ),
+            (
+                "b.ndjson",
+                lines(&[
+                    // o1 again, older: the copy in a.ndjson is kept.
+                    obs("o1", 3, Some("2026-01-01T00:00:00Z")),
+                    // p1 again, neither with lastUpdated: the later file wins.
+                    json!({"resourceType": "Patient", "id": "p1", "birthDate": "2019-07-01"}),
+                ]),
+            ),
+            ("sub/transaction.json", transaction.to_string()),
+            (".hidden.ndjson", "not json\n".into()),
+        ],
+    );
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .assert()
+        .success()
+        .stdout(has("== files (3 files"))
+        .stdout(has("Observation: 3 resources (2 duplicates by id merged)"))
+        .stdout(has("IcrObs (Observation) → parquet/obs (3 rows)"))
+        .stdout(has("parquet/patient (1 rows)"));
+
+    let raw = read_ndjson(&root.join("data/raw/test/Observation.ndjson"));
+    let ids: Vec<&str> = raw.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["o1", "o2", "o4"]);
+    assert_eq!(
+        read_ndjson(&root.join("data/raw/test/Location.ndjson")).len(),
+        1
+    );
+
+    let got: Vec<(String, String, String, String)> = table_rows(&root.join("data/parquet/obs"))
+        .into_iter()
+        .map(|(part, r)| {
+            let col = |c| get(&r, c).to_string();
+            (part, col("id"), col("value"), col("location_id"))
+        })
+        .collect();
+    let row = |p: &str, id: &str, v: &str| (p.into(), id.into(), v.into(), "loc-bo".into());
+    // Every row found its country through the locations table, o4 through
+    // the resolved urn:uuid.
+    assert_eq!(
+        got,
+        [
+            row("country=SLE", "o1", "30"),
+            row("country=SLE", "o2", "50"),
+            row("country=SLE", "o4", "4"),
+        ]
+    );
+    let patients = table_rows(&root.join("data/parquet/patient"));
+    assert_eq!(get(&patients[0].1, "born"), "2019-07-01");
+
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["server"], Value::Null);
+    assert_eq!(manifest["files"], json!([input.display().to_string()]));
+    assert_eq!(manifest["tables"]["obs"]["rows"], 3);
+}
+
+#[test]
+fn locations_in_the_files_build_the_locations_table() {
+    let (dir, config) = setup(NOWHERE, "");
+    let root = dir.path();
+    let snapshot = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot");
+    let n = read_ndjson(&snapshot.join("locations.ndjson")).len();
+    cmd(&config)
+        .args(["--only", "locations,views", "--input"])
+        .arg(snapshot.join("locations.ndjson"))
+        .assert()
+        .success()
+        .stdout(has(format!("snapshot: {n} Locations")));
+    let snap = root.join("data/raw/test/locations");
+    assert_eq!(read_ndjson(&snap.join("locations.ndjson")).len(), n);
+    assert!(!snap.join("organizations.ndjson").exists());
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(snap.join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["server"], "files");
+    assert_eq!(state["count"], n);
+
+    // parquet/locations is the files' registry now, not the fixture's.
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["extract"]["count"], n);
+    let rows = manifest["tables"]["locations"]["rows"].as_i64().unwrap();
+    assert!(rows > 2, "{manifest}");
+    assert!(root.join("data/parquet/locations/country=NG").is_dir());
+    assert!(!root.join("data/parquet/locations/country=SLE").exists());
+}
+
+#[test]
+fn types_the_files_lack_give_empty_tables() {
+    let (dir, config) = setup(NOWHERE, "\n[source]\nfiles = [\"input/*.ndjson\"]\n");
+    let root = dir.path();
+    // No locations table at all: the observations go to the null partition.
+    fs::remove_dir_all(root.join("data/parquet/locations")).unwrap();
+    inputs(
+        root,
+        &[
+            ("obs.ndjson", lines(&[obs("o1", 3, None)])),
+            (
+                "patients.ndjson",
+                lines(&[json!({"resourceType": "Patient", "id": "p1"})]),
+            ),
+        ],
+    );
+    cmd(&config)
+        .args(["--only", "locations,views"])
+        .assert()
+        .success()
+        .stdout(has("the files have no Location resources; skipped"))
+        .stdout(has("parquet/obs (1 rows)"));
+    let obs_rows = table_rows(&root.join("data/parquet/obs"));
+    assert_eq!(obs_rows[0].0, "country=__HIVE_DEFAULT_PARTITION__");
+    assert!(!root.join("data/parquet/locations").exists());
+
+    // Without observations in the files the second run's obs table is
+    // empty, and the first run's Observation.ndjson is gone.
+    fs::remove_file(root.join("input/obs.ndjson")).unwrap();
+    cmd(&config)
+        .args(["--only", "views"])
+        .assert()
+        .success()
+        .stdout(has("removed raw/Observation.ndjson"))
+        .stdout(has(
+            "Observation: none in the files; its views write empty tables",
+        ))
+        .stdout(has("parquet/obs (0 rows)"));
+    assert!(!root.join("data/raw/test/Observation.ndjson").exists());
+    let empty = root.join("data/parquet/obs/country=__HIVE_DEFAULT_PARTITION__/part-0.parquet");
+    assert!(rows(&empty).is_empty());
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("data/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["tables"]["obs"]["rows"], 0);
+}
+
+#[test]
+fn check_shows_the_file_source() {
+    let (dir, config) = setup(
+        NOWHERE,
+        "\n[source]\nfiles = [\"input\", \"exports/*.ndjson\"]\n",
+    );
+    inputs(
+        dir.path(),
+        &[("a.ndjson", "{}\n".into()), ("sub/b.json", "{}".into())],
+    );
+    cmd(&config)
+        .args(["--only", "views", "--check"])
+        .assert()
+        .success()
+        .stdout(has("source:     files, no server (raw/test)"))
+        .stdout(has("input:      ").and(has("input: 2 files")))
+        .stdout(has("exports/*.ndjson: input pattern").and(has("matches nothing")))
+        .stdout(has("server:").not())
+        .stdout(has("auth:").not());
+}
+
+#[test]
+fn a_view_column_named_like_the_partition_column_stops_the_run() {
+    let (dir, config) = setup(NOWHERE, "");
+    let views = dir.path().join("views");
+    fs::create_dir_all(&views).unwrap();
+    fs::write(
+        views.join("v.json"),
+        json!({"resourceType": "ViewDefinition", "name": "PatientCountry", "resource": "Patient",
+            "status": "active", "select": [{"column": [
+                {"name": "id", "path": "getResourceKey()"},
+                {"name": "country", "path": "address.country.first()"}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let input = inputs(
+        dir.path(),
+        &[(
+            "p.ndjson",
+            lines(&[json!({"resourceType": "Patient", "id": "p1"})]),
+        )],
+    );
+    cmd(&config)
+        .args(["--only", "views", "--views"])
+        .arg(&views)
+        .arg("--input")
+        .arg(&input)
+        .assert()
+        .failure()
+        .stderr(has(
+            "view PatientCountry has a column `country`, which is the partition column",
+        ));
+    assert!(!dir.path().join("data/parquet/patient_country").exists());
+}
