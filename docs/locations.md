@@ -931,6 +931,9 @@ Re-running after a load and a fresh extract writes nothing.
 Location's position, every quadkey and geohash cell already on it is
 recomputed for the new point (an H3 cell, which fhir-pipes cannot compute, is
 dropped rather than left wrong), and clearing the position removes them all.
+A cell whose level is outside its scheme's range (quadkey 1–23, geohash
+1–12, H3 0–15) is reported as `malformed_field` and skipped: `transform`
+leaves it out of the `quadkey` columns and `diff` does not recompute it.
 Quadkey and geohash are computed in fhir-pipes with no dependency; H3 cells are
 parsed and carried but not computed yet.
 
@@ -1024,7 +1027,8 @@ fhir-pipes load --server URL [AUTH] --in changes.ndjson [--dry-run] [--batch-siz
 ```
 
 Load reads any NDJSON of FHIR resources with a `resourceType` and an `id`,
-orders them parents first by `partOf`, groups them into transaction bundles
+orders them parents first by `partOf` (matched by type and id, so a
+Location and an Organization may share an id), groups them into transaction bundles
 of `PUT <Type>/<id>`, and posts them with retry and backoff. Before the
 first bundle it fetches the server's capability statement, which also
 proves the URL and token work. If the input creates any new resource, the

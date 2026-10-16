@@ -298,7 +298,8 @@ Report kinds: `stratum_without_total` (a breakdown value whose total DHIS2
 did not return), `fractional_count` (a numerator or denominator that is not a
 whole number, rounded because FHIR counts are integers; common for
 averages and annualised denominators), `bad_number`, `unmapped_org_unit`,
-`period_without_dates`, `invalid_id`; for `locations`, `bad_geometry`,
+`period_without_dates`, `invalid_id`; for `locations`, `bad_geometry`
+(including a child boundary that cannot be read when filling a parent's),
 `parent_not_exported`, `below_facility_level` and `boundary_from_children`.
 
 The Sierra Leone demo instance is open, so the whole chain can be tried:

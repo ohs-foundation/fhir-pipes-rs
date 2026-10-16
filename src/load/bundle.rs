@@ -66,17 +66,25 @@ impl Bundle {
     }
 }
 
-/// Every `reference` string in a resource, as `Type/id` (the last two
-/// segments, after any `/_history/<v>` is cut off).
+/// The type and id a reference string points at: its last two segments,
+/// after any `/_history/<v>` is cut off. `None` without a type segment.
+pub fn type_and_id(reference: &str) -> Option<(&str, &str)> {
+    let r = reference.split("/_history/").next().unwrap_or(reference);
+    let mut parts = r.rsplit('/');
+    match (parts.next(), parts.next()) {
+        (Some(id), Some(t)) => Some((t, id)),
+        _ => None,
+    }
+}
+
+/// Every `reference` string in a resource, as `Type/id` (see `type_and_id`).
 fn references(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Object(o) => {
             for (k, x) in o {
                 match (k.as_str(), x) {
                     ("reference", Value::String(r)) => {
-                        let r = r.split("/_history/").next().unwrap_or(r);
-                        let mut parts = r.rsplit('/');
-                        if let (Some(id), Some(t)) = (parts.next(), parts.next()) {
+                        if let Some((t, id)) = type_and_id(r) {
                             out.push(format!("{t}/{id}"));
                         }
                     }
