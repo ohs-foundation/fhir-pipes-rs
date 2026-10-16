@@ -357,16 +357,22 @@ fn run_on_files(
 
 /// Read `files` in order and hand their resources to `f` a chunk at a time:
 /// an NDJSON file (by its `.ndjson` extension) a chunk of lines at a time,
-/// parsed on `threads` threads, any other file whole. A Bundle or an array
-/// is handed on as its resources. Returns the number of resources.
+/// parsed on `threads` threads, other files whole, several small ones
+/// together, up to a chunk's worth of resources. A Bundle or an array is
+/// handed on as its resources. Returns the number of resources.
 fn for_each_chunk(
     files: &[PathBuf],
     threads: usize,
     mut f: impl FnMut(Vec<serde_json::Value>) -> Result<()>,
 ) -> Result<usize> {
     let mut count = 0;
+    // Resources of JSON files not yet handed on.
+    let mut pending = Vec::new();
     for file in files {
         if file.extension().is_some_and(|x| x == "ndjson") {
+            if !pending.is_empty() {
+                f(std::mem::take(&mut pending))?;
+            }
             for chunk in ndjson::open(file)? {
                 let mut resources = Vec::new();
                 for value in chunk?.values(threads)? {
@@ -376,11 +382,16 @@ fn for_each_chunk(
                 f(resources)?;
             }
         } else {
-            let mut resources = Vec::new();
-            load_json_file(file, &mut resources)?;
-            count += resources.len();
-            f(resources)?;
+            let before = pending.len();
+            load_json_file(file, &mut pending)?;
+            count += pending.len() - before;
+            if pending.len() >= ndjson::CHUNK_LINES {
+                f(std::mem::take(&mut pending))?;
+            }
         }
+    }
+    if !pending.is_empty() {
+        f(pending)?;
     }
     Ok(count)
 }
