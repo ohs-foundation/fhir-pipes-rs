@@ -12,6 +12,8 @@ use serde::Deserialize;
 use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
 use crate::extract::google::{self, Credentials};
 
+use super::Step;
+
 /// The config file (`fhir-pipes.toml`). Every field is optional.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -257,15 +259,42 @@ pub struct Database {
 pub struct Hook {
     pub name: String,
     /// Run only when this step ran (e.g. `locations`). Unset: always.
-    pub after: Option<String>,
+    #[serde(default, deserialize_with = "hook_after")]
+    pub after: Option<Step>,
     /// The command and its arguments. A program path with a `/` is relative to
     /// the config file.
     pub run: Vec<String>,
 }
 
+/// A hook's `after`: a step that runs before the hooks, in any case
+/// (`Views` is `views`). `hooks` and `push` are refused, since a hook could
+/// never run after either.
+fn hook_after<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Step>, D::Error> {
+    use clap::ValueEnum;
+    let name = String::deserialize(d)?;
+    match Step::from_str(&name, true) {
+        Ok(step) if !matches!(step, Step::Hooks | Step::Push) => Ok(Some(step)),
+        _ => {
+            let steps: Vec<&str> = Step::value_variants()
+                .iter()
+                .filter(|s| !matches!(s, Step::Hooks | Step::Push))
+                .map(|s| s.name())
+                .collect();
+            Err(serde::de::Error::custom(format!(
+                "`after = \"{name}\"`: a hook runs after one of {}, which run before the hooks",
+                steps.join(", ")
+            )))
+        }
+    }
+}
+
 /// Everything a run needs, resolved.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// Absolute, since the hooks get it as DATA and run in the config file's
+    /// directory, not the current one.
     pub data: PathBuf,
     pub views: Option<PathBuf>,
     /// The file source: files, directories and glob patterns, resolved. Empty:
@@ -352,10 +381,6 @@ impl Settings {
     pub fn parquet_dir(&self) -> PathBuf {
         self.data.join("parquet")
     }
-
-    pub fn views_out_dir(&self) -> PathBuf {
-        self.data.join("views")
-    }
 }
 
 /// Read a config file, or the empty config when there is none.
@@ -429,6 +454,8 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             )
         }
     };
+    let data =
+        std::path::absolute(&data).with_context(|| format!("resolving {}", data.display()))?;
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
     let files = if o.input.is_empty() {
         file.source
@@ -593,7 +620,14 @@ mod tests {
     fn file_paths_resolve_against_the_file() {
         let file: File = toml::from_str("data = \"../data\"\nviews = \"/abs/views\"").unwrap();
         let s = settings(file, PathBuf::from("/repo/tools"), Overrides::default()).unwrap();
-        assert_eq!(s.data, PathBuf::from("/repo/tools/../data"));
+        // `data` is made absolute: as is on Unix; on Windows `/repo` gets the
+        // current drive and `..` is resolved, as std::path::absolute does.
+        if cfg!(windows) {
+            assert!(s.data.is_absolute(), "{}", s.data.display());
+            assert!(s.data.ends_with(r"repo\data"), "{}", s.data.display());
+        } else {
+            assert_eq!(s.data, PathBuf::from("/repo/tools/../data"));
+        }
         assert_eq!(s.views, Some(PathBuf::from("/abs/views")));
     }
 
@@ -804,6 +838,47 @@ mod tests {
         };
         let s = settings(file, PathBuf::from("/b"), o).unwrap();
         assert_eq!(s.auth_kind(), "none");
+    }
+
+    #[test]
+    fn a_relative_data_flag_is_made_absolute() {
+        let file: File = toml::from_str("").unwrap();
+        let o = Overrides {
+            data: Some(PathBuf::from("../data")),
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert!(s.data.is_absolute(), "{}", s.data.display());
+        // On Windows std::path::absolute resolves `..`; on Unix it keeps it.
+        let cwd = std::env::current_dir().unwrap();
+        let expected = if cfg!(windows) {
+            cwd.parent().unwrap().join("data")
+        } else {
+            cwd.join("../data")
+        };
+        assert_eq!(s.data, expected);
+    }
+
+    #[test]
+    fn a_hooks_after_is_a_step_before_the_hooks() {
+        let hook = |after: &str| {
+            toml::from_str::<File>(&format!(
+                "[[hooks]]\nname = \"h\"\nafter = \"{after}\"\nrun = [\"true\"]"
+            ))
+            .map(|f| f.hooks[0].after)
+        };
+        assert_eq!(hook("views").unwrap(), Some(Step::Views));
+        assert_eq!(hook("Views").unwrap(), Some(Step::Views));
+        assert_eq!(hook("database").unwrap(), Some(Step::Database));
+        for bad in ["push", "hooks", "vews"] {
+            let err = hook(bad).unwrap_err().to_string();
+            assert!(
+                err.contains("a hook runs after one of locations, views"),
+                "{err}"
+            );
+        }
+        let none: File = toml::from_str("[[hooks]]\nname = \"h\"\nrun = [\"true\"]").unwrap();
+        assert_eq!(none.hooks[0].after, None);
     }
 
     #[test]

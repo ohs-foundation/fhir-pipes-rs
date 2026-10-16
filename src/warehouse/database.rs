@@ -7,6 +7,11 @@
 //! see the previous run's rows until the commit, then all of the new run's, and
 //! views or grants built on the tables survive, since they are not dropped
 //! unless their columns change. Column types come from the Parquet files.
+//!
+//! The DELETE leaves the old rows as dead tuples for autovacuum to reclaim.
+//! After the commit each loaded table is analyzed, so the planner's
+//! statistics describe the new rows at once rather than after autovacuum's
+//! next analyze.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -179,6 +184,8 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
     // First every table, so that indexes, which PostgreSQL names to avoid
     // the relations that exist, cannot take a name a table of this load needs.
     let mut created = Vec::new();
+    // The tables this load fills or empties, analyzed after the commit.
+    let mut loaded = Vec::new();
     for p in plans.iter().filter(|p| !p.files.is_empty()) {
         let existing = existing_columns(&mut tx, schema, &p.table).await?;
         let wanted: Vec<(String, String)> = p
@@ -226,6 +233,7 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
             if table_exists(&mut tx, schema, &p.table).await? {
                 exec(&mut tx, &format!("DELETE FROM {name}")).await?;
                 println!("   {} → {schema}.{} (0 rows)", p.table, p.table);
+                loaded.push(name);
             } else {
                 println!(
                     "   {}: no files to take its columns from, not created; run the views step",
@@ -237,8 +245,14 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
         exec(&mut tx, &format!("DELETE FROM {name}")).await?;
         let rows = copy(&mut tx, &name, p).await?;
         println!("   {} → {schema}.{} ({rows} rows)", p.table, p.table);
+        loaded.push(name);
     }
     tx.commit().await.context("committing")?;
+    // Outside the load's transaction, so the lock it held is released and
+    // readers see the new rows before this finishes.
+    for name in loaded {
+        exec(&mut conn, &format!("ANALYZE {name}")).await?;
+    }
     Ok(())
 }
 
@@ -347,20 +361,23 @@ fn csv(batch: &RecordBatch) -> Result<String> {
                 DataType::Timestamp(unit, tz) => {
                     let c = column.as_ref();
                     let micros = match unit {
-                        TimeUnit::Second => {
-                            c.as_primitive::<TimestampSecondType>().value(row) * 1_000_000
-                        }
-                        TimeUnit::Millisecond => {
-                            c.as_primitive::<TimestampMillisecondType>().value(row) * 1_000
-                        }
+                        TimeUnit::Second => c
+                            .as_primitive::<TimestampSecondType>()
+                            .value(row)
+                            .checked_mul(1_000_000),
+                        TimeUnit::Millisecond => c
+                            .as_primitive::<TimestampMillisecondType>()
+                            .value(row)
+                            .checked_mul(1_000),
                         TimeUnit::Microsecond => {
-                            c.as_primitive::<TimestampMicrosecondType>().value(row)
+                            Some(c.as_primitive::<TimestampMicrosecondType>().value(row))
                         }
                         TimeUnit::Nanosecond => {
-                            c.as_primitive::<TimestampNanosecondType>().value(row) / 1_000
+                            Some(c.as_primitive::<TimestampNanosecondType>().value(row) / 1_000)
                         }
                     };
-                    let t = chrono::DateTime::from_timestamp_micros(micros)
+                    let t = micros
+                        .and_then(chrono::DateTime::from_timestamp_micros)
                         .context("timestamp out of range")?;
                     // An instant (with a time zone) as UTC; a local time as is.
                     out.push_str(
@@ -401,7 +418,8 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{
-        BooleanArray, Date32Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        BooleanArray, Date32Array, Float64Array, Int64Array, StringArray,
+        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampSecondArray,
     };
     use arrow::datatypes::{Field, Schema};
 
@@ -444,6 +462,30 @@ mod tests {
             csv(&batch).unwrap(),
             "\"a \"\"b\"\", c\",1,41.735497,true,2020-05-01,2020-05-01 00:00:00.500000+00\n\"\",,NaN,false,,\n,-3,,,,\n"
         );
+    }
+
+    #[test]
+    fn a_timestamp_too_large_for_microseconds_is_an_error() {
+        let batch = |array: Arc<dyn Array>| {
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "t",
+                array.data_type().clone(),
+                true,
+            )]));
+            RecordBatch::try_new(schema, vec![array]).unwrap()
+        };
+        for array in [
+            Arc::new(TimestampSecondArray::from(vec![i64::MAX / 1_000])) as Arc<dyn Array>,
+            Arc::new(TimestampMillisecondArray::from(vec![i64::MAX / 10])),
+        ] {
+            let err = csv(&batch(array)).unwrap_err();
+            assert!(err.to_string().contains("timestamp out of range"), "{err}");
+        }
+        let ok = csv(&batch(Arc::new(TimestampSecondArray::from(vec![
+            1_588_291_200,
+        ]))))
+        .unwrap();
+        assert_eq!(ok, "2020-05-01 00:00:00.000000\n");
     }
 
     #[test]
