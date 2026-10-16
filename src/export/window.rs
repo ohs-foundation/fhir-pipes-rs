@@ -551,14 +551,7 @@ mod tests {
             let offset: usize = get("_offset").first().map_or(0, |c| c.parse().unwrap());
             let mut page: Vec<&(String, String)> =
                 rows.iter().skip(offset).take(count).copied().collect();
-            if windowed
-                && offset == 0
-                && !page.is_empty()
-                && self
-                    .shorten
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                    .is_ok()
-            {
+            if windowed && offset == 0 && !page.is_empty() && take_one(&self.shorten) {
                 page.remove(0);
             }
             let mut bundle = serde_json::json!({
@@ -924,5 +917,18 @@ mod tests {
         windows(&r);
         assert_eq!(r.lines.len(), 6000);
         assert_eq!(fake.most.load(Ordering::SeqCst), 2);
+    }
+
+    /// Take one from `n` if it is above zero. A compare-exchange loop rather
+    /// than `fetch_update`, which newer toolchains deprecate under another name.
+    fn take_one(n: &AtomicUsize) -> bool {
+        let mut now = n.load(Ordering::SeqCst);
+        while now > 0 {
+            match n.compare_exchange(now, now - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return true,
+                Err(seen) => now = seen,
+            }
+        }
+        false
     }
 }
