@@ -5,7 +5,8 @@
 //! the computed delay); any other status is final. With a limit
 //! (`with_concurrency`, for `export --concurrency`) the threads sharing a
 //! client keep at most that many requests in flight, and a Retry-After pauses
-//! them all.
+//! them all. The Authorization header is chosen for each attempt once it is
+//! admitted, so a request that waited is not sent with an expired token.
 //!
 //! The bearer token is either fixed (`--token`), obtained with the OAuth
 //! client-credentials grant (`--client-id`), or obtained from Google
@@ -252,6 +253,19 @@ struct GateState {
     limit: usize,
     in_flight: usize,
     paused_until: Option<Instant>,
+}
+
+/// What `retrying` does before each attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    /// Waits for a place in the gate, then adds the Authorization header as
+    /// it is then, renewing a token that is due.
+    Authorized,
+    /// Waits for a place; no credentials (a signed storage URL).
+    Anonymous,
+    /// Neither: a token request. It runs while a request holds a place and
+    /// the token lock, so it must not wait for another place.
+    Token,
 }
 
 /// A place in the gate, given back when dropped.
@@ -552,7 +566,6 @@ impl FhirClient {
         url: &str,
         deadline: Option<Instant>,
     ) -> std::result::Result<Exchange, FetchError> {
-        let auth = self.authorization()?;
         let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let mut last = None;
         for attempt in 1..=self.retries {
@@ -563,10 +576,11 @@ impl FhirClient {
                 }
                 request = request.timeout(self.timeout.min(left));
             }
-            if let Some(v) = &auth {
-                request = self.authorize(request, v);
-            }
             let pass = self.enter();
+            // After the wait for a place, which can outlast a token.
+            if let Some(v) = self.authorization()? {
+                request = self.authorize(request, &v);
+            }
             match request.send() {
                 Ok(resp) => return exchanged(resp),
                 Err(e) => {
@@ -604,11 +618,12 @@ impl FhirClient {
         let body = |mut resp: Response| {
             read(&mut resp).map_err(|e| FetchError::Transport(format!("reading body: {e}")))
         };
-        if authorize {
-            self.send(request, body)
+        let attempt = if authorize {
+            Attempt::Authorized
         } else {
-            self.retrying(request, body)
-        }
+            Attempt::Anonymous
+        };
+        self.retrying(attempt, request, body)
     }
 
     /// One token request, with the retry policy. Returns the Authorization
@@ -621,6 +636,7 @@ impl FhirClient {
         let started = Instant::now();
         let post = |url: &str, form: String| {
             self.retrying(
+                Attempt::Token,
                 || {
                     self.http
                         .post(url)
@@ -638,6 +654,7 @@ impl FhirClient {
                 sa.token_form().map_err(FetchError::Transport)?,
             )?,
             Grant::Metadata { url } => self.retrying(
+                Attempt::Token,
                 || {
                     self.http
                         .get(url)
@@ -685,21 +702,13 @@ impl FhirClient {
         }
     }
 
-    /// The retry loop with the Authorization header added. The header is
-    /// chosen once per call, so every attempt carries the same token.
+    /// The retry loop with the Authorization header added to every attempt.
     fn send<T>(
         &self,
         request: impl Fn() -> RequestBuilder,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
-        let auth = self.authorization()?;
-        self.retrying(
-            || match &auth {
-                Some(v) => self.authorize(request(), v),
-                None => request(),
-            },
-            success,
-        )
+        self.retrying(Attempt::Authorized, request, success)
     }
 
     /// The Authorization header, and `x-goog-user-project` when set.
@@ -716,13 +725,26 @@ impl FhirClient {
     /// delay); any other status is final on the first response.
     fn retrying<T>(
         &self,
+        kind: Attempt,
         request: impl Fn() -> RequestBuilder,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
-            let pass = self.enter();
-            match request().send() {
+            let pass = match kind {
+                Attempt::Token => None,
+                Attempt::Authorized | Attempt::Anonymous => self.enter(),
+            };
+            let mut request = request();
+            // Chosen once admitted, for every attempt: the wait for a place
+            // and the sleeps between attempts can outlast a token, and the
+            // token is renewed here when it is due.
+            if kind == Attempt::Authorized
+                && let Some(v) = self.authorization()?
+            {
+                request = self.authorize(request, &v);
+            }
+            match request.send() {
                 Err(e) => {
                     drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
@@ -833,6 +855,65 @@ mod tests {
             started.elapsed()
         );
         client.get(&server.url_str("/slow")).unwrap();
+    }
+
+    #[test]
+    fn a_request_queued_past_its_tokens_expiry_is_sent_with_a_new_token() {
+        // Two-second tokens, renewed after one. A 429 with Retry-After: 3
+        // pauses the client; the request queued behind the pause is
+        // admitted after tok-1 has expired and must go out with tok-2. The
+        // gate has one place, so the renewal, made while that request holds
+        // it, must not wait for a place itself.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(2)
+                .respond_with(cycle![
+                    json_encoded(serde_json::json!({"access_token": "tok-1", "expires_in": 2})),
+                    json_encoded(serde_json::json!({"access_token": "tok-2", "expires_in": 2})),
+                ]),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/busy"))
+                .times(1)
+                .respond_with(status_code(429).insert_header("retry-after", "3")),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("authorization", "Bearer tok-1"))),
+            ])
+            .times(0..)
+            .respond_with(status_code(401)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("authorization", "Bearer tok-2"))),
+            ])
+            .times(1)
+            .respond_with(status_code(200)),
+        );
+        let client = FhirClient::new(
+            Auth::ClientCredentials {
+                token_url: server.url_str("/token"),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            1,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .with_concurrency(1);
+        client.get(&server.url_str("/busy")).unwrap_err();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| tx.send(client.get(&server.url_str("/fhir/Patient"))));
+            let got = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the queued request finished, not stuck behind its own renewal");
+            got.unwrap();
+        });
     }
 
     #[test]
