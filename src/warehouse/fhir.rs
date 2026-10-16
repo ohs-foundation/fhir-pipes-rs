@@ -59,8 +59,9 @@ pub fn locations(s: &Settings, out: &Path) -> Result<()> {
 }
 
 /// `fhir-pipes export --incremental`: each type to raw/<server>/<Type>.ndjson,
-/// downloading only what changed since the last refresh unless `full`. With
-/// `fetch = "bulk"`, through a Bulk Data `$export` (`export --bulk`).
+/// downloading only what changed since the last refresh unless `full`, with
+/// `server.concurrency` searches at a time. With `fetch = "bulk"`, through a
+/// Bulk Data `$export` (`export --bulk`).
 pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
     if types.is_empty() {
         return Ok(());
@@ -80,6 +81,7 @@ pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
         incremental: !s.full,
         bulk,
         bulk_timeout: s.bulk_timeout,
+        concurrency: s.concurrency,
         report: None,
         retries: DEFAULT_RETRIES,
         timeout: DEFAULT_TIMEOUT_SECS,

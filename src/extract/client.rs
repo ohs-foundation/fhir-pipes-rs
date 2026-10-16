@@ -2,7 +2,11 @@
 //! policy shared by paging, boundary fetches and load's bundle posts:
 //! connection errors, 5xx and 429 are retried with exponential backoff
 //! (0.5 s doubling, clamped to [0, 30] s, a numeric Retry-After replacing
-//! the computed delay); any other status is final.
+//! the computed delay); any other status is final. With a limit
+//! (`with_concurrency`, for `export --concurrency`) the threads sharing a
+//! client keep at most that many requests in flight, and a Retry-After pauses
+//! them all. The Authorization header is chosen for each attempt once it is
+//! admitted, so a request that waited is not sent with an expired token.
 //!
 //! The bearer token is either fixed (`--token`), obtained with the OAuth
 //! client-credentials grant (`--client-id`), or obtained from Google
@@ -17,7 +21,7 @@
 //! 202 and 429 the caller reads itself) and the output files.
 
 use std::io::Read as _;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
@@ -231,6 +235,98 @@ pub struct FhirClient {
     auth: Authorizer,
     /// `x-goog-user-project`, sent with the Authorization header.
     user_project: Option<HeaderValue>,
+    /// The limit on requests in flight, when the client has one.
+    gate: Option<Gate>,
+}
+
+/// A limit on the requests in flight from all the threads sharing a client
+/// (`export --concurrency`), and a pause they all wait out after a response
+/// with a Retry-After, so parallel downloads back off together. A request
+/// holds its place from sending until its body is read, not while it waits
+/// to retry.
+struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+struct GateState {
+    limit: usize,
+    in_flight: usize,
+    paused_until: Option<Instant>,
+}
+
+/// What `retrying` does before each attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    /// Waits for a place in the gate, then adds the Authorization header as
+    /// it is then, renewing a token that is due.
+    Authorized,
+    /// Waits for a place; no credentials (a signed storage URL).
+    Anonymous,
+    /// Neither: a token request. It runs while a request holds a place and
+    /// the token lock, so it must not wait for another place.
+    Token,
+}
+
+/// A place in the gate, given back when dropped.
+struct Pass<'a>(&'a Gate);
+
+impl Gate {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Mutex::new(GateState {
+                limit: limit.max(1),
+                in_flight: 0,
+                paused_until: None,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wait for a pause to end and a place to be free.
+    fn enter(&self) -> Pass<'_> {
+        let mut state = self.lock();
+        loop {
+            let now = Instant::now();
+            if let Some(until) = state.paused_until.filter(|u| *u > now) {
+                state = self
+                    .changed
+                    .wait_timeout(state, until - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+            } else if state.in_flight < state.limit {
+                state.in_flight += 1;
+                return Pass(self);
+            } else {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+    }
+
+    /// No request starts for `wait`, or until an earlier pause ends.
+    fn pause(&self, wait: Duration) {
+        let until = Instant::now() + wait;
+        let mut state = self.lock();
+        if state.paused_until.is_none_or(|u| u < until) {
+            state.paused_until = Some(until);
+        }
+    }
+}
+
+impl Drop for Pass<'_> {
+    fn drop(&mut self) {
+        self.0.lock().in_flight -= 1;
+        // All, not one: a thread waiting out a pause must not take the
+        // wake-up meant for one waiting for a place.
+        self.0.changed.notify_all();
+    }
 }
 
 pub fn backoff_delay(attempt: usize, retry_after: Option<f64>) -> Duration {
@@ -323,6 +419,7 @@ impl FhirClient {
             timeout,
             auth: Authorizer::None,
             user_project: None,
+            gate: None,
         };
         client.auth = match auth {
             Auth::None => Authorizer::None,
@@ -384,6 +481,18 @@ impl FhirClient {
             }
         };
         Ok(client)
+    }
+
+    /// At most `limit` requests in flight at once from all the threads using
+    /// this client, and a Retry-After on any response pauses them all.
+    pub fn with_concurrency(mut self, limit: usize) -> Self {
+        self.gate = Some(Gate::new(limit));
+        self
+    }
+
+    /// A place in the gate, when the client has one.
+    fn enter(&self) -> Option<Pass<'_>> {
+        self.gate.as_ref().map(Gate::enter)
     }
 
     /// A renewing authorizer, with its first token fetched now.
@@ -457,23 +566,27 @@ impl FhirClient {
         url: &str,
         deadline: Option<Instant>,
     ) -> std::result::Result<Exchange, FetchError> {
-        let auth = self.authorization()?;
         let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let mut last = None;
         for attempt in 1..=self.retries {
             let mut request = self.http.request(method.clone(), url);
+            let pass = self.enter();
+            // After the wait for a place, which can outlast a token.
+            if let Some(v) = self.authorization()? {
+                request = self.authorize(request, &v);
+            }
+            // After both: the wait and a token renewal take from the time
+            // left, and a request must not start after the deadline.
             if let Some(left) = left() {
                 if left.is_zero() {
                     break;
                 }
                 request = request.timeout(self.timeout.min(left));
             }
-            if let Some(v) = &auth {
-                request = self.authorize(request, v);
-            }
             match request.send() {
                 Ok(resp) => return exchanged(resp),
                 Err(e) => {
+                    drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
                         let wait = jittered(backoff_delay(attempt, None));
@@ -507,11 +620,12 @@ impl FhirClient {
         let body = |mut resp: Response| {
             read(&mut resp).map_err(|e| FetchError::Transport(format!("reading body: {e}")))
         };
-        if authorize {
-            self.send(request, body)
+        let attempt = if authorize {
+            Attempt::Authorized
         } else {
-            self.retrying(request, body)
-        }
+            Attempt::Anonymous
+        };
+        self.retrying(attempt, request, body)
     }
 
     /// One token request, with the retry policy. Returns the Authorization
@@ -524,6 +638,7 @@ impl FhirClient {
         let started = Instant::now();
         let post = |url: &str, form: String| {
             self.retrying(
+                Attempt::Token,
                 || {
                     self.http
                         .post(url)
@@ -541,6 +656,7 @@ impl FhirClient {
                 sa.token_form().map_err(FetchError::Transport)?,
             )?,
             Grant::Metadata { url } => self.retrying(
+                Attempt::Token,
                 || {
                     self.http
                         .get(url)
@@ -588,21 +704,13 @@ impl FhirClient {
         }
     }
 
-    /// The retry loop with the Authorization header added. The header is
-    /// chosen once per call, so every attempt carries the same token.
+    /// The retry loop with the Authorization header added to every attempt.
     fn send<T>(
         &self,
         request: impl Fn() -> RequestBuilder,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
-        let auth = self.authorization()?;
-        self.retrying(
-            || match &auth {
-                Some(v) => self.authorize(request(), v),
-                None => request(),
-            },
-            success,
-        )
+        self.retrying(Attempt::Authorized, request, success)
     }
 
     /// The Authorization header, and `x-goog-user-project` when set.
@@ -619,13 +727,28 @@ impl FhirClient {
     /// delay); any other status is final on the first response.
     fn retrying<T>(
         &self,
+        kind: Attempt,
         request: impl Fn() -> RequestBuilder,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
-            match request().send() {
+            let pass = match kind {
+                Attempt::Token => None,
+                Attempt::Authorized | Attempt::Anonymous => self.enter(),
+            };
+            let mut request = request();
+            // Chosen once admitted, for every attempt: the wait for a place
+            // and the sleeps between attempts can outlast a token, and the
+            // token is renewed here when it is due.
+            if kind == Attempt::Authorized
+                && let Some(v) = self.authorization()?
+            {
+                request = self.authorize(request, &v);
+            }
+            match request.send() {
                 Err(e) => {
+                    drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
                         std::thread::sleep(jittered(backoff_delay(attempt, None)));
@@ -645,6 +768,12 @@ impl FhirClient {
                             status,
                             body: read_error_body(resp),
                         });
+                        drop(pass);
+                        if let (Some(gate), Some(_)) = (&self.gate, ra) {
+                            // The server asked for a wait: every thread
+                            // sharing the client waits, not only this one.
+                            gate.pause(delay);
+                        }
                         if attempt < self.retries {
                             std::thread::sleep(delay);
                         }
@@ -670,6 +799,162 @@ mod tests {
 
     fn client(retries: usize) -> FhirClient {
         FhirClient::new(Auth::None, retries, std::time::Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn the_gate_lets_in_only_its_limit() {
+        let gate = Gate::new(2);
+        let a = gate.enter();
+        let _b = gate.enter();
+        let entered = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _c = gate.enter();
+                entered.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!entered.load(std::sync::atomic::Ordering::SeqCst));
+            drop(a);
+        });
+        assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_pause_holds_every_request_back() {
+        let gate = Gate::new(4);
+        gate.pause(Duration::from_millis(200));
+        // A shorter pause does not cut the longer one short.
+        gate.pause(Duration::from_millis(10));
+        let started = Instant::now();
+        let _pass = gate.enter();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn a_retry_after_pauses_the_other_threads_sharing_the_client() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/slow"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(429).insert_header("retry-after", "1"),
+                    status_code(200),
+                ]),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/other"))
+                .times(1)
+                .respond_with(status_code(200)),
+        );
+        let client = client(1).with_concurrency(4);
+        client.get(&server.url_str("/slow")).unwrap_err();
+        // The 429's Retry-After holds back a request to another URL too.
+        let started = Instant::now();
+        client.get(&server.url_str("/other")).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        client.get(&server.url_str("/slow")).unwrap();
+    }
+
+    #[test]
+    fn a_request_queued_past_its_tokens_expiry_is_sent_with_a_new_token() {
+        // Two-second tokens, renewed after one. A 429 with Retry-After: 3
+        // pauses the client; the request queued behind the pause is
+        // admitted after tok-1 has expired and must go out with tok-2. The
+        // gate has one place, so the renewal, made while that request holds
+        // it, must not wait for a place itself.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(2)
+                .respond_with(cycle![
+                    json_encoded(serde_json::json!({"access_token": "tok-1", "expires_in": 2})),
+                    json_encoded(serde_json::json!({"access_token": "tok-2", "expires_in": 2})),
+                ]),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/busy"))
+                .times(1)
+                .respond_with(status_code(429).insert_header("retry-after", "3")),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("authorization", "Bearer tok-1"))),
+            ])
+            .times(0..)
+            .respond_with(status_code(401)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("authorization", "Bearer tok-2"))),
+            ])
+            .times(1)
+            .respond_with(status_code(200)),
+        );
+        let client = FhirClient::new(
+            Auth::ClientCredentials {
+                token_url: server.url_str("/token"),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            1,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .with_concurrency(1);
+        client.get(&server.url_str("/busy")).unwrap_err();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| tx.send(client.get(&server.url_str("/fhir/Patient"))));
+            let got = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the queued request finished, not stuck behind its own renewal");
+            got.unwrap();
+        });
+    }
+
+    #[test]
+    fn a_token_renewal_that_uses_up_the_deadline_stops_the_exchange() {
+        // The first token is due at once; renewing it takes 900 ms, more
+        // than the exchange's 400 ms. The status URL must not be asked after
+        // the deadline.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/token"))
+                .times(2)
+                .respond_with(cycle![
+                    json_encoded(serde_json::json!({"access_token": "tok-1", "expires_in": 0})),
+                    delay_and_then(
+                        Duration::from_millis(900),
+                        json_encoded(serde_json::json!({"access_token": "tok-2", "expires_in": 0})),
+                    ),
+                ]),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/status"))
+                .times(0)
+                .respond_with(status_code(200)),
+        );
+        let client = FhirClient::new(
+            Auth::ClientCredentials {
+                token_url: server.url_str("/token"),
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+            },
+            3,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(400);
+        let err = client
+            .exchange_by(Method::GET, &server.url_str("/status"), Some(deadline))
+            .unwrap_err();
+        assert!(err.to_string().contains("deadline"), "{err}");
     }
 
     #[test]

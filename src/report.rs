@@ -46,6 +46,18 @@ impl Report {
         }
     }
 
+    /// Add another report's issues after this one's, as if they had been
+    /// added here: the per-kind cap applies, and counts stay exact.
+    pub fn append(&mut self, other: Report) {
+        for issue in &other.issues {
+            self.add(&issue.kind, &issue.location_id, &issue.detail);
+        }
+        for (kind, total) in other.counts {
+            let kept = other.retained.get(&kind).copied().unwrap_or(0);
+            *self.counts.entry(kind).or_default() += total - kept;
+        }
+    }
+
     pub fn counts(&self) -> &BTreeMap<String, usize> {
         &self.counts
     }
@@ -110,6 +122,23 @@ mod tests {
         assert_eq!(report.counts()["orphan"], MAX_RETAINED_ISSUES_PER_KIND + 5);
         assert_eq!(report.issues.len(), MAX_RETAINED_ISSUES_PER_KIND);
         assert_eq!(report.truncated()["orphan"], 5);
+    }
+
+    #[test]
+    fn appending_keeps_counts_exact_and_the_cap() {
+        let mut a = Report::default();
+        a.add("orphan", "a", "");
+        let mut b = Report::default();
+        for i in 0..(MAX_RETAINED_ISSUES_PER_KIND + 2) {
+            b.add("orphan", &format!("b-{i}"), "");
+        }
+        b.add("cycle", "c", "");
+        a.append(b);
+        assert_eq!(a.counts()["orphan"], MAX_RETAINED_ISSUES_PER_KIND + 3);
+        assert_eq!(a.counts()["cycle"], 1);
+        assert_eq!(a.issues[0].location_id, "a");
+        assert_eq!(a.issues.len(), MAX_RETAINED_ISSUES_PER_KIND + 1);
+        assert_eq!(a.truncated()["orphan"], 3);
     }
 
     #[test]

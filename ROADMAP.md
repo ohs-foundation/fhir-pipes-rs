@@ -19,6 +19,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Download only what changed (`_lastUpdated` watermark per type, merged by id); a type whose count differs from the server's is downloaded in full, which picks up deletions | `refresh`, `export --incremental` | 0.3.0 |
 | Download every resource of the given types as NDJSON | `export` | 0.3.0 |
 | Download through a system-level Bulk Data `$export` instead of search: `_since` the last export's `transactionTime`, merged by id, `deleted` resources removed, an interrupted export resumed from its saved status URL, cancelled after `--bulk-timeout`. Group and Patient exports are not supported yet | `export --bulk`, `refresh` (`fetch = "bulk"`) | next release |
+| Download several types side by side, and split a full download of a large type into `_lastUpdated` windows paged side by side, under one limit on requests in flight that also honours `Retry-After` (#30) | `export --concurrency`, `refresh` (`server.concurrency`) | next release |
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
 | Build the warehouse from NDJSON and Bundle files instead of a server (`[source] files`, `--input`): the same reader as `views run --input`, duplicates by id resolved by `meta.lastUpdated`, the Location registry from the files' Locations, an empty table for a type the files lack (#32) | `refresh` | next release |
 | A refresh is all-or-nothing: tables, `manifest.json` and `catalog.sql` are staged and swapped in together at the end, so a run that fails leaves the previous run's warehouse as it was (#35) | `refresh` | next release |
@@ -121,6 +122,7 @@ on its own outstanding list, next to fhir-pipes.
 | Resolve `urn:uuid` references inside transaction and collection Bundles | Yes, for `views run --input` and `refresh` from files (next release) |
 | Incremental merge by id and `meta.lastUpdated`, dropping deleted resources | Yes, per type, with a `_lastUpdated` watermark; deletions are found when the server's count differs, then the type is downloaded in full. With `$export`, the manifest's `deleted` resources are removed without a full download (next release) |
 | Nested Parquet-on-FHIR tables (SQL-on-FHIR v1) | No; see [Next](#next) |
+| Fetch in parallel (the Java pipeline pages HAPI with `_getpagesoffset` segments and fetches types in parallel) | Yes, on any server: types side by side, and a large type split into `_lastUpdated` windows (`export --concurrency`, `refresh`; next release). `_getpagesoffset` is not used, since it relies on HAPI's expiring search cache |
 | Flat view tables in Parquet | Yes, Hive-partitioned, with a manifest |
 | `schema.sql` (`CREATE TABLE` per view) | `views sql --ddl` (ANSI, PostgreSQL or DuckDB types) |
 | `init_duckdb.sql` (a DuckDB view per table) | `catalog.sql`, with paths for a bucket URL, and an optional `catalog.duckdb` to attach by URL (next release) |
