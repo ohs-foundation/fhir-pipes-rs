@@ -144,7 +144,7 @@ pub enum Step {
 }
 
 impl Step {
-    pub(crate) fn name(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Step::Locations => "locations",
             Step::Views => "views",
