@@ -47,20 +47,18 @@ All notable changes to this project are documented here. The format follows
     and `` %`ext-name` ``, and names bound by `defineVariable()` in the same
     path, are passed to the engine instead of failing as undefined
     constants. The SQL generator still rejects them.
-  - `ofType(T)` reads a choice element under its JSON name
-    (`value.ofType(Quantity)` → `valueQuantity`) only when `T` is a FHIR
-    datatype and the element is stored under that name.
-    `contained.ofType(Practitioner)` filters by resource type,
-    `name.family.ofType(string)` reads `family`, and text inside string
-    literals is not rewritten. On an element that is not a choice element,
-    the type is checked against the JSON form of the value (a JSON string
-    fits any string-based type), since there is no FHIR model.
+  - `ofType(T)` is joined onto the element name (`value.ofType(Quantity)` →
+    `valueQuantity`) only when `T` is a FHIR datatype, and not inside string
+    literals. `contained.ofType(Practitioner)` is left to the engine and
+    filters by resource type. On an element that is not a choice element,
+    `ofType` with a datatype still finds nothing; see the README's known
+    limitations.
   - `lowBoundary()` / `highBoundary()` accept any expression as their base,
     such as `(1.5 + 1).lowBoundary()`.
   - Inside `forEach`, `forEachOrNull` and `repeat`, the resource stays the
     root: `%resource` is the resource, and `getReferenceKey()` resolves a `#`
-    reference against the resource's `contained`. `$this` is still the
-    element.
+    reference against the resource's `contained`. `$this` and `%context`
+    are still the element, also inside a lambda such as `where()`.
 
 ## [0.1.2]
 

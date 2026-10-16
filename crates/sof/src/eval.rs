@@ -39,7 +39,7 @@ use octofhir_fhirpath::{
 use serde_json::Value;
 
 use crate::column::{ColumnInfo, ColumnType};
-use crate::lexer::{Kind, Token, tokens};
+use crate::lexer::{Kind, Token, tokens, variable_name};
 use crate::runner::ViewResult;
 use crate::sql_generator::{build_constants, substitute_constants_keeping};
 use crate::view_definition::{Column, SelectColumn, ViewDefinition};
@@ -163,7 +163,6 @@ impl CompiledView {
         let mut registry = create_function_registry();
         registry.register_lazy_function(Arc::new(GetResourceKey));
         registry.register_lazy_function(Arc::new(GetReferenceKey));
-        registry.register_lazy_function(Arc::new(ChoiceOfType));
         // SoF-divergent function semantics: override the engine's defaults to
         // match the SQL-on-FHIR conformance suite (join() with no separator,
         // and the spec's precision-boundary rules for low/highBoundary).
@@ -178,6 +177,7 @@ impl CompiledView {
             constants,
             engine,
             model,
+            uses_context: AtomicBool::new(false),
         };
 
         let shape = shape(&view.select)?;
@@ -433,7 +433,16 @@ struct Evaluator {
     constants: std::collections::HashMap<String, String>,
     engine: FhirPathEngine,
     model: Arc<dyn ModelProvider + Send + Sync>,
+    /// Whether any path uses `%context`, so contexts bind [`CONTEXT_VAR`].
+    /// Set while the view compiles.
+    uses_context: AtomicBool,
 }
+
+/// The variable `%context` is renamed to ([`rename_context`]). Each context
+/// binds it to its own focus: the engine's own `%context` is an alias of the
+/// root, which child contexts share, while FHIRPath defines `%context` as the
+/// node the expression started from.
+const CONTEXT_VAR: &str = "_sofContext";
 
 /// A view path compiled for the engine: either a plain expression, or a
 /// `lowBoundary()`/`highBoundary()` call whose base is evaluated first and the
@@ -511,7 +520,14 @@ impl Evaluator {
         let substituted = substitute_constants_keeping(path, &self.constants, |name| {
             is_environment_variable(name) || defined.iter().any(|d| d == name)
         })?;
-        Ok(rewrite_of_type(&substituted))
+        let prepared = rewrite_of_type(&substituted);
+        Ok(match rename_context(&prepared) {
+            Some(renamed) => {
+                self.uses_context.store(true, Ordering::Relaxed);
+                renamed
+            }
+            None => prepared,
+        })
     }
 
     /// Parse a prepared expression into a plan the engine runs directly.
@@ -603,9 +619,12 @@ impl Evaluator {
             None,
             None,
         );
-        // The engine binds %resource and %context to the root itself, but
-        // not %rootResource.
+        // The engine binds %resource to the root itself, but not
+        // %rootResource.
         ctx.set_variable("rootResource".to_string(), root.clone());
+        if self.uses_context.load(Ordering::Relaxed) {
+            ctx.set_variable(CONTEXT_VAR.to_string(), root.clone());
+        }
         // %rowIndex: the engine resolves `%rowIndex` by stripping `%` and
         // looking up `rowIndex`.
         ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(0));
@@ -620,7 +639,7 @@ impl Evaluator {
     /// As a child of the resource's context, it keeps the resource as its
     /// root: `%resource` inside `forEach` is the resource, and
     /// `getReferenceKey()` resolves a `#` reference against the resource's
-    /// `contained`.
+    /// `contained`. `%context` is the focus, the node the path starts from.
     fn context(
         &self,
         root: &EvaluationContext,
@@ -630,6 +649,9 @@ impl Evaluator {
         let ctx = root.create_child_context(Collection::single(focus.clone()));
         // Without this, `$this` outside a lambda would resolve to the root.
         ctx.set_this(focus.clone());
+        if self.uses_context.load(Ordering::Relaxed) {
+            ctx.set_variable(CONTEXT_VAR.to_string(), focus.clone());
+        }
         ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(rid));
         ctx
     }
@@ -914,6 +936,31 @@ fn value_to_json(v: &FhirPathValue) -> Value {
     }
 }
 
+/// `path` with each `%context` (or ``%`context` ``) renamed to
+/// [`CONTEXT_VAR`], or `None` if it has none. Run after constant
+/// substitution, so a view constant named `context` has already been
+/// replaced.
+fn rename_context(path: &str) -> Option<String> {
+    let toks = tokens(path);
+    let is_context = |t: &Token| {
+        let text = &path[t.span.clone()];
+        t.kind == Kind::Variable && text.starts_with('%') && variable_name(text) == "context"
+    };
+    if !toks.iter().any(is_context) {
+        return None;
+    }
+    let mut out = String::with_capacity(path.len() + 8);
+    for t in &toks {
+        if is_context(t) {
+            out.push('%');
+            out.push_str(CONTEXT_VAR);
+        } else {
+            out.push_str(&path[t.span.clone()]);
+        }
+    }
+    Some(out)
+}
+
 /// FHIRPath environment variables the engine resolves itself, which constant
 /// substitution leaves in place.
 fn is_environment_variable(name: &str) -> bool {
@@ -987,19 +1034,19 @@ fn visit(node: &ExpressionNode, f: &mut impl FnMut(&ExpressionNode)) {
     }
 }
 
-/// The function [`rewrite_of_type`] calls; see [`ChoiceOfType`].
-const CHOICE_OF_TYPE: &str = "_sofOfType";
-
-/// Rewrite `element.ofType(T)`, where `T` is a FHIR datatype, so that a
-/// choice element is found under its JSON name: `value.ofType(Quantity)`
-/// becomes `_sofOfType(valueQuantity, value, Quantity)` (see [`ChoiceOfType`]),
-/// which on each input item reads `valueQuantity` when the item has it, as
-/// the FHIR JSON form of a choice element, and otherwise `value`, kept when
-/// its JSON form fits the type. So `value.ofType(Quantity)` gives the same
-/// values as `valueQuantity`, while `name.family.ofType(string)` reads
-/// `family`, not `familyString`. The type name is capitalized as the JSON
-/// name requires. The engine, on an `EmptyModelProvider`, cannot map choice
-/// elements itself, and its own `ofType` knows no FHIR datatypes.
+/// Rewrite `element.ofType(T)`, where `T` is a FHIR datatype, to the JSON
+/// name a choice element has for that type: `value.ofType(Quantity)` →
+/// `valueQuantity`, `value.ofType(string)` → `valueString`. The type name is
+/// capitalized as the JSON name requires. The engine, on an
+/// `EmptyModelProvider`, cannot map choice elements itself.
+///
+/// Without a FHIR model there is no telling whether an element is a choice
+/// element, so the rewrite is made for any element; on one that is not
+/// (`name.family.ofType(string)` → `name.familyString`) it finds nothing.
+/// The engine's own `ofType` is no better there: with no model it compares
+/// the type with the element's name (`code.ofType(code)` on a
+/// CodeableConcept matches) or fails on most complex types. See the crate
+/// README's known limitations.
 ///
 /// The rewrite works on tokens, so string literals, backtick-quoted names and
 /// comments are left alone. `ofType` with a resource type
@@ -1027,10 +1074,8 @@ fn rewrite_of_type(path: &str) -> String {
         {
             let (element, ty_name) = (text(element), text(ty));
             out.push_str(&path[copied..sig[k].span.start]);
-            out.push_str(&format!(
-                "{CHOICE_OF_TYPE}({element}{}, {element}, {ty_name})",
-                capitalize_first(ty_name)
-            ));
+            out.push_str(element);
+            out.push_str(&capitalize_first(ty_name));
             copied = close.span.end;
             k += 6;
         } else {
@@ -1246,103 +1291,6 @@ impl LazyFunctionEvaluator for GetReferenceKey {
             std::sync::LazyLock::new(|| sof_fn_metadata("getReferenceKey", 0, Some(1)));
         &META
     }
-}
-
-/// `_sofOfType(choice, element, T)`, which [`rewrite_of_type`] writes for
-/// `element.ofType(T)` with `T` a FHIR datatype. For each input item: if the
-/// item has the field `choice` (`valueQuantity`), its value; else if it has
-/// `element`, those of its values whose JSON form fits `T`
-/// ([`json_form_fits`]); else nothing. The arguments are names read off the
-/// AST; the fields are read through the engine, so the values are those of
-/// plain navigation.
-struct ChoiceOfType;
-
-#[async_trait]
-impl LazyFunctionEvaluator for ChoiceOfType {
-    async fn evaluate(
-        &self,
-        input: Collection,
-        context: &EvaluationContext,
-        args: Vec<ExpressionNode>,
-        evaluator: AsyncNodeEvaluator<'_>,
-    ) -> octofhir_fhirpath::Result<octofhir_fhirpath::EvaluationResult> {
-        let (Some(choice), Some(element), Some(ty)) = (args.first(), args.get(1), args.get(2))
-        else {
-            return Err(FhirPathError::evaluation_error(
-                FP0053,
-                "_sofOfType() takes three arguments",
-            ));
-        };
-        let (choice_name, element_name) = match (choice, element) {
-            (ExpressionNode::Identifier(c), ExpressionNode::Identifier(e)) => (&c.name, &e.name),
-            _ => {
-                return Err(FhirPathError::evaluation_error(
-                    FP0053,
-                    "_sofOfType() takes element names",
-                ));
-            }
-        };
-        let mut values = Vec::new();
-        for item in input.iter() {
-            let node = value_node(item);
-            let plain = if node.get(choice_name).is_some() {
-                false
-            } else if node.get(element_name).is_some() {
-                true
-            } else {
-                continue;
-            };
-            let ctx = context.create_child_context(Collection::single(item.clone()));
-            if plain {
-                let ty = ast_type_name(ty)?;
-                let found = evaluator.evaluate(element, &ctx).await?.value;
-                values.extend(found.into_iter().filter(|v| json_form_fits(v, &ty)));
-            } else {
-                values.extend(evaluator.evaluate(choice, &ctx).await?.value);
-            }
-        }
-        Ok(octofhir_fhirpath::EvaluationResult::from_values(values))
-    }
-
-    fn metadata(&self) -> &FunctionMetadata {
-        static META: std::sync::LazyLock<FunctionMetadata> =
-            std::sync::LazyLock::new(|| sof_fn_metadata(CHOICE_OF_TYPE, 3, Some(3)));
-        &META
-    }
-}
-
-/// Whether `v`, a value of an element that is not a choice element, can be of
-/// FHIR datatype `ty`. With no FHIR model the element's declared type is not
-/// known, so this checks the JSON form only: a JSON string fits any
-/// string-based primitive type (`string`, `code`, `date`, ...), a JSON object
-/// any complex type.
-fn json_form_fits(v: &FhirPathValue, ty: &str) -> bool {
-    match ty {
-        "boolean" | "Boolean" => matches!(v, FhirPathValue::Boolean(..)),
-        "integer" | "unsignedInt" | "positiveInt" | "Integer" => {
-            matches!(v, FhirPathValue::Integer(..))
-        }
-        "decimal" | "Decimal" => {
-            matches!(v, FhirPathValue::Integer(..) | FhirPathValue::Decimal(..))
-        }
-        "String" | "Date" | "DateTime" | "Time" => string_form(v),
-        _ if ty.starts_with(|c: char| c.is_ascii_lowercase()) => string_form(v),
-        _ => match v {
-            FhirPathValue::Resource(node, _, _) => node.is_object(),
-            FhirPathValue::Quantity { .. } => true,
-            _ => false,
-        },
-    }
-}
-
-fn string_form(v: &FhirPathValue) -> bool {
-    matches!(
-        v,
-        FhirPathValue::String(..)
-            | FhirPathValue::Date(..)
-            | FhirPathValue::DateTime(..)
-            | FhirPathValue::Time(..)
-    )
 }
 
 /// Extract a bare type name from an argument node (`Patient`, `Organization`,
@@ -1711,17 +1659,11 @@ mod tests {
     #[test]
     fn of_type_is_rewritten_only_for_datatypes_on_element_names() {
         for (path, want) in [
-            (
-                "value.ofType(Quantity).value",
-                "_sofOfType(valueQuantity, value, Quantity).value",
-            ),
-            (
-                "a.value . ofType ( dateTime )",
-                "a._sofOfType(valueDateTime, value, dateTime)",
-            ),
+            ("value.ofType(Quantity).value", "valueQuantity.value"),
+            ("a.value . ofType ( dateTime )", "a.valueDateTime"),
             (
                 "where(value.ofType(integer) > 1)",
-                "where(_sofOfType(valueInteger, value, integer) > 1)",
+                "where(valueInteger > 1)",
             ),
             // Left to the engine.
             (
@@ -1736,6 +1678,15 @@ mod tests {
         ] {
             assert_eq!(rewrite_of_type(path), want, "{path}");
         }
+    }
+
+    #[test]
+    fn context_is_renamed_outside_literals() {
+        assert_eq!(
+            rename_context("%context.a | %`context`.b | '%context' | %contextual").as_deref(),
+            Some("%_sofContext.a | %_sofContext.b | '%context' | %contextual")
+        );
+        assert_eq!(rename_context("%resource.id // %context"), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
-  "title": "of_type_memory",
-  "description": "ofType() with a resource type, or on an element that is not a choice element, keeps its FHIRPath meaning rather than being joined onto the element name (issue #57). The SQL generator still joins the type onto the element name.",
+  "title": "of_type_non_choice",
+  "description": "ofType() with a resource type is left to the FHIRPath engine rather than joined onto the element name, and ofType() with a FHIR datatype on an element that is not a choice element gives no false matches (issue #57, PR #74 review). Without a FHIR model the engine cannot tell whether an element is a choice element, so ofType with a datatype on any other element finds nothing, even when the type is right (a known limitation, see the crate README). The SQL generator still joins resource types onto the element name.",
   "resources": [
     {
       "resourceType": "Patient",
@@ -41,6 +41,19 @@
           "family": "Doe"
         }
       ]
+    },
+    {
+      "resourceType": "Observation",
+      "id": "o1",
+      "status": "final",
+      "code": {
+        "coding": [
+          {
+            "system": "http://loinc.org",
+            "code": "8867-4"
+          }
+        ]
+      }
     }
   ],
   "tests": [
@@ -77,7 +90,7 @@
       ]
     },
     {
-      "title": "ofType on an element that is not a choice element",
+      "title": "ofType(Quantity) on a HumanName element finds nothing",
       "view": {
         "resource": "Patient",
         "select": [
@@ -89,7 +102,99 @@
                 "type": "string"
               },
               {
-                "name": "family",
+                "name": "v",
+                "path": "name.ofType(Quantity).count()",
+                "type": "integer"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "v": 0
+        },
+        {
+          "id": "p2",
+          "v": 0
+        }
+      ]
+    },
+    {
+      "title": "ofType(code) on a string element finds nothing",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "v",
+                "path": "name.family.ofType(code)",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "v": null
+        },
+        {
+          "id": "p2",
+          "v": null
+        }
+      ]
+    },
+    {
+      "title": "ofType(code) on a string element does not pass a where filter",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "v",
+                "path": "id",
+                "type": "string"
+              }
+            ]
+          }
+        ],
+        "where": [
+          {
+            "path": "name.family.ofType(code).exists()"
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "title": "known limitation: ofType(string) on an element that is not a choice element finds nothing",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "v",
                 "path": "name.family.ofType(string)",
                 "type": "string"
               }
@@ -100,11 +205,71 @@
       "expect": [
         {
           "id": "p1",
-          "family": "50%off"
+          "v": null
         },
         {
           "id": "p2",
-          "family": "Doe"
+          "v": null
+        }
+      ]
+    },
+    {
+      "title": "known limitation: ofType with a complex type on an element that is not a choice element finds nothing",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "v",
+                "path": "name.ofType(HumanName).count()",
+                "type": "integer"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "v": 0
+        },
+        {
+          "id": "p2",
+          "v": 0
+        }
+      ]
+    },
+    {
+      "title": "ofType(code) on a CodeableConcept element named code finds nothing",
+      "view": {
+        "resource": "Observation",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "v",
+                "path": "code.ofType(code).count()",
+                "type": "integer"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "o1",
+          "v": 0
         }
       ]
     }
