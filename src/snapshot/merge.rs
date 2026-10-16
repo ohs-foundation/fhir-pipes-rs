@@ -12,6 +12,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
 use crate::fhir::location::{GEOJSON_CONTENT_TYPE, is_boundary_extension};
 use crate::fhir::ndjson::NdjsonReader;
+use crate::fs::AtomicFile;
 use crate::report::Report;
 use crate::snapshot::Snapshot;
 use crate::snapshot::instant::later;
@@ -177,7 +178,7 @@ pub fn merge_file(
         boundary_extensions,
         drop: &HashSet::new(),
     };
-    merge_cleaning_up(files, &input, report)
+    merge_into(files, &input, report)
 }
 
 /// `merge_file` for a file without boundaries, also leaving out the
@@ -198,19 +199,7 @@ pub fn merge_file_dropping(
         boundary_extensions: &[],
         drop,
     };
-    merge_cleaning_up(files, &input, report)
-}
-
-fn merge_cleaning_up(
-    files: &MergeFiles,
-    input: &MergeInput,
-    report: &mut Report,
-) -> Result<MergeStats> {
-    let result = merge_into(files, input, report);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&files.tmp);
-    }
-    result
+    merge_into(files, &input, report)
 }
 
 fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Result<MergeStats> {
@@ -222,7 +211,8 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
         last_index.insert(&n.id, i);
     }
 
-    let file = std::fs::File::create(tmp).map_err(|e| PipesError::io(tmp, e))?;
+    // Removed when dropped by an error return before the commit.
+    let file = AtomicFile::create_at(&files.existing, files.tmp.clone())?;
     let mut out = std::io::BufWriter::new(file);
     let mut stats = MergeStats {
         total: 0,
@@ -328,20 +318,9 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
             "incoming file and page notes disagree; rerun extract".into(),
         ));
     }
-    out.flush().map_err(|e| PipesError::io(tmp, e))?;
-    let file = out
-        .into_inner()
-        .map_err(|e| PipesError::io(tmp, e.into_error()))?;
-    file.sync_all().map_err(|e| PipesError::io(tmp, e))?;
-    std::fs::rename(tmp, &files.existing).map_err(|e| PipesError::io(tmp, e))?;
-    // Best-effort, as in `State::write`: not every platform/filesystem
-    // supports fsync on a directory, and that's not worth failing an
-    // otherwise-successful merge over.
-    if let Some(dir) = files.existing.parent()
-        && let Ok(d) = std::fs::File::open(dir)
-    {
-        let _ = d.sync_all();
-    }
+    out.into_inner()
+        .map_err(|e| PipesError::io(tmp, e.into_error()))?
+        .commit()?;
     let _ = std::fs::remove_file(&files.incoming);
     Ok(stats)
 }

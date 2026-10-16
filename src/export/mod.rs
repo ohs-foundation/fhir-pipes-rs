@@ -108,11 +108,8 @@ impl ExportState {
 
     /// Written beside the target and renamed into place.
     fn write(&self, dir: &Path) -> Result<()> {
-        let path = dir.join(STATE_FILE);
-        let tmp = dir.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&tmp, text).map_err(|e| PipesError::io(&tmp, e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| PipesError::io(&path, e))
+        crate::fs::atomic_write(&dir.join(STATE_FILE), text)
     }
 }
 
@@ -418,15 +415,9 @@ fn export_all(
     out: &Path,
     report: &mut Report,
 ) -> Result<TypeState> {
-    let tmp = tmp_path(&args.out, resource_type);
-    let (paged, windows) = match download_all(client, args, resource_type, &tmp, report) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-    std::fs::rename(&tmp, out).map_err(|e| PipesError::io(out, e))?;
+    let tmp = crate::fs::AtomicFile::adopt(out, tmp_path(&args.out, resource_type));
+    let (paged, windows) = download_all(client, args, resource_type, tmp.tmp(), report)?;
+    tmp.commit()?;
     let total = paged.notes.len();
     // As in extract: a last page that was full with no next link may mean
     // the server stopped paging early, so only then is the count worth a

@@ -127,6 +127,8 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
             fs::remove_file(p).with_context(|| format!("removing {}", p.display()))?;
         }
     }
+    // Removed on any failure below; renamed into place at the end.
+    let file = crate::fs::AtomicFile::adopt(&target, tmp.clone());
     // DuckDB runs in the warehouse directory, so relative paths in the views
     // resolve against it; the database is named relative to it too, since
     // s.data may itself be relative.
@@ -149,13 +151,13 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
     // so its error output is the failure signal.
     let err = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() || !err.trim().is_empty() {
-        let _ = fs::remove_file(&tmp);
         bail!("building {DUCKDB_FILE} with duckdb: {}", err.trim());
     }
     if wal(&tmp).exists() {
         bail!("duckdb left {} behind", wal(&tmp).display());
     }
-    fs::rename(&tmp, &target).with_context(|| format!("writing {}", target.display()))?;
+    file.commit()
+        .with_context(|| format!("writing {}", target.display()))?;
     println!("   {DUCKDB_FILE}");
     Ok(())
 }

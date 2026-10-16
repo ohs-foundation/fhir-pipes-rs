@@ -58,23 +58,30 @@ pub fn read_text(r: impl Read + Send + 'static, gz: bool) -> Box<dyn BufRead + S
 /// A file being written, plain or gzip. `finish` completes the gzip
 /// stream and flushes; dropping it unfinished may leave the stream cut off,
 /// which is what a temporary file of a failed run is.
-pub enum Output {
-    Plain(BufWriter<File>),
-    Gz(Box<GzEncoder<BufWriter<File>>>),
+pub enum Output<W: Write = File> {
+    Plain(BufWriter<W>),
+    Gz(Box<GzEncoder<BufWriter<W>>>),
 }
 
-impl Output {
+#[cfg(test)]
+impl Output<File> {
     pub fn create(path: &Path, gz: bool) -> Result<Self> {
         let file = File::create(path).map_err(|e| PipesError::io(path, e))?;
-        let w = BufWriter::with_capacity(1 << 20, file);
-        Ok(if gz {
+        Ok(Self::new(file, gz))
+    }
+}
+
+impl<W: Write> Output<W> {
+    pub fn new(inner: W, gz: bool) -> Self {
+        let w = BufWriter::with_capacity(1 << 20, inner);
+        if gz {
             Output::Gz(Box::new(GzEncoder::new(w, Compression::default())))
         } else {
             Output::Plain(w)
-        })
+        }
     }
 
-    pub fn finish(self) -> std::io::Result<File> {
+    pub fn finish(self) -> std::io::Result<W> {
         let mut w = match self {
             Output::Plain(w) => w,
             Output::Gz(e) => e.finish()?,
@@ -84,7 +91,7 @@ impl Output {
     }
 }
 
-impl Write for Output {
+impl<W: Write> Write for Output<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Output::Plain(w) => w.write(buf),

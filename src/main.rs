@@ -6,6 +6,7 @@ mod error;
 mod export;
 mod extract;
 mod fhir;
+mod fs;
 mod geometry;
 mod import;
 mod index;

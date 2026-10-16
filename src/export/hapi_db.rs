@@ -716,7 +716,7 @@ async fn read_all(
     let mut total = 0usize;
     let mut watermark: Option<String> = None;
     let result = async {
-        let file = std::fs::File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
+        let file = crate::fs::AtomicFile::create_at(&out, tmp.clone())?;
         let mut w = std::io::BufWriter::new(file);
         read_rows(
             conn,
@@ -738,15 +738,12 @@ async fn read_all(
             },
         )
         .await?;
-        w.flush().map_err(|e| PipesError::io(&tmp, e))?;
-        drop(w);
-        std::fs::rename(&tmp, &out).map_err(|e| PipesError::io(&out, e))
+        w.into_inner()
+            .map_err(|e| PipesError::io(&tmp, e.into_error()))?
+            .commit()
     }
     .await;
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    result?;
     println!(
         "{resource_type}: {total} resources from the database -> {}",
         out.display()

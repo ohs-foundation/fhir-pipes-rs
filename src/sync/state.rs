@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PipesError, Result};
+use crate::fs::{AtomicFile, atomic_write};
 use crate::snapshot::same_server;
 
 const STATE_FILE: &str = ".sync-state.json";
@@ -70,11 +71,8 @@ impl SyncState {
 
     /// Written beside the target and renamed into place.
     pub fn write(&self, dir: &Path) -> Result<()> {
-        let path = dir.join(STATE_FILE);
-        let tmp = dir.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&tmp, text).map_err(|e| PipesError::io(&tmp, e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| PipesError::io(&path, e))
+        atomic_write(&dir.join(STATE_FILE), text)
     }
 
     fn sink(&self, url: &str) -> Option<&SinkState> {
@@ -159,17 +157,17 @@ fn read_synced(path: &Path) -> Result<Synced> {
 fn write_synced(path: &Path, synced: &Synced) -> Result<()> {
     let dir = path.parent().expect("a file in a directory");
     std::fs::create_dir_all(dir).map_err(|e| PipesError::io(dir, e))?;
-    let tmp = crate::fhir::ndjson::with_suffix(path, ".tmp");
     let mut rows: Vec<(&String, &String)> = synced.iter().collect();
     rows.sort_unstable();
-    let file = std::fs::File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
+    let file = AtomicFile::create(path)?;
+    let tmp = file.tmp().to_path_buf();
     let mut w = std::io::BufWriter::new(file);
     for (id, updated) in rows {
         writeln!(w, "{id}\t{updated}").map_err(|e| PipesError::io(&tmp, e))?;
     }
-    w.flush().map_err(|e| PipesError::io(&tmp, e))?;
-    drop(w);
-    std::fs::rename(&tmp, path).map_err(|e| PipesError::io(path, e))
+    w.into_inner()
+        .map_err(|e| PipesError::io(&tmp, e.into_error()))?
+        .commit()
 }
 
 #[cfg(test)]

@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use crate::cli::Dhis2Command;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{is_gz, read_text, with_suffix};
+use crate::fs::AtomicFile;
 use crate::profile::{Dhis2Profile, Profile};
 
 /// Instance names go into every id, so they are kept short.
@@ -212,11 +213,10 @@ pub fn write_ndjson<'a>(
 /// gzip file, and the length after each is a place an interrupted run can
 /// be cut back to, which the middle of a member is not.
 pub struct NdjsonWriter {
-    out: PathBuf,
     tmp: PathBuf,
-    file: Option<BufWriter<File>>,
+    file: Option<BufWriter<AtomicFile>>,
     /// The gzip member being written, holding the file meanwhile.
-    member: Option<GzEncoder<BufWriter<File>>>,
+    member: Option<GzEncoder<BufWriter<AtomicFile>>>,
     gz: bool,
     n: usize,
     /// Length of the file up to the last line written (plain), or the last
@@ -231,9 +231,8 @@ impl NdjsonWriter {
     }
 
     pub fn create(out: &Path) -> Result<Self> {
-        let tmp = Self::tmp_path(out);
-        let file = File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
-        Ok(Self::new(out, tmp, file, 0))
+        let file = AtomicFile::create_at(out, Self::tmp_path(out))?;
+        Ok(Self::new(out, file, 0))
     }
 
     /// Carries on with the temporary file of an interrupted run: cut back
@@ -255,13 +254,12 @@ impl NdjsonWriter {
         file.set_len(bytes).map_err(|e| PipesError::io(&tmp, e))?;
         file.seek(SeekFrom::End(0))
             .map_err(|e| PipesError::io(&tmp, e))?;
-        Ok(Self::new(out, tmp, file, bytes))
+        Ok(Self::new(out, AtomicFile::with_file(out, tmp, file), bytes))
     }
 
-    fn new(out: &Path, tmp: PathBuf, file: File, bytes: u64) -> Self {
+    fn new(out: &Path, file: AtomicFile, bytes: u64) -> Self {
         Self {
-            out: out.to_path_buf(),
-            tmp,
+            tmp: file.tmp().to_path_buf(),
             file: Some(BufWriter::with_capacity(1 << 20, file)),
             member: None,
             gz: is_gz(out),
@@ -329,6 +327,7 @@ impl NdjsonWriter {
         let f = self.file.as_mut().expect("synced after finish");
         f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
         f.get_ref()
+            .file()
             .sync_data()
             .map_err(|e| PipesError::io(&self.tmp, e))?;
         Ok(self.bytes)
@@ -345,21 +344,22 @@ impl NdjsonWriter {
                 .finish()
                 .map_err(|e| PipesError::io(&self.tmp, e))?;
         }
-        f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
-        drop(f);
-        std::fs::rename(&self.tmp, &self.out).map_err(|e| PipesError::io(&self.out, e))?;
+        f.into_inner()
+            .map_err(|e| PipesError::io(&self.tmp, e.into_error()))?
+            .commit()?;
         Ok(self.n)
     }
 }
 
 impl Drop for NdjsonWriter {
+    /// Unfinished: the `AtomicFile` removes the temporary file as it drops,
+    /// unless `keep_partial` asked to keep it.
     fn drop(&mut self) {
-        if self.file.is_some() || self.member.is_some() {
-            drop(self.member.take());
-            drop(self.file.take());
-            if !self.keep {
-                let _ = std::fs::remove_file(&self.tmp);
-            }
+        if let Some(m) = self.member.as_mut() {
+            m.get_mut().get_mut().keep_on_drop(self.keep);
+        }
+        if let Some(f) = self.file.as_mut() {
+            f.get_mut().keep_on_drop(self.keep);
         }
     }
 }

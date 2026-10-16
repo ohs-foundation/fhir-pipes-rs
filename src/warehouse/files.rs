@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::cli::{DEFAULT_PARTITION_BY, DEFAULT_ROW_GROUP_SIZE, TransformArgs};
 use crate::fhir::head::Head;
+use crate::fs::AtomicFile;
 use crate::snapshot::instant::{format_utc, parse_instant};
 use crate::snapshot::{Snapshot, State};
 
@@ -350,20 +351,17 @@ pub fn split(s: &Settings) -> Result<()> {
         paths: &sources.paths,
         open: None,
     };
+    // Every temporary file not yet renamed is removed if this returns early.
     let mut written = Vec::new();
     for (rtype, t) in &types {
-        let tmp = write_ndjson(&raw, rtype, &t.slots, &mut reader)?;
-        written.push((tmp, raw.join(format!("{rtype}.ndjson"))));
+        written.push(write_ndjson(&raw, rtype, &t.slots, &mut reader)?);
     }
     // A changed input could have put other text where a resource was.
-    if let Err(e) = sources.check_unchanged() {
-        for (tmp, _) in &written {
-            let _ = fs::remove_file(tmp);
-        }
-        return Err(e);
-    }
-    for ((rtype, t), (tmp, path)) in types.iter().zip(&written) {
-        fs::rename(tmp, path).with_context(|| format!("renaming {} into place", path.display()))?;
+    sources.check_unchanged()?;
+    for ((rtype, t), file) in types.iter().zip(written) {
+        let path = raw.join(format!("{rtype}.ndjson"));
+        file.commit()
+            .with_context(|| format!("renaming {} into place", path.display()))?;
         if t.duplicates > 0 {
             println!(
                 "   {rtype}: {} resources ({} duplicates by id merged)",
@@ -393,30 +391,26 @@ fn is_older(candidate: Option<(i64, u32)>, current: Option<(i64, u32)>) -> bool 
 
 /// The resources at `slots` into `dir/.<rtype>.ndjson.tmp`, to be renamed
 /// to `<rtype>.ndjson` once every type is written, so a failed write leaves
-/// the previous file. Returns the temporary file.
+/// the previous file. Returns the temporary file, not yet committed.
 fn write_ndjson(
     dir: &Path,
     rtype: &str,
     slots: &[Slot],
     reader: &mut SlotReader,
-) -> Result<PathBuf> {
+) -> Result<AtomicFile> {
+    let path = dir.join(format!("{rtype}.ndjson"));
     let tmp = dir.join(format!(".{rtype}.ndjson.tmp"));
-    let result = (|| -> Result<()> {
-        let mut out = BufWriter::new(fs::File::create(&tmp)?);
+    let result = (|| -> Result<AtomicFile> {
+        let mut out = BufWriter::new(AtomicFile::create_at(&path, tmp.clone())?);
         let mut buf = Vec::new();
         for slot in slots {
             reader.read(slot, &mut buf)?;
             out.write_all(&buf)?;
             out.write_all(b"\n")?;
         }
-        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-        Ok(())
+        Ok(out.into_inner().map_err(|e| e.into_error())?)
     })();
-    if let Err(e) = result {
-        let _ = fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("writing {}", tmp.display()));
-    }
-    Ok(tmp)
+    result.with_context(|| format!("writing {}", tmp.display()))
 }
 
 /// The types with a `<Type>.ndjson` in `dir`.
@@ -511,8 +505,11 @@ fn copy_into(from: &Path, tmp: &Path, to: &Path) -> Result<usize> {
     for chunk in crate::views::ndjson::open(from)? {
         count += chunk?.len();
     }
+    // Removes the copy if it fails part of the way.
+    let file = AtomicFile::adopt(to, tmp.to_path_buf());
     fs::copy(from, tmp).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(tmp, to).with_context(|| format!("renaming {} into place", to.display()))?;
+    file.commit()
+        .with_context(|| format!("renaming {} into place", to.display()))?;
     Ok(count)
 }
 
