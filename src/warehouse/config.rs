@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS};
+use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
 use crate::extract::google::{self, Credentials};
 
 /// The config file (`fhir-pipes.toml`). Every field is optional.
@@ -24,6 +24,8 @@ pub struct File {
     /// The profile for the locations step: a file path (relative to this
     /// file) or an https URL. See docs/profiles.md.
     pub profile: Option<String>,
+    #[serde(default)]
+    pub source: SourceFile,
     #[serde(default)]
     pub server: ServerFile,
     #[serde(default)]
@@ -41,6 +43,17 @@ pub struct File {
     pub hooks: Vec<Hook>,
 }
 
+/// `[source]`: where the resources come from when not from the server.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFile {
+    /// NDJSON, Bundle and resource files, directories of them, or glob
+    /// patterns, relative to this file. Set, the run reads these instead of a
+    /// FHIR server (see files.rs).
+    #[serde(default)]
+    pub files: Vec<PathBuf>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerFile {
@@ -52,6 +65,9 @@ pub struct ServerFile {
     /// With `fetch = "bulk"`: seconds to wait for an export before cancelling
     /// it.
     pub bulk_timeout: Option<u64>,
+    /// With `fetch = "search"`: search requests in flight at once (`export
+    /// --concurrency`).
+    pub concurrency: Option<usize>,
     /// HTTP Basic username; the password comes only from FHIR_PIPES_PASSWORD.
     pub username: Option<String>,
     /// Google Application Default Credentials (`--google-auth`).
@@ -252,12 +268,17 @@ pub struct Hook {
 pub struct Settings {
     pub data: PathBuf,
     pub views: Option<PathBuf>,
+    /// The file source: files, directories and glob patterns, resolved. Empty:
+    /// the resources come from the server.
+    pub files: Vec<PathBuf>,
     pub server: String,
     pub server_name: String,
     /// How to authenticate to the FHIR server, as the other commands take it.
     pub auth: AuthArgs,
     pub fetch: Fetch,
     pub bulk_timeout: u64,
+    /// Search requests in flight at once in the views step.
+    pub concurrency: usize,
     pub duckdb: String,
     pub tippecanoe: String,
     pub rclone: String,
@@ -280,6 +301,23 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Whether the run reads files instead of a FHIR server.
+    pub fn reads_files(&self) -> bool {
+        !self.files.is_empty()
+    }
+
+    /// The server the run reads, for the manifest, last-refresh.json and the
+    /// hooks' FHIR_BASE; none with a file source.
+    pub fn server_used(&self) -> Option<&str> {
+        (!self.reads_files()).then_some(self.server.as_str())
+    }
+
+    /// The file source's inputs as given, for the manifest and
+    /// last-refresh.json; empty when the run reads a server.
+    pub fn inputs(&self) -> Vec<String> {
+        self.files.iter().map(|p| p.display().to_string()).collect()
+    }
+
     /// How the run authenticates, for `--check`.
     pub fn auth_kind(&self) -> &'static str {
         if self.auth.google_auth {
@@ -361,6 +399,8 @@ pub struct Overrides {
     pub profile: Option<String>,
     pub data: Option<PathBuf>,
     pub views: Option<PathBuf>,
+    /// `--input`: replaces the file's `source.files`.
+    pub input: Vec<PathBuf>,
     pub server: Option<String>,
     pub server_name: Option<String>,
     pub token: Option<String>,
@@ -390,50 +430,65 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         }
     };
     let views = o.views.or_else(|| file.views.map(|p| resolve(&base, &p)));
-    let username = o.username.or(file.server.username);
-    let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
-    let kinds: Vec<&str> = [
-        (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
-        (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
-        (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
-        (
-            google_auth,
-            "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(set, what)| set.then_some(what))
-    .collect();
-    if kinds.len() > 1 {
-        bail!("use one way to authenticate, not {}", kinds.join(" and "));
-    }
-    let none = AuthArgs::none();
-    let auth = match (o.client_id, o.client_secret, username, o.password) {
-        _ if google_auth => AuthArgs {
-            google_auth: true,
-            ..none
-        },
-        (Some(id), Some(secret), _, _) => AuthArgs {
-            client_id: Some(id),
-            client_secret: Some(secret),
-            token_url: Some(o.token_url.or(file.server.token_url).context(
-                "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
-            )?),
-            ..none
-        },
-        (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
-        (None, _, Some(user), Some(password)) => AuthArgs {
-            username: Some(user),
-            password: Some(password),
-            ..none
-        },
-        (None, _, Some(_), None) => {
-            bail!("a username is set but no password: set FHIR_PIPES_PASSWORD")
+    let files = if o.input.is_empty() {
+        file.source
+            .files
+            .iter()
+            .map(|p| resolve(&base, p))
+            .collect()
+    } else {
+        o.input
+    };
+    // With a file source no server is contacted, so the server's auth
+    // settings are neither needed nor checked.
+    let auth = if !files.is_empty() {
+        AuthArgs::none()
+    } else {
+        let username = o.username.or(file.server.username);
+        let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
+        let kinds: Vec<&str> = [
+            (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
+            (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
+            (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
+            (
+                google_auth,
+                "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(set, what)| set.then_some(what))
+        .collect();
+        if kinds.len() > 1 {
+            bail!("use one way to authenticate, not {}", kinds.join(" and "));
         }
-        _ => AuthArgs {
-            token: o.token,
-            ..none
-        },
+        let none = AuthArgs::none();
+        match (o.client_id, o.client_secret, username, o.password) {
+            _ if google_auth => AuthArgs {
+                google_auth: true,
+                ..none
+            },
+            (Some(id), Some(secret), _, _) => AuthArgs {
+                client_id: Some(id),
+                client_secret: Some(secret),
+                token_url: Some(o.token_url.or(file.server.token_url).context(
+                    "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
+                )?),
+                ..none
+            },
+            (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
+            (None, _, Some(user), Some(password)) => AuthArgs {
+                username: Some(user),
+                password: Some(password),
+                ..none
+            },
+            (None, _, Some(_), None) => {
+                bail!("a username is set but no password: set FHIR_PIPES_PASSWORD")
+            }
+            _ => AuthArgs {
+                token: o.token,
+                ..none
+            },
+        }
     };
     let threads = o
         .threads
@@ -446,21 +501,29 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     Ok(Settings {
         data,
         views,
+        server_name: o.server_name.or(file.server.name).unwrap_or_else(|| {
+            if files.is_empty() {
+                "hapi-local".into()
+            } else {
+                "files".into()
+            }
+        }),
+        files,
         server: google::server_url(
             &o.server
                 .or(file.server.base)
                 .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
         ),
-        server_name: o
-            .server_name
-            .or(file.server.name)
-            .unwrap_or_else(|| "hapi-local".into()),
         auth,
         fetch: file.server.fetch.unwrap_or_default(),
         bulk_timeout: file
             .server
             .bulk_timeout
             .unwrap_or(DEFAULT_BULK_TIMEOUT_SECS),
+        concurrency: match file.server.concurrency {
+            Some(0) => bail!("server.concurrency must be at least 1"),
+            n => n.unwrap_or(DEFAULT_EXPORT_CONCURRENCY),
+        },
         duckdb: file.tools.duckdb.unwrap_or_else(|| "duckdb".into()),
         tippecanoe: file.tools.tippecanoe.unwrap_or_else(|| "tippecanoe".into()),
         rclone: file.tools.rclone.unwrap_or_else(|| "rclone".into()),
@@ -572,6 +635,10 @@ mod tests {
         assert_eq!(bulk.fetch, Fetch::Bulk);
         assert_eq!(bulk.bulk_timeout, 60);
         assert!(toml::from_str::<File>("[server]\nfetch = \"jdbc\"").is_err());
+        assert_eq!(search.concurrency, DEFAULT_EXPORT_CONCURRENCY);
+        assert_eq!(s("data = \"d\"\n[server]\nconcurrency = 2").concurrency, 2);
+        let zero: File = toml::from_str("data = \"d\"\n[server]\nconcurrency = 0").unwrap();
+        assert!(settings(zero, PathBuf::from("/b"), Overrides::default()).is_err());
         let db = s("data = \"d\"\n[server]\nfetch = \"hapi-db\"");
         assert_eq!(db.fetch, Fetch::HapiDb);
         assert_eq!(db.fetch.name(), "hapi-db");
@@ -691,6 +758,52 @@ mod tests {
             s.server,
             "https://healthcare.googleapis.com/v1/projects/p/locations/l/datasets/d/fhirStores/s/fhir"
         );
+    }
+
+    #[test]
+    fn a_file_source_comes_from_the_file_or_the_flag() {
+        let file: File =
+            toml::from_str("data = \"d\"\n[source]\nfiles = [\"../fhir\", \"/abs/*.ndjson\"]")
+                .unwrap();
+        let s = settings(file, PathBuf::from("/repo/tools"), Overrides::default()).unwrap();
+        assert!(s.reads_files());
+        assert_eq!(
+            s.files,
+            [
+                PathBuf::from("/repo/tools/../fhir"),
+                PathBuf::from("/abs/*.ndjson")
+            ]
+        );
+        assert_eq!(s.server_name, "files");
+
+        // --input replaces the file's list and is taken as given.
+        let file: File =
+            toml::from_str("data = \"d\"\n[source]\nfiles = [\"x\"]\n[server]\nname = \"synthea\"")
+                .unwrap();
+        let o = Overrides {
+            input: vec![PathBuf::from("in")],
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert_eq!(s.files, [PathBuf::from("in")]);
+        assert_eq!(s.server_name, "synthea");
+
+        let file: File = toml::from_str("data = \"d\"").unwrap();
+        let s = settings(file, PathBuf::from("/b"), Overrides::default()).unwrap();
+        assert!(!s.reads_files());
+        assert_eq!(s.server_name, "hapi-local");
+    }
+
+    #[test]
+    fn a_file_source_leaves_the_server_auth_unchecked() {
+        let text = "data = \"d\"\n[source]\nfiles = [\"x\"]\n[server]\nusername = \"u\"\ngoogle_auth = true";
+        let file: File = toml::from_str(text).unwrap();
+        let o = Overrides {
+            client_id: Some("id".into()),
+            ..Default::default()
+        };
+        let s = settings(file, PathBuf::from("/b"), o).unwrap();
+        assert_eq!(s.auth_kind(), "none");
     }
 
     #[test]

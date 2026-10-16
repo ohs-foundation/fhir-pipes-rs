@@ -1,6 +1,7 @@
 # fhir-pipes refresh
 
-`fhir-pipes refresh` refreshes a Parquet warehouse from a FHIR server. It
+`fhir-pipes refresh` refreshes a Parquet warehouse from a FHIR server, or
+from NDJSON and Bundle files (see [From files](#from-files)). It
 downloads the data, runs [SQL-on-FHIR](https://sql-on-fhir.org)
 ViewDefinitions over it, and writes the result as Hive-partitioned Parquet
 tables with a manifest. It can also build map tiles of the Location registry,
@@ -20,6 +21,7 @@ installed.
 fhir-pipes refresh --config fhir-pipes.toml
 fhir-pipes refresh --only views --reuse-raw          # views from the last download
 fhir-pipes refresh --server https://example.org/fhir --server-name prod --push
+fhir-pipes refresh --input exports/ --input extra.ndjson   # from files, no server
 fhir-pipes refresh --check                           # settings, steps, tools found
 ```
 
@@ -117,7 +119,14 @@ another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
 goes to the null partition, `__HIVE_DEFAULT_PARTITION__`, as hive and DuckDB
 name it. A view with no rows writes one empty file there, so the table keeps
-its columns. Tables other views look up in are written first, and are read
+its columns. A view with a column of the partition column's name stops the
+run, since that column would be lost beside the partition column: set
+`[partition] column` to another name (the fhir-data-pipes views have an
+address `country` column, for one). The `locations` table stays partitioned
+by `country` whatever the view tables use. The manifest, the catalog, the
+database step and the partition lookups read each table by its own
+first-level partition directories, so a lookup through `locations` gives the
+Location's country as the row's partition value either way. Tables other views look up in are written first, and are read
 back from staging. Tables are swapped in at the end of the run (see [What a
 failed run leaves behind](#what-a-failed-run-leaves-behind)).
 
@@ -126,6 +135,23 @@ The views directory can be any directory of JSON files: files whose
 build (`fsh-generated/resources/Binary-*.json`), are views; the rest are
 skipped. Each view is checked against the spec's structure rules before
 anything runs, and a plain copy is saved to `views/<name>.json`.
+
+### Parallel downloads
+
+The views step keeps `server.concurrency` search requests in flight at once
+(4 by default), as `fhir-pipes export --concurrency` does (see the
+[README](../README.md#parallel-downloads)): several resource types download
+side by side, and a full download of a large type (10,000 resources or more)
+is split into `_lastUpdated` windows paged side by side. Incremental
+downloads stay one stream per type. `concurrency = 1` downloads one type at a
+time, one page at a time. The `locations` step pages Locations as one stream
+either way.
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"
+concurrency = 4
+```
 
 ### Downloading with Bulk Data $export
 
@@ -167,8 +193,79 @@ This ties the refresh to HAPI's internal schema, which changes between HAPI
 releases; fhir-pipes checks it before reading and stops on one it does not
 know. The files are the same `raw/<server>/<TYPE>.ndjson`. Deleted resources
 are removed from them on each refresh, and `--full` reads every type again.
-The `locations` step still uses search. `--check` says whether the
-environment variable is set.
+One connection reads the types one after another; `server.concurrency` is
+not used. The `locations` step still uses search. `--check` says whether
+the environment variable is set.
+
+## From files
+
+With a file source, `refresh` reads the resources from files instead of a
+FHIR server, as the Java pipeline's `--fhirFetchMode=NDJSON` and `JSON` do.
+The server is never contacted, and the server settings are not needed.
+
+```toml
+[source]
+files = ["../synthea/fhir", "exports/*.ndjson"]   # files, directories, glob patterns
+```
+
+or `refresh --input PATH`, repeated for more inputs, which replaces the
+config's list. Paths in the config are relative to the config file; `--input`
+paths are relative to the current directory.
+
+The inputs are read as `views run --input` reads them: NDJSON (`.ndjson`), a
+Bundle, a JSON resource or an array of them; a directory with its
+subdirectories, hidden files skipped; in a Bundle, a reference to another
+entry by its `urn:uuid` fullUrl is rewritten to that entry's `Type/id`, so
+joins work. A glob pattern reads the `.json` and `.ndjson` files and the
+directories it matches, in path order. A path that does not exist, or a
+pattern that matches nothing, stops the run.
+
+The steps then run as for a server:
+
+- The resources are split by type into `raw/<name>/<Type>.ndjson`, each file
+  written beside its target and renamed into place. `name` is
+  `--server-name` or `server.name`, `files` by default. A resource that
+  appears more than once (same type and id) is kept once: the copy with the
+  latest `meta.lastUpdated`, or, on a tie or when neither has one, the copy
+  read last (the later file in path order). A `<Type>.ndjson` from an earlier
+  run, of a type the files no longer have, is removed.
+- `locations`: the files' Location resources, and their Organizations if
+  there are any, become the snapshot `raw/<name>/locations`, which is
+  transformed into `parquet/locations` as after an extract. Boundaries given
+  inline (`valueAttachment.data`) are read; boundaries given by URL are not
+  fetched, and the transform reports them as unresolved. If the files have
+  no Locations, the step is skipped with a note, and an earlier run's
+  `parquet/locations`, if there is one, is kept. Without any `locations`
+  table, `tiles` is skipped too, and views that look their partition up in
+  `locations` write their rows to the null partition.
+- `views`: each view runs on its type's file, as on a download. A type the
+  views read but the files lack gives each of its views an empty table, with
+  a note.
+- `manifest`, `catalog`, `database`, `hooks` and `push` are unchanged, and the
+  run is staged and swapped in as for a server. The manifest's `server` is
+  `null` and its `files` lists the inputs; hooks get an empty `FHIR_BASE`.
+
+With a file source the server's auth settings are not used, so they are not
+checked either: a config with `server.username` runs from files without
+`FHIR_PIPES_PASSWORD`. The tiles step's tools are checked only once the run
+knows the step will run, since files without Locations skip it.
+
+`raw/<name>/` can hold a server's download when the file source uses the
+same name (`server.name`). The split removes the server export's state
+(`.export-state.json`), and a Location snapshot built from files has no
+watermark, so the next refresh from the server downloads every type, and
+extracts every Location, in full, rather than merging the server's changes
+into the files' copies.
+
+`--reuse-raw` reruns on the last split in `raw/<name>/` without reading the
+inputs again. `--check` shows the file source and how many files each input
+names, and leaves out the server and auth lines.
+
+On fhir-data-pipes' Synthea sample, with its 12 views (`--skip tiles`, since
+the sample's Locations have no admin-unit boundaries, and
+`[partition] column = "part"`, since the views have a `country` column), the
+tables have the same rows as `views run docker/config/views --input
+synthea-hiv/sample_data_segments`.
 
 ## Catalog
 
@@ -375,13 +472,15 @@ the file are relative to the file.
 | `--profile` | `FHIR_PIPES_PROFILE` | `profile` | the snapshot's copy, else none (base FHIR); a path relative to the config file, or an https URL. See [profiles.md](profiles.md) |
 | `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
 | `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir`; a Cloud Healthcare API store path (`projects/…/fhirStores/…`) is expanded to its FHIR URL |
-| `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local` |
+| `--input` (repeatable) | | `source.files` | no file source: the resources come from the server. See [From files](#from-files) |
+| `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local`; `files` with a file source |
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
 | | | `server.fetch` | `search`; `bulk` for `$export`; `hapi-db` for the HAPI server's database |
 | | `FHIR_PIPES_HAPI_DATABASE_URL` | | the HAPI database's connection string, with `fetch = "hapi-db"` |
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
+| | | `server.concurrency` | 4: search requests in flight at once in the views step |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
 | `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
@@ -410,6 +509,7 @@ base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
 fetch = "search"            # "bulk" for a Bulk Data $export, "hapi-db" for HAPI's database
+concurrency = 4             # search requests at a time
 # google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
 
 [tools]            # paths or names on the PATH
@@ -454,9 +554,9 @@ after = "locations"         # only when that step ran; leave out to always run
 run = ["./catalog.sh"]      # a path with / is relative to this file
 ```
 
-Hooks run in the config file's directory with `DATA`, `FHIR_BASE`,
-`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set, after the run's
-tables, manifest and catalog are swapped in.
+Hooks run in the config file's directory with `DATA`, `FHIR_BASE` (empty with
+a file source), `SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set,
+after the run's tables, manifest and catalog are swapped in.
 
 Each run writes its step timings to `raw/<server>/last-refresh.json`.
 

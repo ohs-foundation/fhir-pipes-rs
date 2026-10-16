@@ -45,7 +45,8 @@ cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhi
 
 `fhir-pipes refresh` downloads the resources a directory of ViewDefinitions
 reads, runs the views, and writes each view as a Hive-partitioned Parquet
-table, with a manifest of what it wrote.
+table, with a manifest of what it wrote. It can also read the resources from
+NDJSON and Bundle files instead of a server.
 
 ```toml
 # fhir-pipes.toml
@@ -61,6 +62,7 @@ name = "prod"
 fhir-pipes refresh --check                    # settings, steps and tools found
 fhir-pipes refresh --only views               # download, run the views, write the tables
 fhir-pipes refresh --only views --reuse-raw   # run the views again on the last download
+fhir-pipes refresh --input exports/           # from NDJSON and Bundle files, no server
 ```
 
 The result:
@@ -83,7 +85,7 @@ A full refresh can also extract and transform the Location registry, build
 map tiles, write a DuckDB catalog (a view per table, which a dashboard can
 attach by URL) and Spark SQL tables for a Spark Thrift server, load the view tables into PostgreSQL, run your own commands afterwards, and push the warehouse to object
 storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
-partitioning and hooks.
+reading from files, partitioning and hooks.
 
 ### How the views run
 
@@ -99,7 +101,8 @@ file and the rule it breaks.
 The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged, and
 give the same rows on its Synthea sample Bundles
 (`synthea-hiv/sample_data_segments`) read directly as on the same resources
-flattened to NDJSON.
+flattened to NDJSON. `refresh` on the same directory as a file source gives
+the same rows again.
 
 ## Profiles
 
@@ -178,6 +181,46 @@ way unless given `--full`. The watermark is never later than the server's
 clock when the search began (its HTTP `Date`), less five minutes, so a
 resource updated while a run is paging is fetched by the next run. `extract`
 sets its Location and Organization watermarks the same way.
+
+### Parallel downloads
+
+`--concurrency` (4 by default) is how many search requests `export` keeps in
+flight at once, for all types together. Up to that many types download side
+by side, and each type's file is the same as when they download one after
+another. A full download of a type with more than one page also asks the
+server for the type's count (the first page's `total`, else
+`_summary=count`). A type with 10,000 resources or more is split into
+`_lastUpdated` windows paged side by side:
+
+- The oldest and newest `meta.lastUpdated` come from
+  `_sort=_lastUpdated&_count=1` and `_sort=-_lastUpdated&_count=1`. The range
+  is cut at whole seconds into windows searched with
+  `_lastUpdated=ge<from>&_lastUpdated=lt<to>`. The first window has no lower
+  bound and the last no upper bound, so a resource updated during the run is
+  still in a window. A resource stamped exactly on a cut is in the window
+  that starts there, and only that one.
+- Each window is counted. A window holding more than its share is halved, so
+  updates bunched in time still spread over several windows. The windows'
+  counts must add up to the type's count.
+- A window whose paged count is not its count is counted and paged again. A
+  second difference is reported as `count_mismatch`.
+- The windows are joined oldest first, each in the server's order. A resource
+  in two windows (one updated during the run) is kept once, in its later
+  version. A windowed file has the same resources as one paged as a single
+  stream, in a different order.
+- A server that rejects `_sort=_lastUpdated`, gives no count for a window, or
+  whose window counts do not add up to the type's is paged as one stream,
+  with a line saying why.
+
+Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
+type. The limit covers types and windows together. A `Retry-After` on a 429
+or 5xx holds back every request, not only the one that got it.
+`--concurrency 1` downloads one type at a time, one page at a time.
+`--concurrency` does not apply to `--bulk` or `--hapi-db`.
+
+The Java pipeline instead pages HAPI in parallel with `_getpagesoffset`.
+fhir-pipes does not, since that relies on HAPI's search cache, which
+expires, and on behaviour HAPI does not document.
 
 ### Copying to a second FHIR server
 
@@ -282,7 +325,8 @@ deletions on a HAPI server without Bulk Data export.
   offset.
 - All types are read in one read-only, repeatable-read transaction through a
   cursor, 1000 rows at a time, so a run sees one consistent state of the
-  database and memory does not grow with the table.
+  database and memory does not grow with the table. The types are read one
+  after another on one connection; `--concurrency` is not used.
 - `.export-state.json` keeps a `res_updated` watermark per type under
   `hapi_db`, apart from the search and bulk watermarks. With `--incremental`,
   a run reads the rows updated after the watermark, merges them into the file

@@ -82,6 +82,19 @@ fn export_follows_next_links_and_writes_one_file_per_type() {
         ])
         .respond_with(status_code(200).body(bundle(vec![report("c")], None))),
     );
+    // More than one page: the count decides whether to split the type into
+    // _lastUpdated windows. Three resources are too few.
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains(("_summary", "count")))),
+            bearer(),
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200).body(r#"{"resourceType":"Bundle","type":"searchset","total":3}"#),
+        ),
+    );
     server.expect(
         Expectation::matching(all_of![
             request::method_path("GET", "/fhir/Measure"),
@@ -693,4 +706,226 @@ fn a_missing_google_key_file_is_reported() {
         .failure()
         .stderr(predicates::str::contains("GOOGLE_APPLICATION_CREDENTIALS"))
         .stderr(predicates::str::contains("missing.json"));
+}
+
+/// Answers with `body` after `delay`, recording the most requests the server
+/// had in flight at once (shared by every `Recorded` with the same counters).
+#[derive(Clone)]
+struct Recorded {
+    body: String,
+    delay: std::time::Duration,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    most: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl httptest::responders::Responder for Recorded {
+    fn respond<'a>(
+        &mut self,
+        _req: &'a httptest::http::Request<httptest::bytes::Bytes>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = httptest::http::Response<httptest::bytes::Bytes>>
+                + Send
+                + 'a,
+        >,
+    > {
+        use std::sync::atomic::Ordering::SeqCst;
+        let me = self.clone();
+        Box::pin(async move {
+            let now = me.in_flight.fetch_add(1, SeqCst) + 1;
+            me.most.fetch_max(now, SeqCst);
+            tokio::time::sleep(me.delay).await;
+            me.in_flight.fetch_sub(1, SeqCst);
+            httptest::http::Response::builder()
+                .status(200)
+                .body(httptest::bytes::Bytes::from(me.body))
+                .unwrap()
+        })
+    }
+}
+
+const TYPES: [&str; 6] = [
+    "Patient",
+    "Encounter",
+    "Observation",
+    "Condition",
+    "Procedure",
+    "Immunization",
+];
+
+/// A server with two pages of each of `TYPES`, every answer 100 ms late.
+/// Returns the most requests it had in flight at once.
+fn slow_server() -> (Server, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let server = Server::run();
+    let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let most = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recorded = |body: String| Recorded {
+        body,
+        delay: std::time::Duration::from_millis(100),
+        in_flight: in_flight.clone(),
+        most: most.clone(),
+    };
+    for t in TYPES {
+        let resource = |id: String| json!({"resourceType": t, "id": id});
+        let mut first: Value = serde_json::from_str(&bundle(
+            vec![resource(format!("{t}-b")), resource(format!("{t}-a"))],
+            Some(format!("/fhir/{t}?page=2")),
+        ))
+        .unwrap();
+        // A count on the first page: too few to split into windows.
+        first["total"] = json!(3);
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", format!("/fhir/{t}")),
+                request::query(url_decoded(not(contains(key("page"))))),
+            ])
+            .respond_with(recorded(first.to_string())),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", format!("/fhir/{t}")),
+                request::query(url_decoded(contains(("page", "2")))),
+            ])
+            .respond_with(recorded(bundle(vec![resource(format!("{t}-c"))], None))),
+        );
+    }
+    (server, most)
+}
+
+fn export_types(server: &Server, out: &Path, concurrency: &str) -> Assert {
+    let mut c = fhir_pipes();
+    c.args(["export", "--server", &server.url_str("/fhir")]);
+    for t in TYPES {
+        c.args(["--type", t]);
+    }
+    c.args(["--concurrency", concurrency])
+        .arg("--out")
+        .arg(out)
+        .arg("--report")
+        .arg(out.join("report.json"))
+        .assert()
+        .success()
+}
+
+#[test]
+fn types_downloaded_side_by_side_give_the_same_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (server, most) = slow_server();
+    export_types(&server, &dir.path().join("one"), "1");
+    assert_eq!(most.load(std::sync::atomic::Ordering::SeqCst), 1);
+    drop(server);
+
+    let (server, most) = slow_server();
+    let a = export_types(&server, &dir.path().join("four"), "4");
+    let most = most.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((2..=4).contains(&most), "{most} requests at once");
+    for t in TYPES {
+        assert!(
+            stdout(&a).contains(&format!("{t}: 3 resources, 2 pages")),
+            "{}",
+            stdout(&a)
+        );
+        let name = format!("{t}.ndjson");
+        let one = std::fs::read(dir.path().join("one").join(&name)).unwrap();
+        let four = std::fs::read(dir.path().join("four").join(&name)).unwrap();
+        assert_eq!(one, four, "{name}");
+    }
+    assert_eq!(
+        std::fs::read(dir.path().join("one/report.json")).unwrap(),
+        std::fs::read(dir.path().join("four/report.json")).unwrap()
+    );
+    let state: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("four/.export-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["types"].as_object().unwrap().len(), TYPES.len());
+}
+
+#[test]
+fn concurrency_limits_requests_across_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let (server, most) = slow_server();
+    export_types(&server, dir.path(), "2");
+    assert_eq!(most.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[test]
+fn concurrency_must_be_at_least_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = fhir_pipes()
+        .args([
+            "export",
+            "--server",
+            "http://127.0.0.1:9/fhir",
+            "--type",
+            "Patient",
+            "--concurrency",
+            "0",
+        ])
+        .arg("--out")
+        .arg(dir.path())
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("--concurrency"), "{}", stderr(&a));
+}
+
+#[test]
+fn a_large_type_on_a_server_that_cannot_sort_is_paged_as_one_stream() {
+    let server = Server::run();
+    let base = server.url_str("/fhir");
+    let mut first: Value = serde_json::from_str(&bundle(
+        vec![report("a"), report("b")],
+        Some(format!("{base}/MeasureReport?page=2")),
+    ))
+    .unwrap();
+    // Large enough to split into _lastUpdated windows.
+    first["total"] = json!(20_000);
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(not(contains(key("page"))))),
+            request::query(url_decoded(not(contains(key("_sort"))))),
+        ])
+        // Once to decide, once more as one stream.
+        .times(2)
+        .respond_with(status_code(200).body(first.to_string())),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains(("_sort", "_lastUpdated")))),
+        ])
+        .times(1)
+        .respond_with(status_code(400).body(r#"{"resourceType":"OperationOutcome"}"#)),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/MeasureReport"),
+            request::query(url_decoded(contains(("page", "2")))),
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(bundle(vec![report("c")], None))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let a = fhir_pipes()
+        .args(["export", "--server", &base, "--type", "MeasureReport"])
+        .arg("--out")
+        .arg(dir.path())
+        .assert()
+        .success();
+    let text = stdout(&a);
+    assert!(
+        text.contains("MeasureReport: the server did not sort by _lastUpdated"),
+        "{text}"
+    );
+    assert!(text.contains("paging it as one stream"), "{text}");
+    assert!(
+        text.contains("MeasureReport: 3 resources, 2 pages"),
+        "{text}"
+    );
+    let ids: Vec<Value> = read_ndjson(&dir.path().join("MeasureReport.ndjson"))
+        .iter()
+        .map(|r| r["id"].clone())
+        .collect();
+    assert_eq!(ids, ["a", "b", "c"]);
 }

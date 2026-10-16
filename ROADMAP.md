@@ -20,7 +20,9 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Download every resource of the given types as NDJSON | `export` | 0.3.0 |
 | Download through a system-level Bulk Data `$export` instead of search: `_since` the last export's `transactionTime`, merged by id, `deleted` resources removed, an interrupted export resumed from its saved status URL, cancelled after `--bulk-timeout`. Group and Patient exports are not supported yet | `export --bulk`, `refresh` (`fetch = "bulk"`) | next release |
 | Read from a HAPI FHIR JPA server's PostgreSQL database instead of its API (fhir-data-pipes' `HAPI_JDBC`): the current version of each resource with `meta` rebuilt from HAPI's tables, a `res_updated` watermark, deleted resources removed. Ties fhir-pipes to HAPI's internal schema; tested with HAPI 8.12, and reads the older `hfj_forced_id` layout (#33) | `export --hapi-db`, `refresh` (`fetch = "hapi-db"`) | next release |
+| Download several types side by side, and split a full download of a large type into `_lastUpdated` windows paged side by side, under one limit on requests in flight that also honours `Retry-After` (#30) | `export --concurrency`, `refresh` (`server.concurrency`) | next release |
 | Copy Locations and Organizations into a local snapshot, incrementally | `extract` | 0.3.0 |
+| Build the warehouse from NDJSON and Bundle files instead of a server (`[source] files`, `--input`): the same reader as `views run --input`, duplicates by id resolved by `meta.lastUpdated`, the Location registry from the files' Locations, an empty table for a type the files lack (#32) | `refresh` | next release |
 | A refresh is all-or-nothing: tables, `manifest.json` and `catalog.sql` are staged and swapped in together at the end, so a run that fails leaves the previous run's warehouse as it was (#35) | `refresh` | next release |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
@@ -117,10 +119,11 @@ on its own outstanding list, next to fhir-pipes.
 |---|---|
 | One native binary on arrow-rs and parquet, CLI first, run from cron or CI instead of a Spring Boot and Flink controller | Yes. `refresh` takes the controller's role |
 | Evaluate ViewDefinitions in Rust rather than compiling them to SQL | Yes, in memory (`crates/sof`); SQL generation is also available (`views sql`) |
-| Read `$export` NDJSON, FHIR search Bundles, and local Bundles | NDJSON, Bundles, JSON resources and directories of them, subdirectories included (`views run --input`); FHIR search and system-level `$export` (`export`, `export --bulk`, `refresh`; `$export` in the next release) |
-| Resolve `urn:uuid` references inside transaction and collection Bundles | Yes, for `views run --input` (next release) |
+| Read `$export` NDJSON, FHIR search Bundles, and local Bundles | NDJSON, Bundles, JSON resources and directories of them, subdirectories included (`views run --input`, and `refresh` with a file source in the next release); FHIR search and system-level `$export` (`export`, `export --bulk`, `refresh`; `$export` in the next release) |
+| Resolve `urn:uuid` references inside transaction and collection Bundles | Yes, for `views run --input` and `refresh` from files (next release) |
 | Incremental merge by id and `meta.lastUpdated`, dropping deleted resources | Yes, per type, with a `_lastUpdated` watermark; deletions are found when the server's count differs, then the type is downloaded in full. With `$export`, the manifest's `deleted` resources are removed without a full download (next release) |
 | Nested Parquet-on-FHIR tables (SQL-on-FHIR v1) | No; see [Next](#next) |
+| Fetch in parallel (the Java pipeline pages HAPI with `_getpagesoffset` segments and fetches types in parallel) | Yes, on any server: types side by side, and a large type split into `_lastUpdated` windows (`export --concurrency`, `refresh`; next release). `_getpagesoffset` is not used, since it relies on HAPI's expiring search cache |
 | Flat view tables in Parquet | Yes, Hive-partitioned, with a manifest |
 | `schema.sql` (`CREATE TABLE` per view) | `views sql --ddl` (ANSI, PostgreSQL or DuckDB types) |
 | `init_duckdb.sql` (a DuckDB view per table) | `catalog.sql`, with paths for a bucket URL, and an optional `catalog.duckdb` to attach by URL (next release) |

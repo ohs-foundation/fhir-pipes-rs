@@ -21,6 +21,9 @@ pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
 /// A Bulk Data export of a large server can take hours. How long a run waits
 /// for one, in seconds, before cancelling it.
 pub const DEFAULT_BULK_TIMEOUT_SECS: u64 = 4 * 3600;
+/// Search requests `export` (and `refresh`'s views step) keeps in flight at
+/// once. Low, since each one is a page of a thousand resources.
+pub const DEFAULT_EXPORT_CONCURRENCY: usize = 4;
 pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
 /// Rows fhir-pipes aims to keep one analytics request under; DHIS2's own default
 /// limit is 50,000.
@@ -603,6 +606,12 @@ pub struct ExportArgs {
     /// schema; with --incremental, deleted resources are removed
     #[arg(long, conflicts_with_all = ["server", "bulk"])]
     pub hapi_db: bool,
+    /// Search requests in flight at once, for all types together: up to this
+    /// many types are downloaded side by side, and a full download of a large
+    /// type is split into `_lastUpdated` windows paged side by side. 1 pages
+    /// one type at a time, one page at a time. Not used with --bulk or --hapi-db
+    #[arg(long, default_value_t = DEFAULT_EXPORT_CONCURRENCY)]
+    pub concurrency: usize,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,

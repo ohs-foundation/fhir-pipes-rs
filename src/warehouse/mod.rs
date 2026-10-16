@@ -2,6 +2,10 @@
 //! server. This was fhir-warehouse, which ran kiln as a separate program; the
 //! FHIR side now runs in process.
 //!
+//! With a file source (`[source] files`, `--input`), the resources are read
+//! from files instead of the server (files.rs), and the locations and views
+//! steps read them; the server is never contacted.
+//!
 //! Steps, in order:
 //!   locations  extract and transform the Location registry → parquet/locations
 //!   views      export each resource type the views read (only what changed
@@ -26,6 +30,7 @@ mod config;
 #[cfg(feature = "postgres")]
 mod database;
 mod fhir;
+mod files;
 mod manifest;
 mod partition;
 mod push;
@@ -62,6 +67,12 @@ pub struct RefreshArgs {
     /// Name for the server's raw downloads: raw/<name>/.
     #[arg(long, env = "FHIR_PIPES_SERVER_NAME")]
     server_name: Option<String>,
+    /// Read the resources from files instead of a FHIR server: an NDJSON
+    /// file, a Bundle, a JSON resource or array, a directory of such files
+    /// (searched recursively), or a glob pattern. Repeat for more; replaces
+    /// the config's `source.files`.
+    #[arg(long, value_name = "PATH")]
+    input: Vec<PathBuf>,
     /// Fixed bearer token for the FHIR server.
     #[arg(long, env = "FHIR_PIPES_TOKEN", hide_env_values = true)]
     token: Option<String>,
@@ -158,6 +169,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
             profile: profile.map(str::to_string),
             data: args.data.clone(),
             views: args.views.clone(),
+            input: args.input.clone(),
             server: args.server.clone(),
             server_name: args.server_name.clone(),
             token: args.token.clone(),
@@ -199,12 +211,18 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
         check(&s, &steps, &needed);
         return Ok(());
     }
+    // With a file source, whether the tiles step runs is known only once the
+    // files are read (without Locations it is skipped), so its tools are
+    // checked then.
     let needed: Vec<(&str, &str)> = needed
         .iter()
         .map(|(t, w)| (t.as_str(), w.as_str()))
         .collect();
-    tools::require(&needed)?;
-    refresh(&s, &steps)
+    let (later, now): (Vec<_>, Vec<_>) = needed
+        .into_iter()
+        .partition(|&(_, w)| s.reads_files() && w == "tiles");
+    tools::require(&now)?;
+    refresh(&s, &steps, &later)
 }
 
 /// The steps a run takes, from --only, --skip and --push.
@@ -295,23 +313,37 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
         "steps:      {}",
         names(steps.iter().map(|s| s.name().to_string()).collect())
     );
-    println!("server:     {} (raw/{})", s.server, s.server_name);
-    println!("auth:       {}", s.auth_description());
-    match s.fetch {
-        config::Fetch::Bulk => println!(
-            "fetch:      bulk ($export, waiting up to {} s)",
-            s.bulk_timeout
-        ),
-        config::Fetch::HapiDb => println!(
-            "fetch:      hapi-db (the HAPI server's database, from ${}{})",
-            crate::export::HAPI_DB_URL_ENV,
-            if std::env::var(crate::export::HAPI_DB_URL_ENV).is_ok_and(|v| !v.is_empty()) {
-                ""
-            } else {
-                ", which is not set"
-            }
-        ),
-        f => println!("fetch:      {}", f.name()),
+    if s.reads_files() {
+        // The server settings are not used, so they are not shown.
+        println!("source:     files, no server (raw/{})", s.server_name);
+        for input in &s.files {
+            let found = files::expand(std::slice::from_ref(input))
+                .map_or_else(|e| format!("{e:#}"), |f| format!("{} files", f.len()));
+            println!("input:      {}: {found}", input.display());
+        }
+    } else {
+        println!("server:     {} (raw/{})", s.server, s.server_name);
+        println!("auth:       {}", s.auth_description());
+        match s.fetch {
+            config::Fetch::Bulk => println!(
+                "fetch:      bulk ($export, waiting up to {} s)",
+                s.bulk_timeout
+            ),
+            config::Fetch::HapiDb => println!(
+                "fetch:      hapi-db (the HAPI server's database, from ${}{})",
+                crate::export::HAPI_DB_URL_ENV,
+                if std::env::var(crate::export::HAPI_DB_URL_ENV).is_ok_and(|v| !v.is_empty()) {
+                    ""
+                } else {
+                    ", which is not set"
+                }
+            ),
+            f => println!(
+                "fetch:      {} ({} requests at a time)",
+                f.name(),
+                s.concurrency
+            ),
+        }
     }
     println!("data:       {}", s.data.display());
     println!(
@@ -376,7 +408,9 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
     }
 }
 
-fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
+/// `tiles_tools`: the tiles step's tools, when they are checked only once the
+/// step is known to run.
+fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -> Result<()> {
     let started = Instant::now();
     let mut timings: Vec<(&str, f64)> = Vec::new();
     let mut ran: BTreeSet<Step> = BTreeSet::new();
@@ -384,17 +418,43 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
     std::fs::create_dir_all(s.parquet_dir())?;
     let stage = stage::Stage::new(s)?;
 
+    // A file source is split by type into raw/ first, as a download would
+    // be; --reuse-raw reruns on the last split.
+    let reads = steps.contains(&Step::Locations) || steps.contains(&Step::Views);
+    if s.reads_files() && reads && !s.reuse_raw {
+        let t = Instant::now();
+        files::split(s)?;
+        timings.push(("files", t.elapsed().as_secs_f64()));
+    }
+
     if steps.contains(&Step::Locations) {
         let t = Instant::now();
-        fhir::locations(s, stage.tables_dir())?;
-        timings.push(("locations", t.elapsed().as_secs_f64()));
-        ran.insert(Step::Locations);
+        let built = if s.reads_files() {
+            files::locations(s, stage.tables_dir())?
+        } else {
+            fhir::locations(s, stage.tables_dir())?;
+            true
+        };
+        if built {
+            timings.push(("locations", t.elapsed().as_secs_f64()));
+            ran.insert(Step::Locations);
+        }
+    }
+
+    // Files without Locations leave no locations table to build tiles from.
+    let tiles_wanted =
+        steps.contains(&Step::Tiles) && !(s.reads_files() && !stage.read("locations").is_dir());
+    if steps.contains(&Step::Tiles) && !tiles_wanted {
+        println!("== tiles: there is no locations table; skipped");
+    }
+    if tiles_wanted {
+        tools::require(tiles_tools)?;
     }
 
     // Views and tiles both read the location registry and nothing of each
     // other's, so they run side by side.
     let (views, tiles) = std::thread::scope(|scope| {
-        let tiles = steps.contains(&Step::Tiles).then(|| {
+        let tiles = tiles_wanted.then(|| {
             scope.spawn(|| {
                 let t = Instant::now();
                 tiles::build(s, &stage.read("locations")).map(|()| t.elapsed().as_secs_f64())
@@ -506,12 +566,15 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>) -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let report = json!({
+    let mut report = json!({
         "refreshed_at": refreshed_at,
-        "server": s.server,
+        "server": s.server_used(),
         "seconds": total,
         "steps": timings.iter().map(|(n, t)| (n.to_string(), json!(t))).collect::<serde_json::Map<_, _>>(),
     });
+    if s.reads_files() {
+        report["files"] = json!(s.inputs());
+    }
     std::fs::write(
         s.raw_dir().join("last-refresh.json"),
         serde_json::to_string_pretty(&report)?,
@@ -571,12 +634,20 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
                 || !ndjson(t).exists()
         })
         .collect();
-    fhir::export(s, &download)?;
+    if !s.reads_files() {
+        fhir::export(s, &download)?;
+    }
 
     let mut results: Vec<Option<fhir_pipes_sof::ViewResult>> = all.iter().map(|_| None).collect();
     for (rtype, idx) in &by_type {
         let t = Instant::now();
-        let resources = views::read_ndjson(&ndjson(rtype), s.threads)?;
+        // A type the files lack gives its views empty tables.
+        let resources = if s.reads_files() && !ndjson(rtype).exists() {
+            println!("   {rtype}: none in the files; its views write empty tables");
+            Vec::new()
+        } else {
+            views::read_ndjson(&ndjson(rtype), s.threads)?
+        };
         let vs: Vec<&views::View> = idx.iter().map(|&i| &all[i]).collect();
         for (&i, r) in idx.iter().zip(views::run(&vs, &resources, s.threads)?) {
             results[i] = Some(r);
@@ -599,6 +670,16 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<()> {
     for i in order {
         let v = &all[i];
         let result = results[i].take().expect("every view ran");
+        // The partition column is added to every row; a view column of the
+        // same name would be lost beside it.
+        if result.columns.iter().any(|c| c.name == s.partition_column) {
+            bail!(
+                "view {} has a column `{}`, which is the partition column; \
+                 set [partition] column to another name",
+                v.name,
+                s.partition_column
+            );
+        }
         let rule = partition::rule_for(&result, &s.lookups);
         let mut map: Option<&HashMap<String, String>> = None;
         if let Some((l, _)) = rule {
