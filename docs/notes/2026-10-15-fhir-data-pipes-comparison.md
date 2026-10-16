@@ -11,11 +11,13 @@ Compared on 2026-10-15:
   `experimental/` and the `exp/rust-fhir-pipes` branch, which
   [ROADMAP.md](../../ROADMAP.md#compared-with-the-fhir-data-pipes-rust-rfc)
   covers.
-- fhir-pipes `main` at `6faed50`: v0.4.0 plus everything merged since, from
-  #22 to #49.
+- fhir-pipes `main` at `f389b35`: v0.4.0 plus everything merged since, from
+  #22 to #69.
 
 First written on 2026-10-15 and updated on 2026-10-16 as the gaps it found
 were closed: #36, #37, #39, #40, #41, #42, #43, #45, #46, #47, #48 and #49.
+Updated again on 2026-10-16 after a code review of fhir-pipes (issues #51 to
+#62) and the fixes merged from it (#63 to #69).
 
 Status in the tables:
 
@@ -76,6 +78,24 @@ Closed since the first version of this comparison:
 - **The warehouse from files** (#32): `refresh --input` (#47).
 - **Reading a HAPI server's database** (#33): `export --hapi-db` (#49).
 
+Changed by the code review (#63 to #69):
+
+- **Stale search results.** fhir-pipes now sends `Cache-Control: no-cache`
+  on searches and counts, as the Java pipeline does; without it HAPI could
+  return a cached page or total for up to a minute (#64). It also asks for
+  gzip, which cut a 14,120-Group download from ICR from about 40 MB to
+  0.9 MB.
+- **Bulk Data.** The wait between status checks is capped at 15 s, whatever
+  `Retry-After` the server sends; HAPI always sends 120 s, so a 5,000-Patient
+  export went from 120 s to 30 s. Output files download in parallel (#69).
+- **Allocator.** The release binaries use mimalloc (#67). On Linux, where
+  the binaries are built for musl, the ICR views step went from 84.6 s to
+  4.9 s.
+- **Values that do not fit a column's type.** Before, they were written as
+  NULL without a message. Now `5.0` in an integer column is written as `5`,
+  a dateTime in a `date` column as its date, and anything else as NULL with a
+  count per column printed by the run (#68).
+
 The OpenMRS database mode is not needed: OpenMRS works over FHIR search, which
 fhir-pipes supports (to be checked in #29).
 
@@ -88,10 +108,10 @@ into FHIR, release binaries for five platforms, and view linting.
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
-| FHIR search | `FHIR_SEARCH` (default). First query with `_total=accurate`, `_count=batchSize` (default 100), `_summary=data`; pages fetched in parallel by generating `_getpagesoffset` segments, which only works on HAPI (`FhirSearchUtil`) | `export`, `extract`, `refresh`. Follows `next` links with `_count=1000`, so it works on any server that pages with links; pages of one type are fetched one after another | Same, slower on large servers |
+| FHIR search | `FHIR_SEARCH` (default). First query with `_total=accurate`, `_count=batchSize` (default 100), `_summary=data`, `Cache-Control: no-cache`; pages fetched in parallel by generating `_getpagesoffset` segments, which only works on HAPI (`FhirSearchUtil`) | `export`, `extract`, `refresh`. Follows `next` links with `_count=1000`, so it works on any server that pages with links; types, and `_lastUpdated` windows of a large type, are fetched in parallel (#46). Sends `Cache-Control: no-cache` and asks for gzip (#64) | Same |
 | Resource types | `resourceList` (default `Patient,Encounter,Observation`) | `export --type`; `refresh` downloads the types its views read | Same |
 | Incremental fetch | `--since` → `_lastUpdated=ge` (search), `_since` (bulk), `res_updated >` (HAPI JDBC). The controller reads `since` from the last snapshot | Watermark per type in `.export-state.json`, `_lastUpdated=ge`, merged by id. When the first response has an HTTP `Date`, the watermark is never later than that time less five minutes; without one, it is the greatest `meta.lastUpdated` seen | Same |
-| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | `export --bulk`, `refresh` `fetch = "bulk"` (#37): system-level kick-off with `_type` and `_since`; polls with `Retry-After`; `--bulk-timeout` cancels the export with `DELETE`; the status URL is saved, so an interrupted run resumes; outputs downloaded with the token when `requiresAccessToken`; merged by id; `deleted[]` applied; the count check still runs. No Group or Patient export | Same; fhir-pipes also applies `deleted[]` and resumes |
+| Bulk Data `$export` | `BULK_EXPORT`: system-level kick-off with `_type` and `_since`, polls with `Retry-After`, downloads the NDJSON outputs with a plain `URL.openStream()` and no Authorization header (`ReadJsonFn.FromUrl`), so outputs that need the server's credentials fail; keeps `transactionTime` for the next `_since`. Ignores `deleted[]`; no polling timeout | `export --bulk`, `refresh` `fetch = "bulk"` (#37): system-level kick-off with `_type` and `_since`; polls with `Retry-After`, at most 15 s apart (#69); `--bulk-timeout` cancels the export with `DELETE`; the status URL is saved, so an interrupted run resumes; outputs downloaded in parallel (`--concurrency`, #69), with the token when `requiresAccessToken`; merged by id; `deleted[]` applied; the count check still runs. No Group or Patient export | Same; fhir-pipes also applies `deleted[]` and resumes |
 | HAPI database | `HAPI_JDBC`: reads `hfj_resource`/`hfj_res_ver` in PostgreSQL (or MySQL) directly, in chunks; rebuilds `meta` from the tag tables; the only mode that sees deletions | `export --hapi-db`, `refresh` `fetch = "hapi-db"` (#49): reads `hfj_resource`/`hfj_res_ver` and the tag tables in PostgreSQL, in one read-only transaction streamed by cursor; HAPI 7/8 `fhir_id` and older `hfj_forced_id` layouts; incremental on `res_updated`, deletions included. On HAPI 8.12 the files are byte-identical to search, about 12 times faster. PostgreSQL only; one connection | Same; ties fhir-pipes to HAPI's schema |
 | OpenMRS database | `OPENMRS_JDBC`: reads uuids from OpenMRS MySQL tables, then fetches them from the FHIR2 module with `_id=` searches. No incremental mode | None. OpenMRS works through FHIR search (`/openmrs/ws/fhir2/R4`), untested | Missing (search untested) |
 | `--activePeriod` | Fetches resources in a date range, then each matched patient's history. Marked in the code as possibly to be removed | None | Not needed |
@@ -132,7 +152,7 @@ into FHIR, release binaries for five platforms, and view linting.
 |---|---|---|---|
 | Engine | HAPI FHIRPath per FHIR version. Runs a copy of the official SQL-on-FHIR v2 tests in CI (`SQLonFHIRv2Test`), skipping 5 cases (`join()` with no separator, date `lowBoundary`/`highBoundary`, one validation case) and with `fn_reference_keys.json` adapted; listed in the spec's implementations registry | `crates/sof` on `octofhir-fhirpath`; passes all 144 cases of the v2.1 suite in memory, with no skips, in CI | Same; fhir-pipes has no skipped cases |
 | Constructs | `select`, `column`, `forEach`, `forEachOrNull`, `unionAll`, `where`, `constant`, `getResourceKey()`, `getReferenceKey()` | The same, as the spec's test cases cover them | Same |
-| Views to Parquet | `outputParquetViewPath` / `createParquetViews`: one directory per view in each snapshot | `refresh`: one Hive-partitioned table per view (partition looked up through another table), dates and times as Parquet date and timestamp types | Same, different layout |
+| Views to Parquet | `outputParquetViewPath` / `createParquetViews`: one directory per view in each snapshot | `refresh`: one Hive-partitioned table per view (partition looked up through another table), dates and times as Parquet date and timestamp types. A value that does not fit its column's type is converted when nothing is lost (`5.0` → `5`), a dateTime in a `date` column becomes its date, and the rest are NULL and counted per column in the run's output and `last-refresh.json` (#68) | Same, different layout |
 | Views to a database | `sinkDbConfigPath`: `CREATE TABLE` per view, rows upserted by resource id (delete then insert), `--recreateSinkTables`. The docs name PostgreSQL and MySQL, but the SQL is PostgreSQL's (`CREATE INDEX IF NOT EXISTS`, `TIMESTAMP WITH TIME ZONE`, `JSONB`, `ON CONFLICT`) with no MySQL variant. Without views, one `(id, datab JSONB)` table per type | `refresh` with `[database]` (#39, #40): every view table, or those listed, replaced in one transaction (`DELETE` then `COPY`); types from the Parquet; tables created, and recreated when their columns change; an index on `id`; an advisory lock so overlapping loads take turns; TLS through `sslmode`. No upsert of only the changed rows (#38) and no raw JSONB mode | Same, replacing rather than upserting |
 | Regenerate views without fetching | Controller `VIEWS` run: from the current snapshot into a new `VIEWS_TIMESTAMP_*` directory, sink tables recreated | `refresh --only views --reuse-raw` | Same |
 | Try a view on one resource | `POST /test-view` and a web editor | `views run view.json --input resource.json` (CSV to the terminal); `views validate`, `views lint` | Same, without a web page |
@@ -153,7 +173,7 @@ into FHIR, release binaries for five platforms, and view linting.
 |---|---|---|---|
 | Timestamped snapshots | Every run writes `<dwhRootPrefix>_TIMESTAMP_<time>/`; complete when `timestamp_end.txt` exists; queries go through Hive views that point at the latest | One current warehouse, replaced as a whole at the end of each run (#42); older runs are not kept (versioned run directories are on the ROADMAP) | Missing (by design so far) |
 | Retention | `purgeSchedule` and `numOfDwhSnapshotsToRetain`; `DELETE /dwh?snapshotId=` | n/a | Missing |
-| Failed runs | `error.log` in the snapshot, downloadable from the controller; the incomplete snapshot is not used | Every table, the manifest and the catalog are staged and swapped in only at the end (#42), so a run that fails before then leaves the warehouse as the last good run left it. Hooks run after the swap: a failing hook does not roll back, and the push does not run | Same |
+| Failed runs | `error.log` in the snapshot, downloadable from the controller; the incomplete snapshot is not used | Every table, the manifest and the catalog are staged and swapped in only at the end (#42), so a run that fails before then leaves the warehouse as the last good run left it; `views/` and `tiles/` are staged the same way (#66). Hooks run after the swap: a failing hook does not roll back, and the push does not run | Same |
 
 ## 8. Running it: controller, scheduling, monitoring
 
@@ -171,7 +191,7 @@ into FHIR, release binaries for five platforms, and view linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Engine | Apache Beam: DirectRunner, Flink (local or cluster), Dataflow and Spark (Maven profiles). The controller uses local Flink only | One process, all CPUs (rayon); each resource type read once for all its views | Not needed (different design) |
-| Memory | Sizing guidance, not a measurement: `docker/.env` gives about 6.7 GB of JVM for 48 cores and 32 MB row groups; the image defaults to `-Xms6g -Xmx6g` | Measured: on the 46,497-resource Synthea sample, the 12 views ran in 0.79 s with 0.87 GB peak (2026-10-14 notes); the ICR warehouse (349k Locations, 164k MeasureReports) rebuilds in about 25 s from data already downloaded | Not compared: the two have not been run on the same workload |
+| Memory and speed | Sizing guidance, not a measurement: `docker/.env` gives about 6.7 GB of JVM for 48 cores and 32 MB row groups; the image defaults to `-Xms6g -Xmx6g` | Measured: on the 46,497-resource Synthea sample, the 12 views ran in 0.79 s with 0.87 GB peak (2026-10-14 notes); the ICR warehouse (349k Locations, 164k MeasureReports) rebuilds in about 25 s from data already downloaded. The ICR views step peaks at about 2.1 GB, because each type's file is held in memory (reading in chunks is #58). Release binaries use mimalloc (#67): on Linux the ICR views step went from 84.6 s to 4.9 s, on macOS from 6.0 s to 4.4 s | Not compared: the two have not been run on the same workload |
 | Very large data | Distributed runners | One machine; each type's resources are held in memory while its views run | Partial: a limit for very large types |
 | Parallel fetching | Parallel page segments on HAPI | Resource types fetched in parallel, and a large type split into `_lastUpdated` windows paged in parallel, under one shared request limit (#46); works on any server that sorts by `_lastUpdated`. ICR's 350k Locations: 712 s → 302 s | Same, not HAPI-specific |
 
@@ -198,8 +218,8 @@ into FHIR, release binaries for five platforms, and view linting.
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
-| Distribution | Docker image (`us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main`), jars, compose files for HAPI, OpenMRS, Spark, OpenHIM | Release binaries for macOS, Linux and Windows with checksums; `cargo install` | Missing: no image or compose files |
-| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 824 tests (844 with all features) on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite, fake FHIR servers, and PostgreSQL over TLS; bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
+| Distribution | Docker image (`us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main`), jars, compose files for HAPI, OpenMRS, Spark, OpenHIM | Release binaries for macOS, Linux (static musl) and Windows (C runtime linked in, no redistributable needed) with checksums; `cargo install` | Missing: no image or compose files |
+| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 884 tests (904 with all features) on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite, fake FHIR servers, and PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
 | Docs | mkdocs site: concepts, installation (Docker, controller, pipeline), tutorials (single machine, test servers, Superset, GCP), schema | README, ROADMAP, `docs/` per command, profile walkthrough | Partial: no install-with-Docker or dashboard tutorials |
 | Licence | Apache-2.0, Google CLA | Apache-2.0 (sof crates MIT OR Apache-2.0) | Same; CLA needed to contribute |
 
@@ -236,7 +256,7 @@ ROADMAP once agreed.
 |---|---|---|---|
 | Write view tables into PostgreSQL | The single-machine setup and its dashboards read view tables from PostgreSQL. Upsert by resource id, as the Java sink does, or replace each table | Medium | #25, done (#39, #40); upsert is #38 |
 | HTTP Basic auth | OpenMRS and many HAPI deployments use it | Small | #26, done (#36) |
-| Bulk Data `$export` source | Second fetch mode in the Java pipeline; faster for large servers that support it. Use `deleted[]`, which the Java pipeline ignores | Medium | #27, done (#37) |
+| Bulk Data `$export` source | Second fetch mode in the Java pipeline; faster for large servers that support it. Use `deleted[]`, which the Java pipeline ignores | Medium | #27, done (#37); faster polling and parallel downloads (#69) |
 | Copy to a second FHIR server | FHIR-to-FHIR sync (Shared Health Record use case): `load` without `If-Match`, or a `sync` command; forward deletions | Small to medium | #28, done (#45) |
 | Docker image and a compose example | How existing sites deploy | Small |  |
 | Nested Parquet-on-FHIR | Existing queries and Spark tables read it. On hold until a site needs it | Large |  |
