@@ -5,12 +5,16 @@
 //! (so a line `Value` rejects, such as one with a number out of range, is
 //! rejected too), a repeated field name keeps its last value, and a field of
 //! another JSON type than expected reads as absent, as
-//! `Value::get(..).and_then(Value::as_str)` would have it.
+//! `Value::get(..).and_then(Value::as_str)` would have it. A line the fast
+//! reader does not take, including any object with serde_json's raw-value
+//! key (which `Value` reads specially with the `raw_value` feature), is read
+//! as a `Value` instead: its answer, or its error.
 
 use std::fmt;
 
 use serde::Deserialize;
-use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::de::{Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
+use serde_json::Value;
 
 /// `resourceType`, `id`, `meta.lastUpdated` and `partOf.reference`, when
 /// each is a string.
@@ -26,9 +30,35 @@ impl Head {
     /// The head of one NDJSON line: an error when the line is not JSON (as
     /// `Value` reads it), `None` when it is JSON but not an object.
     pub fn parse(text: &str) -> serde_json::Result<Option<Head>> {
-        Ok(serde_json::from_str::<Top>(text)?.0)
+        fast(text).or_else(|_| by_value(text))
     }
 }
+
+/// The hand-written reader. An error is not final: `parse` then reads the
+/// line as a `Value`.
+fn fast(text: &str) -> serde_json::Result<Option<Head>> {
+    Ok(serde_json::from_str::<Top>(text)?.0)
+}
+
+/// The line read as a `Value`, the reference the fast reader matches.
+fn by_value(text: &str) -> serde_json::Result<Option<Head>> {
+    let v: Value = serde_json::from_str(text)?;
+    if !v.is_object() {
+        return Ok(None);
+    }
+    let s = |ptr: &str| v.pointer(ptr).and_then(Value::as_str).map(str::to_string);
+    Ok(Some(Head {
+        resource_type: s("/resourceType"),
+        id: s("/id"),
+        last_updated: s("/meta/lastUpdated"),
+        part_of: s("/partOf/reference"),
+    }))
+}
+
+/// serde_json's key for a raw value. With its `raw_value` feature on, a
+/// `Value` read of an object whose first key is this parses the string
+/// that follows as JSON; the fast reader leaves such a line to `Value`.
+const RAW_VALUE_KEY: &str = "$serde_json::private::RawValue";
 
 /// The field names read; any other is `Other`.
 #[derive(Deserialize)]
@@ -46,6 +76,8 @@ enum Key {
     LastUpdated,
     #[serde(rename = "reference")]
     Reference,
+    #[serde(rename = "$serde_json::private::RawValue")]
+    RawValue,
     #[serde(other)]
     Other,
 }
@@ -97,8 +129,22 @@ macro_rules! other_values {
 
 /// Parse and drop every entry of an object.
 fn skip_map<'de, A: MapAccess<'de>>(mut map: A) -> Result<(), A::Error> {
-    while map.next_entry::<Skip, Skip>()?.is_some() {}
+    while let Some(key) = map.next_key::<Key>()? {
+        raw_value_key::<A>(&key)?;
+        map.next_value::<Skip>()?;
+    }
     Ok(())
+}
+
+/// An error for serde_json's raw-value key, wherever it is: the line is
+/// read as a `Value` instead.
+fn raw_value_key<'de, A: MapAccess<'de>>(key: &Key) -> Result<(), A::Error> {
+    match key {
+        Key::RawValue => Err(A::Error::custom(format!(
+            "{RAW_VALUE_KEY}: read as a Value"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 impl<'de> Deserialize<'de> for Skip {
@@ -161,6 +207,7 @@ impl<'de, const K: u8> Deserialize<'de> for Field<K> {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Field<K>, A::Error> {
                 let mut found = None;
                 while let Some(key) = map.next_key::<Key>()? {
+                    raw_value_key::<A>(&key)?;
                     match (K, key) {
                         (LAST_UPDATED, Key::LastUpdated) | (REFERENCE, Key::Reference) => {
                             found = map.next_value::<Str>()?.0;
@@ -193,6 +240,7 @@ impl<'de> Deserialize<'de> for Top {
                 // A repeated name overwrites, as in a `Value` object.
                 let mut head = Head::default();
                 while let Some(key) = map.next_key::<Key>()? {
+                    raw_value_key::<A>(&key)?;
                     match key {
                         Key::ResourceType => head.resource_type = map.next_value::<Str>()?.0,
                         Key::Id => head.id = map.next_value::<Str>()?.0,
@@ -216,22 +264,6 @@ impl<'de> Deserialize<'de> for Top {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
-
-    /// What the `Value` reads gave, for comparison.
-    fn by_value(text: &str) -> serde_json::Result<Option<Head>> {
-        let v: Value = serde_json::from_str(text)?;
-        if !v.is_object() {
-            return Ok(None);
-        }
-        let s = |ptr: &str| v.pointer(ptr).and_then(Value::as_str).map(str::to_string);
-        Ok(Some(Head {
-            resource_type: s("/resourceType"),
-            id: s("/id"),
-            last_updated: s("/meta/lastUpdated"),
-            part_of: s("/partOf/reference"),
-        }))
-    }
 
     #[test]
     fn the_head_is_what_a_full_parse_finds() {
@@ -248,7 +280,7 @@ mod tests {
             r#"7"#,
             r#"null"#,
         ] {
-            let got = Head::parse(text).unwrap();
+            let got = fast(text).unwrap();
             assert_eq!(got, by_value(text).unwrap(), "{text}");
         }
     }
@@ -265,13 +297,9 @@ mod tests {
             r#"{"partOf":{"reference":"Location/x"},"partOf":"y"}"#,
             r#"{"partOf":{"reference":"a","reference":"b"}}"#,
         ] {
-            assert_eq!(
-                Head::parse(text).unwrap(),
-                by_value(text).unwrap(),
-                "{text}"
-            );
+            assert_eq!(fast(text).unwrap(), by_value(text).unwrap(), "{text}");
         }
-        let head = Head::parse(r#"{"resourceType":"Patient","id":"a","id":"b"}"#).unwrap();
+        let head = fast(r#"{"resourceType":"Patient","id":"a","id":"b"}"#).unwrap();
         assert_eq!(head.unwrap().id.as_deref(), Some("b"));
     }
 
@@ -286,11 +314,39 @@ mod tests {
             r#"{"id":"\ud800"}"#,
         ] {
             assert!(by_value(text).is_err(), "{text}");
-            assert!(Head::parse(text).is_err(), "{text}");
+            assert!(fast(text).is_err(), "{text}");
         }
         // A surrogate pair is a character.
         let pair = r#"{"id":"a","x":"\ud83d\ude00"}"#;
-        assert_eq!(Head::parse(pair).unwrap(), by_value(pair).unwrap());
+        assert_eq!(fast(pair).unwrap(), by_value(pair).unwrap());
+    }
+
+    #[test]
+    fn a_raw_value_key_is_left_to_a_value_read() {
+        let lines = [
+            // The review's case: a Value read parses the string as JSON and fails.
+            r#"{"resourceType":"Patient","id":"bad","x":{"$serde_json::private::RawValue":"not json"}}"#,
+            r#"{"resourceType":"Patient","id":"ok","x":{"$serde_json::private::RawValue":"{\"a\":1}"}}"#,
+            r#"{"$serde_json::private::RawValue":"{\"resourceType\":\"Patient\",\"id\":\"inner\"}"}"#,
+            r#"{"id":"later","x":{"a":1,"$serde_json::private::RawValue":"not json"}}"#,
+            r#"{"id":"esc","x":{"\u0024serde_json::private::RawValue":"not json"}}"#,
+            r#"{"id":"m","meta":{"$serde_json::private::RawValue":"7"}}"#,
+            r#"{"id":"s","resourceType":{"$serde_json::private::RawValue":"\"Patient\""}}"#,
+            r#"{"id":"arr","x":[{"$serde_json::private::RawValue":"[]"}]}"#,
+        ];
+        for text in lines {
+            assert!(fast(text).is_err(), "the fast reader leaves it: {text}");
+            match (Head::parse(text), by_value(text)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "{text}"),
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{text}"),
+                (a, b) => panic!("{text}: {a:?} against {b:?}"),
+            }
+        }
+        // serde_json's `raw_value` comes on with sqlx, in a `postgres` build.
+        if cfg!(feature = "postgres") {
+            assert!(by_value(lines[0]).is_err(), "raw_value is on");
+            assert!(Head::parse(lines[0]).is_err());
+        }
     }
 
     #[test]
@@ -301,7 +357,7 @@ mod tests {
             r#"{"id":"a"} x"#,
             r#"{"id":"a","x":[1,}"#,
         ] {
-            assert!(Head::parse(text).is_err(), "{text}");
+            assert!(fast(text).is_err(), "{text}");
             assert!(by_value(text).is_err(), "{text}");
         }
     }
@@ -318,7 +374,7 @@ mod tests {
         let full: Vec<_> = text.lines().map(|l| by_value(l).unwrap()).collect();
         let full_time = started.elapsed();
         let started = std::time::Instant::now();
-        let heads: Vec<_> = text.lines().map(|l| Head::parse(l).unwrap()).collect();
+        let heads: Vec<_> = text.lines().map(|l| fast(l).unwrap()).collect();
         let head_time = started.elapsed();
         eprintln!(
             "{} lines, {} MB: Value {full_time:?}, Head {head_time:?}",

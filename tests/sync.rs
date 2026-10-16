@@ -608,6 +608,37 @@ fn a_bearer_token_goes_with_every_request_including_deletes() {
     run(&["DELETE Patient/b"]);
 }
 
+// serde_json's `raw_value` feature, on with sqlx in a `postgres` build.
+#[cfg(feature = "postgres")]
+#[test]
+fn a_raw_value_key_that_is_not_json_rejects_the_plan_before_any_request() {
+    // A Value read with serde_json's `raw_value` feature parses the string
+    // under this key as JSON, so the line is not valid; no bundle may go.
+    let dir = tempfile::tempdir().unwrap();
+    let mut text: String = (0..4)
+        .map(|i| format!("{}\n", patient(&format!("p{i}"), T1)))
+        .collect();
+    text.push_str(
+        r#"{"resourceType":"Patient","id":"bad","x":{"$serde_json::private::RawValue":"not json"}}"#,
+    );
+    text.push('\n');
+    std::fs::write(dir.path().join("Patient.ndjson"), text).unwrap();
+    // No expectations: nothing may reach the server.
+    let server = Server::run();
+    let a = sync(
+        &server,
+        dir.path(),
+        &["--batch-size", "1", "--concurrency", "1"],
+    )
+    .failure()
+    .code(2);
+    assert!(
+        stderr(&a).contains("Patient.ndjson: line 5"),
+        "{}",
+        stderr(&a)
+    );
+}
+
 #[test]
 fn input_problems_are_usage_errors_before_any_request() {
     // No expectations: none of these may reach the server.
