@@ -189,8 +189,10 @@ fn check_needs_a_profile_and_a_readable_ig() {
 
 /// ICR's profile with the optional keys `import` reads, set explicitly.
 fn with_import_keys(location_profile: &str) -> String {
+    // A Windows checkout has CRLF line endings; the replacements expect LF.
     std::fs::read_to_string(ICR_PROFILE)
         .unwrap()
+        .replace("\r\n", "\n")
         .replace(
             "admin_code_column = \"pcode\"\n",
             &format!(
