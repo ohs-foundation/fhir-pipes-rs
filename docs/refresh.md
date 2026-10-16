@@ -127,6 +127,23 @@ build (`fsh-generated/resources/Binary-*.json`), are views; the rest are
 skipped. Each view is checked against the spec's structure rules before
 anything runs, and a plain copy is saved to `views/<name>.json`.
 
+### Parallel downloads
+
+The views step keeps `server.concurrency` search requests in flight at once
+(4 by default), as `fhir-pipes export --concurrency` does (see the
+[README](../README.md#parallel-downloads)): several resource types download
+side by side, and a full download of a large type (10,000 resources or more)
+is split into `_lastUpdated` windows paged side by side. Incremental
+downloads stay one stream per type. `concurrency = 1` downloads one type at a
+time, one page at a time. The `locations` step pages Locations as one stream
+either way.
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"
+concurrency = 4
+```
+
 ### Downloading with Bulk Data $export
 
 By default the views step pages FHIR searches. With `fetch = "bulk"` in
@@ -270,6 +287,7 @@ the file are relative to the file.
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
 | | | `server.fetch` | `search`; `bulk` for `$export` |
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
+| | | `server.concurrency` | 4: search requests in flight at once in the views step |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
 | `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
@@ -298,6 +316,7 @@ base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
 fetch = "search"            # or "bulk" for a Bulk Data $export
+concurrency = 4             # search requests at a time
 # google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
 
 [tools]            # paths or names on the PATH

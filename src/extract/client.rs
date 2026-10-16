@@ -2,7 +2,10 @@
 //! policy shared by paging, boundary fetches and load's bundle posts:
 //! connection errors, 5xx and 429 are retried with exponential backoff
 //! (0.5 s doubling, clamped to [0, 30] s, a numeric Retry-After replacing
-//! the computed delay); any other status is final.
+//! the computed delay); any other status is final. With a limit
+//! (`with_concurrency`, for `export --concurrency`) the threads sharing a
+//! client keep at most that many requests in flight, and a Retry-After pauses
+//! them all.
 //!
 //! The bearer token is either fixed (`--token`), obtained with the OAuth
 //! client-credentials grant (`--client-id`), or obtained from Google
