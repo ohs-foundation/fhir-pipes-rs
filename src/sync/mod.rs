@@ -35,7 +35,7 @@ use crate::export::valid_type;
 use crate::extract::client::FhirClient;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::load::bundle::{Bundle, plan, plan_deletes};
-use crate::load::order::{depths, parent_id};
+use crate::load::order::{depths, parent_key};
 use crate::load::{Progress, post_all, preflight};
 use crate::snapshot::instant::{format_utc, later};
 use state::{SyncState, Synced, TypeState};
@@ -196,7 +196,12 @@ fn plan_type(resource_type: &str, path: &Path, synced: &Synced, full: bool) -> R
             unchanged += 1;
             continue;
         }
-        parents.push(parent_id(&value).map(str::to_string));
+        // One type per file: a parent of another type is not in this set.
+        parents.push(
+            parent_key(&value)
+                .filter(|(t, _)| *t == resource_type)
+                .map(|(_, id)| id.to_string()),
+        );
         changed.push(Changed {
             id: id.to_string(),
             updated: updated.to_string(),
