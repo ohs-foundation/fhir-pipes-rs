@@ -54,7 +54,8 @@ pub struct RefreshArgs {
     /// Directory of ViewDefinition JSON files (e.g. an IG's fsh-generated/resources).
     #[arg(long, env = "FHIR_PIPES_VIEWS")]
     views: Option<PathBuf>,
-    /// FHIR server base URL.
+    /// FHIR server base URL, or a Cloud Healthcare API FHIR store path
+    /// (projects/P/locations/L/datasets/D/fhirStores/S).
     #[arg(long, env = "FHIR_PIPES_SERVER")]
     server: Option<String>,
     /// Name for the server's raw downloads: raw/<name>/.
@@ -71,6 +72,19 @@ pub struct RefreshArgs {
     /// FHIR_PIPES_PASSWORD, which is read only from the environment.
     #[arg(long, env = "FHIR_PIPES_USERNAME")]
     username: Option<String>,
+    /// Google Application Default Credentials, for a Cloud Healthcare API
+    /// FHIR store (as `server.google_auth = true`). `--google-auth=false` or
+    /// FHIR_PIPES_GOOGLE_AUTH=0 turns off the config file's setting.
+    #[arg(
+        long,
+        env = "FHIR_PIPES_GOOGLE_AUTH",
+        value_name = "BOOL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    google_auth: Option<bool>,
     /// Run only these steps (comma-separated). The manifest is added when a
     /// data step is among them.
     #[arg(long, value_delimiter = ',')]
@@ -151,6 +165,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
             token_url: args.token_url.clone(),
             username: args.username.clone(),
             password: env_secret("FHIR_PIPES_PASSWORD"),
+            google_auth: args.google_auth,
             countries: args.countries.clone(),
             threads: args.threads,
             reuse_raw: args.reuse_raw,
@@ -280,7 +295,7 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
         names(steps.iter().map(|s| s.name().to_string()).collect())
     );
     println!("server:     {} (raw/{})", s.server, s.server_name);
-    println!("auth:       {}", s.auth_kind());
+    println!("auth:       {}", s.auth_description());
     match s.fetch {
         config::Fetch::Bulk => println!(
             "fetch:      bulk ($export, waiting up to {} s)",

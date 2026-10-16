@@ -8,6 +8,7 @@ use assert_cmd::Command;
 use httptest::{Expectation, Server, all_of, matchers::*, responders::*};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::Field;
+use predicates::prelude::*;
 use predicates::str::contains as has;
 use serde_json::{Value, json};
 
@@ -107,6 +108,7 @@ fn cmd(config: &Path) -> Command {
         "FHIR_PIPES_TOKEN_URL",
         "FHIR_PIPES_USERNAME",
         "FHIR_PIPES_PASSWORD",
+        "FHIR_PIPES_GOOGLE_AUTH",
         "FHIR_PIPES_PROFILE",
     ] {
         c.env_remove(var);
@@ -1549,4 +1551,125 @@ fn a_killed_run_is_cleaned_up_by_the_next() {
         serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest["tables"]["locations"]["rows"], 2);
     assert_eq!(manifest["tables"]["obs"]["rows"], 3);
+}
+
+/// `server.google_auth`: tokens from a service account key, shown by
+/// `--check` without any secret.
+#[test]
+fn locations_are_extracted_with_google_auth() {
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/token"),
+            request::body(url_decoded(contains((
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:jwt-bearer"
+            )))),
+        ])
+        .times(1)
+        .respond_with(json_encoded(
+            json!({"access_token": "ya29.r", "expires_in": 3599}),
+        )),
+    );
+    let bearer = || request::headers(contains(("authorization", "Bearer ya29.r")));
+    for t in ["Location", "Organization"] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", format!("/fhir/{t}")),
+                bearer()
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(bundle(vec![]))),
+        );
+    }
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("name = \"test\"\n", "name = \"test\"\ngoogle_auth = true\n");
+    fs::write(&config, text).unwrap();
+    let key = dir.path().join("key.json");
+    fs::write(
+        &key,
+        json!({
+            "type": "service_account",
+            "private_key": fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/google/test-only-service-account-key.pem")
+            )
+            .unwrap(),
+            "client_email": "pipes-test@test-project.iam.gserviceaccount.com",
+            "token_uri": server.url_str("/token"),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "locations", "--full", "--check"])
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &key)
+        .assert()
+        .success()
+        .stdout(has(
+            "auth:       Google application default credentials: service account pipes-test@test-project.iam.gserviceaccount.com",
+        ))
+        .stdout(has("PRIVATE KEY").not());
+    cmd(&config)
+        .args(["--only", "locations", "--full"])
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &key)
+        .assert()
+        .success();
+    cmd(&config)
+        .args(["--only", "locations", "--full"])
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &key)
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .failure()
+        .stderr(has("use one way to authenticate"));
+}
+
+/// The environment wins over the config file, false as well as true.
+#[test]
+fn google_auth_false_in_the_environment_overrides_the_config() {
+    let (_dir, config) = setup(NOWHERE, "");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("name = \"test\"\n", "name = \"test\"\ngoogle_auth = true\n");
+    fs::write(&config, text).unwrap();
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .env("FHIR_PIPES_GOOGLE_AUTH", "0")
+        .assert()
+        .success()
+        .stdout(has("auth:       none"));
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .env("FHIR_PIPES_GOOGLE_AUTH", "0")
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .success()
+        .stdout(has("auth:       bearer token"));
+    cmd(&config)
+        .args(["--only", "locations", "--check", "--google-auth=false"])
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .success()
+        .stdout(has("auth:       bearer token"));
+    // Without the override, the file's setting still excludes a token.
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .env("FHIR_PIPES_TOKEN", "t")
+        .assert()
+        .failure()
+        .stderr(has("use one way to authenticate"));
+}
+
+#[test]
+fn a_store_path_is_expanded_in_check() {
+    let (_dir, config) = setup("projects/p/locations/l/datasets/d/fhirStores/s", "");
+    cmd(&config)
+        .args(["--only", "locations", "--check"])
+        .assert()
+        .success()
+        .stdout(has(
+            "server:     https://healthcare.googleapis.com/v1/projects/p/locations/l/datasets/d/fhirStores/s/fhir",
+        ));
 }

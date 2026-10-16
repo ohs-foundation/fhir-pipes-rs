@@ -263,7 +263,7 @@ the file are relative to the file.
 | `--data` | `FHIR_PIPES_DATA` | `data` | (required) |
 | `--profile` | `FHIR_PIPES_PROFILE` | `profile` | the snapshot's copy, else none (base FHIR); a path relative to the config file, or an https URL. See [profiles.md](profiles.md) |
 | `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
-| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir` |
+| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir`; a Cloud Healthcare API store path (`projects/…/fhirStores/…`) is expanded to its FHIR URL |
 | `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local` |
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
@@ -272,6 +272,7 @@ the file are relative to the file.
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
 | `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
 | | `FHIR_PIPES_PASSWORD` | | |
+| `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
 | `--countries` | | `tiles.countries` | every country |
 | `--threads` | | | number of CPUs |
 | `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
@@ -282,8 +283,11 @@ The client ID and secret are read only from the environment, never from flags
 or the file. They are traded for a token with the client-credentials grant,
 and the token is renewed before it expires, as for the other commands. With a
 username, the password is read only from `FHIR_PIPES_PASSWORD` and the two are
-sent as HTTP Basic auth. A token, a client ID and a username are mutually
-exclusive.
+sent as HTTP Basic auth. With `google_auth`, tokens come from Google
+Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud's
+credentials, or the metadata server), as described in the
+[README](../README.md#google-cloud-healthcare-api); `--check` shows which.
+A token, a client ID, a username and Google auth are mutually exclusive.
 
 ```toml
 data = "../data"
@@ -294,6 +298,7 @@ base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
 fetch = "search"            # or "bulk" for a Bulk Data $export
+# google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
 
 [tools]            # paths or names on the PATH
 duckdb = "duckdb"
