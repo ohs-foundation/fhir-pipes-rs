@@ -196,29 +196,6 @@ fn load_views(path: &Path) -> Result<Vec<(String, ViewDefinition)>> {
     }
 }
 
-/// Compile `view` before any input is read. A view that does not compile is
-/// the view's fault, a usage error, whatever the input and output format;
-/// failures while the rows are made are not.
-async fn check_compiles(name: &str, view: &ViewDefinition) -> Result<()> {
-    fhir_pipes_sof::CompiledView::compile(view)
-        .await
-        .with_context(|| format!("compiling view {name}"))
-        .map_err(usage)?;
-    Ok(())
-}
-
-/// `check_compiles` for every view, from outside a Tokio runtime (refresh).
-pub(crate) fn check_compiles_blocking(views: &[(&str, &ViewDefinition)]) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("starting the async runtime")?;
-    for (name, view) in views {
-        runtime.block_on(check_compiles(name, view))?;
-    }
-    Ok(())
-}
-
 /// Where `run` gets each view's rows from.
 enum Source {
     /// Every view's rows, already run over the files, in view order.
@@ -957,9 +934,6 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             }
 
             let views = load_views(view)?;
-            for (name, view) in &views {
-                check_compiles(name, view).await?;
-            }
             let mut source = match (input, db) {
                 // Evaluation runs on threads of its own; block_in_place lets
                 // this runtime worker wait for them without stalling other

@@ -129,6 +129,23 @@ with `--dialect duckdb`; both come from one dialect-parametrized generator and
 pass the full content-test suite (DuckDB verified through the `duckdb` CLI). The
 in-memory engine (`run --input`, `execute`) needs no database at all.
 
+## Known limitations
+
+The in-memory engine has no FHIR model, so it does not know an element's
+declared type or whether it is a choice element. `ofType(T)` with a FHIR
+datatype `T` reads the JSON name a choice element has for that type
+(`value.ofType(Quantity)` reads `valueQuantity`). On an element that is not a
+choice element that name does not exist, so the result is empty even when the
+type is right: `name.family.ofType(string)` and `name.ofType(HumanName)` find
+nothing. It never returns a value of another type, so a `where` filter using
+it does not let wrong rows through. (The FHIRPath engine's own `ofType` is
+not used there: without a model it compares the type with the element's name,
+so `code.ofType(code)` on a CodeableConcept matches, and it fails on most
+complex types.)
+
+`ofType` with a resource type (`contained.ofType(Practitioner)`) is left to
+the engine and filters by `resourceType`.
+
 ## FHIR versions
 
 Execution is **version-agnostic**: the engine navigates the resource JSON and is

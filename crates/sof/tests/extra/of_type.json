@@ -1,0 +1,112 @@
+{
+  "title": "of_type",
+  "description": "ofType() on a choice element reads its JSON name; inside a string literal it is not rewritten (issue #57).",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "50%off",
+          "given": [
+            "Ann"
+          ]
+        }
+      ],
+      "generalPractitioner": [
+        {
+          "reference": "#c1"
+        },
+        {
+          "reference": "Practitioner/x"
+        }
+      ]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "p2",
+      "deceasedBoolean": true,
+      "name": [
+        {
+          "family": "Doe"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "ofType inside a string literal is not rewritten",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "s",
+                "path": "'a.ofType(b)'",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "s": "a.ofType(b)"
+        },
+        {
+          "id": "p2",
+          "s": "a.ofType(b)"
+        }
+      ]
+    },
+    {
+      "title": "ofType on a choice element",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "deceased",
+                "path": "deceased.ofType(boolean)",
+                "type": "boolean"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "deceased": null
+        },
+        {
+          "id": "p2",
+          "deceased": true
+        }
+      ]
+    }
+  ]
+}
