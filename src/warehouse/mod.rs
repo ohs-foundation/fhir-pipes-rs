@@ -509,6 +509,9 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         ran.insert(Step::Views);
         contacted |= done.downloaded;
         view_tables = Some(done.tables);
+        // Said as soon as the views step is done, so a later step that fails
+        // (a hook, the push) does not hide them once the tables are published.
+        print_mismatches(&done.mismatches);
         mismatches = Some(done.mismatches);
     }
     let server = manifest::recorded_server(s, contacted);
@@ -590,12 +593,6 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         let t = Instant::now();
         push::push(s)?;
         timings.push(("push", t.elapsed().as_secs_f64()));
-    }
-
-    // Said last, where it is seen: the values the views step could not write
-    // as they are.
-    if let Some(m) = &mismatches {
-        print_mismatches(m);
     }
 
     if let Some(written) = view_tables {

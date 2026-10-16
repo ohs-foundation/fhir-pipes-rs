@@ -135,7 +135,8 @@ A value that does not match its column's type is written as follows:
   unparseable date) is written as null.
 
 The values written as their date or as null are counted per column and
-printed at the end of the run, before the `done` line:
+printed as soon as the views step is done, before the later steps run, so
+a hook or push that fails afterwards does not hide them:
 
 ```
 values that did not match their column's type:
@@ -614,7 +615,8 @@ before the hooks, in any case: `locations`, `views`, `tiles`, `manifest`,
 `catalog` or `database`. A config whose hook names `hooks`, `push` or an
 unknown step is refused before anything runs.
 
-Each run writes its step timings to `raw/<server>/last-refresh.json`. When
+Each run that finishes writes its step timings to
+`raw/<server>/last-refresh.json`; a run that stops at an error does not. When
 the views step ran, `type_mismatches` lists, per table and column, the values
 that did not match the column's type ([Tables](#tables)):
 
