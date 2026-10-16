@@ -22,6 +22,8 @@ pub struct MergeStats {
     pub total: usize,
     pub added: usize,
     pub updated: usize,
+    /// Existing lines left out because their id was to be dropped.
+    pub removed: usize,
     pub watermark: Option<String>,
 }
 
@@ -34,6 +36,9 @@ struct MergeInput<'a> {
     failures: &'a HashMap<String, String>,
     /// The profile's boundary extensions, beside the HL7 one.
     boundary_extensions: &'a [String],
+    /// Ids whose existing lines are left out, unless an incoming line
+    /// replaces them.
+    drop: &'a HashSet<&'a str>,
 }
 
 /// Replace the boundary attachment that carries `url` with inline base64 data.
@@ -155,8 +160,38 @@ pub fn merge_file(
         lookup,
         failures,
         boundary_extensions,
+        drop: &HashSet::new(),
     };
-    let result = merge_into(files, &input, report);
+    merge_cleaning_up(files, &input, report)
+}
+
+/// `merge_file` for a file without boundaries, also leaving out the
+/// existing lines whose id is in `drop` (resources deleted on the server)
+/// in the same pass. `MergeStats::removed` counts them; `total` does not.
+pub fn merge_file_dropping(
+    files: &MergeFiles,
+    notes: &[PageNote],
+    full: bool,
+    drop: &HashSet<&str>,
+    report: &mut Report,
+) -> Result<MergeStats> {
+    let input = MergeInput {
+        notes,
+        full,
+        lookup: &|_| None,
+        failures: &HashMap::new(),
+        boundary_extensions: &[],
+        drop,
+    };
+    merge_cleaning_up(files, &input, report)
+}
+
+fn merge_cleaning_up(
+    files: &MergeFiles,
+    input: &MergeInput,
+    report: &mut Report,
+) -> Result<MergeStats> {
+    let result = merge_into(files, input, report);
     if result.is_err() {
         let _ = std::fs::remove_file(&files.tmp);
     }
@@ -178,6 +213,7 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
         total: 0,
         added: 0,
         updated: 0,
+        removed: 0,
         watermark: None,
     };
     let mut old_ids: HashSet<String> = HashSet::new();
@@ -191,6 +227,10 @@ fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Re
                     // incoming line that replaces it below checks `old_ids`
                     // to tell an update from a new row.
                     old_ids.insert(id);
+                    continue;
+                }
+                Some((id, _)) if input.drop.contains(id.as_str()) => {
+                    stats.removed += 1;
                     continue;
                 }
                 Some((id, updated)) => {
@@ -667,6 +707,47 @@ mod tests {
         assert_eq!((stats.total, stats.added), (1, 1));
         let text = std::fs::read_to_string(snap.locations()).unwrap();
         assert_eq!(text, format!("{src}\n"), "byte-identical raw copy");
+    }
+
+    #[test]
+    fn dropped_ids_are_left_out_of_the_existing_file_unless_incoming() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(
+            snap.locations(),
+            format!(
+                "{}\n{}\n{}\nnot json\n{}\n",
+                line("a", "2026-01-01T00:00:00Z", None),
+                line("gone", "2026-01-09T00:00:00Z", None),
+                line("back", "2026-01-01T00:00:00Z", None),
+                line("gone", "2026-01-09T00:00:00Z", None),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            snap.incoming(),
+            format!("{}\n", line("back", "2026-01-02T00:00:00Z", None)),
+        )
+        .unwrap();
+        let notes = vec![note("back", "2026-01-02T00:00:00Z", None)];
+        let drop: HashSet<&str> = ["gone", "back", "never"].into();
+        let mut report = Report::default();
+        let stats = merge_file_dropping(
+            &MergeFiles::locations(&snap),
+            &notes,
+            false,
+            &drop,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(
+            (stats.total, stats.added, stats.updated, stats.removed),
+            (3, 0, 1, 2)
+        );
+        assert_eq!(stats.watermark.as_deref(), Some("2026-01-02T00:00:00Z"));
+        let text = std::fs::read_to_string(snap.locations()).unwrap();
+        assert_eq!(ids(&text), vec!["a", "<unparsed>", "back"]);
+        assert!(!snap.incoming().exists());
     }
 
     #[test]

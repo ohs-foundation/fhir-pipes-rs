@@ -395,12 +395,19 @@ fn page_window(
 
 /// Write the windows' files to `out` in order, keeping the last copy of each
 /// id. Line n of a window's file is its note n. Returns the kept notes.
+/// When no id repeats, which is the usual case, the files are concatenated
+/// as they are, without reading them line by line.
 fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>> {
     let mut last: HashMap<&str, (usize, usize)> = HashMap::new();
     for (w, p) in paged.iter().enumerate() {
         for (n, note) in p.notes.iter().enumerate() {
             last.insert(note.id.as_str(), (w, n));
         }
+    }
+    let lines: usize = paged.iter().map(|p| p.notes.len()).sum();
+    if last.len() == lines {
+        concatenate(files, out)?;
+        return Ok(paged.iter().flat_map(|p| p.notes.clone()).collect());
     }
     let mut kept = Vec::with_capacity(last.len());
     let file = std::fs::File::create(out).map_err(|e| PipesError::io(out, e))?;
@@ -426,8 +433,36 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
     Ok(kept)
 }
 
+/// `files` one after another into `out`: the first renamed, the rest
+/// appended to it, each removed once copied.
+pub(super) fn concatenate(files: &[PathBuf], out: &Path) -> Result<()> {
+    let Some((first, rest)) = files.split_first() else {
+        std::fs::File::create(out).map_err(|e| PipesError::io(out, e))?;
+        return Ok(());
+    };
+    std::fs::rename(first, out).map_err(|e| PipesError::io(out, e))?;
+    if rest.is_empty() {
+        return Ok(());
+    }
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(out)
+        .map_err(|e| PipesError::io(out, e))?;
+    for path in rest {
+        let mut reader = std::fs::File::open(path).map_err(|e| PipesError::io(path, e))?;
+        std::io::copy(&mut reader, &mut writer).map_err(|e| PipesError::io(out, e))?;
+        drop(reader);
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 /// `f` over `items` on up to `workers` threads; the results in item order.
-fn parallel<T: Sync, R: Send>(items: &[T], workers: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(super) fn parallel<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
     std::thread::scope(|s| {
@@ -451,7 +486,7 @@ fn parallel<T: Sync, R: Send>(items: &[T], workers: usize, f: impl Fn(&T) -> R +
 }
 
 /// Files removed when dropped, whether the download worked or not.
-struct Remove(Vec<PathBuf>);
+pub(super) struct Remove(pub(super) Vec<PathBuf>);
 
 impl Drop for Remove {
     fn drop(&mut self) {
@@ -683,6 +718,60 @@ mod tests {
         let mut ids: Vec<String> = lines.iter().map(|(id, _)| id.clone()).collect();
         ids.sort();
         ids
+    }
+
+    #[test]
+    fn windows_without_a_repeated_id_are_concatenated_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, ids: &[&str]| {
+            let path = dir.path().join(name);
+            let text: String = ids
+                .iter()
+                .map(|id| format!("{{\"id\":\"{id}\",\"n\":\"{name}\"}}\n"))
+                .collect();
+            std::fs::write(&path, text).unwrap();
+            let notes = ids
+                .iter()
+                .map(|id| PageNote {
+                    id: id.to_string(),
+                    last_updated: None,
+                    boundary_url: None,
+                })
+                .collect();
+            (
+                path,
+                Paged {
+                    notes,
+                    pages: 1,
+                    report: Report::default(),
+                },
+            )
+        };
+        let run = |sets: &[&[&str]], out: &str| {
+            let (files, paged): (Vec<_>, Vec<_>) = sets
+                .iter()
+                .enumerate()
+                .map(|(i, ids)| write(&format!("{out}-w{i}"), ids))
+                .unzip();
+            let out = dir.path().join(out);
+            let kept = join(&files, &paged, &out).unwrap();
+            let kept: Vec<String> = kept.into_iter().map(|n| n.id).collect();
+            (std::fs::read_to_string(&out).unwrap(), kept, files)
+        };
+        let (text, kept, files) = run(&[&["a", "b"], &[], &["c"]], "plain");
+        assert_eq!(
+            text,
+            "{\"id\":\"a\",\"n\":\"plain-w0\"}\n{\"id\":\"b\",\"n\":\"plain-w0\"}\n{\"id\":\"c\",\"n\":\"plain-w2\"}\n"
+        );
+        assert_eq!(kept, ["a", "b", "c"]);
+        assert!(files.iter().all(|f| !f.exists()), "the windows are used up");
+        // A repeat is read line by line, keeping the later copy.
+        let (text, kept, _) = run(&[&["a", "b"], &["a"]], "repeat");
+        assert_eq!(
+            text,
+            "{\"id\":\"b\",\"n\":\"repeat-w0\"}\n{\"id\":\"a\",\"n\":\"repeat-w1\"}\n"
+        );
+        assert_eq!(kept, ["b", "a"]);
     }
 
     #[test]

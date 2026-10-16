@@ -28,7 +28,7 @@
 //! `res_updated` has no time zone: HAPI writes it in its JVM's zone, which
 //! is UTC in the HAPI images, and `meta.lastUpdated` is written as UTC.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
 
 use serde::Deserialize;
@@ -38,13 +38,13 @@ use sqlx_core::row::Row;
 use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::{PgConnection, PgRow};
 
-use super::{ExportState, TypeState, incoming_path, ndjson_path, remove_ids, tmp_path, type_state};
+use super::{ExportState, TypeState, incoming_path, ndjson_path, tmp_path, type_state};
 use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::page::PageNote;
 use crate::report::Report;
 use crate::snapshot::instant::WATERMARK_MARGIN_SECS;
-use crate::snapshot::merge::{MergeFiles, merge_file};
+use crate::snapshot::merge::{MergeFiles, merge_file_dropping};
 use crate::snapshot::same_server;
 
 /// Rows fetched from the cursor at a time.
@@ -821,7 +821,10 @@ async fn read_changes(
         let _ = std::fs::remove_file(&incoming);
         return Err(e);
     }
-    let stats = merge_file(
+    // A resource deleted and created again is live: its row says so, and
+    // the merge keeps an id it reads.
+    let gone: HashSet<&str> = deleted.iter().map(String::as_str).collect();
+    let stats = merge_file_dropping(
         &MergeFiles {
             existing: out.clone(),
             tmp: tmp.clone(),
@@ -830,20 +833,10 @@ async fn read_changes(
         },
         &notes,
         false,
-        &|_| None,
-        &HashMap::new(),
+        &gone,
         report,
-        &[],
     )?;
-    // A resource deleted and created again is live: its row says so.
-    let read: HashSet<&str> = notes.iter().map(|n| n.id.as_str()).collect();
-    let gone: HashSet<&str> = deleted
-        .iter()
-        .map(String::as_str)
-        .filter(|id| !read.contains(id))
-        .collect();
-    let removed = remove_ids(&out, &tmp, &gone)?;
-    let total = stats.total - removed;
+    let (total, removed) = (stats.total, stats.removed);
     let live: i64 = sqlx_core::query::query(
         "SELECT count(*) FROM hfj_resource WHERE res_type = $1 AND res_deleted_at IS NULL",
     )
