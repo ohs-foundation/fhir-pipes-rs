@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
-use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding};
+use fhir_pipes_sof::output::{OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary};
 use fhir_pipes_sof::{ColumnInfo, ColumnType, ViewResult};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -18,6 +18,34 @@ use super::config::Lookup;
 
 /// The directory name hive (and DuckDB) give the null partition.
 pub const NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
+
+/// The column a table is partitioned by at its first level, from its directory
+/// names: `country` for `country=SLE/`. Each table is read by its own layout,
+/// since they can differ: the views step partitions by `[partition] column`,
+/// the Location transform always by `country`. `default` when the table has
+/// no `<column>=` directory (yet).
+pub fn partition_key(table_dir: &Path, default: &str) -> String {
+    let Ok(entries) = fs::read_dir(table_dir) else {
+        return default.to_string();
+    };
+    let mut keys: Vec<String> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().into_owned();
+            let (key, _) = name.split_once('=')?;
+            (!key.is_empty() && !key.starts_with('.')).then(|| key.to_string())
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    if keys.iter().any(|k| k == default) {
+        return default.to_string();
+    }
+    keys.into_iter()
+        .next()
+        .unwrap_or_else(|| default.to_string())
+}
 
 /// The parquet files of a partitioned table: those under a `<column>=` directory,
 /// which leaves out metadata kept beside the data (e.g. a catalog's items.parquet).
@@ -58,9 +86,13 @@ fn collect_parquet(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// key → partition value, read from a warehouse table. Where a key has several
-/// values the first one read wins. A file without the value column takes it
-/// from its `<column>=<value>` directory.
+/// values the first one read wins. The value is the table's own first-level
+/// partition (`partition_key`, `column` by default), which need not be named
+/// `column`: Locations are partitioned by `country` whatever the views use. A
+/// file without that column takes the value from its `<key>=<value>`
+/// directory.
 pub fn read_lookup(table_dir: &Path, key: &str, column: &str) -> Result<HashMap<String, String>> {
+    let column = &partition_key(table_dir, column);
     let mut map = HashMap::new();
     for file in table_files(table_dir, column) {
         let from_path = partition_value_in_path(&file, table_dir, column);
@@ -128,17 +160,23 @@ pub fn rule_for<'a>(result: &ViewResult, lookups: &'a [Lookup]) -> Option<(&'a L
 }
 
 /// Split `result` by partition value and write it to `table_dir`, replacing
-/// what was there only once every file is written. Returns the row count.
+/// what was there only once every file is written. Returns the row count and
+/// the values that did not match their column's type.
 pub fn write(
     result: ViewResult,
     table_dir: &Path,
     column: &str,
     partition_of: impl Fn(&[Value]) -> Option<String>,
-) -> Result<usize> {
+) -> Result<(usize, WriteSummary)> {
     let total = result.data.len();
     let mut groups: BTreeMap<Option<String>, Vec<Vec<Value>>> = BTreeMap::new();
     for row in result.data {
         groups.entry(partition_of(&row)).or_default().push(row);
+    }
+    // No rows: one empty file in the null partition, so the table still has
+    // its columns for whatever reads it (the catalog, the database step).
+    if groups.is_empty() {
+        groups.insert(None, Vec::new());
     }
     let parent = table_dir
         .parent()
@@ -153,6 +191,7 @@ pub fn write(
     let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
     let mut columns = result.columns;
     columns.push(ColumnInfo::new(column, ColumnType::String));
+    let mut summary = WriteSummary::default();
     for (value, rows) in groups {
         let dir = staging.join(format!(
             "{column}={}",
@@ -174,19 +213,37 @@ pub fn write(
         let path = dir.join("part-0.parquet");
         let mut file =
             fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-        writer
-            .write(&part, &mut file)
-            .with_context(|| format!("writing {}", path.display()))?;
+        summary.merge(
+            writer
+                .write_with_summary(&part, &mut file)
+                .with_context(|| format!("writing {}", path.display()))?,
+        );
     }
     fs::create_dir_all(&staging)?;
+    replace(&staging, table_dir)?;
+    Ok((total, summary))
+}
+
+/// Put the table at `staged` in place of `table_dir`: the old one is renamed
+/// to `.<table>.old`, the new one renamed in, then the old one removed.
+pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
+    let parent = table_dir
+        .parent()
+        .context("table directory has no parent")?;
+    let name = table_dir
+        .file_name()
+        .context("table directory has no name")?
+        .to_string_lossy();
     let old = parent.join(format!(".{name}.old"));
     let _ = fs::remove_dir_all(&old);
     if table_dir.exists() {
-        fs::rename(table_dir, &old)?;
+        fs::rename(table_dir, &old)
+            .with_context(|| format!("moving {} aside", table_dir.display()))?;
     }
-    fs::rename(&staging, table_dir)?;
+    fs::rename(staged, table_dir)
+        .with_context(|| format!("renaming {} into place", staged.display()))?;
     let _ = fs::remove_dir_all(&old);
-    Ok(total)
+    Ok(())
 }
 
 /// A partition value made safe as one path segment, as hive escapes it.
@@ -206,6 +263,20 @@ fn escape(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tables_partition_key_comes_from_its_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path();
+        // No directories yet: the configured column.
+        assert_eq!(partition_key(&t.join("missing"), "part"), "part");
+        fs::create_dir_all(t.join("country=NG/geom_type=point")).unwrap();
+        fs::create_dir_all(t.join(".staging")).unwrap();
+        assert_eq!(partition_key(t, "part"), "country");
+        // The configured column wins where both are there.
+        fs::create_dir_all(t.join("part=x")).unwrap();
+        assert_eq!(partition_key(t, "part"), "part");
+    }
     use serde_json::json;
 
     fn result(cols: &[&str], rows: Vec<Vec<Value>>) -> ViewResult {
@@ -231,10 +302,11 @@ mod tests {
                 vec![json!("c"), Value::Null],
             ],
         );
-        let n = write(r, &table, "country", |row| {
+        let (n, summary) = write(r, &table, "country", |row| {
             row[1].as_str().map(str::to_string)
         })
         .unwrap();
+        assert!(summary.is_empty());
         assert_eq!(n, 3);
         for p in [
             "country=SLE",
@@ -248,6 +320,34 @@ mod tests {
         assert_eq!(lookup.get("b").map(String::as_str), Some("NGA"));
         assert!(!lookup.contains_key("c"));
         assert!(!dir.path().join(".places.new").exists());
+    }
+
+    #[test]
+    fn the_summary_adds_up_every_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = ViewResult {
+            columns: vec![
+                ColumnInfo::new("where", ColumnType::String),
+                ColumnInfo::new("start", ColumnType::Date),
+            ],
+            row_count: 3,
+            data: vec![
+                vec![json!("SLE"), json!("2026-06-15T08:30:00+01:00")],
+                vec![json!("NGA"), json!("2026-06-15T08:30:00+01:00")],
+                vec![json!("NGA"), json!("June")],
+            ],
+        };
+        let (_, summary) = write(r, &dir.path().join("t"), "country", |row| {
+            row[0].as_str().map(str::to_string)
+        })
+        .unwrap();
+        assert_eq!(
+            summary.messages(),
+            [
+                "start: 2 dateTime values written as their date",
+                "start: 1 value did not fit date and was written as null",
+            ]
+        );
     }
 
     #[test]

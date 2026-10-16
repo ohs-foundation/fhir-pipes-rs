@@ -167,6 +167,8 @@ fhir-pipes load      --server URL [AUTH] --in CHANGES.ndjson
                [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
 fhir-pipes index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
                --out CHANGES.ndjson [--refresh] [--report FILE]
+fhir-pipes import location-boundaries --in BOUNDARIES.geojson --country NAME=CODE --level … --out UNITS.ndjson
+fhir-pipes import location-sites --in SITES.csv --boundaries UNITS.ndjson --type CODE … --out SITES.ndjson
 fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
                --out GROUPS.ndjson [--source worldpop] [--planning-denominator]
                [--estimate-date YYYY-MM-DD] [--report FILE] [--cache-dir DIR]
@@ -176,8 +178,8 @@ fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
 `AUTH`, timeouts and retries work as for every command; see
 [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server).
 
-`extract` and `load` touch the network. `transform locations`, `inspect` and `diff`
-never do. That split is deliberate: a slow server or an expired token has
+`extract` and `load` touch the network. `transform locations`, `inspect`, `diff`
+and `import` never do. That split is deliberate: a slow server or an expired token has
 nothing to do with whether your geometry is valid, and keeping them apart
 means the whole geospatial half is testable from files with no server
 involved.
@@ -590,6 +592,243 @@ the dataset lists every place and geometry can be added later.
 
 ---
 
+## Importing admin boundaries and sites
+
+Two commands turn files from outside the registry into Location NDJSON for
+`load`, to start a country's registry or add to it:
+
+- `import location-boundaries` turns one level of admin boundaries (a GeoJSON
+  file such as GRID3's operational wards) into the whole admin unit
+  hierarchy above and including that level.
+- `import location-sites` turns rows of points (a CSV of facilities, schools
+  or settlements) into site Locations, each hung under the admin unit its
+  row names, optionally each paired with a facility Organization.
+
+They replace kiln's Python `bake` and `bake-points`, with the same options and
+output. Both are offline: they read files and write NDJSON, and `load` sends
+it. The resource shape comes from the profile (see
+[What the profile provides](#what-the-profile-provides)); with ICR's profile
+the output is what kiln wrote.
+
+```
+fhir-pipes import location-boundaries --in BOUNDARIES.geojson --country NAME=CODE
+               --level LEVEL=NAME_PROP[:CODE_PROP] [--level …] [--alias LEVEL=PROPERTY …]
+               [--code-system URI] [--dissolve-parents] --out UNITS.ndjson [--report FILE]
+fhir-pipes import location-sites --in SITES.csv --boundaries UNITS.ndjson --type CODE
+               --name-col COL --lat-col COL --lon-col COL --id-col COL
+               --parent LEVEL=COLUMN [--parent …] [--identifier URI=COLUMN …] [--where COLUMN=VALUE …]
+               [--paired-org] [--org-identifier URI=COLUMN …] [--org-type-coding URI=CODE_COL[:TEXT_COL] …]
+               [--type-coding URI=CODE_COL[:TEXT_COL] …] [--spatial-index SCHEME:LEVEL …]
+               --out SITES.ndjson [--report FILE]
+```
+
+A problem with the mapping is fatal: the command exits 2 and writes nothing,
+because every resource would be wrong the same way. A problem with one
+feature or row is reported and costs only that feature or row. The report
+uses the same kinds as the other commands; `--report` saves it as JSON.
+
+### import location-boundaries
+
+The input is a GeoJSON FeatureCollection with one feature per unit of the
+lowest level, each carrying the names (and optionally codes) of its
+ancestors as properties. GRID3's ward files are like this:
+
+```json
+{"type": "Feature", "properties": {"state": "Bauchi", "statecode": "BA",
+  "lga": "Alkaleri", "lga_alt_names": "", "ward": "Alkaleri East", …},
+ "geometry": {"type": "Polygon", …}}
+```
+
+```sh
+fhir-pipes import location-boundaries --profile examples/profiles/icr.toml \
+  --in GRID3_NGA_operational_wards.geojson --country Nigeria=NGA \
+  --level state=state:statecode --level lga=lga --level ward=ward \
+  --alias lga=lga_alt_names --alias ward=ward_alt_names \
+  --out units.ndjson
+```
+
+- `--country NAME=CODE` writes the root, level 0. Its id is the code as a
+  slug (`nga`).
+- Each `--level LEVEL=NAME_PROP[:CODE_PROP]` is one level below it, top
+  down. The last is the level of the features and carries their boundaries.
+  A unit above it is written once, the first time a feature names it.
+- A unit's id is its parent's id, a hyphen, and the slug of its code, or of
+  its name when the level has no code or the feature has none:
+  `nga-ba-alkaleri-alkaleri-east`. A slug is lower case with accents folded
+  to ASCII and each run of other characters made one hyphen
+  (`N'Djaména` → `n-djamena`). So the ids are the same on every run, and
+  units can be matched by name later.
+- Each unit gets one identifier under `--code-system` (default: the
+  profile's `[location] admin_code_system`, else `[dhis2]
+  country_code_system`): its code, or its id when it has no code. The
+  country's is the `--country` code.
+- `--alias LEVEL=PROPERTY` reads `;`-separated alternative names into
+  `alias`. `import location-sites` matches them too.
+- The boundary is checked (a Polygon or MultiPolygon, rings with at least
+  three distinct points and no self-intersection), rewound to RFC 7946
+  (exterior rings counterclockwise, holes clockwise) and inlined as base64
+  in the profile's boundary extension.
+- `--dissolve-parents` also gives the country and every level above the last
+  a boundary: the union of the last-level boundaries below it. It is derived,
+  consistent with the units below it but not authoritative; a later official
+  boundary for that unit can replace it.
+
+Output is parents first: the country, then each level in the order its
+units first appear. That is the order `load` needs.
+
+| Fatal (exit 2, nothing written) | Reported |
+|---|---|
+| Not a FeatureCollection | `missing_field`: a feature without a name at some level, skipped; or a name that slugs to nothing, which stops that feature at the level above |
+| A `crs` other than WGS84 (reproject with `ogr2ogr -t_srs EPSG:4326`) | `geometry_invalid`: not a Polygon or MultiPolygon, or not valid; the unit is written without a boundary. With `--dissolve-parents`, a union that comes out empty |
+| A `--level` property empty on every feature: a typo in the mapping | `invalid_id`: an id longer than 64 characters; the feature is skipped from that level down |
+| Two different names with the same slug under one parent | `boundary_z_dropped`: 3D coordinates flattened to 2D |
+| The same last-level unit twice | |
+
+### import location-sites
+
+The input is a CSV with a header row. Each row is one site, with its name, a
+stable id, its coordinates and the names of the admin units it is in.
+
+```sh
+fhir-pipes import location-sites --profile examples/profiles/icr.toml \
+  --in GRID3_NGA_health_facilities.csv --boundaries units.ndjson \
+  --type facility --name-col facility_name --lat-col latitude --lon-col longitude \
+  --id-col globalid --where state=Bauchi \
+  --parent state=state --parent lga=lga --parent ward=ward \
+  --identifier https://icr.healthcampaigns.org/identifiers/grid3-globalid=globalid \
+  --paired-org \
+  --org-identifier https://icr.healthcampaigns.org/identifiers/nga-nhfr-code=nhfr_facility_code \
+  --org-type-coding https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs=facility_level:facility_level_option \
+  --org-type-coding https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs=ownership:ownership_type \
+  --type-coding https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs=facility_level:facility_level_option \
+  --spatial-index quadkey:18 \
+  --out facilities.ndjson
+```
+
+- Each row becomes a Location with the `--type` code under the profile's
+  Location type system, physical type `si` (Site), the row's position, and
+  an identifier for each `--identifier` whose cell is not empty. The
+  `--id-col` value is the Location id, so it must be a valid FHIR id (up to
+  64 letters, digits, `-` and `.`), such as GRID3's `globalid`.
+- `--parent` columns name the row's admin units, top down. Each is matched
+  against the names and aliases of the children of the unit matched above
+  it, as slugs, so `Tama/Daye` matches `Tama Daye`. The first level is
+  matched below the country when `--boundaries` has one root, as rows do not
+  usually name the country. A row whose names stop matching part way is
+  linked to the deepest unit that matched and reported as
+  `parent_unresolved`; one that matches nothing has no `partOf`.
+- `--where COLUMN=VALUE` keeps only rows whose cell is exactly the value.
+- `--paired-org` writes a facility Organization before each Location, with
+  id `<[organization] id_prefix><row id>` (`org-…`), and the Location names it
+  as `managingOrganization`. Registry codes go on the Organization
+  (`--org-identifier`); the Location keeps the place identifiers.
+- `--org-type-coding URI=CODE_COL[:TEXT_COL]` adds a type to the
+  Organization after `prov`: the cell as a slug is the code (`Primary` →
+  `primary`), the cell itself the display, and the text column the concept
+  text. `--type-coding` adds the same to the Location's type, after its type
+  code, for tools that read only Locations.
+- `--spatial-index SCHEME:LEVEL` writes the profile's spatial index
+  extension on every row with a position, as `index` does.
+
+| Fatal (exit 2, nothing written) | Reported |
+|---|---|
+| A column an option names is not in the CSV header | `missing_field`: no name; row skipped |
+| Two rows with the same id | `invalid_id`: an id (or its Organization's id) that is not a valid FHIR id; row skipped |
+| `--boundaries` has no line that is JSON | `missing_position`: coordinates missing, not numbers or out of range; written without a position |
+| | `parent_unresolved`: see above |
+| | `malformed_field`: a `--boundaries` line that is not JSON, skipped |
+
+### What the profile provides
+
+| In the output | Profile key |
+|---|---|
+| Location type codes' system | `[location] type_systems` (the first), else `[dhis2] location_type_system` |
+| Admin unit type code | `[location] admin_unit_type` |
+| Location `meta.profile` | `[location] profile`, else `[dhis2] location_profile`; none: no `meta` |
+| Organization `meta.profile` | `[organization] profile`, else `[dhis2] facility_organization_profile` |
+| Admin code identifier system | `--code-system`, else `[location] admin_code_system`, else `[dhis2] country_code_system` |
+| Boundary extension | `[location] boundary_extensions` (the first), else the HL7 one |
+| Spatial index extension | `[location] spatial_index_extension` (needed for `--spatial-index`) |
+| Organization id prefix | `[organization] id_prefix` |
+
+Physical types and the Organization `prov` type are base FHIR.
+
+### Example: a new country
+
+Sierra Leone from OCHA's common operational datasets: admin boundaries with
+P-codes at three levels (province, district, chiefdom), and a health facility
+list. The boundaries file has `ADM1_EN`, `ADM1_PCODE`, `ADM2_EN` … per
+chiefdom. Using ICR's profile, with the P-code as each unit's code:
+
+```sh
+fhir-pipes import location-boundaries --profile examples/profiles/icr.toml \
+  --in sle_admbnda_adm3.geojson --country "Sierra Leone=SLE" \
+  --level province=ADM1_EN:ADM1_PCODE --level district=ADM2_EN:ADM2_PCODE \
+  --level chiefdom=ADM3_EN:ADM3_PCODE \
+  --code-system https://icr.healthcampaigns.org/identifiers/pcode \
+  --dissolve-parents --out sle-units.ndjson --report sle-units-report.json
+```
+
+The chiefdom `SL040101` in district `SL0401` of province `SL04` gets the id
+`sle-sl04-sl0401-sl040101` and an identifier with system
+`https://icr.healthcampaigns.org/identifiers/pcode` and value `SL040101`, which the
+`pcode` column of `transform locations` reads. Then the facilities, matched
+by province, district and chiefdom name:
+
+```sh
+fhir-pipes import location-sites --profile examples/profiles/icr.toml \
+  --in sle_health_facilities.csv --boundaries sle-units.ndjson \
+  --type facility --name-col facility_name --lat-col lat --lon-col lon --id-col facility_id \
+  --parent province=province --parent district=district --parent chiefdom=chiefdom \
+  --paired-org --spatial-index quadkey:18 \
+  --out sle-facilities.ndjson --report sle-facilities-report.json
+```
+
+Check the reports: `parent_unresolved` usually means a spelling differs
+between the two files, which an alias in the boundaries file (`--alias`) or a
+fix in the CSV resolves. Then load the units before the sites, so every
+`partOf` exists when its child arrives:
+
+```sh
+fhir-pipes load --server https://fhir.example.org/fhir --in sle-units.ndjson --dry-run
+fhir-pipes load --server https://fhir.example.org/fhir --in sle-units.ndjson
+fhir-pipes load --server https://fhir.example.org/fhir --in sle-facilities.ndjson
+```
+
+For a country whose IG is not ICR's, write a profile first
+([profiles.md](profiles.md)): `import` needs at least `[location]
+type_systems` and `admin_unit_type`, and uses `[location] profile` and
+`admin_code_system` when set.
+
+### Differences from kiln's bake and bake-points
+
+Checked by running both on the same inputs (the Python tests' cases, GRID3's
+Bauchi wards with and without `--dissolve-parents`, and GRID3's facility
+list) and comparing the NDJSON resource by resource: ids, names, aliases,
+identifiers, `partOf`, types, extensions and report issues are the same, and
+last-level boundaries are byte for byte the same. The differences:
+
+- Systems, profiles and extension URLs come from the profile; with ICR's
+  profile they are the ones kiln wrote.
+- A dissolved boundary is computed with `geo` rather than GEOS. The polygons
+  are the same to about 1e-9 of their area, but the vertices are in a
+  different order.
+- Validity is checked ring by ring (at least three distinct points, no
+  self-intersection), as `transform locations` checks it. GEOS also checks
+  how rings relate to each other, such as a hole outside its shell or
+  overlapping parts of a MultiPolygon; such a boundary, which kiln reported
+  as `geometry_invalid`, is written. The `geometry_invalid` detail text
+  differs.
+- 3D coordinates are flattened to 2D and reported as `boundary_z_dropped`;
+  kiln kept them.
+- An id longer than 64 characters is reported as `invalid_id` and skipped;
+  kiln wrote it, and a FHIR server refuses it.
+- `import location-sites` refuses a column the options name that the CSV
+  lacks; kiln read every row's value as empty.
+- `--org-identifier` and `--org-type-coding` need `--paired-org`; kiln
+  ignored them without it.
+- `--admin` is now `--boundaries`. Both commands take `--report`.
+
 ## Round trip: diff and load
 
 Editing happens in GIS tools because that is where the good editing tools are.
@@ -676,7 +915,7 @@ so that de-duplication, tile-level joins and containment queries
 (`Location?quadkey=0313131` is every point inside that tile, because FHIR
 string search is prefix matching and quadkeys are prefix-hierarchical)
 need no geometry engine. The cell is a pure function of the position, so
-fhir-pipes owns it: `bake-points --spatial-index quadkey:18` writes it at import,
+fhir-pipes owns it: `import location-sites --spatial-index quadkey:18` writes it at import,
 and `index` backfills it onto Locations that were loaded without one.
 
 `index` reads the snapshot, and for every Location that has a position but
@@ -692,6 +931,9 @@ Re-running after a load and a fresh extract writes nothing.
 Location's position, every quadkey and geohash cell already on it is
 recomputed for the new point (an H3 cell, which fhir-pipes cannot compute, is
 dropped rather than left wrong), and clearing the position removes them all.
+A cell whose level is outside its scheme's range (quadkey 1–23, geohash
+1–12, H3 0–15) is reported as `malformed_field` and skipped: `transform`
+leaves it out of the `quadkey` columns and `diff` does not recompute it.
 Quadkey and geohash are computed in fhir-pipes with no dependency; H3 cells are
 parsed and carried but not computed yet.
 
@@ -785,7 +1027,8 @@ fhir-pipes load --server URL [AUTH] --in changes.ndjson [--dry-run] [--batch-siz
 ```
 
 Load reads any NDJSON of FHIR resources with a `resourceType` and an `id`,
-orders them parents first by `partOf`, groups them into transaction bundles
+orders them parents first by `partOf` (matched by type and id, so a
+Location and an Organization may share an id), groups them into transaction bundles
 of `PUT <Type>/<id>`, and posts them with retry and backoff. Before the
 first bundle it fetches the server's capability statement, which also
 proves the URL and token work. If the input creates any new resource, the
@@ -807,6 +1050,13 @@ committed, and re-running the same file is safe because every entry is a
 PUT by id with a version check. The fix is to extract again, re-apply the
 edit, and diff again. This is what makes it safe for a GIS user to edit a
 copy that might be a day old.
+
+A bundle is sent again after a timeout or a 5xx. When the first attempt was
+committed but its answer was lost, the retry conflicts with that attempt's
+own writes. A 412 or 409 after more than one attempt says so: the error
+gives the number of attempts and says the earlier one may have been
+committed. Check the named resources on the server before extracting
+again; if they hold the edit, the bundle was loaded.
 
 Organizations are posted before Locations, so a new pair resolves within
 the run.
@@ -956,12 +1206,6 @@ scanline fill does the zonal sum.
 - **Merge countries.** One snapshot and one dataset per country. Separate
   outputs can be placed under one directory tree by hand, since the partition
   key includes the country.
-- **Import external data into Locations.** Turning a GRID3 ward file or a CSV
-  of facilities into FHIR resources is the job of `bake` and `bake-points`,
-  which remain in the Python package under `python/` for now. `fhir-pipes
-  population` is the deliberate exception: it derives Groups from the
-  registry's own boundaries and a published raster, and writes nothing onto
-  a Location.
 - **Validate against the profile.** `diff` produces structurally correct
   resources; running them through a FHIR validator before load is the
   operator's call, and the NDJSON checkpoint exists so that is easy.
@@ -988,11 +1232,6 @@ a partial one.
 `country` as the top level partition, for a regional or global view. The
 partition layout already accommodates it; what is missing is the merge
 command and a decision about how the report combines.
-
-**`bake` and `bake-points` in Rust.** Porting the import side of the Python
-fhir-pipes, so the whole toolkit is one binary. The GeoJSON and CSV parsing are
-straightforward; `--dissolve-parents` needs polygon union, which is available
-in pure Rust but is the piece to prototype first.
 
 **Tile baking as an optional step.** If a Rust tiler matures to the point of
 matching tippecanoe's generalisation quality, `fhir-pipes tiles` could become an

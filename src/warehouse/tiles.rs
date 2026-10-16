@@ -22,12 +22,13 @@ const POINT_COLS: &str = "id, name, type, status, admin1_name, admin2_name, admi
     managing_organization, part_of, last_updated,
     round(position_longitude, 5) AS lon, round(position_latitude, 5) AS lat";
 
-pub fn build(s: &Settings) -> Result<()> {
-    let locations = s.parquet_dir().join("locations");
-    let countries = countries(&locations, &s.tile_countries)?;
+/// Build the archives from the Location table at `locations` (the one this
+/// run wrote, else the live one) into `out`, the run's staged tiles/, which
+/// replaces the live one when the run is published.
+pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
+    let countries = countries(locations, &s.tile_countries)?;
     println!("== tiles ({})", countries.join(", "));
-    let out = s.data.join("tiles");
-    fs::create_dir_all(&out)?;
+    fs::create_dir_all(out)?;
     let tmp = tempfile::tempdir()?;
     let t = tmp.path();
     // Each country's `dir`, where it exists, with `pattern` appended: duckdb
@@ -143,11 +144,8 @@ pub fn build(s: &Settings) -> Result<()> {
         .filter(|d| has_catchments(d))
         .map(|d| d.join("type=*-catchment/*.parquet"))
         .collect();
+    // `out` starts empty, so an archive not built is not in the new tiles/.
     if catchment_globs.is_empty() {
-        let stale = out.join("catchments.pmtiles");
-        if stale.exists() {
-            fs::remove_file(stale)?;
-        }
         println!("   catchments: none in the registry, not built");
     } else {
         let catch = list(&catchment_globs);
@@ -234,14 +232,11 @@ fn has_catchments(polygon_dir: &Path) -> bool {
 }
 
 /// Build one archive from its layers. Empty layers are left out (tippecanoe
-/// fails on them); with none left the archive is removed rather than left stale.
+/// fails on them); with none left the archive is not built.
 fn tippecanoe(s: &Settings, out: &Path, args: &[&str], layers: &[(&str, PathBuf)]) -> Result<()> {
     let layers: Vec<&(&str, PathBuf)> = layers.iter().filter(|(_, f)| features(f) > 0).collect();
     let name = out.file_name().unwrap_or_default().to_string_lossy();
     if layers.is_empty() {
-        if out.exists() {
-            fs::remove_file(out)?;
-        }
         println!("   → {name}: no features, not built");
         return Ok(());
     }

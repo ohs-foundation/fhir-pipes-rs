@@ -34,6 +34,9 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_USERNAME",
+        "FHIR_PIPES_PASSWORD",
+        "FHIR_PIPES_GOOGLE_AUTH",
     ] {
         c.env_remove(var);
     }
@@ -243,6 +246,44 @@ fn a_412_names_the_conflicting_ids_and_stops() {
     );
     assert!(err.contains("bundle 1/3 committed"), "{err}");
     assert!(err.contains("diff again"), "{err}");
+}
+
+#[test]
+fn a_412_after_a_retry_says_the_earlier_attempt_may_have_committed() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("a", Some("1"), None)]);
+    expect_metadata(&server, true);
+    // The first attempt was committed but its answer lost (a gateway's
+    // 503); the retry then conflicts with that attempt's own write.
+    server.expect(
+        Expectation::matching(any_bundle())
+            .times(2)
+            .respond_with(cycle![
+                status_code(503),
+                status_code(412).body(r#"{"resourceType":"OperationOutcome"}"#),
+            ]),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Location/a"))
+            .times(1)
+            .respond_with(ok(
+                json!({"resourceType": "Location", "id": "a", "meta": {"versionId": "2"}})
+                    .to_string(),
+            )),
+    );
+    let a = load(&server, &input, &["--retries", "2"]).failure().code(1);
+    let err = stderr(&a);
+    assert!(
+        err.contains("bundle 1/1 rejected with HTTP 412 after it was sent 2 times"),
+        "{err}"
+    );
+    assert!(err.contains("may have been committed"), "{err}");
+    assert!(!err.contains("nothing in it was written"), "{err}");
+    assert!(
+        err.contains("Location/a (expected version 1, server has 2)"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -550,4 +591,32 @@ fn parallel_bundles_still_put_parents_first() {
         "{}",
         stdout(&a)
     );
+}
+
+#[test]
+fn basic_auth_authorises_the_preflight_and_every_bundle() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("state", Some("3"), None)]);
+    let basic = || request::headers(contains(("authorization", "Basic YWRtaW46QWRtaW4xMjM=")));
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/metadata"),
+            basic()
+        ])
+        .times(1)
+        .respond_with(ok(capability(true))),
+    );
+    server.expect(
+        Expectation::matching(all_of![any_bundle(), basic()])
+            .times(1)
+            .respond_with(ok(transaction_response())),
+    );
+    fhir_pipes()
+        .args(["load", "--server", &server.url("/fhir").to_string(), "--in"])
+        .arg(&input)
+        .args(["--username", "admin"])
+        .env("FHIR_PIPES_PASSWORD", "Admin123")
+        .assert()
+        .success();
 }

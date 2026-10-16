@@ -1,6 +1,7 @@
 # fhir-pipes refresh
 
-`fhir-pipes refresh` refreshes a Parquet warehouse from a FHIR server. It
+`fhir-pipes refresh` refreshes a Parquet warehouse from a FHIR server, or
+from NDJSON and Bundle files (see [From files](#from-files)). It
 downloads the data, runs [SQL-on-FHIR](https://sql-on-fhir.org)
 ViewDefinitions over it, and writes the result as Hive-partitioned Parquet
 tables with a manifest. It can also build map tiles of the Location registry,
@@ -20,6 +21,7 @@ installed.
 fhir-pipes refresh --config fhir-pipes.toml
 fhir-pipes refresh --only views --reuse-raw          # views from the last download
 fhir-pipes refresh --server https://example.org/fhir --server-name prod --push
+fhir-pipes refresh --input exports/ --input extra.ndjson   # from files, no server
 fhir-pipes refresh --check                           # settings, steps, tools found
 ```
 
@@ -27,23 +29,89 @@ fhir-pipes refresh --check                           # settings, steps, tools fo
 
 | Step | What it does | Needs |
 |---|---|---|
-| `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations` | |
-| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh), run each type's views on one read of it, write each view's table | |
+| `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations`; with `--reuse-raw` and a snapshot there, transformed without an extract | |
+| `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, write each view's table | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
-| `manifest` | `manifest.json`: time, server, each table's row count, the views, the Location extract's state | |
-| `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
+| `manifest` | `manifest.json`: time, server (see below), each table's row count, the views, the Location extract's state | |
+| `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
+| `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | |
 | `hooks` | the config's commands, in order | the commands |
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
 `locations` runs first. `views` and `tiles` then run side by side, since both
-read only the registry. The manifest, the catalog, the hooks and the push
-follow.
+read only the registry. The manifest, the catalog and the database follow.
+The run's tables, manifest and catalog are then swapped in together (see
+below), and the hooks and the push run last, on the swapped-in warehouse.
 
-By default every step except `push` runs, and `catalog` when the config has a
-`[catalog]` section. `--only views,tiles` picks steps (the manifest and the
-catalog are added when a data step is picked), `--skip tiles` leaves some out,
+By default every step except `push` runs, `catalog` only when the config has a
+`[catalog]` section, and `database` only with `[database]`. `--only
+views,tiles` picks steps (the manifest, the catalog and the database are added
+when a data step is picked), `--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
+
+### What a failed run leaves behind
+
+A run does not change the warehouse's tables, `views/`, `tiles/`,
+`manifest.json` or `catalog.sql` until every step up to and including
+`database` has succeeded. Until then it writes them to staging directories:
+
+| Staged at | Swapped in to |
+|---|---|
+| `parquet/.staging/<table>/`, for each table the run writes, `locations` included | `parquet/<table>/` |
+| `parquet/.staging/_report.json` (the Location transform's report) | `parquet/_report.json` |
+| `.staging/views/` (the `views` step's copies of the views) | `views/` |
+| `.staging/tiles/` (the `tiles` step's archives) | `tiles/` |
+| `.staging/manifest.json`, `.staging/catalog.sql` | `manifest.json`, `catalog.sql` |
+
+`views/` and `tiles/` are replaced as a whole when the step that writes them
+ran: `views/` then holds the current views only, and `tiles/` only the
+archives this run built. A step that did not run leaves its directory as it
+is.
+
+While the run goes on, each step reads a table from staging if the run wrote
+it, and from `parquet/` if not: the views look partitions up in the new
+`locations` and in lookup tables written earlier in the run, the tiles are
+built from the new `locations`, and the manifest, the catalog and the database
+step describe or load the tables as they will be after the swap. Tables the
+run does not write (`locations` with `--only views`, say) stay as they are and
+are counted and listed as before.
+
+After the `database` step, each staged table is renamed into `parquet/` (the
+old one is renamed aside and then removed), then `views/` and `tiles/` the
+same way, then `manifest.json` and `catalog.sql` are renamed into place. A
+reader can see files from two runs only during those renames. A table is
+never half-written.
+
+So a run that fails in `locations`, `views`, `tiles`, `manifest`, `catalog`
+or `database` leaves every table, `views/`, `tiles/`, `manifest.json` and
+`catalog.sql` exactly as the previous successful run left them, and removes
+its staging. What it does change:
+
+- `raw/`: the downloads and the extract state move forward, so the next run
+  downloads only what changed since and rebuilds every table from the whole
+  download.
+- PostgreSQL: the `database` step commits before the swap, so if a rename in
+  the swap fails afterwards, the database has the new run's rows.
+
+`catalog.duckdb` with relative paths is built just after the swap, since
+DuckDB reads each table's schema from its files at their final paths. If
+that build fails, the run stops with the new tables, `manifest.json` and
+`catalog.sql` in place and the previous `catalog.duckdb`.
+
+The hooks run after the swap, on the published warehouse: a hook such as a
+catalog build reads the new tables and can write beside them. A hook that
+fails stops the run before the push, with the new tables, manifest and
+catalog in place. The push uploads the swapped-in warehouse.
+
+A run that is killed leaves its staging behind; the next run removes it
+before it starts. A run killed between the two renames of a table's swap
+leaves the old table as `parquet/.<table>.old` (or `.views.old`, `.tiles.old`
+in the warehouse directory); the next run renames it back. While it runs, a refresh holds a lock on `.refresh.lock` in the
+warehouse directory, so a second refresh of the same warehouse waits for the
+first to finish.
+
+Disk use doubles for the tables, views and tiles a run writes, until the swap.
 
 ### Tables
 
@@ -52,18 +120,199 @@ The table is the view's name in snake case minus a configured prefix
 (`IcrIndicatorValue` → `indicator_value`). Dates, dateTimes, instants and times
 are parquet date and timestamp types, not text.
 
+A value that does not match its column's type is written as follows:
+
+- an integral number (`5.0`) in an `integer` or `integer64` column (FHIR
+  `integer`, `positiveInt`, `unsignedInt`, `integer64`) is written as the
+  integer; `5.5` is not rounded and is written as null;
+- a dateTime with a time (`2026-06-15T23:30:00-05:00`) in a `date` column is
+  written as its date part as written (`2026-06-15`), without converting to
+  UTC first. Switch the column to `dateTime` to keep the time;
+- a partial date (`2026`, `2026-06`) is floored to the start of the period:
+  `2026-01-01`, `2026-06-01`. In a `dateTime` or `instant` column, a partial
+  or date-only value is midnight UTC on that day. These are not counted;
+- anything else that cannot be converted (a string in an `integer` column, an
+  unparseable date) is written as null.
+
+The values written as their date or as null are counted per column and
+printed as soon as the views step is done, before the later steps run, so
+a hook or push that fails afterwards does not hide them:
+
+```
+values that did not match their column's type:
+   indicator_value.period_start: 12 dateTime values written as their date
+   obs.value: 3 values did not fit integer and were written as null
+```
+
+The run does not fail. The counts are also in `last-refresh.json` (see
+below).
+
 Every row gets a partition column (default `country`), looked up through
 another table: the first `[[partition.lookup]]` rule whose `key` column the view
 has gives the table and column to look the value up in. A row without a match
 goes to the null partition, `__HIVE_DEFAULT_PARTITION__`, as hive and DuckDB
-name it. Tables other views look up in are written first. A table is replaced
-only once all of its new files are written.
+name it. The views step prints a warning with the number of rows that went
+there, for each table with a lookup rule: rows without a key, rows whose key
+is not in the lookup table (a key that is not text is never found, since the
+lookup table's keys are read as text), or every row when the lookup table is
+missing. The run carries on. A view with no rows writes one empty file there, so the table keeps
+its columns. A view with a column of the partition column's name stops the
+run, since that column would be lost beside the partition column: set
+`[partition] column` to another name (the fhir-data-pipes views have an
+address `country` column, for one). The `locations` table stays partitioned
+by `country` whatever the view tables use. The manifest, the catalog, the
+database step and the partition lookups read each table by its own
+first-level partition directories, so a lookup through `locations` gives the
+Location's country as the row's partition value either way. Tables other views look up in are written first, and are read
+back from staging. Tables are swapped in at the end of the run (see [What a
+failed run leaves behind](#what-a-failed-run-leaves-behind)).
 
 The views directory can be any directory of JSON files: files whose
 `resourceType` is `ViewDefinition`, or ends in `/ViewDefinition` as in an IG
 build (`fsh-generated/resources/Binary-*.json`), are views; the rest are
 skipped. Each view is checked against the spec's structure rules before
-anything runs, and a plain copy is saved to `views/<name>.json`.
+anything runs, and a plain copy is saved to `views/<name>.json`; `views/` is
+replaced with the run's copies when the run is published, so a removed view
+leaves it and the manifest.
+
+A view that is removed or renamed leaves its table behind in `parquet/`.
+refresh does not delete it: it is still counted in the manifest, named in
+the catalog and pushed. A run that ran the views step ends with a note
+naming each table in `parquet/` that no current view writes, leaving out
+`locations` and the lookup tables, and `--check` lists them as
+`unwritten:`. Delete a table's directory by hand if it is no longer wanted.
+
+### Parallel downloads
+
+The views step keeps `server.concurrency` search requests in flight at once
+(4 by default), as `fhir-pipes export --concurrency` does (see the
+[README](../README.md#parallel-downloads)): several resource types download
+side by side, and a full download of a large type (10,000 resources or more)
+is split into `_lastUpdated` windows paged side by side. Incremental
+downloads stay one stream per type. `concurrency = 1` downloads one type at a
+time, one page at a time. With `fetch = "bulk"`, it is the number of the
+export's output files downloaded at once. The `locations` step pages
+Locations as one stream either way.
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"
+concurrency = 4
+```
+
+### Downloading with Bulk Data $export
+
+By default the views step pages FHIR searches. With `fetch = "bulk"` in
+`[server]`, it asks the server for a system-level Bulk Data `$export` of the
+types the views read instead, as `fhir-pipes export --bulk --incremental`
+does (see the [README](../README.md#bulk-data-export)):
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"
+fetch = "bulk"
+bulk_timeout = 14400        # seconds to wait for the export; then it is cancelled
+```
+
+The downloads land in the same `raw/<server>/<TYPE>.ndjson` files, so the
+views and `--reuse-raw` work the same way. The export's `transactionTime` is
+the next refresh's `_since`, and the resources the export lists as deleted
+are removed. A refresh that stops while the server is still exporting polls
+the same export next time. `--full` exports every type without `_since`.
+The `locations` step still uses search. `Group/[id]/$export` and
+`Patient/$export` are not supported yet.
+
+### Reading the HAPI server's database
+
+With `fetch = "hapi-db"`, the views step reads the types the views use from
+the PostgreSQL database of a HAPI FHIR JPA server instead of its API, as
+`fhir-pipes export --hapi-db --incremental` does (see the
+[README](../README.md#reading-a-hapi-servers-database)). The connection
+string comes only from `FHIR_PIPES_HAPI_DATABASE_URL`:
+
+```toml
+[server]
+base = "https://fhir.example.org/fhir"   # still used by the locations step
+fetch = "hapi-db"
+```
+
+This ties the refresh to HAPI's internal schema, which changes between HAPI
+releases; fhir-pipes checks it before reading and stops on one it does not
+know. The files are the same `raw/<server>/<TYPE>.ndjson`. Deleted resources
+are removed from them on each refresh, and `--full` reads every type again.
+One connection reads the types one after another; `server.concurrency` is
+not used. The `locations` step still uses search. `--check` says whether
+the environment variable is set.
+
+## From files
+
+With a file source, `refresh` reads the resources from files instead of a
+FHIR server, as the Java pipeline's `--fhirFetchMode=NDJSON` and `JSON` do.
+The server is never contacted, and the server settings are not needed.
+
+```toml
+[source]
+files = ["../synthea/fhir", "exports/*.ndjson"]   # files, directories, glob patterns
+```
+
+or `refresh --input PATH`, repeated for more inputs, which replaces the
+config's list. Paths in the config are relative to the config file; `--input`
+paths are relative to the current directory.
+
+The inputs are read as `views run --input` reads them: NDJSON (`.ndjson`), a
+Bundle, a JSON resource or an array of them; a directory with its
+subdirectories, hidden files skipped; in a Bundle, a reference to another
+entry by its `urn:uuid` fullUrl is rewritten to that entry's `Type/id`, so
+joins work. A glob pattern reads the `.json` and `.ndjson` files and the
+directories it matches, in path order. A path that does not exist, or a
+pattern that matches nothing, stops the run.
+
+The steps then run as for a server:
+
+- The resources are split by type into `raw/<name>/<Type>.ndjson`, each file
+  written beside its target and renamed into place. `name` is
+  `--server-name` or `server.name`, `files` by default. A resource that
+  appears more than once (same type and id) is kept once: the copy with the
+  latest `meta.lastUpdated`, or, on a tie or when neither has one, the copy
+  read last (the later file in path order). A `<Type>.ndjson` from an earlier
+  run, of a type the files no longer have, is removed.
+- `locations`: the files' Location resources, and their Organizations if
+  there are any, become the snapshot `raw/<name>/locations`, which is
+  transformed into `parquet/locations` as after an extract. Boundaries given
+  inline (`valueAttachment.data`) are read; boundaries given by URL are not
+  fetched, and the transform reports them as unresolved. If the files have
+  no Locations, the step is skipped with a note, and an earlier run's
+  `parquet/locations`, if there is one, is kept. Without any `locations`
+  table, `tiles` is skipped too, and views that look their partition up in
+  `locations` write their rows to the null partition.
+- `views`: each view runs on its type's file, as on a download. A type the
+  views read but the files lack gives each of its views an empty table, with
+  a note.
+- `manifest`, `catalog`, `database`, `hooks` and `push` are unchanged, and the
+  run is staged and swapped in as for a server. The manifest's `server` is
+  `null` and its `files` lists the inputs; hooks get an empty `FHIR_BASE`.
+
+With a file source the server's auth settings are not used, so they are not
+checked either: a config with `server.username` runs from files without
+`FHIR_PIPES_PASSWORD`. The tiles step's tools are checked only once the run
+knows the step will run, since files without Locations skip it.
+
+`raw/<name>/` can hold a server's download when the file source uses the
+same name (`server.name`). The split removes the server export's state
+(`.export-state.json`), and a Location snapshot built from files has no
+watermark, so the next refresh from the server downloads every type, and
+extracts every Location, in full, rather than merging the server's changes
+into the files' copies.
+
+`--reuse-raw` reruns on the last split in `raw/<name>/` without reading the
+inputs again. `--check` shows the file source and how many files each input
+names, and leaves out the server and auth lines.
+
+On fhir-data-pipes' Synthea sample, with its 12 views (`--skip tiles`, since
+the sample's Locations have no admin-unit boundaries, and
+`[partition] column = "part"`, since the views have a `country` column), the
+tables have the same rows as `views run docker/config/views --input
+synthea-hiv/sample_data_segments`.
 
 ## Catalog
 
@@ -105,7 +354,8 @@ SELECT * FROM warehouse.coverage WHERE country = 'NGA';
 
 DuckDB reads each table's schema from its files when it creates a view, so
 the file is built where the views can reach the data. With relative paths
-that is the catalog step. With a `base_url` it is the push: after the tables
+that is just after the run's tables are swapped in. With a `base_url` it is
+the push: after the tables
 are uploaded, `refresh --push` builds `catalog.duckdb` against the uploaded
 copy, then uploads `catalog.sql` and `catalog.duckdb` last, so a client never
 sees a catalog naming files that are not there yet. `duckdb_setup` runs before
@@ -116,6 +366,152 @@ is temporary and is not saved in the file.
 A client without `catalog.duckdb` can run `catalog.sql` itself: DuckDB-Wasm
 can fetch the file and run its text, and the duckdb shell can run it with
 `-init` or `.read`.
+
+### Querying with Spark
+
+With `spark = true`, each refresh also writes `catalog.spark.sql`: Spark SQL
+that creates a table for each warehouse table, for a Spark Thrift server such
+as the one the fhir-data-pipes Java pipeline runs. Writing it needs no Spark.
+
+```toml
+[catalog]
+spark = true
+spark_location = "s3a://warehouse"           # how Spark reaches the warehouse directory
+spark_database = "fhir"                      # the default
+spark_extra = "catalog-spark-extra.sql"      # your own Spark SQL, appended
+```
+
+`spark_location` is the warehouse directory as Spark sees it: `s3a://…`,
+`hdfs://…`, `file:/…`, or a path on the Spark machine (`/dwh` when the
+warehouse is mounted there in a container). Unset, it is the warehouse
+directory on this machine, as a `file:` URL. Each table reads
+`<spark_location>/parquet/<table>`.
+
+The file creates the database if it is missing, then, for each table, drops
+the table and creates it again:
+
+```sql
+CREATE DATABASE IF NOT EXISTS `fhir`;
+USE `fhir`;
+
+DROP TABLE IF EXISTS `fhir`.`coverage`;
+CREATE TABLE `fhir`.`coverage` (
+  `id` STRING,
+  `location_id` STRING,
+  `period_start` DATE,
+  `country` STRING
+)
+USING PARQUET
+OPTIONS (recursiveFileLookup 'true', pathGlobFilter 'part-*.parquet')
+LOCATION 's3a://warehouse/parquet/coverage';
+```
+
+Run it after each refresh, with `spark-sql -f catalog.spark.sql` or
+`beeline -u jdbc:hive2://<host>:10000 -f catalog.spark.sql`. A hook runs after
+the catalog step, so it can do this on every refresh:
+
+```toml
+[[hooks]]
+name = "spark"
+run = ["sh", "-c", "beeline -u jdbc:hive2://spark:10000 -f \"$DATA/catalog.spark.sql\""]
+```
+
+`refresh --push` uploads the file with the other catalog files, after the
+tables.
+
+- The tables are external (they have a `LOCATION`), so `DROP TABLE` removes
+  only the definition, never the files. Use a database of their own: the
+  file drops any table in it with a warehouse table's name, and dropping a
+  managed table deletes its data.
+- Dropping and creating the table each run picks up new columns and new
+  files. A query that runs between a table's `DROP` and `CREATE` fails; the
+  gap is a few milliseconds per table. The Java pipeline instead creates a
+  timestamped table per run and points a view at it; fhir-pipes does not,
+  since every run's table would read the same directory and the old tables
+  would pile up in the metastore.
+- The columns and their types are read from the Parquet files when the file
+  is written and listed in the `CREATE TABLE`, so an empty table (one empty
+  file) has its columns too. A column Spark cannot read, such as a `time`
+  column (Spark has no TIME type), is left out, with a comment saying so.
+- The tables are not partitioned in Spark's sense. `country` is a column in
+  the files as well as in the directory names, and Spark does not partition a
+  table whose partition column is in its files. Spark reads every
+  `part-*.parquet` under the table directory instead (other files there, such
+  as a catalog's `items.parquet` or `.json` files, are left out). A filter
+  such as `WHERE country = 'NGA'` is pushed down to the Parquet statistics,
+  so other countries' row groups are skipped, but each file's footer is
+  still read.
+- The Locations table's `geometry` column is WKB in a Parquet GEOMETRY
+  column; the file declares it `BINARY`. Spark 4.1 reads it. Spark 3.5 and
+  4.0 (including the `bitnamilegacy/spark:4.0.0` image in the fhir-data-pipes
+  compose files) cannot read any column of that table: their Parquet reader
+  fails on the GEOMETRY type in the file footer. The view tables work in
+  3.5, 4.0 and 4.1.
+- Your own views go in `spark_extra`, appended after a `USE` of the
+  database, so they can name the tables without the database:
+  `CREATE OR REPLACE VIEW coverage_nga AS SELECT * FROM coverage WHERE country = 'NGA';`.
+  The `extra` file for DuckDB is not used: the two dialects differ.
+
+Superset connects to the Thrift server with the Hive driver (PyHive), as in
+the fhir-data-pipes Superset tutorial, with the database in the URI:
+`hive://hive@<host>:10000/fhir`. The tables then appear under the `fhir`
+schema.
+
+## Database
+
+With a `[database]` section, each refresh also loads the view tables into
+PostgreSQL, for dashboards and tools that read a database (as the
+fhir-data-pipes single-machine setup does). The release binaries include it;
+a build without the `postgres` feature (`--no-default-features`) stops a
+refresh with `[database]` before it runs (`--skip database` runs the rest).
+
+```toml
+[database]
+url_env = "FHIR_PIPES_DATABASE_URL"   # the variable holding the connection string (the default)
+schema = "public"                      # the default
+tables = ["indicator_value", "coverage"]   # default: every view table
+```
+
+The connection string (`postgres://user:password@host:5432/db`) is read only
+from the environment, never from the file. Its `sslmode` sets TLS, as for
+`psql`: `require` encrypts the connection; `verify-ca` and `verify-full` also
+check the server's certificate, against Mozilla's root certificates (built
+in, so nothing on the machine is needed) or the CA file named by
+`sslrootcert`. Managed databases (Cloud SQL, RDS, Azure) usually need at least
+`require`:
+
+```sh
+export FHIR_PIPES_DATABASE_URL='postgres://warehouse:…@db.example.org:5432/analytics?sslmode=verify-full'
+```
+
+Each view table becomes a table of the same name, with the same columns and
+the partition column (`country`), its types taken from the Parquet files:
+`text`, `bigint`, `double precision`, `boolean`, `date`, `timestamp with time
+zone` and `time`. The Location table is not loaded.
+
+The step reads the tables the run has staged, before they are swapped into
+`parquet/`, so a database failure leaves the files as they were too. All the
+tables are replaced in one transaction: each is created if missing,
+emptied with `DELETE`, and filled with `COPY`. A reader sees the previous run's
+rows until the commit, then all of the new run's, never a mix. Views and grants
+built on the tables survive, since a table is dropped and recreated only when
+its columns change; if something depends on it then, the step stops and says
+so, and the database keeps the previous run. A table with an `id` column gets
+an index on it when it is created.
+
+A table whose Parquet cannot be read (a wrong `--data`, a missing mount) stops
+the step before anything in the database changes. Two refreshes loading into
+the same schema at once take turns: the second waits for the first to commit.
+
+Every run reloads every table. On the ICR warehouse (10 view tables, 229,082
+rows, 161,216 in the largest) that takes about half a second.
+
+The `DELETE` leaves each replaced row as a dead tuple until `VACUUM` reclaims
+its space. PostgreSQL's autovacuum does that in the background, and is on by
+default; keep it on for the schema's tables, or run `VACUUM` on them yourself
+(after the refresh, say from a hook) if it is off. After the commit the step
+runs `ANALYZE` on each table it loaded, so the planner's statistics describe
+the new rows at once rather than after autovacuum's next analyze.
 
 ## Settings
 
@@ -129,20 +525,34 @@ the file are relative to the file.
 | `--data` | `FHIR_PIPES_DATA` | `data` | (required) |
 | `--profile` | `FHIR_PIPES_PROFILE` | `profile` | the snapshot's copy, else none (base FHIR); a path relative to the config file, or an https URL. See [profiles.md](profiles.md) |
 | `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
-| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir` |
-| `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local` |
+| `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir`; a Cloud Healthcare API store path (`projects/…/fhirStores/…`) is expanded to its FHIR URL |
+| `--input` (repeatable) | | `source.files` | no file source: the resources come from the server. See [From files](#from-files) |
+| `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local`; `files` with a file source |
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
+| | | `server.fetch` | `search`; `bulk` for `$export`; `hapi-db` for the HAPI server's database |
+| | `FHIR_PIPES_HAPI_DATABASE_URL` | | the HAPI database's connection string, with `fetch = "hapi-db"` |
+| | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
+| | | `server.concurrency` | 4: search requests in flight at once in the views step |
+| `--username` | `FHIR_PIPES_USERNAME` | `server.username` | no Basic auth |
+| | `FHIR_PIPES_PASSWORD` | | |
+| `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` | `server.google_auth = true` | no Google auth; `--google-auth=false` or `FHIR_PIPES_GOOGLE_AUTH=0` turns off the file's setting |
 | `--countries` | | `tiles.countries` | every country |
-| `--threads` | | | number of CPUs |
-| `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again |
+| `--threads` | | | number of CPUs; at least 1 |
+| `--reuse-raw` | `FHIR_PIPES_REUSE_RAW=true` | | download again; with it, the downloads in `raw/<server>/` and the Location snapshot there are used where present |
 | `--full` | | | only what changed (Locations and the views' resource types) |
 | `--dry-run` | | | (push only) |
 
 The client ID and secret are read only from the environment, never from flags
 or the file. They are traded for a token with the client-credentials grant,
-and the token is renewed before it expires, as for the other commands.
+and the token is renewed before it expires, as for the other commands. With a
+username, the password is read only from `FHIR_PIPES_PASSWORD` and the two are
+sent as HTTP Basic auth. With `google_auth`, tokens come from Google
+Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud's
+credentials, or the metadata server), as described in the
+[README](../README.md#google-cloud-healthcare-api); `--check` shows which.
+A token, a client ID, a username and Google auth are mutually exclusive.
 
 ```toml
 data = "../data"
@@ -152,6 +562,9 @@ views = "../ig/fsh-generated/resources"
 base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
+fetch = "search"            # "bulk" for a Bulk Data $export, "hapi-db" for HAPI's database
+concurrency = 4             # search requests at a time
+# google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
 
 [tools]            # paths or names on the PATH
 duckdb = "duckdb"
@@ -186,6 +599,8 @@ exclude = [".DS_Store"]
 [catalog]
 base_url = "https://data.example.org/warehouse"
 extra = "catalog-extra.sql"
+spark = true                # also catalog.spark.sql
+spark_location = "s3a://warehouse"
 
 [[hooks]]
 name = "catalog"
@@ -193,10 +608,35 @@ after = "locations"         # only when that step ran; leave out to always run
 run = ["./catalog.sh"]      # a path with / is relative to this file
 ```
 
-Hooks run in the config file's directory with `DATA`, `FHIR_BASE`,
-`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set.
+Hooks run in the config file's directory with `DATA` (the warehouse
+directory as an absolute path), `FHIR_BASE` (empty with a file source),
+`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set, after the run's
+tables, manifest and catalog are swapped in. `after` names one of the steps
+before the hooks, in any case: `locations`, `views`, `tiles`, `manifest`,
+`catalog` or `database`. A config whose hook names `hooks`, `push` or an
+unknown step is refused before anything runs.
 
-Each run writes its step timings to `raw/<server>/last-refresh.json`.
+Each run that finishes writes its step timings to
+`raw/<server>/last-refresh.json`; a run that stops at an error does not. When
+the views step ran, `type_mismatches` lists, per table and column, the values
+that did not match the column's type ([Tables](#tables)):
+
+```json
+"type_mismatches": {
+  "indicator_value": {
+    "period_start": {"type": "date", "written_as_date": 12, "written_as_null": 0}
+  }
+}
+```
+
+Tables and columns without any are left out, so `{}` means every value was
+written as it is.
+
+The manifest's and `last-refresh.json`'s `server` is the configured server
+when the run downloaded from it. A run that downloads nothing (with
+`--reuse-raw`, or `--only manifest`) records the server named in
+`raw/<server>/.export-state.json`, else in the Location snapshot's
+`state.json`, else `null`, rather than a server it did not contact.
 
 ## Development
 

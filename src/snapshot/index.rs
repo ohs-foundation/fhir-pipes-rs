@@ -4,9 +4,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::Value;
-
 use crate::error::Result;
+use crate::fhir::head::Head;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 
@@ -21,9 +20,7 @@ pub fn index_by_id(
     let mut index = HashMap::new();
     for line in NdjsonReader::open(path)? {
         let line = line?;
-        let id = serde_json::from_str::<Value>(&line.text)
-            .ok()
-            .and_then(|v| v.get("id")?.as_str().map(str::to_string));
+        let id = Head::parse(&line.text).ok().flatten().and_then(|h| h.id);
         match id {
             Some(id) => match index.entry(id) {
                 std::collections::hash_map::Entry::Occupied(e) => report.add(
@@ -57,9 +54,14 @@ mod tests {
         writeln!(f, "not json").unwrap();
         writeln!(f, r#"{{"id":"a","n":2}}"#).unwrap();
         writeln!(f, r#"{{"id":"b"}}"#).unwrap();
+        // Repeated field names: the last value, as a `Value` read gives.
+        writeln!(f, r#"{{"resourceType":"X","resourceType":"X","id":"c"}}"#).unwrap();
+        writeln!(f, r#"{{"id":"x","id":"d"}}"#).unwrap();
         let mut report = Report::default();
         let index = index_by_id(f.path(), &mut report, "organization_line_unparsed").unwrap();
-        assert_eq!(index.len(), 2);
+        assert_eq!(index.len(), 4);
+        assert!(index.contains_key("c") && index.contains_key("d"));
+        assert!(!index.contains_key("x"));
         assert_eq!(index["a"], (0, 16));
         assert_eq!(report.count("duplicate_id"), 1);
         assert_eq!(report.count("organization_line_unparsed"), 1);

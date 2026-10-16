@@ -1,0 +1,7 @@
+# Windows (MSVC): link the C and C++ runtime statically, so fhir-pipes.exe
+# needs no Visual C++ Redistributable. mimalloc's MSVC build is C++ and would
+# otherwise add VCRUNTIME140_1.dll to the DLLs the binary imports. cc follows
+# this target feature and compiles the C code (mimalloc, ring, zstd, lz4)
+# with /MT to match.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

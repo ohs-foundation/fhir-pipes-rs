@@ -60,11 +60,16 @@ pub fn push(s: &Settings) -> Result<()> {
     // The catalog's files are uploaded below, after it is built, even when
     // `files` lists them. catalog.duckdb is only fhir-pipes' when it builds it;
     // otherwise a listed one (from a hook, say) is uploaded here as usual.
-    let managed: &[&str] = match &s.catalog {
-        Some(c) if c.duckdb_file => &[catalog::SQL_FILE, catalog::DUCKDB_FILE],
-        Some(_) => &[catalog::SQL_FILE],
-        None => &[],
-    };
+    let mut managed = Vec::new();
+    if let Some(c) = &s.catalog {
+        managed.push(catalog::SQL_FILE);
+        if c.spark.is_some() {
+            managed.push(catalog::SPARK_FILE);
+        }
+        if c.duckdb_file {
+            managed.push(catalog::DUCKDB_FILE);
+        }
+    }
     for file in &p.files {
         let src = s.data.join(file);
         if !src.is_file() || managed.contains(&file.as_str()) {
@@ -85,6 +90,9 @@ pub fn push(s: &Settings) -> Result<()> {
     // each table's schema from the files when it creates the view.
     if let Some(c) = &s.catalog {
         let mut files = vec![catalog::SQL_FILE];
+        if c.spark.is_some() {
+            files.push(catalog::SPARK_FILE);
+        }
         if c.duckdb_file {
             if c.base_url.is_some() && !s.dry_run {
                 catalog::build_duckdb(s, c)?;
@@ -119,7 +127,7 @@ pub fn hook(s: &Settings, h: &Hook, program: &str, refreshed_at: &str) -> Result
             .args(&h.run[1..])
             .current_dir(&s.base_dir)
             .env("DATA", &s.data)
-            .env("FHIR_BASE", &s.server)
+            .env("FHIR_BASE", s.server_used().unwrap_or(""))
             .env("SERVER_NAME", &s.server_name)
             .env("REFRESHED_AT", refreshed_at),
     )

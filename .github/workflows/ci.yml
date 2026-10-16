@@ -4,8 +4,9 @@ name: ci
 # only:
 #   - for a version tag (v0.3.0), which then publishes the release;
 #   - when run by hand (Actions > ci > Run workflow), e.g. before tagging;
-#   - for a PR or push that changes Cargo.toml, Cargo.lock or the workflows,
-#     since dependency changes are what break cross-compiled builds;
+#   - for a PR or push that changes Cargo.toml, Cargo.lock, .cargo/config.toml
+#     or the workflows, since dependency and build-setting changes are what
+#     break cross-compiled builds;
 #   - weekly, so a new toolchain that breaks a target shows up before release day.
 on:
   push:
@@ -39,6 +40,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'crates/*/Cargo.toml'
+              - '.cargo/config.toml'
               - '.github/workflows/**'
   test:
     runs-on: ${{ matrix.os }}
@@ -55,13 +57,41 @@ jobs:
         run: cargo fmt --all --check
       - if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # The optional features (postgres, fhir-packages) are off in releases
-      # but must still build and pass.
+      # postgres is on by default; fhir-packages is off in releases, and a
+      # build without postgres must still work.
       - if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      # A PostgreSQL with TLS for the database step's tests (tests/refresh.rs,
+      # module database), which run only with this URL: every load goes over
+      # an encrypted connection (sslmode=require), with the image's
+      # self-signed certificate.
+      - if: matrix.os == 'ubuntu-latest'
+        run: |
+          docker run -d --name pg -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:17 \
+            -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem \
+            -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+          for _ in $(seq 30); do docker exec pg pg_isready -U postgres && break; sleep 1; done
       - run: cargo test --workspace --locked
+        env:
+          FHIR_PIPES_TEST_DATABASE_URL: ${{ matrix.os == 'ubuntu-latest' && 'postgres://postgres:test@localhost:5432/postgres?sslmode=require' || '' }}
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --all-features
+        env:
+          FHIR_PIPES_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=require
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --locked --no-default-features
+  # Known advisories against Cargo.lock. .cargo/audit.toml sets what fails
+  # (a vulnerability, an unmaintained or an unsound crate) and which are
+  # ignored and why. The weekly run catches advisories published after a merge.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit
   release-build:
     needs: [changes, test]
     if: >-

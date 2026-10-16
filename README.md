@@ -9,7 +9,8 @@ dependencies.
   is `locations`, which turns the Location registry into GeoParquet for GIS
   tools.
 - **Into FHIR:** load resources into a FHIR server with version-checked
-  writes, including edits made in a GIS tool and data imported from DHIS2.
+  writes, including edits made in a GIS tool and data imported from DHIS2,
+  and copy what was downloaded from one FHIR server to another.
 
 fhir-pipes is intended to move into
 [fhir-data-pipes](https://github.com/ohs-foundation/fhir-data-pipes) as a
@@ -44,7 +45,8 @@ cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhi
 
 `fhir-pipes refresh` downloads the resources a directory of ViewDefinitions
 reads, runs the views, and writes each view as a Hive-partitioned Parquet
-table, with a manifest of what it wrote.
+table, with a manifest of what it wrote. It can also read the resources from
+NDJSON and Bundle files instead of a server.
 
 ```toml
 # fhir-pipes.toml
@@ -60,6 +62,7 @@ name = "prod"
 fhir-pipes refresh --check                    # settings, steps and tools found
 fhir-pipes refresh --only views               # download, run the views, write the tables
 fhir-pipes refresh --only views --reuse-raw   # run the views again on the last download
+fhir-pipes refresh --input exports/           # from NDJSON and Bundle files, no server
 ```
 
 The result:
@@ -80,9 +83,9 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 
 A full refresh can also extract and transform the Location registry, build
 map tiles, write a DuckDB catalog (a view per table, which a dashboard can
-attach by URL), run your own commands afterwards, and push the warehouse to
-object storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
-partitioning and hooks.
+attach by URL) and Spark SQL tables for a Spark Thrift server, load the view tables into PostgreSQL, run your own commands afterwards, and push the warehouse to object
+storage. [docs/refresh.md](docs/refresh.md) covers the steps, the config file,
+reading from files, partitioning and hooks.
 
 ### How the views run
 
@@ -98,7 +101,8 @@ file and the rule it breaks.
 The 12 views in fhir-data-pipes (`docker/config/views`) run unchanged, and
 give the same rows on its Synthea sample Bundles
 (`synthea-hiv/sample_data_segments`) read directly as on the same resources
-flattened to NDJSON.
+flattened to NDJSON. `refresh` on the same directory as a file source gives
+the same rows again.
 
 ## Profiles
 
@@ -124,6 +128,9 @@ data to show what each part does.
 | `inspect` | | Summarise a GeoParquet dataset | [locations.md](docs/locations.md) |
 | `diff` | in | Edited GeoJSON or GeoParquet → changed FHIR resources | [locations.md](docs/locations.md) |
 | `load` | in | Send NDJSON resources to a FHIR server in transaction bundles, with version checks | [locations.md](docs/locations.md#load) |
+| `import location-boundaries` | in | Admin boundaries (GeoJSON, one level) → the admin unit hierarchy as Location NDJSON | [locations.md](docs/locations.md#importing-admin-boundaries-and-sites) |
+| `import location-sites` | in | Facilities, schools or settlements (CSV) → site Locations under that hierarchy, with facility Organizations | [locations.md](docs/locations.md#import-location-sites) |
+| `sync` | in | Copy what `export` downloaded to a second FHIR server: only what changed, deletions on request | [sync.md](docs/sync.md) |
 | `index` | in | Add spatial index identifiers (quadkey, geohash) to Locations | [locations.md](docs/locations.md#index) |
 | `population` | in | Population Groups for admin units from a raster such as WorldPop | [locations.md](docs/locations.md#population) |
 | `dhis2 locations`, `measures`, `reports` | in | DHIS2 org units, indicators and data → FHIR NDJSON | [dhis2.md](docs/dhis2.md) |
@@ -143,15 +150,27 @@ fhir-pipes views lint patient_flat.json --shareable                         # th
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
 
+`--output parquet` writes typed columns. An integral number such as `5.0` in
+an `integer` column is written as the integer; `5.5` is not rounded. With
+`--parquet-temporal native`, a dateTime with a time in a `date` column
+(`2026-06-15T23:30:00-05:00`) is written as its date part as written
+(`2026-06-15`, not converted to UTC first), and partial dates (`2026`,
+`2026-06`) are floored to the start of the period. Any other value that does
+not fit its column's type is written as null. Each is counted per column and
+printed on stderr at the end of the run (`IcrObs.value: 3 values did not fit
+integer and were written as null`), so a view whose types do not match the
+data can be fixed; the run does not fail. CSV and NDJSON write every value
+as it is.
+
 A directory of views is read as `refresh` reads it. An `--input` directory is
 read with its subdirectories, skipping hidden files. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
 Synthea have, is rewritten to that entry's `Type/id`, as a FHIR server would
-store it, so `getReferenceKey()` and joins work on Bundle files. Two options need a build
-with an optional feature (see [Building and testing](#building-and-testing)):
-`views run --db URL` runs against PostgreSQL holding FHIR resources as JSONB
-instead of files (`postgres`), and `views lint --package hl7.fhir.r4.core`
-checks selectors against a FHIR package it downloads (`fhir-packages`).
+store it, so `getReferenceKey()` and joins work on Bundle files. `views run --db URL` runs
+against PostgreSQL holding FHIR resources as JSONB instead of files, and
+`views lint --package hl7.fhir.r4.core` checks selectors against a FHIR
+package it downloads; the second needs a build with the `fhir-packages`
+feature (see [Building and testing](#building-and-testing)).
 
 `export` downloads every resource of each `--type` to `DIR/<TYPE>.ndjson`:
 
@@ -175,13 +194,203 @@ clock when the search began (its HTTP `Date`), less five minutes, so a
 resource updated while a run is paging is fetched by the next run. `extract`
 sets its Location and Organization watermarks the same way.
 
+### Parallel downloads
+
+`--concurrency` (4 by default) is how many search requests `export` keeps in
+flight at once, for all types together. Up to that many types download side
+by side, and each type's file is the same as when they download one after
+another. A full download of a type with more than one page also asks the
+server for the type's count (the first page's `total`, else
+`_summary=count`). A type with 10,000 resources or more is split into
+`_lastUpdated` windows paged side by side:
+
+- The oldest and newest `meta.lastUpdated` come from
+  `_sort=_lastUpdated&_count=1` and `_sort=-_lastUpdated&_count=1`. The range
+  is cut at whole seconds into windows searched with
+  `_lastUpdated=ge<from>&_lastUpdated=lt<to>`. The first window has no lower
+  bound and the last no upper bound, so a resource updated during the run is
+  still in a window. A resource stamped exactly on a cut is in the window
+  that starts there, and only that one.
+- Each window is counted. A window holding more than its share is halved, so
+  updates bunched in time still spread over several windows. The windows'
+  counts must add up to the type's count.
+- A window whose paged count is not its count is counted and paged again. A
+  second difference is reported as `count_mismatch`.
+- The windows are joined oldest first, each in the server's order. A resource
+  in two windows (one updated during the run) is kept once, in its later
+  version. A windowed file has the same resources as one paged as a single
+  stream, in a different order.
+- A server that rejects `_sort=_lastUpdated`, gives no count for a window, or
+  whose window counts do not add up to the type's is paged as one stream,
+  with a line saying why.
+
+Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
+type. The limit covers types and windows together. A `Retry-After` on a 429
+or 5xx holds back every request, not only the one that got it.
+`--concurrency 1` downloads one type at a time, one page at a time. With
+`--bulk`, `--concurrency` is the number of the export's output files
+downloaded at once. It does not apply to `--hapi-db`.
+
+The Java pipeline instead pages HAPI in parallel with `_getpagesoffset`.
+fhir-pipes does not, since that relies on HAPI's search cache, which
+expires, and on behaviour HAPI does not document.
+
+### Copying to a second FHIR server
+
+`sync` copies a directory `export` wrote to another FHIR server (the sink),
+as the Java pipeline does with `sinkFhirServerUrl`:
+
+```sh
+fhir-pipes export --server $SOURCE --incremental --out raw/ --type Patient --type Encounter
+fhir-pipes sync --server $SINK --from raw/ --type Patient --type Encounter
+```
+
+It sends transaction Bundles of `PUT <Type>/<id>` without `ifMatch` and
+without the source's `meta.versionId` and `meta.lastUpdated`. A record per
+sink in `raw/.sync-state.json` and `raw/.sync/` means each run sends only the
+resources that are new or whose `meta.lastUpdated` changed. With `--delete`,
+resources gone from the download are deleted from the sink, unless that is
+more than `--max-delete-share` (a fifth) of a type. `--dry-run` prints the
+plan. The auth options are the sink's. See [docs/sync.md](docs/sync.md).
+
+### Bulk Data $export
+
+With `--bulk`, `export` asks the server for a
+[Bulk Data](https://hl7.org/fhir/uv/bulkdata/) `$export` instead of paging
+searches. The files are the same `OUT/<TYPE>.ndjson`, so `refresh` and the
+views read them unchanged.
+
+```sh
+fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
+  --type Patient --type Observation --out raw/
+```
+
+- The kick-off is a system-level `GET [base]/$export?_type=…` with
+  `Prefer: respond-async`. With `--incremental`, the types that have a
+  watermark are exported together with `_since` the earliest of them and
+  merged into their files by id; the types without one are exported in full
+  in a second export.
+- The status URL is polled with the server's `Retry-After`, or a backoff from
+  one second up to a minute without one. While the export runs (202), the
+  wait is at most 15 seconds, whatever `Retry-After` says: HAPI asks for two
+  minutes on every poll. A 429 or 5xx is waited out for as long as its
+  `Retry-After` asks. Each new `X-Progress` is printed.
+- The status URL is saved in `.export-state.json` as soon as the server
+  returns it. A run that stops before the export is done (a crash, a lost
+  connection) polls the same export next time instead of starting another.
+  A saved export for other types or another `_since` is cancelled.
+- `--bulk-timeout` (four hours by default) is how long a run waits. After
+  that it cancels the export with a `DELETE` of the status URL and fails. It
+  is also the time allowed for each file's download.
+- The output files are downloaded `--concurrency` at a time (4 by default),
+  each into a part file. Each type's parts are joined in the manifest's
+  order, so the file is the same as one downloaded a file at a time. When a
+  download fails, the parts are removed, no type's file or watermark
+  changes, and the next run reads the same export again.
+- The output files are downloaded with the bearer token only when the
+  manifest says `requiresAccessToken`.
+- Resources in the manifest's `deleted` Bundles are removed from the files,
+  unless the same export also returned them. The server's count is still
+  checked after a merge, as for search, because not every server lists
+  deletions (HAPI does not); a type whose count differs is exported again in
+  full.
+- Every type's watermark becomes the manifest's `transactionTime`.
+- An `OperationOutcome` from the kick-off or the status URL, or an error or
+  fatal issue in the manifest's `error` files, fails the run with its text.
+  Warnings and information go in the report.
+- After the files are read, the status URL gets a `DELETE` so the server can
+  remove them.
+
+Only system-level export is supported. `Group/[id]/$export` and
+`Patient/$export` are not supported yet.
+
+### Reading a HAPI server's database
+
+With `--hapi-db`, `export` reads the resources from the PostgreSQL database of
+a HAPI FHIR JPA server instead of its API, as fhir-data-pipes'
+`--fhirFetchMode=HAPI_JDBC` does. It writes the same `OUT/<TYPE>.ndjson`
+files, so `refresh` and the views read them unchanged. The connection string
+comes only from `FHIR_PIPES_HAPI_DATABASE_URL`, never from a flag or a file:
+
+```sh
+export FHIR_PIPES_HAPI_DATABASE_URL='postgres://fhir_pipes_ro:...@hapi-db.example.org:5432/hapi?sslmode=require'
+fhir-pipes export --hapi-db --incremental --type Patient --type Observation --out raw/
+```
+
+This reads HAPI's internal tables, not a FHIR API, so it ties fhir-pipes to
+HAPI's database schema, which HAPI changes between releases. It was tested
+with HAPI 8.12 on PostgreSQL 17. Before reading, fhir-pipes checks for the
+tables and columns it needs, and refuses a database that lacks them, naming
+what it found. Search and `--bulk` do not depend on the server's internals;
+use `--hapi-db` when paging the API is too slow for the data, or to see
+deletions on a HAPI server without Bulk Data export.
+
+- Each resource is the current version of an `hfj_resource` row that is not
+  deleted, read from `hfj_res_ver`. The text is `res_text_vc` (JSON, as HAPI 8
+  writes it) or the `res_text` large object (JSON, or gzipped JSON as `JSONC`,
+  as older releases wrote it).
+- The id comes from `hfj_resource.fhir_id` (HAPI 7 and later). In a database
+  without that column, a client-assigned id comes from `hfj_forced_id`, and a
+  server-assigned one is the numeric `res_id`.
+- HAPI stores a resource without its `id` and `meta`. `meta.versionId` and
+  `meta.lastUpdated` come from the row, `meta.source` from
+  `hfj_res_ver.source_uri` and `request_id`, and profiles, security labels
+  and tags from `hfj_res_tag` and `hfj_tag_def`. Against HAPI 8.12 the lines
+  are byte for byte the ones `export` writes from a search.
+- `res_updated` has no time zone. HAPI writes it in its JVM's time zone, which
+  is UTC in the HAPI Docker images, and fhir-pipes reads it as UTC. On a HAPI
+  server running in another time zone, `meta.lastUpdated` is wrong by the
+  offset.
+- All types are read in one read-only, repeatable-read transaction through a
+  cursor, 1000 rows at a time, so a run sees one consistent state of the
+  database and memory does not grow with the table. The types are read one
+  after another on one connection; `--concurrency` is not used.
+- `.export-state.json` keeps a `res_updated` watermark per type under
+  `hapi_db`, apart from the search and bulk watermarks. With `--incremental`,
+  a run reads the rows updated after the watermark, merges them into the file
+  by id, and removes the resources deleted since (a delete sets
+  `res_deleted_at`). If the merged file's count then differs from the
+  database's, as after an `$expunge`, the type is read in full. Files written
+  from a search, a bulk export, another database or another schema are read
+  in full the first time.
+- The watermark is never later than the database's clock when the run began,
+  less five minutes, so a resource HAPI was still writing then is read by the
+  next run, as with search.
+- The resources of every partition of a partitioned HAPI server go into the
+  same files.
+- Only PostgreSQL is supported, not the MySQL, MS SQL Server or Oracle
+  databases HAPI can also use.
+
+A read-only role for it:
+
+```sql
+CREATE ROLE fhir_pipes_ro LOGIN PASSWORD '...';
+ALTER ROLE fhir_pipes_ro SET default_transaction_read_only = on;
+GRANT CONNECT ON DATABASE hapi TO fhir_pipes_ro;
+GRANT USAGE ON SCHEMA public TO fhir_pipes_ro;
+GRANT SELECT ON hfj_resource, hfj_res_ver, hfj_res_tag, hfj_tag_def TO fhir_pipes_ro;
+GRANT SELECT ON hfj_forced_id TO fhir_pipes_ro;   -- where the table exists
+-- Only for resources older HAPI releases stored as large objects; run as a superuser:
+GRANT SELECT ON pg_catalog.pg_largeobject TO fhir_pipes_ro;
+```
+
+Reading a large object with `lo_get` needs SELECT on that object, which
+`pg_read_all_data` does not give, so fhir-pipes reads `pg_largeobject`
+directly when the role may. If HAPI's tables are in a schema other than
+`public`, add `options=-c%20search_path%3D<schema>` to the connection string,
+or set the role's default `search_path`. The state file records the schema
+`hfj_resource` was found in, so a run against another schema reads in full.
+`refresh` reads this way with `fetch = "hapi-db"` (see
+[docs/refresh.md](docs/refresh.md#reading-the-hapi-servers-database)).
+
 ## Connecting to a FHIR server
 
 Any FHIR R4 server that supports standard search with `_lastUpdated`,
 `Bundle.link` paging and transaction bundles works. fhir-pipes does not depend
-on any vendor's extensions.
+on any vendor's extensions. `export --bulk` also needs the server's
+system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
-A server that needs authentication gets one of two kinds:
+A server that needs authentication gets one of four kinds:
 
 - `--token` (or `FHIR_PIPES_TOKEN`) is sent as a fixed bearer token. Getting
   it is up to you, and a run that outlasts it fails with a 401.
@@ -193,9 +402,17 @@ A server that needs authentication gets one of two kinds:
   expires, so a long run does not outlive its token. A wrong secret or token
   URL fails before any FHIR request. `refresh` reads the client ID and secret
   only from the environment.
+- `--username` and `--password` (or `FHIR_PIPES_USERNAME`,
+  `FHIR_PIPES_PASSWORD`) are sent as HTTP Basic auth, as OpenMRS and many
+  HAPI servers expect. Use HTTPS: Basic sends the password with every request.
+  `refresh` takes the username from `--username` or `server.username`, and
+  reads the password only from the environment.
+- `--google-auth` (or `FHIR_PIPES_GOOGLE_AUTH=1`) gets tokens from Google
+  Application Default Credentials, for a Cloud Healthcare API FHIR store. See
+  [Google Cloud Healthcare API](#google-cloud-healthcare-api).
 
-The two are mutually exclusive; with neither, requests carry no
-Authorization header.
+They are mutually exclusive; with none, requests carry no Authorization
+header.
 
 ```sh
 export FHIR_PIPES_CLIENT_SECRET=...          # keep the secret out of shell history
@@ -206,8 +423,57 @@ fhir-pipes export --server https://gateway.example.org/fhir \
 
 `--timeout` is the total deadline for one HTTP request, 300 seconds by
 default. Connection errors, 429 and 5xx responses are retried up to
-`--retries` times with exponential backoff and jitter, honouring a numeric
-`Retry-After`. Any other 4xx is final.
+`--retries` times with exponential backoff and jitter, honouring a
+`Retry-After` in seconds or as an HTTP-date, up to 30 seconds. Any other 4xx
+is final.
+
+Requests ask for gzip (`Accept-Encoding: gzip`); HAPI's search pages are
+about fifty times smaller compressed. Searches, counts and the Bulk Data
+kick-off and status requests send `Cache-Control: no-cache`, so the server
+runs the search again instead of answering from its search cache, which
+can return stale results and totals for a minute after a change.
+
+### Google Cloud Healthcare API
+
+A Cloud Healthcare API FHIR store is a FHIR server at
+`https://healthcare.googleapis.com/v1/projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>/fhir`.
+`--server` (and `server.base` in `refresh`) also takes the store path,
+`projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>`, and expands it to
+that URL.
+
+With `--google-auth`, fhir-pipes finds credentials in the order Google's
+client libraries use (Application Default Credentials):
+
+1. The JSON key file named by `GOOGLE_APPLICATION_CREDENTIALS`. For a service
+   account key, fhir-pipes signs a JWT with the key (RS256) and trades it at
+   the key's `token_uri` for a token with the `cloud-platform` scope. An
+   `authorized_user` file's refresh token is traded instead.
+2. gcloud's application default credentials,
+   `~/.config/gcloud/application_default_credentials.json`
+   (`%APPDATA%\gcloud\…` on Windows, or under `$CLOUDSDK_CONFIG`), written by
+   `gcloud auth application-default login`.
+3. The metadata server on Compute Engine, Cloud Run and GKE, which gives the
+   tokens of the attached service account. `GCE_METADATA_HOST` replaces
+   `metadata.google.internal`. Off Google Cloud this fails within seconds.
+
+Tokens are renewed a minute before they expire, as with an OAuth client. A
+file's `quota_project_id`, or `GOOGLE_CLOUD_QUOTA_PROJECT`, is sent as
+`x-goog-user-project`. Tokens and keys are never printed; `refresh --check`
+shows only where the credentials come from. Other credential types
+(workload identity federation, impersonation) are not supported.
+
+```sh
+export GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/fhir-reader.json
+fhir-pipes export --google-auth \
+  --server projects/my-project/locations/us-central1/datasets/health/fhirStores/main \
+  --type Patient --type Observation --out raw/
+```
+
+The account needs an IAM role on the store or its dataset:
+`roles/healthcare.fhirResourceReader` to read (`export`, `extract`,
+`refresh`), `roles/healthcare.fhirResourceEditor` to write (`load`, `sync`).
+`export --bulk` uses the server's `$export`; the Healthcare API's own export
+to Cloud Storage is not used.
 
 ## Not done yet
 
@@ -215,9 +481,6 @@ The open items are in [ROADMAP.md](ROADMAP.md#next). The main ones:
 
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
-- `bake` and `bake-points`, which turn GRID3 and CSV files into Locations,
-  are still in the Python package under `python/` (named `kiln`); see
-  [python/README.md](python/README.md).
 
 ## Building and testing
 
@@ -229,26 +492,35 @@ cargo build --release
 cargo test --workspace
 ```
 
-Two features are off by default, and the release binaries leave them out:
+Two Cargo features add optional parts:
 
-| Feature | Adds |
-|---|---|
-| `postgres` | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL |
-| `fhir-packages` | `views lint --package`: views checked against a FHIR package, downloaded over HTTP |
+| Feature | Default | Adds |
+|---|---|---|
+| `postgres` | on, in the release binaries | `views run --db`: views against FHIR resources stored as JSONB in PostgreSQL; `refresh` with `[database]`: the view tables into PostgreSQL. Connections can use TLS (`sslmode=require` and up), through the same rustls as the FHIR client |
+| `fhir-packages` | off | `views lint --package`: views checked against a FHIR package, downloaded over HTTP |
 
 ```sh
-cargo build --release --features postgres,fhir-packages
+cargo build --release --features fhir-packages     # everything
+cargo build --release --no-default-features        # without PostgreSQL
 ```
 
-Without them the binary is about 5 MB smaller and builds 113 fewer crates, and
-asking for either option says which feature it needs.
+`postgres` adds 21 crates and about 1 MB to the release binary;
+`fhir-packages` adds over 100 crates. Asking for an option a build lacks says
+which feature it needs.
+
+The binary uses [mimalloc](https://github.com/microsoft/mimalloc), compiled
+from C source, as its memory allocator in place of the system one.
 
 Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
-aarch64, statically linked against musl) and Windows (x86_64), as single files
-with no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
+aarch64, statically linked against musl) and Windows (x86_64, with the C
+runtime linked statically, set in `.cargo/config.toml`), as single files with
+no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
 release builds are slow, so they run for a version tag (which publishes them),
 when run by hand from the Actions tab, for a change to `Cargo.toml`,
-`Cargo.lock` or the workflows, and weekly.
+`Cargo.lock`, `.cargo/config.toml` or the workflows, and weekly.
+`cargo audit` checks `Cargo.lock` against the RustSec advisories on every PR
+and weekly; `.cargo/audit.toml` lists what fails the check and the advisories
+ignored, each with its reason.
 
 Some tests check output with DuckDB when it is on `PATH` and skip that check
 otherwise. DuckDB is never linked into fhir-pipes. The SQL-on-FHIR
@@ -263,10 +535,11 @@ src/
   main.rs, cli.rs, error.rs
   warehouse/      refresh: config, views, partitioning, manifest, tiles, hooks, push
   views/          views: run, sql, validate, lint, test
-  export.rs       export
+  export/         export: search paging, Bulk Data $export (bulk.rs), HAPI database (hapi_db.rs)
   extract/        FHIR client with retry and OAuth, paging, boundary fetch and cache
   snapshot/       state.json, merge by id
   load/           parents-first ordering, transaction bundles with ifMatch
+  sync/           sync: copy an export directory to a second FHIR server
   fhir/           resource parsing, NDJSON reading and writing
   transform.rs, index/, geometry/, write/, inspect.rs, run.rs
                   the locations transform: hierarchy, geometry, GeoParquet
@@ -275,14 +548,14 @@ src/
   raster/, population.rs
                   population Groups from a raster
   dhis2/          DHIS2 import
+  import/         import location-boundaries and location-sites: GeoJSON and CSV to Locations
   profile/        profiles: loading, and `profile check` against an IG
 crates/
   sof/            fhir-pipes-sof: the ViewDefinition engine (from octofhir/sof)
   sof-lint/       fhir-pipes-sof-lint: ViewDefinition checks
 tests/            integration tests per command; fixtures under tests/fixtures
-python/           bake and bake-points (still the Python kiln package)
 docs/
-  refresh.md, locations.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
+  refresh.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
   notes/          the consolidation notes
   superpowers/    kiln's design specs, plans and spikes
 ```

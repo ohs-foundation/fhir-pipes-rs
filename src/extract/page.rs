@@ -111,14 +111,42 @@ pub fn page_resources(
     report: &mut Report,
     boundary_extensions: &[String],
 ) -> Result<PageResult> {
+    let since = since.map(|s| ("_lastUpdated", format!("ge{s}")));
+    let paged = page_search(
+        client,
+        server,
+        resource_type,
+        since.as_slice(),
+        incoming,
+        report,
+        boundary_extensions,
+        &mut |_| true,
+    )?;
+    Ok(paged.expect("paging stops early only when told to"))
+}
+
+/// `page_resources` with any search parameters (`_count` is added), and a
+/// look at the first page: when `after_first` returns false, paging stops
+/// there and the result is `None`.
+#[allow(clippy::too_many_arguments)]
+pub fn page_search(
+    client: &FhirClient,
+    server: &str,
+    resource_type: &str,
+    params: &[(&str, String)],
+    incoming: &Path,
+    report: &mut Report,
+    boundary_extensions: &[String],
+    after_first: &mut dyn FnMut(&Value) -> bool,
+) -> Result<Option<PageResult>> {
     let base = server.trim_end_matches('/');
     let mut url = Url::parse(&format!("{base}/{resource_type}"))
         .map_err(|_| PipesError::Usage(format!("--server is not a valid URL: {server}")))?;
     {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("_count", &PAGE_SIZE.to_string());
-        if let Some(s) = since {
-            qp.append_pair("_lastUpdated", &format!("ge{s}"));
+        for (k, v) in params {
+            qp.append_pair(k, v);
         }
     }
     if let Some(parent) = incoming.parent() {
@@ -200,6 +228,9 @@ pub fn page_resources(
             out.write_all(b"\n")
                 .map_err(|e| PipesError::io(incoming, e))?;
         }
+        if pages == 1 && !after_first(&bundle) {
+            return Ok(None);
+        }
         match next_link(&bundle) {
             Some(next) => {
                 url = url.join(&next).map_err(|_| {
@@ -212,12 +243,12 @@ pub fn page_resources(
         }
     }
     out.flush().map_err(|e| PipesError::io(incoming, e))?;
-    Ok(PageResult {
+    Ok(Some(PageResult {
         notes,
         pages,
         last_page_full: last_page_len >= PAGE_SIZE,
         started,
-    })
+    }))
 }
 
 /// The server's total for `resource_type`, or `None` when it will not say.
@@ -226,15 +257,27 @@ pub fn page_resources(
 /// rejects `_summary`). Never an error: the count is a cross-check, not a
 /// phase.
 pub fn count_resources(client: &FhirClient, server: &str, resource_type: &str) -> Option<u64> {
+    count_matching(client, server, resource_type, &[])
+}
+
+/// `count_resources` for a search with `params`.
+pub fn count_matching(
+    client: &FhirClient,
+    server: &str,
+    resource_type: &str,
+    params: &[(&str, String)],
+) -> Option<u64> {
     let base = server.trim_end_matches('/');
-    let total = |query: &str| -> Option<u64> {
-        let fetched = client
-            .get(&format!("{base}/{resource_type}?{query}"))
-            .ok()?;
+    let mut url = Url::parse(&format!("{base}/{resource_type}")).ok()?;
+    url.query_pairs_mut().extend_pairs(params);
+    let total = |extra: &[(&str, &str)]| -> Option<u64> {
+        let mut url = url.clone();
+        url.query_pairs_mut().extend_pairs(extra);
+        let fetched = client.get(url.as_str()).ok()?;
         let bundle: Value = serde_json::from_slice(&fetched.body).ok()?;
         bundle.get("total")?.as_u64()
     };
-    total("_summary=count").or_else(|| total("_count=0&_total=accurate"))
+    total(&[("_summary", "count")]).or_else(|| total(&[("_count", "0"), ("_total", "accurate")]))
 }
 
 #[cfg(test)]

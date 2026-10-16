@@ -58,7 +58,7 @@ pub fn rebuild(
         // ones already on the resource, or drop them all if it was cleared.
         match position_after {
             Some((lon, lat)) => {
-                refresh_cells(&mut obj, url, lon, lat);
+                refresh_cells(&mut obj, url, lon, lat, &id, report);
             }
             None => remove_all_cells(&mut obj, url),
         }
@@ -711,7 +711,7 @@ pub fn rebuild_organization(
     Value::Object(obj)
 }
 
-/// The Organization for a new facility row: the pairing shape bake used,
+/// The Organization for a new facility row: the pairing shape `import location-sites --paired-org` writes,
 /// then the row's columns on top.
 pub fn new_organization(
     org_id: &str,
@@ -1233,6 +1233,54 @@ mod tests {
             &mut report,
         );
         assert_eq!(out["position"], json!({"longitude":1.0,"latitude":2.0}));
+    }
+
+    #[test]
+    fn a_moved_position_skips_spatial_index_cells_with_an_out_of_range_level() {
+        let url = icr().location.spatial_index_extension.unwrap();
+        let cell = |scheme: &str, level: u64, cell: &str| {
+            json!({"url": url, "extension": [
+                {"url": "system", "valueCode": scheme},
+                {"url": "level", "valueUnsignedInt": level},
+                {"url": "cell", "valueString": cell},
+            ]})
+        };
+        let bad = vec![
+            cell("quadkey", 70, "0"),
+            cell("quadkey", u64::from(u32::MAX), "0"),
+            cell("quadkey", 0, ""),
+            cell("geohash", 13, "s"),
+        ];
+        let mut extension = bad.clone();
+        extension.push(cell(
+            "quadkey",
+            18,
+            &crate::fhir::spatial::quadkey(3.25, 6.25, 18),
+        ));
+        let base = json!({"resourceType":"Location","id":"a","extension":extension,
+            "position":{"longitude":3.25,"latitude":6.25}});
+        let mut report = Report::default();
+        let out = rebuild(
+            &base,
+            None,
+            &row(&[
+                ("position_longitude", ColumnValue::Number(9.9)),
+                ("position_latitude", ColumnValue::Number(10.5)),
+            ]),
+            &icr(),
+            &mut report,
+        );
+        let exts = out["extension"].as_array().unwrap();
+        assert_eq!(
+            &exts[..4],
+            &bad[..],
+            "malformed cells are left as they were"
+        );
+        assert_eq!(
+            exts[4],
+            cell("quadkey", 18, &crate::fhir::spatial::quadkey(9.9, 10.5, 18))
+        );
+        assert_eq!(report.count("malformed_field"), 4);
     }
 
     const SQUARE: &str = r#"{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}"#;

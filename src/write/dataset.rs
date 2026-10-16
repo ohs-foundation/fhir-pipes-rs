@@ -371,7 +371,7 @@ fn write_partitions(
             let (quadkey, quadkey_level) = geom
                 .as_ref()
                 .and_then(|_| crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells))
-                .map(|c| (Some(c.cell.clone()), Some(c.level as i32)))
+                .map(|c| (Some(c.cell.clone()), i32::try_from(c.level).ok()))
                 .unwrap_or((None, None));
             let row = OutputRow {
                 id: loc.id,

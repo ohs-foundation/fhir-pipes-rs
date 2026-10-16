@@ -7,6 +7,7 @@ mod export;
 mod extract;
 mod fhir;
 mod geometry;
+mod import;
 mod index;
 mod inspect;
 mod load;
@@ -16,12 +17,19 @@ mod raster;
 mod report;
 mod run;
 mod snapshot;
+mod sync;
 mod transform;
 mod views;
 mod warehouse;
 mod write;
 
 use clap::Parser;
+
+// mimalloc in place of the system allocator: much less time in malloc and free
+// for view evaluation and the Location transform. musl's malloc takes one lock
+// for all threads, which made the views many times slower in the Linux builds.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let cli = cli::Cli::parse();
@@ -55,12 +63,14 @@ fn main() {
         cli::Command::Run(args) => run::run(&args, profile),
         cli::Command::Diff(args) => diff::run_diff(&args, profile),
         cli::Command::Load(args) => load::run_load(&args),
+        cli::Command::Sync(args) => sync::run_sync(&args),
         cli::Command::Index(args) => cells::run_index(&args, profile),
         cli::Command::Population(args) => population::run_population(&args, profile),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd, profile),
         cli::Command::Profile(cli::ProfileCommand::Check(args)) => {
             profile::check::run(&args, profile)
         }
+        cli::Command::Import(cmd) => import::run(&cmd, profile),
         cli::Command::Refresh(_) | cli::Command::Views(_) => unreachable!("handled above"),
     };
     if let Err(err) = result {

@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::error::{PipesError, Result};
 use crate::extract::client::Auth;
+use crate::extract::google::{Credentials, parse_server};
 
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
 pub const DEFAULT_PARTITION_BY: &str = "country,geom_type,type";
@@ -16,6 +18,12 @@ pub const DEFAULT_BATCH_SIZE: usize = 100;
 /// A country raster is 100–200 MB; the FHIR-paging default would cut a slow
 /// download off after five minutes. Total per-request deadline, in seconds.
 pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
+/// A Bulk Data export of a large server can take hours. How long a run waits
+/// for one, in seconds, before cancelling it.
+pub const DEFAULT_BULK_TIMEOUT_SECS: u64 = 4 * 3600;
+/// Search requests `export` (and `refresh`'s views step) keeps in flight at
+/// once. Low, since each one is a page of a thousand resources.
+pub const DEFAULT_EXPORT_CONCURRENCY: usize = 4;
 pub const DEFAULT_INDICATORS_PER_REQUEST: usize = 10;
 /// Rows fhir-pipes aims to keep one analytics request under; DHIS2's own default
 /// limit is 50,000.
@@ -23,6 +31,9 @@ pub const DEFAULT_ANALYTICS_MAX_ROWS: usize = 20_000;
 /// Analytics requests in flight at once. Each one is a database query on
 /// the DHIS2 server, so this stays low.
 pub const DEFAULT_ANALYTICS_CONCURRENCY: usize = 4;
+/// `sync --delete` refuses to delete more than this share of a type's
+/// synced resources in one run.
+pub const DEFAULT_MAX_DELETE_SHARE: f64 = 0.2;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,6 +80,8 @@ pub enum Command {
     Diff(DiffArgs),
     /// Send changed resources to a FHIR server as version-checked transaction bundles
     Load(LoadArgs),
+    /// Copy what `export` downloaded to a second FHIR server: only what changed since the last sync to it, with deletions on request
+    Sync(SyncArgs),
     /// Backfill spatial-index cells (quadkey, geohash) onto snapshot Locations that lack them; writes the changed resources as FHIR NDJSON for `fhir-pipes load` (offline)
     Index(IndexArgs),
     /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `fhir-pipes load` (offline once the raster is cached)
@@ -79,6 +92,9 @@ pub enum Command {
     /// Work with the profile given by --profile
     #[command(subcommand)]
     Profile(ProfileCommand),
+    /// Admin boundaries (GeoJSON) and sites (CSV) as Location NDJSON for `fhir-pipes load` (offline)
+    #[command(subcommand)]
+    Import(crate::import::ImportCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -415,8 +431,9 @@ pub struct InspectArgs {
     pub out: PathBuf,
 }
 
-/// How extract and load authenticate: no header, a fixed bearer token, or an
-/// OAuth client id and secret that fhir-pipes trades for tokens itself.
+/// How the FHIR commands authenticate: no header, a fixed bearer token, HTTP
+/// Basic, an OAuth client id and secret that fhir-pipes trades for tokens
+/// itself, or Google Application Default Credentials.
 #[derive(clap::Args, Debug, Clone)]
 pub struct AuthArgs {
     /// Bearer token; falls back to $FHIR_PIPES_TOKEN
@@ -441,25 +458,86 @@ pub struct AuthArgs {
     /// OAuth token endpoint the client id and secret are sent to; falls back to $FHIR_PIPES_TOKEN_URL
     #[arg(long, env = "FHIR_PIPES_TOKEN_URL", requires = "client_id")]
     pub token_url: Option<String>,
+    /// Username for HTTP Basic auth; falls back to $FHIR_PIPES_USERNAME
+    #[arg(
+        long,
+        env = "FHIR_PIPES_USERNAME",
+        requires = "password",
+        conflicts_with_all = ["token", "client_id"]
+    )]
+    pub username: Option<String>,
+    /// Password for HTTP Basic auth; falls back to $FHIR_PIPES_PASSWORD
+    #[arg(
+        long,
+        env = "FHIR_PIPES_PASSWORD",
+        hide_env_values = true,
+        requires = "username"
+    )]
+    pub password: Option<String>,
+    /// Google Application Default Credentials, for a Cloud Healthcare API FHIR store: the key file named by $GOOGLE_APPLICATION_CREDENTIALS, else gcloud's application default credentials, else the metadata server on Google Cloud. Tokens are renewed before they expire. Falls back to $FHIR_PIPES_GOOGLE_AUTH
+    #[arg(
+        long,
+        env = "FHIR_PIPES_GOOGLE_AUTH",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub google_auth: bool,
 }
 
 impl AuthArgs {
-    pub fn auth(&self) -> Auth {
-        match (&self.client_id, &self.client_secret, &self.token_url) {
-            (Some(id), Some(secret), Some(url)) => Auth::ClientCredentials {
-                token_url: url.clone(),
-                client_id: id.clone(),
-                client_secret: secret.clone(),
-            },
-            _ => self.token.clone().map_or(Auth::None, Auth::Token),
+    /// No authentication.
+    pub fn none() -> Self {
+        AuthArgs {
+            token: None,
+            client_id: None,
+            client_secret: None,
+            token_url: None,
+            username: None,
+            password: None,
+            google_auth: false,
         }
+    }
+
+    /// With `--google-auth`, finds the credentials (reading a key file if
+    /// there is one), so a bad file fails here.
+    pub fn auth(&self) -> Result<Auth> {
+        if self.google_auth {
+            // Checked here rather than with clap's conflicts_with, which would
+            // also refuse FHIR_PIPES_GOOGLE_AUTH=0 beside a token.
+            let other = [
+                (self.token.is_some(), "--token"),
+                (self.client_id.is_some(), "--client-id"),
+                (self.username.is_some(), "--username"),
+            ]
+            .into_iter()
+            .find_map(|(set, flag)| set.then_some(flag));
+            if let Some(flag) = other {
+                return Err(PipesError::Usage(format!(
+                    "use one way to authenticate: --google-auth (or FHIR_PIPES_GOOGLE_AUTH) \
+                     cannot be used with {flag} (or its environment variable)"
+                )));
+            }
+            return Ok(Auth::Google(Credentials::application_default()?));
+        }
+        Ok(
+            match (&self.client_id, &self.client_secret, &self.token_url) {
+                (Some(id), Some(secret), Some(url)) => Auth::ClientCredentials {
+                    token_url: url.clone(),
+                    client_id: id.clone(),
+                    client_secret: secret.clone(),
+                },
+                _ => match (&self.username, &self.password) {
+                    (Some(user), Some(password)) => Auth::basic(user, password),
+                    _ => self.token.clone().map_or(Auth::None, Auth::Token),
+                },
+            },
+        )
     }
 }
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct ExtractArgs {
-    /// Base URL of the FHIR server (Location is appended)
-    #[arg(long)]
+    /// Base URL of the FHIR server (Location is appended), or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
+    #[arg(long, value_parser = parse_server)]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
@@ -497,8 +575,8 @@ pub struct ExtractArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct ExportArgs {
-    /// Base URL of the FHIR server (the resource type is appended)
-    #[arg(long)]
+    /// Base URL of the FHIR server (the resource type is appended), or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
+    #[arg(long, value_parser = parse_server, required_unless_present = "hapi_db", default_value = "")]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
@@ -513,6 +591,28 @@ pub struct ExportArgs {
     /// from the server's is downloaded in full
     #[arg(long)]
     pub incremental: bool,
+    /// Download with a Bulk Data $export (system level) instead of searches;
+    /// with --incremental, `_since` the last export's transactionTime, and
+    /// resources the export lists as deleted are removed
+    #[arg(long)]
+    pub bulk: bool,
+    /// With --bulk: how long to wait for the server's export, in seconds,
+    /// before cancelling it; also the time allowed for each file's download
+    #[arg(long, default_value_t = DEFAULT_BULK_TIMEOUT_SECS, requires = "bulk")]
+    pub bulk_timeout: u64,
+    /// Read the resources from a HAPI FHIR JPA server's PostgreSQL database
+    /// instead of its API; the connection string comes only from
+    /// $FHIR_PIPES_HAPI_DATABASE_URL. This depends on HAPI's internal
+    /// schema; with --incremental, deleted resources are removed
+    #[arg(long, conflicts_with_all = ["server", "bulk"])]
+    pub hapi_db: bool,
+    /// Search requests in flight at once, for all types together: up to this
+    /// many types are downloaded side by side, and a full download of a large
+    /// type is split into `_lastUpdated` windows paged side by side. 1 pages
+    /// one type at a time, one page at a time. With --bulk, the export's
+    /// output files downloaded at once. Not used with --hapi-db
+    #[arg(long, default_value_t = DEFAULT_EXPORT_CONCURRENCY)]
+    pub concurrency: usize,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,
@@ -576,8 +676,8 @@ pub struct DiffArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct LoadArgs {
-    /// Base URL of the FHIR server
-    #[arg(long)]
+    /// Base URL of the FHIR server, or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S)
+    #[arg(long, value_parser = parse_server)]
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
@@ -599,4 +699,53 @@ pub struct LoadArgs {
     /// Total timeout per HTTP request, in seconds
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct SyncArgs {
+    /// Base URL of the sink FHIR server the resources are copied to, or a Cloud Healthcare API FHIR store path (projects/P/locations/L/datasets/D/fhirStores/S). The auth options are for this server
+    #[arg(long, value_parser = parse_server)]
+    pub server: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+    /// Directory an `export` wrote: one <TYPE>.ndjson per type
+    #[arg(long)]
+    pub from: PathBuf,
+    /// Resource type to copy; repeat for several, parents' types first (e.g. Organization, Location, Patient, Encounter). Default: every <TYPE>.ndjson in --from, in name order
+    #[arg(long = "type", value_name = "TYPE")]
+    pub types: Vec<String>,
+    /// Send every resource, not only those changed since the last sync to this server
+    #[arg(long)]
+    pub full: bool,
+    /// Delete from the server the resources an earlier sync sent that are no longer in the download
+    #[arg(long)]
+    pub delete: bool,
+    /// With --delete: refuse to delete more than this share (0 to 1) of a type's synced resources in one run
+    #[arg(long, default_value_t = DEFAULT_MAX_DELETE_SHARE, value_parser = parse_share)]
+    pub max_delete_share: f64,
+    /// With --delete: delete even when that is more than --max-delete-share
+    #[arg(long, requires = "delete")]
+    pub force_delete: bool,
+    /// Run the preflight and print what would be sent and deleted, without sending
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Resources per transaction bundle
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    pub batch_size: usize,
+    /// Bundles posted at once
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: usize,
+    /// Attempts per request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
+}
+
+fn parse_share(s: &str) -> std::result::Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if (0.0..=1.0).contains(&v) => Ok(v),
+        _ => Err(format!("{s}: not a share between 0 and 1")),
+    }
 }

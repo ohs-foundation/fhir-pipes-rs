@@ -9,61 +9,94 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::error::{PipesError, Result};
+use crate::load::bundle::type_and_id;
 
-fn parent_id(resource: &Value) -> Option<&str> {
+/// The `partOf` parent as (type, id): the last two segments of
+/// `partOf.reference`, without any `/_history/<v>`. A bare id, with no type
+/// segment, is taken to be the resource's own type, which is what `partOf`
+/// points at on Location and Organization.
+pub fn parent_key(resource: &Value) -> Option<(&str, &str)> {
     let reference = resource.get("partOf")?.get("reference")?.as_str()?;
-    let last = reference.rsplit('/').next().unwrap_or(reference);
-    (!last.is_empty()).then_some(last)
+    reference_key(
+        reference,
+        resource.get("resourceType").and_then(Value::as_str),
+    )
 }
 
-/// Depth of `start` within the set: 0 for a root, parent depth + 1
-/// otherwise. Memoised in `depths`; a cycle is a usage error.
-fn depth(
-    start: usize,
-    resources: &[Value],
-    by_id: &HashMap<&str, usize>,
-    depths: &mut [Option<usize>],
-) -> Result<usize> {
-    let mut chain: Vec<usize> = Vec::new();
-    let mut current = Some(start);
-    let mut base = 0usize;
-    while let Some(i) = current {
-        if let Some(d) = depths[i] {
-            base = d + 1;
-            break;
+/// `parent_key` from the `partOf.reference` and `resourceType` strings.
+pub fn reference_key<'a>(
+    reference: &'a str,
+    resource_type: Option<&'a str>,
+) -> Option<(&'a str, &'a str)> {
+    let (t, id) = match type_and_id(reference) {
+        Some(key) => key,
+        None => (resource_type?, reference),
+    };
+    (!t.is_empty() && !id.is_empty()).then_some((t, id))
+}
+
+/// The depth of every node, given the index of each one's parent in the
+/// set: 0 for a root, parent depth + 1 otherwise. A cycle is a usage
+/// error naming one of its nodes by `label`.
+pub fn depths(parents: &[Option<usize>], label: &dyn Fn(usize) -> String) -> Result<Vec<usize>> {
+    let mut depths: Vec<Option<usize>> = vec![None; parents.len()];
+    for start in 0..parents.len() {
+        let mut chain: Vec<usize> = Vec::new();
+        let mut current = Some(start);
+        let mut base = 0usize;
+        while let Some(i) = current {
+            if let Some(d) = depths[i] {
+                base = d + 1;
+                break;
+            }
+            if chain.contains(&i) {
+                return Err(PipesError::Usage(format!(
+                    "partOf cycle detected involving {}; fix the hierarchy before loading",
+                    label(i)
+                )));
+            }
+            chain.push(i);
+            current = parents[i];
         }
-        if chain.contains(&i) {
-            let id = resources[i]["id"].as_str().unwrap_or("?");
-            return Err(PipesError::Usage(format!(
-                "partOf cycle detected involving Location/{id}; fix the hierarchy before loading"
-            )));
+        for (offset, &i) in chain.iter().rev().enumerate() {
+            depths[i] = Some(base + offset);
         }
-        chain.push(i);
-        current = parent_id(&resources[i]).and_then(|p| by_id.get(p).copied());
     }
-    for (offset, &i) in chain.iter().rev().enumerate() {
-        depths[i] = Some(base + offset);
-    }
-    Ok(depths[start].expect("set above"))
+    Ok(depths
+        .into_iter()
+        .map(|d| d.expect("every node is set"))
+        .collect())
 }
 
 pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
-    let by_id: HashMap<&str, usize> = resources
+    // Keyed by type and id: a Location and an Organization may share an id.
+    let by_key: HashMap<(&str, &str), usize> = resources
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| r.get("id")?.as_str().map(|id| (id, i)))
+        .filter_map(|(i, r)| {
+            let t = r.get("resourceType")?.as_str()?;
+            let id = r.get("id")?.as_str()?;
+            Some(((t, id), i))
+        })
         .collect();
-    let mut depths = vec![None; resources.len()];
+    let parents: Vec<Option<usize>> = resources
+        .iter()
+        .map(|r| parent_key(r).and_then(|p| by_key.get(&p).copied()))
+        .collect();
+    let label = |i: usize| {
+        let r = &resources[i];
+        format!(
+            "{}/{}",
+            r["resourceType"].as_str().unwrap_or("?"),
+            r["id"].as_str().unwrap_or("?")
+        )
+    };
+    let depths = depths(&parents, &label)?;
     let is_location =
         |i: usize| resources[i].get("resourceType").and_then(Value::as_str) == Some("Location");
-    let mut keyed: Vec<(bool, usize, usize)> = Vec::with_capacity(resources.len());
-    for i in 0..resources.len() {
-        keyed.push((
-            is_location(i),
-            depth(i, &resources, &by_id, &mut depths)?,
-            i,
-        ));
-    }
+    let mut keyed: Vec<(bool, usize, usize)> = (0..resources.len())
+        .map(|i| (is_location(i), depths[i], i))
+        .collect();
     keyed.sort_by_key(|&(l, d, i)| (l, d, i));
     let mut slots: Vec<Option<Value>> = resources.into_iter().map(Some).collect();
     Ok(keyed
@@ -127,6 +160,78 @@ mod tests {
         ];
         let out = order_parents_first(input).unwrap();
         assert_eq!(ids(&out), vec!["org-clinic", "ward", "clinic"]);
+    }
+
+    fn org(id: &str, parent: Option<&str>) -> Value {
+        let mut r = json!({"resourceType": "Organization", "id": id});
+        if let Some(p) = parent {
+            r["partOf"] = json!({"reference": format!("Organization/{p}")});
+        }
+        r
+    }
+
+    fn keys(v: &[Value]) -> Vec<String> {
+        v.iter()
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r["resourceType"].as_str().unwrap(),
+                    r["id"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_same_id_on_two_types_is_not_a_cycle() {
+        let input = vec![
+            loc("b", None),
+            org("a", None),
+            loc("a", Some("b")),
+            org("b", Some("a")),
+        ];
+        let out = order_parents_first(input).unwrap();
+        assert_eq!(
+            keys(&out),
+            vec![
+                "Organization/a",
+                "Organization/b",
+                "Location/b",
+                "Location/a"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_parent_is_found_by_type_and_id_not_by_id_alone() {
+        // Organization/x shares Location/x's id; the child still follows
+        // Location/x, which is two levels below `top`.
+        let input = vec![
+            loc("child", Some("x")),
+            loc("x", Some("top")),
+            loc("top", None),
+            org("x", None),
+        ];
+        let out = order_parents_first(input).unwrap();
+        assert_eq!(
+            keys(&out),
+            vec![
+                "Organization/x",
+                "Location/top",
+                "Location/x",
+                "Location/child"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_versioned_or_absolute_parent_reference_is_followed() {
+        let mut child = loc("child", None);
+        child["partOf"] = json!({"reference": "Location/mid/_history/3"});
+        let mut mid = loc("mid", None);
+        mid["partOf"] = json!({"reference": "https://example.org/fhir/Location/top"});
+        let out = order_parents_first(vec![child, mid, loc("top", None)]).unwrap();
+        assert_eq!(ids(&out), vec!["top", "mid", "child"]);
     }
 
     #[test]

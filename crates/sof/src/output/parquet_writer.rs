@@ -8,6 +8,19 @@
 //! [`TemporalEncoding::Native`] to write them as Arrow `Date32`,
 //! `Timestamp(µs, UTC)` and `Time64(µs)` instead, so downstream engines
 //! (DuckDB, ClickHouse, Spark, pandas) see real temporal types without a cast.
+//!
+//! A value that does not match its column's type is converted where nothing
+//! is lost, and otherwise written as null:
+//!
+//! - an integral number such as `5.0` in an `integer` or `integer64` column
+//!   is written as the integer `5`; `5.5` does not fit;
+//! - with [`TemporalEncoding::Native`], a `dateTime` with a time
+//!   (`2026-06-15T23:30:00-05:00`) in a `date` column is written as its date
+//!   part as written (`2026-06-15`), without converting to UTC first;
+//! - anything else that cannot be converted is written as null.
+//!
+//! [`OutputWriter::write_with_summary`] returns how many values of each
+//! column were written as their date or as null.
 
 use std::io::Write;
 use std::pin::Pin;
@@ -28,7 +41,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use super::{AsyncOutputWriter, OutputWriter};
+use super::{AsyncOutputWriter, ColumnSummary, OutputWriter, WriteSummary};
 use crate::column::{ColumnInfo, ColumnType};
 use crate::runner::ViewResult;
 use crate::{Error, Result};
@@ -82,8 +95,10 @@ pub enum TemporalEncoding {
     /// start of the period they name: `2026` → `2026-01-01`, `2026-03` →
     /// `2026-03-01`, and a `dateTime` without a time part → midnight UTC.
     /// A `dateTime` with a time part but no offset (not valid FHIR, but seen
-    /// in the wild) is read as UTC. Values that cannot be parsed are written
-    /// as null and logged at `warn`.
+    /// in the wild) is read as UTC. A `dateTime` with a time in a `date`
+    /// column is written as its date part as written. Values that cannot be
+    /// parsed are written as null. Both are counted in the
+    /// [`WriteSummary`](super::WriteSummary).
     Native,
 }
 
@@ -180,13 +195,15 @@ impl ParquetWriter {
         Schema::new(fields)
     }
 
-    /// Build Arrow arrays from result data.
+    /// Build Arrow arrays from result data, with the values of each column
+    /// that did not match its type.
     fn build_arrays(
         columns: &[ColumnInfo],
         data: &[Vec<Value>],
         temporal: TemporalEncoding,
-    ) -> Result<Vec<ArrayRef>> {
-        columns
+    ) -> (Vec<ArrayRef>, WriteSummary) {
+        let mut summary = WriteSummary::default();
+        let arrays = columns
             .iter()
             .enumerate()
             .map(|(i, col)| {
@@ -195,56 +212,76 @@ impl ParquetWriter {
                     .map(|row| row.get(i).filter(|v| !v.is_null()))
                     .collect();
 
-                Self::values_to_array(col, &values, temporal)
+                let (array, counts) = Self::values_to_array(col, &values, temporal);
+                if counts.written_as_date > 0 || counts.written_as_null > 0 {
+                    summary.columns.push(ColumnSummary {
+                        name: col.name.clone(),
+                        col_type: col.col_type,
+                        written_as_date: counts.written_as_date,
+                        written_as_null: counts.written_as_null,
+                    });
+                }
+                array
             })
-            .collect()
+            .collect();
+        (arrays, summary)
     }
 
-    /// Convert JSON values to an Arrow array.
+    /// Convert JSON values to an Arrow array, counting the values that had to
+    /// be written as their date or as null.
     fn values_to_array(
         col: &ColumnInfo,
         values: &[Option<&Value>],
         temporal: TemporalEncoding,
-    ) -> Result<ArrayRef> {
-        match (col.col_type, temporal) {
-            (ColumnType::Integer | ColumnType::Integer64, _) => {
-                let arr: Int64Array = values.iter().map(|v| v.and_then(|v| v.as_i64())).collect();
-                Ok(Arc::new(arr))
-            }
-            (ColumnType::Decimal, _) => {
-                let arr: Float64Array = values.iter().map(|v| v.and_then(|v| v.as_f64())).collect();
-                Ok(Arc::new(arr))
-            }
-            (ColumnType::Boolean, _) => {
-                let arr: BooleanArray =
-                    values.iter().map(|v| v.and_then(|v| v.as_bool())).collect();
-                Ok(Arc::new(arr))
-            }
-            (ColumnType::Date, TemporalEncoding::Native) => {
-                let arr: Date32Array = values
+    ) -> (ArrayRef, Counts) {
+        let mut counts = Counts::default();
+        let array: ArrayRef = match (col.col_type, temporal) {
+            (ColumnType::Integer | ColumnType::Integer64, _) => Arc::new(
+                values
                     .iter()
-                    .map(|v| Self::temporal_value(col, v, temporal::date_to_days))
-                    .collect();
-                Ok(Arc::new(arr))
-            }
-            (ColumnType::DateTime | ColumnType::Instant, TemporalEncoding::Native) => {
-                let arr: TimestampMicrosecondArray = values
+                    .map(|v| counts.fit(*v, convert::integer))
+                    .collect::<Int64Array>(),
+            ),
+            (ColumnType::Decimal, _) => Arc::new(
+                values
                     .iter()
-                    .map(|v| Self::temporal_value(col, v, temporal::datetime_to_micros_utc))
+                    .map(|v| counts.fit(*v, Value::as_f64))
+                    .collect::<Float64Array>(),
+            ),
+            (ColumnType::Boolean, _) => Arc::new(
+                values
+                    .iter()
+                    .map(|v| counts.fit(*v, Value::as_bool))
+                    .collect::<BooleanArray>(),
+            ),
+            (ColumnType::Date, TemporalEncoding::Native) => Arc::new(
+                values
+                    .iter()
+                    .map(|v| {
+                        let (days, from_datetime) = counts.fit(*v, convert::date)?;
+                        if from_datetime {
+                            counts.written_as_date += 1;
+                        }
+                        Some(days)
+                    })
+                    .collect::<Date32Array>(),
+            ),
+            (ColumnType::DateTime | ColumnType::Instant, TemporalEncoding::Native) => Arc::new(
+                values
+                    .iter()
+                    .map(|v| counts.fit(*v, convert::timestamp))
                     .collect::<TimestampMicrosecondArray>()
-                    .with_timezone(temporal::UTC);
-                Ok(Arc::new(arr))
-            }
-            (ColumnType::Time, TemporalEncoding::Native) => {
-                let arr: Time64MicrosecondArray = values
+                    .with_timezone(temporal::UTC),
+            ),
+            (ColumnType::Time, TemporalEncoding::Native) => Arc::new(
+                values
                     .iter()
-                    .map(|v| Self::temporal_value(col, v, temporal::time_to_micros))
-                    .collect();
-                Ok(Arc::new(arr))
-            }
+                    .map(|v| counts.fit(*v, convert::time))
+                    .collect::<Time64MicrosecondArray>(),
+            ),
             // All string-like types
-            _ => {
-                let arr: StringArray = values
+            _ => Arc::new(
+                values
                     .iter()
                     .map(|v| {
                         v.map(|v| match v {
@@ -252,44 +289,16 @@ impl ParquetWriter {
                             other => other.to_string(),
                         })
                     })
-                    .collect();
-                Ok(Arc::new(arr))
-            }
-        }
-    }
-
-    /// Apply a temporal parser to one JSON value, logging (and nulling) values
-    /// that are not strings or do not parse. The log names the column, not the
-    /// value, which may be patient data (as upstream octofhir/sof 0.1.3).
-    fn temporal_value<T>(
-        col: &ColumnInfo,
-        value: &Option<&Value>,
-        parse: fn(&str) -> Option<T>,
-    ) -> Option<T> {
-        let value = (*value)?;
-        let Value::String(s) = value else {
-            tracing::warn!(
-                column = %col.name,
-                "non-string value in {} column written as null",
-                col.col_type
-            );
-            return None;
+                    .collect::<StringArray>(),
+            ),
         };
-        let parsed = parse(s);
-        if parsed.is_none() {
-            tracing::warn!(
-                column = %col.name,
-                "unparseable {} value written as null",
-                col.col_type
-            );
-        }
-        parsed
+        (array, counts)
     }
 
     /// Write result data to a buffer as Parquet.
-    fn write_to_buffer(&self, result: &ViewResult) -> Result<Vec<u8>> {
+    fn write_to_buffer(&self, result: &ViewResult) -> Result<(Vec<u8>, WriteSummary)> {
         let schema = Arc::new(Self::build_schema(&result.columns, self.temporal));
-        let arrays = Self::build_arrays(&result.columns, &result.data, self.temporal)?;
+        let (arrays, summary) = Self::build_arrays(&result.columns, &result.data, self.temporal);
 
         let record_batch = RecordBatch::try_new(schema.clone(), arrays)
             .map_err(|e| Error::Output(format!("Failed to create record batch: {}", e)))?;
@@ -312,7 +321,67 @@ impl ParquetWriter {
                 .map_err(|e| Error::Output(format!("Failed to close Parquet writer: {}", e)))?;
         }
 
-        Ok(buffer)
+        Ok((buffer, summary))
+    }
+}
+
+/// One column's values that were not written as they are.
+#[derive(Debug, Default)]
+struct Counts {
+    written_as_date: usize,
+    written_as_null: usize,
+}
+
+impl Counts {
+    /// Convert a non-null value, counting it when it cannot be converted and
+    /// is written as null.
+    fn fit<T>(
+        &mut self,
+        value: Option<&Value>,
+        convert: impl Fn(&Value) -> Option<T>,
+    ) -> Option<T> {
+        let converted = convert(value?);
+        if converted.is_none() {
+            self.written_as_null += 1;
+        }
+        converted
+    }
+}
+
+/// JSON values to the Arrow value of a typed column; `None` when the value
+/// does not fit.
+mod convert {
+    use serde_json::Value;
+
+    use super::temporal;
+
+    /// An integer, or an integral float within the i64 range (`5.0` → 5).
+    /// `5.5` is not rounded.
+    pub fn integer(v: &Value) -> Option<i64> {
+        if let Some(n) = v.as_i64() {
+            return Some(n);
+        }
+        let f = v.as_f64().filter(|_| v.is_f64())?;
+        // i64::MAX as f64 is 2^63, one past the largest i64.
+        (f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64).then_some(f as i64)
+    }
+
+    /// Days since the epoch, and whether the value was a dateTime with a time
+    /// written as its date.
+    pub fn date(v: &Value) -> Option<(i32, bool)> {
+        let s = v.as_str()?;
+        if let Some(days) = temporal::date_to_days(s) {
+            return Some((days, false));
+        }
+        temporal::datetime_date_to_days(s).map(|days| (days, true))
+    }
+
+    pub fn timestamp(v: &Value) -> Option<i64> {
+        temporal::datetime_to_micros_utc(v.as_str()?)
+    }
+
+    pub fn time(v: &Value) -> Option<i64> {
+        temporal::time_to_micros(v.as_str()?)
     }
 }
 
@@ -349,6 +418,19 @@ mod temporal {
         let date = parse_date(s)?;
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
         i32::try_from(date.signed_duration_since(epoch).num_days()).ok()
+    }
+
+    /// Days since the Unix epoch of a `dateTime` with a time, from its date
+    /// part as written: `2026-06-15T23:30:00-05:00` is 2026-06-15, not the
+    /// 16th it is in UTC. `None` for a value without a time, or one that
+    /// is not a valid dateTime.
+    pub fn datetime_date_to_days(s: &str) -> Option<i32> {
+        let s = s.trim();
+        if s.len() <= 10 {
+            return None;
+        }
+        datetime_to_micros_utc(s)?;
+        date_to_days(s.get(..10)?)
     }
 
     /// Microseconds since the Unix epoch, in UTC, for an Arrow
@@ -407,12 +489,20 @@ impl OutputWriter for ParquetWriter {
     }
 
     fn write(&self, result: &ViewResult, output: &mut dyn Write) -> Result<()> {
-        let buffer = self.write_to_buffer(result)?;
+        self.write_with_summary(result, output).map(|_| ())
+    }
+
+    fn write_with_summary(
+        &self,
+        result: &ViewResult,
+        output: &mut dyn Write,
+    ) -> Result<WriteSummary> {
+        let (buffer, summary) = self.write_to_buffer(result)?;
         output
             .write_all(&buffer)
             .map_err(|e| Error::Output(e.to_string()))?;
         output.flush().map_err(|e| Error::Output(e.to_string()))?;
-        Ok(())
+        Ok(summary)
     }
 }
 
@@ -432,7 +522,7 @@ impl AsyncOutputWriter for ParquetWriter {
         mut writer: W,
     ) -> Result<()> {
         // Write to buffer first (Parquet writer needs sync write)
-        let buffer = self.write_to_buffer(result)?;
+        let (buffer, _) = self.write_to_buffer(result)?;
 
         // Write buffer to async writer
         writer
@@ -481,8 +571,16 @@ mod tests {
 
     /// Write a result and read it back as a single record batch.
     fn round_trip(writer: &ParquetWriter, result: &ViewResult) -> RecordBatch {
+        round_trip_with_summary(writer, result).0
+    }
+
+    /// As `round_trip`, with the writer's summary.
+    fn round_trip_with_summary(
+        writer: &ParquetWriter,
+        result: &ViewResult,
+    ) -> (RecordBatch, WriteSummary) {
         let mut output = Vec::new();
-        OutputWriter::write(writer, result, &mut output).unwrap();
+        let summary = writer.write_with_summary(result, &mut output).unwrap();
         let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(output))
             .unwrap()
             .build()
@@ -490,10 +588,33 @@ mod tests {
         let schema = reader.schema();
         let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
         assert!(batches.len() <= 1, "expected at most one record batch");
-        batches
+        let batch = batches
             .into_iter()
             .next()
-            .unwrap_or_else(|| RecordBatch::new_empty(schema))
+            .unwrap_or_else(|| RecordBatch::new_empty(schema));
+        (batch, summary)
+    }
+
+    /// A one-column result.
+    fn column_of(col_type: ColumnType, values: Vec<Value>) -> ViewResult {
+        ViewResult {
+            columns: vec![ColumnInfo::new("c", col_type)],
+            row_count: values.len(),
+            data: values.into_iter().map(|v| vec![v]).collect(),
+        }
+    }
+
+    fn native() -> ParquetWriter {
+        ParquetWriter::new().with_temporal(TemporalEncoding::Native)
+    }
+
+    /// The summary's (written_as_date, written_as_null) for column `c`.
+    fn counts(summary: &WriteSummary) -> (usize, usize) {
+        summary
+            .columns
+            .iter()
+            .find(|c| c.name == "c")
+            .map_or((0, 0), |c| (c.written_as_date, c.written_as_null))
     }
 
     #[test]
@@ -822,6 +943,192 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(count.value(2), 3);
+    }
+
+    #[test]
+    fn integral_floats_are_written_as_integers() {
+        for col_type in [ColumnType::Integer, ColumnType::Integer64] {
+            let result = column_of(
+                col_type,
+                vec![
+                    json!(5.0),
+                    json!(-3.0),
+                    json!(7),
+                    json!(5.5),
+                    json!("5"),
+                    json!(true),
+                    json!(1e20),
+                    json!(u64::MAX),
+                    Value::Null,
+                ],
+            );
+            let (batch, summary) = round_trip_with_summary(&ParquetWriter::new(), &result);
+            let c = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(c.value(0), 5);
+            assert_eq!(c.value(1), -3);
+            assert_eq!(c.value(2), 7);
+            // 5.5 is not rounded; a string, a boolean and numbers past the
+            // i64 range do not fit either.
+            for i in 3..8 {
+                assert!(c.is_null(i), "{col_type} row {i}");
+            }
+            // A null is not a mismatch.
+            assert!(c.is_null(8));
+            assert_eq!(counts(&summary), (0, 5), "{col_type}");
+            assert_eq!(summary.columns[0].col_type, col_type);
+        }
+    }
+
+    #[test]
+    fn integer_range_edges() {
+        assert_eq!(convert::integer(&json!(i64::MIN as f64)), Some(i64::MIN));
+        // 2^63 is one past i64::MAX.
+        assert_eq!(convert::integer(&json!(9_223_372_036_854_775_808.0)), None);
+        assert_eq!(convert::integer(&json!(-0.0)), Some(0));
+    }
+
+    #[test]
+    fn datetimes_in_a_date_column_are_written_as_their_date_as_written() {
+        let result = column_of(
+            ColumnType::Date,
+            vec![
+                json!("2026-06-15T08:30:00+01:00"),
+                // 2026-06-16 in UTC; the date as written is kept.
+                json!("2026-06-15T23:30:00-05:00"),
+                json!("2026-06-15T00:00:00Z"),
+                json!("2026-06-15"),
+                json!("2026-06-15Tlater"),
+            ],
+        );
+        let (batch, summary) = round_trip_with_summary(&native(), &result);
+        let c = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .unwrap();
+        let day = temporal::date_to_days("2026-06-15").unwrap();
+        for i in 0..4 {
+            assert_eq!(c.value(i), day, "row {i}");
+        }
+        assert!(c.is_null(4));
+        assert_eq!(counts(&summary), (3, 1));
+        assert_eq!(
+            summary.messages(),
+            [
+                "c: 3 dateTime values written as their date",
+                "c: 1 value did not fit date and was written as null",
+            ]
+        );
+    }
+
+    #[test]
+    fn text_mode_writes_temporal_values_as_they_are() {
+        let result = column_of(
+            ColumnType::Date,
+            vec![json!("2026-06-15T08:30:00+01:00"), json!("2026"), json!(12)],
+        );
+        let (batch, summary) = round_trip_with_summary(&ParquetWriter::new(), &result);
+        let c = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(c.value(0), "2026-06-15T08:30:00+01:00");
+        assert_eq!(c.value(1), "2026");
+        assert_eq!(c.value(2), "12");
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn partial_dates_are_floored_and_not_counted() {
+        // date: `2026` and `2026-06` floor to the first day.
+        let (batch, summary) = round_trip_with_summary(
+            &native(),
+            &column_of(ColumnType::Date, vec![json!("2026"), json!("2026-06")]),
+        );
+        let c = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .unwrap();
+        assert_eq!(c.value(0), temporal::date_to_days("2026-01-01").unwrap());
+        assert_eq!(c.value(1), temporal::date_to_days("2026-06-01").unwrap());
+        assert!(summary.is_empty());
+
+        // dateTime and instant: a partial or date-only value floors to
+        // midnight UTC.
+        for col_type in [ColumnType::DateTime, ColumnType::Instant] {
+            let (batch, summary) = round_trip_with_summary(
+                &native(),
+                &column_of(
+                    col_type,
+                    vec![json!("2026"), json!("2026-06"), json!("2026-06-15")],
+                ),
+            );
+            let c = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let m = |s| temporal::datetime_to_micros_utc(s).unwrap();
+            assert_eq!(c.value(0), m("2026-01-01T00:00:00Z"), "{col_type}");
+            assert_eq!(c.value(1), m("2026-06-01T00:00:00Z"), "{col_type}");
+            assert_eq!(c.value(2), m("2026-06-15T00:00:00Z"), "{col_type}");
+            assert!(summary.is_empty(), "{col_type}");
+        }
+    }
+
+    #[test]
+    fn values_that_do_not_fit_are_null_and_counted() {
+        let result = ViewResult {
+            columns: vec![
+                ColumnInfo::new("id", ColumnType::String),
+                ColumnInfo::new("amount", ColumnType::Decimal),
+                ColumnInfo::new("active", ColumnType::Boolean),
+                ColumnInfo::new("recorded", ColumnType::DateTime),
+                ColumnInfo::new("at", ColumnType::Time),
+                ColumnInfo::new("count", ColumnType::Integer),
+            ],
+            data: vec![
+                vec![
+                    json!({"a": 1}),
+                    json!(3),
+                    json!(false),
+                    json!("2026-06-15T10:30:00+02:00"),
+                    json!("10:30:00"),
+                    json!(1),
+                ],
+                vec![
+                    json!("b"),
+                    json!("3.5"),
+                    json!("true"),
+                    json!(12345),
+                    json!("noon"),
+                    json!(1.5),
+                ],
+            ],
+            row_count: 2,
+        };
+        let (batch, summary) = round_trip_with_summary(&native(), &result);
+        // A string column takes anything; the others null what does not fit.
+        for i in 1..6 {
+            assert!(batch.column(i).is_valid(0), "column {i} row 0");
+            assert!(batch.column(i).is_null(1), "column {i} row 1");
+        }
+        assert_eq!(
+            summary.messages(),
+            [
+                "amount: 1 value did not fit decimal and was written as null",
+                "active: 1 value did not fit boolean and was written as null",
+                "recorded: 1 value did not fit dateTime and was written as null",
+                "at: 1 value did not fit time and was written as null",
+                "count: 1 value did not fit integer and was written as null",
+            ]
+        );
     }
 
     #[test]

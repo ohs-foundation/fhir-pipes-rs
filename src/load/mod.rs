@@ -122,8 +122,8 @@ fn probe_conflicts(client: &FhirClient, base: &str, bundle: &Bundle) -> Vec<Stri
 
 /// Posts one bundle; the error says what was and was not written.
 fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> Result<()> {
-    let body = b.to_json().to_string().into_bytes();
-    match client.post_json(base, body) {
+    let (got, sent) = client.post_json_counted(base, b.to_bytes());
+    match got {
         Ok(_) => Ok(()),
         Err(FetchError::Status {
             status: status @ (409 | 412),
@@ -139,11 +139,24 @@ fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> 
                     conflicts.join("\n  ")
                 )
             };
-            Err(PipesError::Environment(format!(
-                "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
-                 These resources changed on the server after the snapshot was taken: \
-                 run extract, re-apply the edit, and diff again."
-            )))
+            Err(PipesError::Environment(if sent > 1 {
+                // The first attempt timed out or got a 5xx; the server may
+                // have committed it, and this answer is about its own writes.
+                format!(
+                    "bundle {n}/{count} rejected with HTTP {status} after it was sent {sent} times. \
+                     An earlier attempt timed out or failed with a server error and may have been \
+                     committed, in which case the conflicts below are that attempt's own writes. {detail}\n\
+                     Check these resources on the server: if they hold the edit, the bundle is \
+                     loaded; if not, they changed after the snapshot was taken: run extract, \
+                     re-apply the edit, and diff again."
+                )
+            } else {
+                format!(
+                    "bundle {n}/{count} rejected with HTTP {status}; nothing in it was written. {detail}\n\
+                     These resources changed on the server after the snapshot was taken: \
+                     run extract, re-apply the edit, and diff again."
+                )
+            }))
         }
         Err(e) => Err(PipesError::Environment(format!(
             "bundle {n}/{count} failed: {e}; bundles committed before it stay committed, re-running is safe"
@@ -151,11 +164,36 @@ fn post(client: &FhirClient, base: &str, b: &Bundle, n: usize, count: usize) -> 
     }
 }
 
+/// Where a run of bundles sits in a larger plan, for the progress lines:
+/// bundle `first + i + 1` of `total`, after `label` ("" for load).
+pub struct Progress<'a> {
+    pub label: &'a str,
+    pub first: usize,
+    pub total: usize,
+}
+
+/// Posts one bundle, given its number and the total; the error says what
+/// was and was not written.
+pub type PostFn<'a> = dyn Fn(&FhirClient, &str, &Bundle, usize, usize) -> Result<()> + Sync + 'a;
+
+/// What `post_all` did: which bundles are committed, and the first failure.
+pub struct Posted {
+    pub committed: Vec<bool>,
+    pub failure: Option<PipesError>,
+}
+
 /// Posts every bundle, `concurrency` at a time. Workers take bundles in
 /// order; each waits until the earlier bundles it references are
 /// committed. The first failure stops new bundles from starting; those
-/// already in flight finish, and the error is returned.
-fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: usize) -> Result<()> {
+/// already in flight finish.
+pub fn post_all(
+    client: &FhirClient,
+    base: &str,
+    bundles: &[Bundle],
+    concurrency: usize,
+    progress: &Progress,
+    post: &PostFn,
+) -> Posted {
     let count = bundles.len();
     let deps = dependencies(bundles);
     let next = AtomicUsize::new(0);
@@ -183,7 +221,13 @@ fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: us
                             break;
                         }
                     }
-                    let r = post(client, base, &bundles[i], i + 1, count);
+                    let r = post(
+                        client,
+                        base,
+                        &bundles[i],
+                        progress.first + i + 1,
+                        progress.total,
+                    );
                     // Recorded before the next bundle is taken, so one worker
                     // stops right after a failure, as a sequential load does.
                     {
@@ -204,9 +248,11 @@ fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: us
         for (i, r) in rx.iter() {
             match r {
                 Ok(()) => eprintln!(
-                    "bundle {}/{count} committed ({} resources)",
-                    i + 1,
-                    bundles[i].entries.len()
+                    "{}bundle {}/{} committed ({} resources)",
+                    progress.label,
+                    progress.first + i + 1,
+                    progress.total,
+                    bundles[i].size()
                 ),
                 Err(e) => {
                     if failure.is_none() {
@@ -216,10 +262,37 @@ fn post_all(client: &FhirClient, base: &str, bundles: &[Bundle], concurrency: us
             }
         }
     });
-    match failure {
-        Some(e) => Err(e),
-        None => Ok(()),
+    let committed = state.0.into_inner().unwrap().0;
+    Posted { committed, failure }
+}
+
+/// GET `<base>/metadata`, the cheapest check that the URL and credentials
+/// work, and check update-as-create for `creates`, the types of resources
+/// that may be new on the server.
+pub fn preflight(client: &FhirClient, base: &str, creates: &[String]) -> Result<()> {
+    let metadata_url = format!("{base}/metadata");
+    let capability: Value = match client.get(&metadata_url) {
+        Ok(f) => serde_json::from_slice(&f.body).map_err(|e| {
+            PipesError::Environment(format!(
+                "capability preflight: {metadata_url} returned non-JSON: {e}"
+            ))
+        })?,
+        Err(e) => {
+            return Err(PipesError::Environment(format!(
+                "capability preflight failed: {e} for {metadata_url}; check the server URL and credentials"
+            )));
+        }
+    };
+    let unstated = check_update_create(&capability, creates)?;
+    if !unstated.is_empty() {
+        eprintln!(
+            "fhir-pipes: warning: the server's CapabilityStatement does not state updateCreate for {}; \
+             proceeding on the assumption that PUT to a new id creates (HAPI FHIR supports it but omits the flag). \
+             If the server does not, the first bundle that creates will fail with the server's own error.",
+            unstated.join(", ")
+        );
     }
+    Ok(())
 }
 
 pub fn run_load(args: &LoadArgs) -> Result<()> {
@@ -249,34 +322,12 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
 
     let base = args.server.trim_end_matches('/').to_string();
     let client = FhirClient::new(
-        args.auth.auth(),
+        args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
     )?;
 
-    // Preflight: also the cheapest check that the URL and token work.
-    let metadata_url = format!("{base}/metadata");
-    let capability: Value = match client.get(&metadata_url) {
-        Ok(f) => serde_json::from_slice(&f.body).map_err(|e| {
-            PipesError::Environment(format!(
-                "capability preflight: {metadata_url} returned non-JSON: {e}"
-            ))
-        })?,
-        Err(e) => {
-            return Err(PipesError::Environment(format!(
-                "capability preflight failed: {e} for {metadata_url}; check the server URL and token"
-            )));
-        }
-    };
-    let unstated = check_update_create(&capability, &creates)?;
-    if !unstated.is_empty() {
-        eprintln!(
-            "fhir-pipes: warning: the server's CapabilityStatement does not state updateCreate for {}; \
-             proceeding on the assumption that PUT to a new id creates (HAPI FHIR supports it but omits the flag). \
-             If the server does not, the first bundle that creates will fail with the server's own error.",
-            unstated.join(", ")
-        );
-    }
+    preflight(&client, &base, &creates)?;
 
     if args.dry_run {
         println!(
@@ -290,7 +341,15 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
     }
 
     let count = bundles.len();
-    post_all(&client, &base, &bundles, args.concurrency)?;
+    let progress = Progress {
+        label: "",
+        first: 0,
+        total: count,
+    };
+    if let Some(e) = post_all(&client, &base, &bundles, args.concurrency, &progress, &post).failure
+    {
+        return Err(e);
+    }
     println!("Loaded {total} resources in {count} bundle(s) to {base}");
     Ok(())
 }

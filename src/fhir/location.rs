@@ -15,6 +15,19 @@ pub const HL7_BOUNDARY_EXTENSION_URL: &str =
 /// extension, as ICR's `…/StructureDefinition/location-boundary-geojson` does.
 const BOUNDARY_EXTENSION_SUFFIX: &str = "/StructureDefinition/location-boundary-geojson";
 pub const GEOJSON_CONTENT_TYPE: &str = "application/geo+json";
+pub const PHYSICAL_TYPE_SYSTEM: &str =
+    "http://terminology.hl7.org/CodeSystem/location-physical-type";
+
+/// A boundary attachment extension under `url`, the GeoJSON inlined as base64.
+pub fn boundary_extension(url: &str, geojson: &[u8]) -> Value {
+    serde_json::json!({
+        "url": url,
+        "valueAttachment": {
+            "contentType": GEOJSON_CONTENT_TYPE,
+            "data": base64::engine::general_purpose::STANDARD.encode(geojson),
+        },
+    })
+}
 
 /// A boundary attachment extension: the HL7 one, one a profile names
 /// (`extra`), or any IG's extension named `…/location-boundary-geojson`.
@@ -393,12 +406,9 @@ impl Location {
                         }
                     } else if Some(url) == profile.location.spatial_index_extension.as_deref() {
                         match crate::fhir::spatial::cell_from_extension(e, url) {
-                            Some(cell) => loc.spatial_cells.push(cell),
-                            None => report.add(
-                                "malformed_field",
-                                &id,
-                                "spatial-index extension lacks system, level or cell",
-                            ),
+                            Some(Ok(cell)) => loc.spatial_cells.push(cell),
+                            Some(Err(reason)) => report.add("malformed_field", &id, &reason),
+                            None => {}
                         }
                     }
                 }
@@ -552,6 +562,27 @@ mod tests {
         let exts = json["extension"].as_array().unwrap();
         assert_eq!(exts.len(), 1, "boundary extension removed, other kept");
         assert_eq!(exts[0]["url"], "https://example.org/keep");
+    }
+
+    #[test]
+    fn a_spatial_index_level_out_of_range_is_reported_and_skipped() {
+        let mut report = Report::default();
+        let cell = |level: u64| {
+            format!(
+                r#"{{"url":"https://icr.healthcampaigns.org/StructureDefinition/spatial-index","extension":[
+                {{"url":"system","valueCode":"quadkey"}},{{"url":"level","valueUnsignedInt":{level}}},
+                {{"url":"cell","valueString":"0"}}]}}"#
+            )
+        };
+        let src = format!(
+            r#"{{"resourceType":"Location","id":"a","extension":[{},{}]}}"#,
+            cell(70),
+            cell(1)
+        );
+        let loc = parse_str(&src, &mut report).unwrap();
+        assert_eq!(loc.spatial_cells.len(), 1);
+        assert_eq!(loc.spatial_cells[0].level, 1);
+        assert_eq!(report.count("malformed_field"), 1);
     }
 
     #[test]

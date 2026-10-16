@@ -3,16 +3,19 @@
 //! The ICR IG's `spatial-index` extension carries, per Location, the scheme
 //! (quadkey | h3 | geohash), the level (quadkey zoom / H3 resolution /
 //! geohash precision) and the cell key. The cell is a pure function of the
-//! position, so fhir-pipes owns it: `bake-points` writes it at import (Python),
+//! position, so fhir-pipes owns it: `import location-sites` writes it at import,
 //! `fhir-pipes index` backfills it onto an existing snapshot as an ordinary
 //! version-checked edit, and `fhir-pipes diff` recomputes it whenever a position
 //! edit comes through. Quadkey and geohash are computed here; H3 needs a
 //! library and is left for a later round (its cells are still parsed and
 //! carried).
 
+use std::ops::RangeInclusive;
+
 use serde_json::{Map, Value, json};
 
 use crate::error::{PipesError, Result};
+use crate::report::Report;
 
 pub const SCHEMES: [&str; 3] = ["quadkey", "h3", "geohash"];
 const MAX_MERCATOR_LAT: f64 = 85.051_128_78;
@@ -27,6 +30,17 @@ pub struct SpatialCell {
     pub cell: String,
 }
 
+/// The levels a scheme allows: quadkey zoom 1-23, geohash precision 1-12,
+/// H3 resolution 0-15. `None` for a scheme fhir-pipes does not know.
+pub fn level_range(scheme: &str) -> Option<RangeInclusive<u32>> {
+    match scheme {
+        "quadkey" => Some(1..=23),
+        "geohash" => Some(1..=12),
+        "h3" => Some(0..=15),
+        _ => None,
+    }
+}
+
 /// `SCHEME:LEVEL`, e.g. `quadkey:18`.
 pub fn parse_scheme_level(arg: &str) -> Result<(String, u32)> {
     let usage = || {
@@ -37,14 +51,15 @@ pub fn parse_scheme_level(arg: &str) -> Result<(String, u32)> {
     let (scheme, level) = arg.split_once(':').ok_or_else(usage)?;
     let level: u32 = level.trim().parse().map_err(|_| usage())?;
     let scheme = scheme.trim();
+    let in_range = level_range(scheme).is_some_and(|r| r.contains(&level));
     match scheme {
-        "quadkey" if (1..=23).contains(&level) => {}
+        "quadkey" if in_range => {}
         "quadkey" => {
             return Err(PipesError::Usage(format!(
                 "quadkey zoom must be 1-23, got {level}"
             )));
         }
-        "geohash" if (1..=12).contains(&level) => {}
+        "geohash" if in_range => {}
         "geohash" => {
             return Err(PipesError::Usage(format!(
                 "geohash precision must be 1-12, got {level}"
@@ -130,8 +145,12 @@ pub fn geohash(lon: f64, lat: f64, precision: u32) -> String {
     out
 }
 
-/// The cell for a scheme fhir-pipes can compute; `None` for h3 (carried, not computed).
+/// The cell for a scheme fhir-pipes can compute; `None` for h3 (carried, not
+/// computed) and for a level outside the scheme's range.
 pub fn compute_cell(scheme: &str, level: u32, lon: f64, lat: f64) -> Option<String> {
+    if !level_range(scheme)?.contains(&level) {
+        return None;
+    }
     match scheme {
         "quadkey" => Some(quadkey(lon, lat, level)),
         "geohash" => Some(geohash(lon, lat, level)),
@@ -165,29 +184,59 @@ fn sub(ext: &Object, name: &str) -> Option<Value> {
         })
 }
 
-/// One `spatial-index` extension entry, if `ext` is a well-formed one.
-pub fn cell_from_extension(ext: &Object, url: &str) -> Option<SpatialCell> {
+/// One `spatial-index` extension entry: `None` if `ext` is not one (another
+/// url), `Some(Err(reason))` if it is malformed. A level outside the
+/// scheme's range (see `level_range`) is malformed: computing a cell at it
+/// would overflow or allocate without bound.
+pub fn cell_from_extension(
+    ext: &Object,
+    url: &str,
+) -> Option<std::result::Result<SpatialCell, String>> {
     if ext.get("url").and_then(Value::as_str) != Some(url) {
         return None;
     }
-    let scheme = sub(ext, "system")?.as_str()?.to_string();
-    let level = u32::try_from(sub(ext, "level")?.as_u64()?).ok()?;
-    let cell = sub(ext, "cell")?.as_str()?.to_string();
-    Some(SpatialCell {
+    let scheme = sub(ext, "system").and_then(|v| v.as_str().map(str::to_string));
+    let level = sub(ext, "level").and_then(|v| v.as_u64());
+    let cell = sub(ext, "cell").and_then(|v| v.as_str().map(str::to_string));
+    let (Some(scheme), Some(level), Some(cell)) = (scheme, level, cell) else {
+        return Some(Err(
+            "spatial-index extension lacks system, level or cell".to_string()
+        ));
+    };
+    let checked = u32::try_from(level)
+        .ok()
+        .filter(|l| level_range(&scheme).is_none_or(|r| r.contains(l)));
+    let Some(level) = checked else {
+        let allowed = level_range(&scheme).map_or(String::new(), |r| {
+            format!(" (allowed {}-{})", r.start(), r.end())
+        });
+        return Some(Err(format!(
+            "spatial-index {scheme} level {level} is out of range{allowed}"
+        )));
+    };
+    Some(Ok(SpatialCell {
         scheme,
         level,
         cell,
-    })
+    }))
 }
 
-/// Every spatial-index cell on a resource object.
-pub fn cells_of(obj: &Object, url: &str) -> Vec<SpatialCell> {
+/// Every spatial-index entry on a resource object, well-formed or not.
+fn entries_of(obj: &Object, url: &str) -> Vec<std::result::Result<SpatialCell, String>> {
     obj.get("extension")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_object)
         .filter_map(|e| cell_from_extension(e, url))
+        .collect()
+}
+
+/// Every well-formed spatial-index cell on a resource object.
+pub fn cells_of(obj: &Object, url: &str) -> Vec<SpatialCell> {
+    entries_of(obj, url)
+        .into_iter()
+        .filter_map(|c| c.ok())
         .collect()
 }
 
@@ -210,7 +259,7 @@ pub fn upsert_cell(obj: &mut Object, url: &str, scheme: &str, level: u32, cell: 
         return false;
     };
     for ext in exts.iter_mut() {
-        let Some(existing) = ext.as_object().and_then(|e| cell_from_extension(e, url)) else {
+        let Some(Ok(existing)) = ext.as_object().and_then(|e| cell_from_extension(e, url)) else {
             continue;
         };
         if existing.scheme == scheme && existing.level == level {
@@ -227,10 +276,26 @@ pub fn upsert_cell(obj: &mut Object, url: &str, scheme: &str, level: u32, cell: 
 
 /// Recompute every computable cell already on the resource for a new
 /// position (a position edit must not leave stale cells behind). H3 cells,
-/// which fhir-pipes cannot compute, are dropped rather than left wrong.
-pub fn refresh_cells(obj: &mut Object, url: &str, lon: f64, lat: f64) -> usize {
+/// which fhir-pipes cannot compute, are dropped rather than left wrong. A
+/// malformed entry is reported as `malformed_field` against `id` and left
+/// as it is.
+pub fn refresh_cells(
+    obj: &mut Object,
+    url: &str,
+    lon: f64,
+    lat: f64,
+    id: &str,
+    report: &mut Report,
+) -> usize {
     let mut changed = 0;
-    for existing in cells_of(obj, url) {
+    for entry in entries_of(obj, url) {
+        let existing = match entry {
+            Ok(c) => c,
+            Err(reason) => {
+                report.add("malformed_field", id, &format!("{reason}; not recomputed"));
+                continue;
+            }
+        };
         match compute_cell(&existing.scheme, existing.level, lon, lat) {
             Some(cell) => {
                 if upsert_cell(obj, url, &existing.scheme, existing.level, &cell) {
@@ -251,6 +316,7 @@ pub fn remove_cell(obj: &mut Object, url: &str, scheme: &str, level: u32) {
         exts.retain(|e| {
             e.as_object()
                 .and_then(|e| cell_from_extension(e, url))
+                .and_then(|c| c.ok())
                 .is_none_or(|c| !(c.scheme == scheme && c.level == level))
         });
         if exts.is_empty() {
@@ -259,7 +325,8 @@ pub fn remove_cell(obj: &mut Object, url: &str, scheme: &str, level: u32) {
     }
 }
 
-/// Drop every spatial-index cell (the position was cleared).
+/// Drop every spatial-index entry, malformed ones too (the position was
+/// cleared).
 pub fn remove_all_cells(obj: &mut Object, url: &str) {
     if let Some(Value::Array(exts)) = obj.get_mut("extension") {
         exts.retain(|e| {
@@ -356,6 +423,47 @@ mod tests {
     }
 
     #[test]
+    fn a_level_outside_the_scheme_range_is_malformed_and_not_computed() {
+        let entry = |scheme: &str, level: u64| {
+            json!({"url": URL, "extension": [
+                {"url": "system", "valueCode": scheme},
+                {"url": "level", "valueUnsignedInt": level},
+                {"url": "cell", "valueString": "0"},
+            ]})
+        };
+        for (scheme, level) in [
+            ("quadkey", 0),
+            ("quadkey", 24),
+            ("quadkey", 70),
+            ("quadkey", u64::from(u32::MAX)),
+            ("quadkey", u64::from(u32::MAX) + 1),
+            ("geohash", 0),
+            ("geohash", 13),
+            ("h3", 16),
+        ] {
+            let ext = entry(scheme, level);
+            let parsed = cell_from_extension(ext.as_object().unwrap(), URL).unwrap();
+            assert!(
+                matches!(&parsed, Err(m) if m.contains("out of range")),
+                "{scheme}:{level} {parsed:?}"
+            );
+            if let Ok(level) = u32::try_from(level) {
+                assert_eq!(compute_cell(scheme, level, 9.9, 10.5), None);
+            }
+        }
+        for (scheme, level) in [("quadkey", 1), ("quadkey", 23), ("geohash", 12), ("h3", 0)] {
+            let ext = entry(scheme, level);
+            assert!(
+                cell_from_extension(ext.as_object().unwrap(), URL)
+                    .unwrap()
+                    .is_ok()
+            );
+        }
+        let other = json!({"url": "https://example.org/other"});
+        assert!(cell_from_extension(other.as_object().unwrap(), URL).is_none());
+    }
+
+    #[test]
     fn cells_round_trip_through_the_extension_and_upsert_replaces_in_place() {
         let mut obj = Object::new();
         assert!(upsert_cell(&mut obj, URL, "quadkey", 18, "0123"));
@@ -380,7 +488,12 @@ mod tests {
         upsert_cell(&mut obj, URL, "quadkey", 18, &quadkey(9.9, 10.5, 18));
         upsert_cell(&mut obj, URL, "geohash", 6, &geohash(9.9, 10.5, 6));
         upsert_cell(&mut obj, URL, "h3", 9, "8928308280fffff");
-        assert_eq!(refresh_cells(&mut obj, URL, 3.39, 6.45), 3);
+        let mut report = Report::default();
+        assert_eq!(
+            refresh_cells(&mut obj, URL, 3.39, 6.45, "a", &mut report),
+            3
+        );
+        assert_eq!(report.counts().len(), 0);
         let cells = cells_of(&obj, URL);
         assert_eq!(cells.len(), 2, "h3 dropped: fhir-pipes cannot recompute it");
         assert_eq!(
