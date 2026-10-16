@@ -25,8 +25,8 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |
-| HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `refresh` | next release |
-| Google Cloud Healthcare API FHIR stores: tokens from Application Default Credentials (service account key, gcloud user credentials, metadata server), renewed before expiry; store paths (`projects/…/fhirStores/…`) accepted as the server (#34) | `--google-auth` on `extract`, `export`, `run`, `load`, `refresh` | next release |
+| HTTP Basic auth to a FHIR server (#26) | `extract`, `export`, `run`, `load`, `sync`, `refresh` | next release |
+| Google Cloud Healthcare API FHIR stores: tokens from Application Default Credentials (service account key, gcloud user credentials, metadata server), renewed before expiry; store paths (`projects/…/fhirStores/…`) accepted as the server (#34) | `--google-auth` on `extract`, `export`, `run`, `load`, `sync`, `refresh` | next release |
 
 ### ViewDefinitions
 
@@ -51,6 +51,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 |---|---|---|
 | Edited GeoJSON or GeoParquet → the changed FHIR resources | `diff` | 0.3.0 |
 | Send NDJSON to a FHIR server in transaction bundles, with version checks | `load` | 0.3.0 |
+| Copy an `export` directory to a second FHIR server: `PUT` without version checks and without the source's `versionId` and `lastUpdated`, only the resources new or changed since the last sync to that server, parents first by `partOf`, deletions with `--delete` behind a guard against deleting a large share of a type (#28) | `sync` | next release |
 | Spatial index identifiers (quadkey, geohash) on Locations | `index` | 0.3.0 |
 | Population Groups for admin units or catchments from a raster such as WorldPop | `population` | 0.3.0 |
 | DHIS2 org units → Locations, indicators → Measures, values → MeasureReports | `dhis2 locations`, `measures`, `reports` | 0.3.0 |
@@ -82,6 +83,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Nested Parquet-on-FHIR (SQL-on-FHIR v1) output | Waiting for a user | Built only when a user needs it, such as a site moving from the Java pipeline whose queries read its nested tables. ICR does not depend on nested tables (it reads view tables and the `locations` GeoParquet), and the raw NDJSON stays queryable with DuckDB's `read_json`. If built, the schema comes from StructureDefinitions to match Bunsen's, with a full-resource JSON column as the fallback |
 | Bulk Data `Group/[id]/$export` and `Patient/$export` | Not started | `export --bulk` is system level only |
 | Fetch resources a patient compartment references (Organization, Practitioner, Location) | Not started | The Java pipeline does this |
+| A `sync` step in `refresh`, with a `[sync]` section for the sink | Not started | Run `sync` on `raw/<name>/` after `refresh` until then |
 
 ## Moving into fhir-data-pipes
 
