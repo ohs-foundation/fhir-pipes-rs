@@ -109,6 +109,9 @@ pub fn build_index(
         });
     }
 
+    // Kept for the whole run, through pass two: drop the growth slack.
+    records.shrink_to_fit();
+
     // Resolved over every parsed record, including ones with no geometry:
     // a geometry-less district is still somebody's parent.
     let hierarchy = resolve_hierarchy(&records, &mut report);

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::api::Dhis2;
-use super::{Instance, check_out, valid_name, write_ndjson};
+use super::{Instance, NdjsonWriter, check_out, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
@@ -347,12 +347,18 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
 }
 
 /// Every Location and Organization for `units`, top level first, then by id.
-pub fn build(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Value> {
+/// The resources for `units`, parents first, handed to `emit` as each unit
+/// is built.
+pub fn build(
+    units: &[OrgUnit],
+    opts: &Options,
+    report: &mut Report,
+    mut emit: impl FnMut(Value) -> Result<()>,
+) -> Result<()> {
     let known: HashSet<&str> = units.iter().map(|u| u.id.as_str()).collect();
     let top = units.iter().map(|u| u.level).min().unwrap_or(1);
     let mut sorted: Vec<&OrgUnit> = units.iter().collect();
     sorted.sort_by(|a, b| (a.level, &a.id).cmp(&(b.level, &b.id)));
-    let mut out = Vec::new();
     for unit in sorted {
         if unit.level > opts.facility_level {
             report.add(
@@ -366,15 +372,11 @@ pub fn build(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Valu
             continue;
         }
         let parent_known = unit.parent.as_deref().is_some_and(|p| known.contains(p));
-        out.extend(resources(
-            unit,
-            opts,
-            parent_known,
-            unit.level == top,
-            report,
-        ));
+        for resource in resources(unit, opts, parent_known, unit.level == top, report) {
+            emit(resource)?;
+        }
     }
-    out
+    Ok(())
 }
 
 const GROUP_FIELDS: &str = "id,name,groupSets[id],organisationUnits[id]";
@@ -496,9 +498,10 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     }
     let raw = api.paged("organisationUnits.json", "organisationUnits", &query)?;
     let mut report = Report::default();
+    // Each response object is dropped once parsed.
     let mut units: Vec<OrgUnit> = raw
-        .iter()
-        .filter_map(|v| OrgUnit::parse(v, &mut report))
+        .into_iter()
+        .filter_map(|v| OrgUnit::parse(&v, &mut report))
         .collect();
     if units.is_empty() {
         return Err(PipesError::Usage(match &args.root {
@@ -565,17 +568,21 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         facility_level,
         groups,
     };
-    let resources = build(&units, &opts, &mut report);
-    let n = write_ndjson(&args.out, &resources)?;
+    // Written as built; the file is renamed into place at the end.
+    let mut out = NdjsonWriter::create(&args.out)?;
+    let mut organizations = 0usize;
+    build(&units, &opts, &mut report, |resource| {
+        if resource["resourceType"] == "Organization" {
+            organizations += 1;
+        }
+        out.write(&resource)
+    })?;
+    let n = out.finish()?;
 
     let mut per_level: BTreeMap<u32, usize> = BTreeMap::new();
     for u in &units {
         *per_level.entry(u.level).or_default() += 1;
     }
-    let organizations = resources
-        .iter()
-        .filter(|r| r["resourceType"] == "Organization")
-        .count();
     println!(
         "Wrote {n} resources to {} ({} Locations, {organizations} Organizations)",
         args.out.display(),
@@ -605,6 +612,16 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
 mod tests {
     use super::*;
     use base64::Engine;
+
+    fn build_all(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Value> {
+        let mut out = Vec::new();
+        build(units, opts, report, |r| {
+            out.push(r);
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
 
     fn unit(id: &str, level: u32, parent: Option<&str>, geometry: Option<Value>) -> OrgUnit {
         OrgUnit {
@@ -679,7 +696,7 @@ mod tests {
             unit("x", 4, Some("f"), None),
         ];
         let mut report = Report::default();
-        let out = build(&units, &opts(&instance), &mut report);
+        let out = build_all(&units, &opts(&instance), &mut report);
         let ids: Vec<&str> = out.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["sle-c", "sle-d", "org-sle-f", "sle-f"]);
         assert_eq!(report.count("below_facility_level"), 1);
@@ -750,7 +767,7 @@ mod tests {
         closed.closed_date = Some("2020-01-01".into());
         let units = vec![unit("c", 1, None, None), closed];
         let mut report = Report::default();
-        let out = build(&units, &opts(&instance), &mut report);
+        let out = build_all(&units, &opts(&instance), &mut report);
         assert_eq!(out[1]["status"], "inactive");
         assert!(out[1].get("partOf").is_none());
         assert_eq!(report.count("parent_not_exported"), 1);
@@ -761,7 +778,7 @@ mod tests {
         let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let units = vec![unit("d", 2, Some("c"), None), unit("e", 3, Some("d"), None)];
         let mut report = Report::default();
-        let out = build(&units, &opts(&instance), &mut report);
+        let out = build_all(&units, &opts(&instance), &mut report);
         assert!(out[0].get("partOf").is_none());
         assert_eq!(report.count("parent_not_exported"), 0);
     }
@@ -830,7 +847,7 @@ mod tests {
             ),
         ];
         let mut report = Report::default();
-        let out = build(&units, &opts(&instance), &mut report);
+        let out = build_all(&units, &opts(&instance), &mut report);
         assert!(out[0].get("extension").is_none());
         assert!(out[1].get("position").is_none());
         assert_eq!(report.count("bad_geometry"), 2);

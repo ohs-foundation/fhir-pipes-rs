@@ -674,7 +674,9 @@ fhir-pipes import location-boundaries --profile examples/profiles/icr.toml \
   boundary for that unit can replace it.
 
 Output is parents first: the country, then each level in the order its
-units first appear. That is the order `load` needs.
+units first appear. That is the order `load` needs. The features are read
+one at a time; the last level's units wait in a temporary file next to
+`--out` until the levels above are complete.
 
 | Fatal (exit 2, nothing written) | Reported |
 |---|---|

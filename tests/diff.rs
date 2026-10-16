@@ -289,6 +289,43 @@ fn usage_errors_exit_2() {
 }
 
 #[test]
+fn reordered_keys_in_the_snapshot_are_not_a_change() {
+    // The rebuilt identifiers come out `system` first; the snapshot has
+    // `value` first, on the Location and on the Organization. Equal as
+    // values, so nothing is emitted, as when diff compared sorted copies.
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot(dir.path());
+    let reorder = |mut v: Value| {
+        for ident in v["identifier"].as_array_mut().unwrap() {
+            let (system, value) = (ident["system"].clone(), ident["value"].clone());
+            *ident = json!({"value": value, "system": system});
+        }
+        v
+    };
+    std::fs::write(
+        snap.join("locations.ndjson"),
+        format!("{}\n{}\n", reorder(ng()), clinic()),
+    )
+    .unwrap();
+    std::fs::write(
+        snap.join("organizations.ndjson"),
+        format!("{}\n", reorder(org_clinic())),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(snap.join("locations.ndjson")).unwrap();
+    assert!(text.contains(r#"[{"value":"NG","system":"#), "{text}");
+    let input = write_input(dir.path(), "edits.geojson", &collection(export()));
+    let out = dir.path().join("changes.ndjson");
+    let a = diff(&snap, &input, &out).success();
+    assert!(
+        stdout(&a).contains("0 changed, 2 unchanged, 0 new"),
+        "{}",
+        stdout(&a)
+    );
+    assert_eq!(changes(&out).len(), 0);
+}
+
+#[test]
 fn a_failed_diff_leaves_no_partial_output() {
     let dir = tempfile::tempdir().unwrap();
     let snap = snapshot(dir.path());

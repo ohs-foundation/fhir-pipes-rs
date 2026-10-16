@@ -13,6 +13,32 @@
 //! fatal and nothing is written; a data problem in one feature or row is
 //! reported and costs only that feature or row.
 
+/// Visitor methods for the JSON types a streaming reader does not want: the
+/// value is consumed and the default returned. Arrays and objects are left
+/// to each visitor.
+macro_rules! other_json_types_are_default {
+    () => {
+        fn visit_bool<E>(self, _: bool) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_i64<E>(self, _: i64) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_u64<E>(self, _: u64) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_f64<E>(self, _: f64) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_str<E>(self, _: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+            Ok(Default::default())
+        }
+    };
+}
+
 pub mod location_boundaries;
 pub mod location_sites;
 
