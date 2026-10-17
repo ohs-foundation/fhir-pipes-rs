@@ -31,7 +31,9 @@ Each command that uses a profile prints it on its first line, for example
 | `import location-boundaries`, `import location-sites` | refuses (needs the Location type system) |
 | `extract`, `export`, `load`, `sync`, `views` | not used |
 
-A refusal exits 2 with a message that ends "Pass --profile; see docs/profiles.md".
+A refusal exits 2. Its message ends "no profile was given. Pass one with
+--profile; see docs/profiles.md", or names the profile and the section it
+lacks. Older binaries say "… has none. Pass --profile".
 
 ## Checking a profile against its IG
 

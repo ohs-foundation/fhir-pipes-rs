@@ -597,8 +597,8 @@ pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
     if shape.admin_unit_type.is_none() {
         return Err(PipesError::Usage(format!(
             "import location-boundaries needs [location] admin_unit_type in the profile, the \
-             type code of an admin unit; {} has none. Pass --profile; see docs/profiles.md",
-            profile.source
+             type code of an admin unit; {}",
+            profile.lacks("[location] admin_unit_type")
         )));
     }
     let code_system = match args.code_system.as_deref().or(profile.admin_code_system()) {
@@ -606,8 +606,12 @@ pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
         None => {
             return Err(PipesError::Usage(format!(
                 "import location-boundaries needs the identifier system of the admin codes: \
-                 --code-system, or [location] admin_code_system in the profile ({} has none)",
-                profile.source
+                 pass --code-system, or a profile with [location] admin_code_system ({})",
+                if profile.is_base() {
+                    "no profile was given".to_string()
+                } else {
+                    format!("{} has none", profile.source)
+                }
             )));
         }
     };

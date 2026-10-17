@@ -3,8 +3,9 @@
 fhir-pipes reads any FHIR R4 server through its API: paged searches with
 `_lastUpdated` and `Bundle.link`, and the system-level Bulk Data `$export`
 with `--bulk`. Some servers page or count in ways that need other search
-parameters. `--server-kind` (`server.kind` in `refresh`) names the server so
-that `export`, `extract` and `run` send them:
+parameters. `--server-kind` names the server so that `export`, `extract`,
+`run` and `refresh` send them. In `refresh` it can also be
+`FHIR_PIPES_SERVER_KIND` or `server.kind`:
 
 | Kind | What changes |
 |---|---|

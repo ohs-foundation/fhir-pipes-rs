@@ -477,8 +477,8 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     if instance.admin_unit_type.is_none() || instance.facility_type.is_none() {
         return Err(PipesError::Usage(format!(
             "dhis2 locations needs [location] admin_unit_type and [organization] facility_type \
-             in the profile, the type codes of admin units and facilities; {} lacks one",
-            profile.source
+             in the profile, the type codes of admin units and facilities; {}",
+            profile.lacks("[location] admin_unit_type or [organization] facility_type")
         )));
     }
     let prefix = args

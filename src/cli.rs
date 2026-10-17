@@ -71,7 +71,7 @@ pub enum Command {
     Transform(TransformCommand),
     /// Summarise a written dataset
     Inspect(InspectArgs),
-    /// Fetch Locations from a FHIR server into a snapshot (incremental)
+    /// Fetch Locations and Organizations from a FHIR server into a snapshot (incremental)
     Extract(ExtractArgs),
     /// Download every resource of one or more types from a FHIR server as NDJSON, one file per type
     Export(ExportArgs),

@@ -20,7 +20,7 @@ Errors go to stderr, starting with `fhir-pipes:`. Clap's own argument errors
 | `--db needs PostgreSQL support, which this fhir-pipes was built without` | a `--no-default-features` build | use a release binary or build with default features |
 | `--package needs FHIR package support…` | `views lint --package` without `fhir-packages` | build with `--features fhir-packages`, or use `--shareable` only |
 | `… needs a profile with a [dhis2] section …` or `… needs the system of the Location type codes …` | no profile | pass `--profile` or set `FHIR_PIPES_PROFILE` |
-| HTTP 400 `Search offset exceeds maximum` on Medplum | search past `_offset` 10,000 without the kind | add `--server-kind medplum` (`kind = "medplum"` in `refresh`) |
+| HTTP 400 `Search offset exceeds maximum` on Medplum | search past `_offset` 10,000 without the kind | add `--server-kind medplum` (for `refresh` also `kind = "medplum"` in `[server]`) |
 | Aidbox pages slow or timing out | every page counts the whole result | add `--server-kind aidbox` |
 | Aidbox `$export` kick-off answers 500 `storage-type not specified` | no bulk storage provider | set `BOX_FHIR_BULK_STORAGE_PROVIDER` on the Aidbox server, or use search |
 | Medplum `$export` fails with 401 on the output files | `Binary/<id>` files need the token | add `--server-kind medplum`; the AccessPolicy needs `AsyncJob` and `Binary` |

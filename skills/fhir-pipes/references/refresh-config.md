@@ -68,7 +68,7 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 | `profile` | `--profile`, `FHIR_PIPES_PROFILE` | none |
 | `server.base` | `--server`, `FHIR_PIPES_SERVER` | `http://localhost:3447/fhir` |
 | `server.name` | `--server-name`, `FHIR_PIPES_SERVER_NAME` | `hapi-local`; `files` with a file source |
-| `server.kind` | (no flag) | `generic`; `hapi`, `medplum`, `aidbox` |
+| `server.kind` | `--server-kind`, `FHIR_PIPES_SERVER_KIND` | `generic`; `hapi`, `medplum`, `aidbox` |
 | `server.fetch` | | `search`; `bulk`; `hapi-db` |
 | `server.bulk_timeout` | | 14400 |
 | `server.concurrency` | | 4 |

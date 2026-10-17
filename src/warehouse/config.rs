@@ -440,6 +440,8 @@ pub struct Overrides {
     pub input: Vec<PathBuf>,
     pub server: Option<String>,
     pub server_name: Option<String>,
+    /// `--server-kind`: replaces the file's `server.kind`.
+    pub server_kind: Option<ServerKind>,
     pub token: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -556,7 +558,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
                 .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
         ),
         auth,
-        server_kind: file.server.kind.unwrap_or_default(),
+        server_kind: o.server_kind.or(file.server.kind).unwrap_or_default(),
         fetch: file.server.fetch.unwrap_or_default(),
         bulk_timeout: file
             .server
@@ -736,6 +738,16 @@ mod tests {
             ServerKind::Aidbox
         );
         assert!(toml::from_str::<File>("[server]\nkind = \"fhirbase\"").is_err());
+        // --server-kind (or FHIR_PIPES_SERVER_KIND) wins over the file.
+        let file: File = toml::from_str("data = \"d\"\n[server]\nkind = \"medplum\"").unwrap();
+        let o = Overrides {
+            server_kind: Some(ServerKind::Aidbox),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings(file, PathBuf::from("/b"), o).unwrap().server_kind,
+            ServerKind::Aidbox
+        );
     }
 
     #[test]

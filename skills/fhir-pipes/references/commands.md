@@ -51,11 +51,13 @@ warehouse from `fhir-pipes.toml` (or `--config`, `FHIR_PIPES_CONFIG`).
 | `--input PATH` (repeat) | read NDJSON/Bundle/JSON files, directories or globs instead of a server |
 | `--push`, `--dry-run` | also push with rclone; `--dry-run` makes only the upload a dry run, so use `--only push --dry-run` to preview a push without running the other steps |
 | `--data`, `--views`, `--server`, `--server-name` | override the config (`FHIR_PIPES_DATA`, `FHIR_PIPES_VIEWS`, `FHIR_PIPES_SERVER`, `FHIR_PIPES_SERVER_NAME`) |
+| `--server-kind generic\|hapi\|medplum\|aidbox` | overrides `server.kind` (`FHIR_PIPES_SERVER_KIND`) |
 | `--token`, `--token-url`, `--token-auth`, `--scope`, `--username`, `--google-auth` | auth; client id, client secret and password come only from the environment |
 | `--countries` | countries to build tiles for |
 | `--threads` | default: number of CPUs |
 
-There is no `--server-kind` on `refresh`; use `server.kind` in the config.
+`refresh --server-kind` and `FHIR_PIPES_SERVER_KIND` are newer than the
+other kind flags; on a binary without them, use `server.kind` in the config.
 See [refresh-config.md](refresh-config.md).
 
 ## views

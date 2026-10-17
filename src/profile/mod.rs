@@ -29,6 +29,8 @@ pub const SNAPSHOT_COPY: &str = "profile.toml";
 
 /// What `--profile` names when it is not given: base FHIR only.
 pub const BASE_TEXT: &str = "name = \"base\"\n";
+/// `Profile::source` when no profile was given.
+pub const NO_PROFILE: &str = "no profile";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +44,7 @@ pub struct Profile {
     pub organization: OrganizationProfile,
     pub dhis2: Option<Dhis2Profile>,
     pub population: Option<PopulationProfile>,
-    /// Where it came from: a path, a URL, or "no profile".
+    /// Where it came from: a path, a URL, or [`NO_PROFILE`].
     #[serde(skip)]
     pub source: String,
     /// The file's text, as kept beside a snapshot.
@@ -215,9 +217,28 @@ impl Profile {
     /// No profile: base FHIR only.
     pub fn base() -> Self {
         let mut p: Profile = toml::from_str(BASE_TEXT).expect("the base profile parses");
-        p.source = "no profile".into();
+        p.source = NO_PROFILE.into();
         p.text = BASE_TEXT.into();
         p
+    }
+
+    /// True when no profile was given: base FHIR only.
+    pub fn is_base(&self) -> bool {
+        self.source == NO_PROFILE
+    }
+
+    /// The end of a message saying the profile lacks `what` (such as
+    /// "[dhis2] section"): that no profile was given, or which profile
+    /// lacks it, and what to do.
+    pub fn lacks(&self, what: &str) -> String {
+        if self.is_base() {
+            "no profile was given. Pass one with --profile; see docs/profiles.md".into()
+        } else {
+            format!(
+                "the profile {} has no {what}. Pass a profile that has it; see docs/profiles.md",
+                self.source
+            )
+        }
     }
 
     /// Parse and check a profile's text; `source` is for messages.
@@ -323,8 +344,8 @@ impl Profile {
         self.dhis2.as_ref().ok_or_else(|| {
             PipesError::Usage(format!(
                 "dhis2 needs a profile with a [dhis2] section (the identifier systems and \
-                 profiles it writes); {} has none. Pass --profile; see docs/profiles.md",
-                self.source
+                 profiles it writes); {}",
+                self.lacks("[dhis2] section")
             ))
         })
     }
@@ -333,8 +354,8 @@ impl Profile {
         self.population.as_ref().ok_or_else(|| {
             PipesError::Usage(format!(
                 "population needs a profile with a [population] section (the Group profile \
-                 and extensions it writes); {} has none. Pass --profile; see docs/profiles.md",
-                self.source
+                 and extensions it writes); {}",
+                self.lacks("[population] section")
             ))
         })
     }
@@ -345,9 +366,8 @@ impl Profile {
             .as_deref()
             .ok_or_else(|| {
                 PipesError::Usage(format!(
-                    "index needs a profile that names [location] spatial_index_extension; \
-                     {} does not. Pass --profile; see docs/profiles.md",
-                    self.source
+                    "index needs a profile that names [location] spatial_index_extension; {}",
+                    self.lacks("[location] spatial_index_extension")
                 ))
             })
     }
@@ -555,6 +575,29 @@ mod tests {
         assert!(p.dhis2().is_err());
         assert!(p.population().is_err());
         assert!(p.spatial_index_extension().is_err());
+    }
+
+    #[test]
+    fn a_missing_section_is_described_plainly() {
+        let base = Profile::base();
+        assert!(base.is_base());
+        let err = base.dhis2().unwrap_err().to_string();
+        assert!(
+            err.ends_with("; no profile was given. Pass one with --profile; see docs/profiles.md"),
+            "{err}"
+        );
+        let mut named = icr_example();
+        named.dhis2 = None;
+        named.source = "ig/profile.toml".into();
+        assert!(!named.is_base());
+        let err = named.dhis2().unwrap_err().to_string();
+        assert!(
+            err.ends_with(
+                "; the profile ig/profile.toml has no [dhis2] section. Pass a profile that has \
+                 it; see docs/profiles.md"
+            ),
+            "{err}"
+        );
     }
 
     #[test]

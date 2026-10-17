@@ -520,8 +520,9 @@ is missing four items the example profile uses: `dhis2-period`,
 
 fhir-pipes reads every server below through its FHIR API, by paged search or
 by system-level Bulk Data `$export` (`--bulk`). Only HAPI can also be read
-from its database. `--server-kind` (`server.kind` in `refresh`) tells
-`export`, `extract` and `run` which search parameters the server needs.
+from its database. `--server-kind` tells `export`, `extract`, `run` and
+`refresh` which search parameters the server needs; `refresh` also reads it
+from `FHIR_PIPES_SERVER_KIND` or `server.kind`.
 
 | Server | Reading | Authentication | `--server-kind` |
 |---|---|---|---|
@@ -559,8 +560,8 @@ on any vendor's extensions. `export --bulk` also needs the server's
 system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
 Medplum and Aidbox need other search parameters: pass `--server-kind medplum`
-or `--server-kind aidbox` (`server.kind` in `refresh`; see
-[Supported FHIR servers](#supported-fhir-servers)).
+or `--server-kind aidbox` (in `refresh`, also `FHIR_PIPES_SERVER_KIND` or
+`server.kind`; see [Supported FHIR servers](#supported-fhir-servers)).
 
 A server that needs authentication gets one of four kinds:
 

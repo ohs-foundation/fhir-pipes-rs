@@ -66,8 +66,11 @@ From source (needs Rust): `cargo install --git https://github.com/ohs-foundation
 
 ## Choosing `--server-kind`
 
-`export`, `extract` and `run` take `--server-kind`. `refresh` has no flag
-for it; set `kind` in `[server]` in `fhir-pipes.toml`.
+`export`, `extract`, `run` and `refresh` take `--server-kind`. For
+`refresh` it can also be `FHIR_PIPES_SERVER_KIND` or `kind` in `[server]` in
+`fhir-pipes.toml`; the flag wins over the variable, and the variable over
+the file. `refresh --server-kind` came after the other kind flags; if
+`fhir-pipes refresh --help` does not list it, set `kind` in the file.
 
 | Server | Kind | Notes |
 |---|---|---|

@@ -278,10 +278,9 @@ impl Shape {
     pub fn new(profile: &Profile, command: &str) -> Result<Shape> {
         let type_system = profile.location_type_system().ok_or_else(|| {
             PipesError::Usage(format!(
-                "import {command} needs the system of the Location type codes: \
-                 [location] type_systems in the profile; {} has none. Pass --profile; \
-                 see docs/profiles.md",
-                profile.source
+                "import {command} needs the system of the Location type codes, \
+                 [location] type_systems in the profile; {}",
+                profile.lacks("[location] type_systems")
             ))
         })?;
         Ok(Shape {
