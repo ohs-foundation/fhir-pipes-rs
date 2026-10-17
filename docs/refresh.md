@@ -274,9 +274,13 @@ The inputs are read as `views run --input` reads them: NDJSON (`.ndjson`), a
 Bundle, a JSON resource or an array of them; a directory with its
 subdirectories, hidden files skipped; in a Bundle, a reference to another
 entry by its `urn:uuid` fullUrl is rewritten to that entry's `Type/id`, so
-joins work. A glob pattern reads the `.json` and `.ndjson` files and the
-directories it matches, in path order. A path that does not exist, or a
-pattern that matches nothing, stops the run.
+joins work. A file ending in `.gz` is read as gzip, through every member:
+a directory reads `.json`, `.ndjson`, `.json.gz` and `.ndjson.gz` files. A
+glob pattern reads the files of those kinds and the directories it matches,
+in path order. A path that does not exist, or a pattern that matches
+nothing, stops the run, and so do inputs that include both `X.ndjson` and
+`X.ndjson.gz` (or `X.json` and `X.json.gz`): they most likely hold the same
+resources, so remove one.
 
 The steps then run as for a server:
 
@@ -290,7 +294,10 @@ The steps then run as for a server:
   twice rather than held in memory: first to find each resource's type, id
   and `meta.lastUpdated` and which copy is kept, then to copy the kept ones.
   A resource on an NDJSON line of its own is copied as it is written there;
-  one from a Bundle, an array or a JSON file is written out again.
+  one from a Bundle, an array or a JSON file is written out again. A gzip
+  NDJSON input is read only once: its lines are written, as they are, to a
+  temporary file in `raw/<name>/` that the second pass copies from, so that
+  file can grow to the decompressed size of the gzip inputs.
 - `locations`: the files' Location resources, and their Organizations if
   there are any, become the snapshot `raw/<name>/locations`, which is
   transformed into `parquet/locations` as after an extract. Boundaries given

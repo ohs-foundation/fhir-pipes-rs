@@ -1,6 +1,7 @@
 //! The file source: `[source] files` or `refresh --input`. The resources come
-//! from NDJSON, Bundle and resource files, read with the reader `views run
-//! --input` uses, instead of from a FHIR server, which is never contacted.
+//! from NDJSON, Bundle and resource files, plain or gzip, read with the
+//! reader `views run --input` uses, instead of from a FHIR server, which is
+//! never contacted.
 //!
 //!   split      every resource into raw/<name>/<Type>.ndjson, one per id, as an
 //!              export would have written them; the views step then reads them
@@ -19,6 +20,7 @@ use serde_json::Value;
 use crate::cli::{DEFAULT_PARTITION_BY, DEFAULT_ROW_GROUP_SIZE, TransformArgs};
 use crate::error::usage;
 use crate::fhir::head::Head;
+use crate::fhir::ndjson::is_gz;
 use crate::fs::AtomicFile;
 use crate::snapshot::instant::{format_utc, parse_instant};
 use crate::snapshot::{Snapshot, State};
@@ -30,10 +32,11 @@ pub const FILES: &str = "files";
 
 /// The files each input names, in order: a file as itself, a directory as
 /// the resource files under it (`views run --input`'s rules: `.json` and
-/// `.ndjson`, subdirectories too, hidden files skipped), a glob pattern as its
-/// matches, sorted. A pattern's matching files must be `.json` or `.ndjson`;
-/// a pattern that matches nothing, or a path that does not exist, is an
-/// error. A file named twice is read once, where it first appears.
+/// `.ndjson`, plain or `.gz`, subdirectories too, hidden files skipped), a
+/// glob pattern as its matches, sorted. A pattern's matching files must be
+/// resource files by the same rule; a pattern that matches nothing, or a
+/// path that does not exist, is an error. A file named twice is read once,
+/// where it first appears. A file and its `.gz` copy both named is an error.
 pub fn expand(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for input in inputs {
@@ -41,6 +44,7 @@ pub fn expand(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
     let mut seen = std::collections::HashSet::new();
     files.retain(|f| seen.insert(f.clone()));
+    crate::views::check_no_gz_copies(&files)?;
     Ok(files)
 }
 
@@ -75,7 +79,7 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
     for m in matches {
         if m.is_dir() {
             files.extend(crate::views::resource_files(&m)?);
-        } else if m.extension().is_some_and(|x| x == "json" || x == "ndjson") {
+        } else if crate::views::is_resource_file(&m) {
             files.push(m);
         }
     }
@@ -170,7 +174,7 @@ enum Read {
 }
 
 /// The files the resources' text is read back from: `sources[0]` is the
-/// spill file, the rest the NDJSON inputs.
+/// spill file, the rest the plain NDJSON inputs.
 struct Sources {
     paths: Vec<PathBuf>,
     /// Each NDJSON input's length and modification time when it was first
@@ -206,8 +210,12 @@ impl Sources {
 
     /// Write `r` to the spill file; returns where it is.
     fn spill(&mut self, r: &Value) -> Result<(u64, usize)> {
-        let text = serde_json::to_vec(r)?;
-        self.spill.write_all(&text)?;
+        self.spill_text(&serde_json::to_vec(r)?)
+    }
+
+    /// Write one resource's text to the spill file; returns where it is.
+    fn spill_text(&mut self, text: &[u8]) -> Result<(u64, usize)> {
+        self.spill.write_all(text)?;
         self.spill.write_all(b"\n")?;
         let at = self.spill_len;
         self.spill_len += text.len() as u64 + 1;
@@ -282,8 +290,10 @@ impl Drop for RemoveOnDrop {
 /// keeps, for each type and id, the resource that wins and where its text
 /// is: a line of an NDJSON input, read a chunk at a time and only far
 /// enough to find its type, id and `meta.lastUpdated`, or, for a Bundle, an
-/// array or a JSON file, its resources written to a spill file. The second
-/// pass copies each type's kept resources' text, in the order first seen.
+/// array or a JSON file, its resources written to a spill file. A gzip
+/// NDJSON input cannot be read back by offset, so its lines are written to
+/// the spill file as they are. The second pass copies each type's kept
+/// resources' text, in the order first seen.
 ///
 /// The directory can hold a server's download (`server.name` names both), so
 /// its export state goes first: the watermarks in it describe the server's
@@ -294,7 +304,7 @@ pub fn split(s: &Settings) -> Result<()> {
     println!("== files ({} files → {})", files.len(), raw.display());
     if files.is_empty() {
         return Err(usage(anyhow::anyhow!(
-            "the inputs hold no .json or .ndjson files"
+            "the inputs hold no .json or .ndjson files (plain or .gz)"
         )));
     }
     fs::create_dir_all(&raw).with_context(|| format!("creating {}", raw.display()))?;
@@ -303,7 +313,7 @@ pub fn split(s: &Settings) -> Result<()> {
     let mut sources = Sources::new(&spill_path)?;
     let mut index = Index::default();
     for file in &files {
-        if file.extension().is_none_or(|x| x != "ndjson") {
+        if !crate::views::is_ndjson(file) {
             let mut batch = Vec::new();
             crate::views::load_json_file(file, &mut batch)?;
             for r in batch {
@@ -311,7 +321,9 @@ pub fn split(s: &Settings) -> Result<()> {
             }
             continue;
         }
-        let source = sources.add_input(file)?;
+        // A gzip file is read once; its lines are copied to the spill file.
+        let gz = is_gz(file);
+        let source = if gz { 0 } else { sources.add_input(file)? };
         for chunk in crate::views::ndjson::open(file)? {
             let chunk = chunk?;
             let reads = chunk.parse(s.threads, |line| {
@@ -328,16 +340,23 @@ pub fn split(s: &Settings) -> Result<()> {
             })?;
             for ((line, text), read) in chunk.lines().zip(reads) {
                 match read {
-                    Read::One(head) => index.add(
-                        head.resource_type,
-                        head.id,
-                        Slot {
-                            source,
-                            offset: line.offset,
-                            len: text.len(),
-                            updated: head.last_updated.as_deref().and_then(parse_instant),
-                        },
-                    ),
+                    Read::One(head) => {
+                        let (offset, len) = if gz {
+                            sources.spill_text(text.as_bytes())?
+                        } else {
+                            (line.offset, text.len())
+                        };
+                        index.add(
+                            head.resource_type,
+                            head.id,
+                            Slot {
+                                source,
+                                offset,
+                                len,
+                                updated: head.last_updated.as_deref().and_then(parse_instant),
+                            },
+                        )
+                    }
                     Read::Many(resources) => {
                         for r in resources {
                             index.spill(r, &mut sources)?;
@@ -742,8 +761,11 @@ mod tests {
             "b.ndjson",
             "a.json",
             "notes.txt",
+            "notes.txt.gz",
             ".hidden.ndjson",
             "sub/deeper/c.json",
+            "sub/d.ndjson.gz",
+            "e.json.gz",
         ] {
             fs::write(d.join(f), "{}").unwrap();
         }
@@ -756,11 +778,17 @@ mod tests {
         assert_eq!(
             rel,
             [
+                format!("sub{sep}d.ndjson.gz"),
                 format!("sub{sep}deeper{sep}c.json"),
                 "a.json".into(),
-                "b.ndjson".into()
+                "b.ndjson".into(),
+                "e.json.gz".into(),
             ]
         );
+        // A file and its gzip copy would both be read.
+        fs::write(d.join("b.ndjson.gz"), "").unwrap();
+        let err = expand(&[d.join("*.ndjson*")]).unwrap_err();
+        assert!(err.to_string().contains("would both be read"), "{err}");
         let err = expand(&[d.join("*.parquet")]).unwrap_err();
         assert!(err.to_string().contains("matches nothing"), "{err}");
         let err = expand(&[d.join("missing")]).unwrap_err();

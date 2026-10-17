@@ -1,9 +1,13 @@
 //! Binary-level tests for `fhir-pipes views`.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use flate2::Compression;
+use flate2::read::MultiGzDecoder;
+use flate2::write::GzEncoder;
 use predicates::str::contains;
 
 fn fixtures() -> PathBuf {
@@ -14,6 +18,35 @@ fn views() -> Command {
     let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     c.env_remove("FHIR_PIPES_DATABASE_URL").arg("views");
     c
+}
+
+/// `bytes` as one gzip member.
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut e = GzEncoder::new(Vec::new(), Compression::default());
+    e.write_all(bytes).unwrap();
+    e.finish().unwrap()
+}
+
+/// The text of a gzip file, every member.
+fn gunzip(path: &Path) -> String {
+    let mut text = String::new();
+    MultiGzDecoder::new(fs::File::open(path).unwrap())
+        .read_to_string(&mut text)
+        .unwrap();
+    text
+}
+
+/// The Observation fixture as `dir/Observation.ndjson.gz`, in two gzip
+/// members, as `cat a.gz b.gz` or a parallel compressor writes it: o1 in the
+/// first, o2 and o3 in the second.
+fn observations_gz(dir: &Path) -> PathBuf {
+    let text = fs::read_to_string(fixtures().join("raw/Observation.ndjson")).unwrap();
+    let first = text.find('\n').unwrap() + 1;
+    let mut bytes = gzip(&text.as_bytes()[..first]);
+    bytes.extend(gzip(&text.as_bytes()[first..]));
+    let path = dir.join("Observation.ndjson.gz");
+    fs::write(&path, bytes).unwrap();
+    path
 }
 
 #[test]
@@ -536,24 +569,216 @@ fn rows_keep_the_input_order_across_chunks() {
         text.push_str(&line);
         text.push('\n');
     }
+    // Plain, then the same gzip: read a chunk at a time either way.
+    let gz = dir.path().join("gz");
+    fs::create_dir_all(&gz).unwrap();
+    fs::write(gz.join("all.ndjson.gz"), gzip(text.as_bytes())).unwrap();
     fs::write(input.join("all.ndjson"), text).unwrap();
+    for (input, out) in [(&input, "out"), (&gz, "out-gz")] {
+        let out = dir.path().join(out);
+        views()
+            .arg("run")
+            .arg(fixtures().join("views"))
+            .arg("--input")
+            .arg(input)
+            .args(["--threads", "3", "--out"])
+            .arg(&out)
+            .assert()
+            .success()
+            .stderr(contains("IcrPatient.csv (15000 rows)"))
+            .stderr(contains("IcrObs.csv (15000 rows)"));
+        let csv = fs::read_to_string(out.join("IcrPatient.csv")).unwrap();
+        let ids: Vec<&str> = csv
+            .lines()
+            .skip(1)
+            .map(|l| l.split(',').next().unwrap())
+            .collect();
+        assert_eq!(ids, patients);
+    }
+}
+
+#[test]
+fn gzip_input_is_read_through_every_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = observations_gz(dir.path());
+    views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .arg("--input")
+        .arg(&input)
+        .assert()
+        .success()
+        .stdout(contains("o1,loc-bo,3,2026-01-02T03:04:05Z"))
+        .stdout(contains("\no3,"));
+    // NDJSON out streams the input line by line: the same file, the same rows.
+    views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .arg("--input")
+        .arg(&input)
+        .args(["--output", "ndjson"])
+        .assert()
+        .success()
+        .stdout(contains(r#""id":"o1""#))
+        .stdout(contains(r#""id":"o3""#))
+        .stderr(contains("3 rows"));
+}
+
+#[test]
+fn out_ending_in_gz_is_written_compressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let view = fixtures().join("views/Binary-IcrObs.json");
+    let input = fixtures().join("raw/Observation.ndjson");
+    for (format, name, want) in [
+        ("ndjson", "rows.ndjson.gz", r#""id":"o2""#),
+        ("csv", "rows.csv.gz", "o2,loc-kono,5,2026-02-03T04:05:06Z"),
+        ("json", "rows.json.gz", r#""id":"o2""#),
+    ] {
+        let out = dir.path().join(name);
+        views()
+            .arg("run")
+            .arg(&view)
+            .arg("--input")
+            .arg(&input)
+            .args(["--output", format, "--out"])
+            .arg(&out)
+            .assert()
+            .success();
+        let text = gunzip(&out);
+        assert!(text.contains(want), "{format}: {text}");
+    }
+    // From a gzip input too, which takes the streaming path for NDJSON.
+    let out = dir.path().join("streamed.ndjson.gz");
+    views()
+        .arg("run")
+        .arg(&view)
+        .arg("--input")
+        .arg(observations_gz(dir.path()))
+        .args(["--output", "ndjson", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(gunzip(&out).lines().count(), 3);
+    // Parquet compresses its own pages; a gzip around it is not Parquet.
+    views()
+        .arg("run")
+        .arg(&view)
+        .arg("--input")
+        .arg(&input)
+        .args(["--output", "parquet", "--out"])
+        .arg(dir.path().join("rows.parquet.gz"))
+        .assert()
+        .code(2)
+        .stderr(contains("Parquet"));
+    assert!(!dir.path().join("rows.parquet.gz").exists());
+}
+
+#[test]
+fn input_directories_read_gzip_files_beside_plain_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    fs::create_dir_all(input.join("sub")).unwrap();
+    observations_gz(&input);
+    fs::copy(
+        fixtures().join("raw/Patient.ndjson"),
+        input.join("Patient.ndjson"),
+    )
+    .unwrap();
+    // A Bundle, compressed.
+    let bundle = serde_json::json!({"resourceType": "Bundle", "type": "collection", "entry": [
+        {"resource": {"resourceType": "Observation", "id": "o9", "status": "final",
+            "code": {"text": "x"}, "valueInteger": 9}},
+    ]});
+    fs::write(
+        input.join("sub/more.json.gz"),
+        gzip(bundle.to_string().as_bytes()),
+    )
+    .unwrap();
     let out = dir.path().join("out");
     views()
         .arg("run")
         .arg(fixtures().join("views"))
         .arg("--input")
         .arg(&input)
-        .args(["--threads", "3", "--out"])
+        .arg("--out")
         .arg(&out)
         .assert()
         .success()
-        .stderr(contains("IcrPatient.csv (15000 rows)"))
-        .stderr(contains("IcrObs.csv (15000 rows)"));
-    let csv = fs::read_to_string(out.join("IcrPatient.csv")).unwrap();
+        .stderr(contains("IcrObs.csv (4 rows)"))
+        .stderr(contains("IcrPatient.csv (2 rows)"));
+    let csv = fs::read_to_string(out.join("IcrObs.csv")).unwrap();
     let ids: Vec<&str> = csv
         .lines()
         .skip(1)
         .map(|l| l.split(',').next().unwrap())
         .collect();
-    assert_eq!(ids, patients);
+    assert_eq!(ids, ["o1", "o2", "o3", "o9"]);
+}
+
+#[test]
+fn a_file_and_its_gzip_copy_in_one_directory_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    observations_gz(dir.path());
+    fs::copy(
+        fixtures().join("raw/Observation.ndjson"),
+        dir.path().join("Observation.ndjson"),
+    )
+    .unwrap();
+    views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .arg("--input")
+        .arg(dir.path())
+        .assert()
+        .code(2)
+        .stderr(contains("Observation.ndjson and"))
+        .stderr(contains("Observation.ndjson.gz"));
+}
+
+#[test]
+fn a_corrupt_gzip_input_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let whole = fs::read(observations_gz(dir.path())).unwrap();
+    let truncated = dir.path().join("Truncated.ndjson.gz");
+    fs::write(&truncated, &whole[..whole.len() - 12]).unwrap();
+    let not_gzip = dir.path().join("Plain.ndjson.gz");
+    fs::copy(fixtures().join("raw/Observation.ndjson"), &not_gzip).unwrap();
+    for input in [&truncated, &not_gzip] {
+        for format in ["csv", "ndjson"] {
+            views()
+                .arg("run")
+                .arg(fixtures().join("views/Binary-IcrObs.json"))
+                .arg("--input")
+                .arg(input)
+                .args(["--output", format])
+                .assert()
+                .code(2)
+                .stderr(contains(input.file_name().unwrap().to_str().unwrap()));
+        }
+    }
+}
+
+#[test]
+fn a_closed_stdout_fails_the_run() {
+    // The read end is closed before the run starts, so every write to
+    // stdout fails, however small the output and whatever is buffered.
+    for format in ["ndjson", "csv"] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let run = std::process::Command::new(env!("CARGO_BIN_EXE_fhir-pipes"))
+            .env_remove("FHIR_PIPES_DATABASE_URL")
+            .arg("views")
+            .arg("run")
+            .arg(fixtures().join("views/Binary-IcrObs.json"))
+            .arg("--input")
+            .arg(fixtures().join("raw/Observation.ndjson"))
+            .args(["--output", format])
+            .stdout(writer)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(1), "{format}: {stderr}");
+        assert!(stderr.contains("writing"), "{format}: {stderr}");
+        assert!(!stderr.contains("3 rows"), "{format}: {stderr}");
+    }
 }

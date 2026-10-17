@@ -192,9 +192,20 @@ data can be fixed; the run does not fail. CSV and NDJSON write every value
 as it is.
 
 A directory of views is read as `refresh` reads it. An `--input` directory is
-read with its subdirectories, skipping hidden files. An NDJSON file is read
-20,000 lines at a time, and resources of a type no view reads are dropped as
-they are read; only the rows are kept until they are written. In a Bundle, a reference
+read with its subdirectories, skipping hidden files; it reads `.json` and
+`.ndjson` files, plain or gzip (`.json.gz`, `.ndjson.gz`). A directory that
+holds both `X.ndjson` and `X.ndjson.gz` is refused (exit 2), since both
+would be read and every row would appear twice; remove one. A gzip file is
+read through every member, so files joined with `cat` work. An NDJSON file,
+plain or gzip, is read 20,000 lines at a time, and resources of a type no
+view reads are dropped as they are read; only the rows are kept until they
+are written.
+
+With `--out FILE.gz`, CSV, NDJSON and JSON are written as gzip. Parquet with
+a `.gz` name is refused: Parquet compresses its own pages, and a gzip file
+around it is not one that Parquet readers open. A directory of views writes
+plain files (`<name>.csv` and so on) into the `--out` directory. Stdin is
+read as plain text. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
 Synthea have, is rewritten to that entry's `Type/id`, as a FHIR server would
 store it, so `getReferenceKey()` and joins work on Bundle files.

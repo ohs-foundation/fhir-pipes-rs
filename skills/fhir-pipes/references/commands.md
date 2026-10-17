@@ -6,14 +6,13 @@ and `views lint --package` needs `fhir-packages` (not in the release
 binaries). Without the feature the command exits 2 and names it.
 
 `--profile FILE|URL` (or `FHIR_PIPES_PROFILE`) is accepted by every command.
-Most commands read and write an NDJSON path ending in `.gz` as gzip. The
-exceptions:
-`views run --input FILE.gz` reads the compressed bytes and fails, `views run
---out FILE.gz` writes plain NDJSON, and directory inputs for `views` and
-`refresh --input` skip `.gz` files. For those, decompress first (`gunzip -k`)
-and compress the output yourself. Run
-`fhir-pipes <command> --help` for the full text; this file lists what is
-needed to pick flags.
+Most commands read and write an NDJSON path ending in `.gz` as gzip, every
+member of it when reading. `views run --input` and `refresh --input` also
+read `.json.gz`, and their directories include `.ndjson.gz` and `.json.gz`
+files; a directory or input list with both `X.ndjson` and `X.ndjson.gz`
+exits 2. `views run --out FILE.gz` writes CSV, NDJSON or JSON as gzip and
+refuses Parquet. Run `fhir-pipes <command> --help` for the full text; this file lists
+what is needed to pick flags.
 
 ## Shared FHIR client flags
 
@@ -66,8 +65,10 @@ All `views` subcommands work offline on files, except `run --db`.
 
 - `views run VIEW --input PATH [--output csv|ndjson|json|parquet] [--out FILE|DIR] [--parquet-temporal text|native] [--threads N]`.
   VIEW is a ViewDefinition JSON file or a directory of them; a directory
-  writes one file per view into `--out`. `--input` is NDJSON, a Bundle, a
-  JSON resource or array, a directory, or `-` for stdin. `--db URL` (or
+  writes one file per view into `--out`, plain. `--input` is NDJSON, a
+  Bundle, a JSON resource or array (any of them `.gz`), a directory, or `-`
+  for stdin (plain only). `--out FILE.gz` writes gzip, except Parquet, which
+  exits 2. `--db URL` (or
   `FHIR_PIPES_DATABASE_URL`) runs against PostgreSQL with FHIR JSONB instead.
   Default output is CSV on stdout.
 - `views sql VIEW [--dialect ansi|postgres|duckdb] [--ddl] [--table NAME]`:
