@@ -662,6 +662,31 @@ The account needs an IAM role on the store or its dataset:
 `export --bulk` uses the server's `$export`; the Healthcare API's own export
 to Cloud Storage is not used.
 
+## Using fhir-pipes with an AI agent
+
+[skills/fhir-pipes](skills/fhir-pipes) is an
+[Agent Skill](https://agentskills.io): instructions that tell a coding agent
+how to choose and run fhir-pipes commands. It covers servers, auth through
+environment variables, incremental and bulk downloads, `refresh` and exit
+codes, and has safety rules: secrets only in the environment, `--check` and
+`--dry-run` before writing, and no writes to production without the user's
+say-so. Copy or symlink the directory into the agent's skills directory:
+
+| Agent | Personal | Project |
+|---|---|---|
+| Claude Code | `~/.claude/skills/fhir-pipes` | `.claude/skills/fhir-pipes` |
+| OpenAI Codex | `~/.agents/skills/fhir-pipes` | `.agents/skills/fhir-pipes` |
+| Gemini CLI | `~/.gemini/skills/fhir-pipes` or `~/.agents/skills/fhir-pipes` | `.gemini/skills/fhir-pipes` or `.agents/skills/fhir-pipes` |
+| GitHub Copilot in VS Code | `~/.copilot/skills/fhir-pipes` | `.github/skills/fhir-pipes` |
+
+```sh
+git clone https://github.com/ohs-foundation/fhir-pipes-rs
+mkdir -p ~/.claude/skills
+ln -s "$PWD/fhir-pipes-rs/skills/fhir-pipes" ~/.claude/skills/fhir-pipes
+```
+
+The skill expects the `fhir-pipes` binary on the `PATH` (see [Install](#install)).
+
 ## Not done yet
 
 The open items are in [ROADMAP.md](ROADMAP.md#next). The main ones:
@@ -751,6 +776,8 @@ crates/
   sof/            fhir-pipes-sof: the ViewDefinition engine (from octofhir/sof)
   sof-lint/       fhir-pipes-sof-lint: ViewDefinition checks
 tests/            integration tests per command; fixtures under tests/fixtures
+skills/fhir-pipes/
+                  the Agent Skill for AI coding agents
 docs/
   refresh.md, servers.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
   notes/          the consolidation notes
