@@ -73,6 +73,29 @@ pub fn convert(g: geojson::Geometry) -> Result<(Geometry<f64>, bool), String> {
     Ok((geom, has_extra))
 }
 
+/// A GeoJSON geometry object, as JSON, through `convert`.
+pub fn convert_value(v: serde_json::Value) -> Result<(Geometry<f64>, bool), String> {
+    serde_json::from_value::<geojson::Geometry>(v)
+        .map_err(|e| e.to_string())
+        .and_then(convert)
+}
+
+/// A geometry as a GeoJSON geometry object: `type` then `coordinates`.
+fn to_geojson(g: &Geometry<f64>) -> geojson::Geometry {
+    geojson::Geometry::new(GeometryValue::from(g))
+}
+
+/// A geometry as compact GeoJSON text, the bytes a boundary attachment
+/// carries.
+pub fn to_geojson_bytes(g: &Geometry<f64>) -> Vec<u8> {
+    serde_json::to_vec(&to_geojson(g)).expect("a GeoJSON geometry serialises")
+}
+
+/// A geometry as a GeoJSON JSON value; written out it is `to_geojson_bytes`.
+pub fn to_geojson_value(g: &Geometry<f64>) -> serde_json::Value {
+    serde_json::to_value(to_geojson(g)).expect("a GeoJSON geometry serialises")
+}
+
 fn to_geo(g: geojson::Geometry, id: &str, report: &mut Report) -> Option<Geometry<f64>> {
     match convert(g) {
         Ok((geom, has_extra)) => {
@@ -188,6 +211,18 @@ pub fn kind_name(g: &Geometry<f64>) -> &'static str {
 mod tests {
     use super::*;
     use crate::report::Report;
+
+    #[test]
+    fn geometries_are_written_as_compact_geojson_and_read_back() {
+        let text = r#"{"type":"MultiPolygon","coordinates":[[[[3.0,6.0],[4.0,6.0],[4.0,7.0],[3.0,6.0]],[[3.2,6.1],[3.3,6.1],[3.3,6.2],[3.2,6.1]]],[[[-0.5,1e-7],[1.25,0.0],[0.0,2.0],[-0.5,1e-7]]]]}"#;
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        let (geom, z_dropped) = convert_value(value.clone()).unwrap();
+        assert!(!z_dropped);
+        assert_eq!(String::from_utf8(to_geojson_bytes(&geom)).unwrap(), text);
+        assert_eq!(to_geojson_value(&geom), value);
+        let err = convert_value(serde_json::json!({"type": "Point", "coordinates": [1]}));
+        assert!(err.unwrap_err().contains("two or more elements"));
+    }
 
     #[test]
     fn bare_geometry_feature_and_collection_all_parse() {

@@ -213,15 +213,12 @@ impl Drop for Stage {
 
 /// The entries of `dir` other than dot-files, sorted.
 fn entries(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .is_some_and(|n| !n.to_string_lossy().starts_with('.'))
-        })
-        .collect();
-    paths.sort();
+    let mut paths =
+        crate::fs::sorted_entries(dir).with_context(|| format!("reading {}", dir.display()))?;
+    paths.retain(|p| {
+        p.file_name()
+            .is_some_and(|n| !n.to_string_lossy().starts_with('.'))
+    });
     Ok(paths)
 }
 

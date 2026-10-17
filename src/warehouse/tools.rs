@@ -82,11 +82,6 @@ pub fn duckdb(duckdb: &str, sql: &str) -> Result<()> {
     output(Command::new(duckdb).args(["-c", sql])).map(|_| ())
 }
 
-/// A SQL string literal for a path.
-pub fn sql_str(p: &Path) -> String {
-    format!("'{}'", p.display().to_string().replace('\'', "''"))
-}
-
 fn show(cmd: &Command) -> String {
     let program = Path::new(cmd.get_program())
         .file_name()
@@ -103,11 +98,6 @@ fn show(cmd: &Command) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sql_strings_escape_quotes() {
-        assert_eq!(sql_str(Path::new("/a/o'b")), "'/a/o''b'");
-    }
 
     #[test]
     #[cfg(unix)]

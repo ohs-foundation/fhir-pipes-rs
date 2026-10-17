@@ -873,8 +873,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             parquet_temporal,
             threads,
         } => {
-            let threads = threads
-                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+            let threads = threads.unwrap_or_else(crate::work::default_threads);
             // A directory of views runs every view in one pass, writing one
             // file per view into the --out directory.
             let multi = view.is_dir();
@@ -997,12 +996,9 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
         ViewsCommand::Test { manifest } => {
             let mut files = Vec::new();
             if manifest.is_dir() {
-                let mut entries: Vec<PathBuf> = fs::read_dir(manifest)
-                    .with_context(|| format!("reading directory {}", manifest.display()))?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().is_some_and(|x| x == "json"))
-                    .collect();
-                entries.sort();
+                let mut entries = crate::fs::sorted_entries(manifest)
+                    .with_context(|| format!("reading directory {}", manifest.display()))?;
+                entries.retain(|p| p.extension().is_some_and(|x| x == "json"));
                 files.extend(entries);
             } else {
                 files.push(manifest.clone());

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use fhir_pipes_sof::{CompiledView, ViewDefinition, ViewResult};
@@ -29,12 +29,9 @@ pub struct View {
 /// logical-model instance, as SUSHI writes it into Binary-*.json); other JSON
 /// files are skipped. Each view's structure is checked, and errors stop here.
 pub fn discover(dir: &Path, strip_prefix: &[String]) -> Result<Vec<View>> {
-    let mut files: Vec<PathBuf> = fs::read_dir(dir)
-        .with_context(|| format!("reading views directory {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
-    files.sort();
+    let mut files = crate::fs::sorted_entries(dir)
+        .with_context(|| format!("reading views directory {}", dir.display()))?;
+    files.retain(|p| p.extension().is_some_and(|x| x == "json"));
     let mut views = Vec::new();
     for path in files {
         let text =

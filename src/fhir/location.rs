@@ -5,7 +5,7 @@
 //! and spatial index come from the profile (crate::profile).
 
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::report::Report;
 
@@ -18,15 +18,17 @@ pub const GEOJSON_CONTENT_TYPE: &str = "application/geo+json";
 pub const PHYSICAL_TYPE_SYSTEM: &str =
     "http://terminology.hl7.org/CodeSystem/location-physical-type";
 
+/// A boundary attachment: the GeoJSON inlined as base64.
+pub fn boundary_attachment(geojson: &[u8]) -> Value {
+    json!({
+        "contentType": GEOJSON_CONTENT_TYPE,
+        "data": base64::engine::general_purpose::STANDARD.encode(geojson),
+    })
+}
+
 /// A boundary attachment extension under `url`, the GeoJSON inlined as base64.
 pub fn boundary_extension(url: &str, geojson: &[u8]) -> Value {
-    serde_json::json!({
-        "url": url,
-        "valueAttachment": {
-            "contentType": GEOJSON_CONTENT_TYPE,
-            "data": base64::engine::general_purpose::STANDARD.encode(geojson),
-        },
-    })
+    json!({"url": url, "valueAttachment": boundary_attachment(geojson)})
 }
 
 /// A boundary attachment extension: the HL7 one, one a profile names
@@ -36,6 +38,161 @@ pub fn is_boundary_extension(url: &str, extra: &[String]) -> bool {
     url == HL7_BOUNDARY_EXTENSION_URL
         || url.ends_with(BOUNDARY_EXTENSION_SUFFIX)
         || extra.iter().any(|e| e == url)
+}
+
+/// `{"reference": "<resource_type>/<id>"}`.
+pub fn reference(resource_type: &str, id: &str) -> Value {
+    json!({"reference": format!("{resource_type}/{id}")})
+}
+
+/// `{"system": .., "value": ..}`.
+pub fn identifier(system: &str, value: &str) -> Value {
+    json!({"system": system, "value": value})
+}
+
+/// The Location physical types fhir-pipes writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalType {
+    /// `si`: a facility, school or other point.
+    Site,
+    /// `jdn`: an admin unit.
+    Jurisdiction,
+}
+
+impl PhysicalType {
+    pub fn concept(self) -> Value {
+        let (code, display) = match self {
+            PhysicalType::Site => ("si", "Site"),
+            PhysicalType::Jurisdiction => ("jdn", "Jurisdiction"),
+        };
+        json!({"coding": [{"system": PHYSICAL_TYPE_SYSTEM, "code": code, "display": display}]})
+    }
+}
+
+/// The top-level keys of a `NewLocation` after `resourceType` and `id`.
+/// Each writer keeps its own key order, so its output stays byte for byte
+/// what it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationKey {
+    Meta,
+    Extension,
+    Identifier,
+    Status,
+    Name,
+    Alias,
+    Type,
+    PhysicalType,
+    Position,
+    ManagingOrganization,
+    PartOf,
+}
+
+/// A Location fhir-pipes writes from scratch (`import`, `dhis2 locations`).
+/// Empty lists and `None` are left out.
+#[derive(Debug, Default)]
+pub struct NewLocation<'a> {
+    pub id: &'a str,
+    pub meta: Option<Value>,
+    pub extension: Vec<Value>,
+    pub identifier: Vec<Value>,
+    pub status: &'a str,
+    pub name: &'a str,
+    pub alias: &'a [String],
+    /// The first type: one coding, `type_code` under `type_system`.
+    pub type_system: &'a str,
+    pub type_code: &'a str,
+    /// Further types after the first.
+    pub extra_types: Vec<Value>,
+    pub physical_type: Option<PhysicalType>,
+    /// (longitude, latitude).
+    pub position: Option<(f64, f64)>,
+    /// An Organization id.
+    pub managing_organization: Option<&'a str>,
+    /// A Location id.
+    pub part_of: Option<&'a str>,
+}
+
+impl NewLocation<'_> {
+    /// The resource, its keys in `order`.
+    pub fn into_json(self, order: &[LocationKey; 11]) -> Value {
+        let first_type = json!({"coding": [{"system": self.type_system, "code": self.type_code}]});
+        let types = std::iter::once(first_type)
+            .chain(self.extra_types)
+            .collect();
+        let position = self
+            .position
+            .map(|(longitude, latitude)| json!({"longitude": longitude, "latitude": latitude}));
+        let fields = vec![
+            (LocationKey::Meta, "meta", self.meta),
+            (
+                LocationKey::Extension,
+                "extension",
+                non_empty(self.extension),
+            ),
+            (
+                LocationKey::Identifier,
+                "identifier",
+                non_empty(self.identifier),
+            ),
+            (LocationKey::Status, "status", Some(json!(self.status))),
+            (LocationKey::Name, "name", Some(json!(self.name))),
+            (
+                LocationKey::Alias,
+                "alias",
+                (!self.alias.is_empty()).then(|| json!(self.alias)),
+            ),
+            (LocationKey::Type, "type", Some(Value::Array(types))),
+            (
+                LocationKey::PhysicalType,
+                "physicalType",
+                self.physical_type.map(PhysicalType::concept),
+            ),
+            (LocationKey::Position, "position", position),
+            (
+                LocationKey::ManagingOrganization,
+                "managingOrganization",
+                self.managing_organization
+                    .map(|id| reference("Organization", id)),
+            ),
+            (
+                LocationKey::PartOf,
+                "partOf",
+                self.part_of.map(|id| reference("Location", id)),
+            ),
+        ];
+        resource("Location", self.id, fields, order)
+    }
+}
+
+/// A list, or `None` when it is empty.
+pub(crate) fn non_empty(list: Vec<Value>) -> Option<Value> {
+    (!list.is_empty()).then_some(Value::Array(list))
+}
+
+/// `resourceType`, `id`, then the fields with a value in `order`. Every
+/// field's key must be in `order` once.
+pub(crate) fn resource<K: PartialEq + std::fmt::Debug>(
+    resource_type: &str,
+    id: &str,
+    mut fields: Vec<(K, &str, Option<Value>)>,
+    order: &[K],
+) -> Value {
+    let mut r = Map::new();
+    r.insert("resourceType".into(), json!(resource_type));
+    r.insert("id".into(), json!(id));
+    for key in order {
+        if let Some(i) = fields.iter().position(|(k, ..)| k == key) {
+            let (_, name, value) = fields.swap_remove(i);
+            if let Some(value) = value {
+                r.insert(name.into(), value);
+            }
+        }
+    }
+    debug_assert!(
+        fields.is_empty(),
+        "{resource_type} keys missing from {order:?}"
+    );
+    Value::Object(r)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,6 +638,56 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_new_location_has_its_keys_in_the_given_order_and_leaves_out_empty_ones() {
+        use LocationKey::*;
+        let full = || NewLocation {
+            id: "a",
+            meta: Some(json!({"profile": ["p"]})),
+            extension: vec![json!({"url": "e"})],
+            identifier: vec![identifier("s", "v")],
+            status: "active",
+            name: "A",
+            alias: &[],
+            type_system: "t",
+            type_code: "site",
+            extra_types: vec![json!({"text": "x"})],
+            physical_type: Some(super::PhysicalType::Site),
+            position: Some((1.5, 2.0)),
+            managing_organization: Some("org-a"),
+            part_of: Some("b"),
+        };
+        let order = [
+            PartOf,
+            Name,
+            Meta,
+            Status,
+            Alias,
+            Type,
+            PhysicalType,
+            Identifier,
+            Position,
+            ManagingOrganization,
+            Extension,
+        ];
+        assert_eq!(
+            full().into_json(&order).to_string(),
+            r#"{"resourceType":"Location","id":"a","partOf":{"reference":"Location/b"},"name":"A","meta":{"profile":["p"]},"status":"active","type":[{"coding":[{"system":"t","code":"site"}]},{"text":"x"}],"physicalType":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/location-physical-type","code":"si","display":"Site"}]},"identifier":[{"system":"s","value":"v"}],"position":{"longitude":1.5,"latitude":2.0},"managingOrganization":{"reference":"Organization/org-a"},"extension":[{"url":"e"}]}"#
+        );
+        let bare = NewLocation {
+            id: "a",
+            status: "active",
+            name: "A",
+            type_system: "t",
+            type_code: "site",
+            ..Default::default()
+        };
+        assert_eq!(
+            bare.into_json(&order).to_string(),
+            r#"{"resourceType":"Location","id":"a","name":"A","status":"active","type":[{"coding":[{"system":"t","code":"site"}]}]}"#
+        );
+    }
     use crate::report::Report;
 
     fn parse_str(s: &str, report: &mut Report) -> Option<Location> {

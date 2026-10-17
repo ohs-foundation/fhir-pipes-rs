@@ -206,7 +206,7 @@ impl Diff<'_> {
                     if let Some(obj) = rebuilt.as_object_mut() {
                         obj.insert(
                             "managingOrganization".into(),
-                            json!({"reference": format!("Organization/{org_id}")}),
+                            crate::fhir::location::reference("Organization", &org_id),
                         );
                     }
                 }

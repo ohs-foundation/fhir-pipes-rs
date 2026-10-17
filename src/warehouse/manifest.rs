@@ -12,15 +12,20 @@ use super::config::Settings;
 use super::partition::{partition_key, table_files};
 use super::stage::Stage;
 
+/// The time now as `refreshed_at` gives it: UTC, to the second.
+pub fn now() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
+        .to_string()
+}
+
 /// Write manifest.json into the staging directory, describing the tables and
 /// views as they will be once the run is published, and return its
 /// `refreshed_at`. `server` is where the data came from, if known
 /// (`recorded_server`).
 pub fn write(s: &Settings, stage: &Stage, server: Option<&str>) -> Result<String> {
     println!("== manifest");
-    let refreshed_at = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S+00:00")
-        .to_string();
+    let refreshed_at = now();
 
     let mut tables = Map::new();
     for (name, dir) in stage.tables()? {
@@ -28,11 +33,8 @@ pub fn write(s: &Settings, stage: &Stage, server: Option<&str>) -> Result<String
     }
 
     let mut views = Map::new();
-    let mut files: Vec<_> = fs::read_dir(stage.read_dir("views"))
-        .map(|it| it.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
-    files.retain(|p: &std::path::PathBuf| p.extension().is_some_and(|x| x == "json"));
-    files.sort();
+    let mut files = crate::fs::sorted_entries(&stage.read_dir("views")).unwrap_or_default();
+    files.retain(|p| p.extension().is_some_and(|x| x == "json"));
     for f in files {
         let v: Value = serde_json::from_str(&fs::read_to_string(&f)?)
             .with_context(|| format!("parsing {}", f.display()))?;

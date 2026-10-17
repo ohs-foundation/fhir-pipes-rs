@@ -253,15 +253,7 @@ fn elements(sd: &Value) -> impl Iterator<Item = &Value> {
 }
 
 fn fetch(url: &str) -> Result<Vec<u8>> {
-    let client = crate::extract::client::FhirClient::new(
-        crate::extract::client::Auth::None,
-        crate::cli::DEFAULT_RETRIES,
-        Duration::from_secs(120),
-    )?;
-    client
-        .get(url)
-        .map(|f| f.body)
-        .map_err(|e| PipesError::Environment(format!("--ig {url}: {e}")))
+    super::fetch_bytes(url, "--ig", Duration::from_secs(120))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

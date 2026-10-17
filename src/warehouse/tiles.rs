@@ -15,7 +15,8 @@ use std::process::Command;
 use anyhow::{Result, bail};
 
 use super::config::Settings;
-use super::tools::{self, sql_str};
+use super::sql::sql_path;
+use super::tools;
 
 const POINT_COLS: &str = "id, name, type, status, admin1_name, admin2_name, admin3_name, pcode, gers_id, nhfr_code, nhfr_uid,
     replace(facility_level_text, chr(160), ' ') AS facility_level, ownership_text AS ownership, settlement_type,
@@ -46,7 +47,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
             "[{}]",
             paths
                 .iter()
-                .map(|p| sql_str(p))
+                .map(|p| sql_path(p))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -66,7 +67,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
              COPY (SELECT id, name, admin_level, admin1_name, admin2_name, path, pcode, geometry
                    FROM read_parquet({poly}, union_by_name=true) WHERE admin_level = {level})
              TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSON');",
-                sql_str(&file)
+                sql_path(&file)
             ),
         )?;
         println!("   {name}: {} features", features(&file));
@@ -120,7 +121,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
                    FROM read_parquet({points}, hive_partitioning=true, union_by_name=true)
                    WHERE type = '{kind}' AND geometry IS NOT NULL)
              TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSONSeq');",
-                sql_str(&file)
+                sql_path(&file)
             ),
         )?;
         println!("   {layer}: {} features", features(&file));
@@ -160,7 +161,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
                        FROM read_parquet({catch}, hive_partitioning=true, union_by_name=true)
                        WHERE type = '{kind}-catchment' AND geometry IS NOT NULL)
                  TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSONSeq');",
-                sql_str(&file)
+                sql_path(&file)
             ))?;
             println!("   {kind}_catchments: {} features", features(&file));
             layers.push((format!("{kind}_catchments"), file));
