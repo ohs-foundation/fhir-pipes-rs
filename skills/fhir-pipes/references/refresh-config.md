@@ -154,8 +154,12 @@ with exit 2. It loads in full on the first run, after a refresh that did not
 finish, with `--full`, without the views step in the run, and for a table
 that is new, whose columns changed, whose view or partition lookup changed,
 whose view calls `now()`, `today()` or `timeOfDay()`, or that another load
-wrote last (each upsert sets the table comment to its own mark). Edits to
-`raw/` by hand are not seen: run `--full` after one.
+wrote last (each upsert records its mark in `<schema>.fhir_pipes_loads`).
+Edits to `raw/` by hand are not seen: run `--full` after one. A role that
+does not own the tables needs `SELECT, INSERT, UPDATE, DELETE` on
+`fhir_pipes_loads` for upsert, and `SELECT, DELETE` on it for a replace
+into a schema an upsert loaded; the step names the grant when it is
+missing.
 
 Before loading into a database, confirm with the user which database it
 is. Do not load into a production database unless the user says so.

@@ -594,16 +594,19 @@ its ids.
 And for one table when:
 
 - the table is new or its columns changed;
-- the table was last written by another load. Each upsert load sets the
-  comment of every table it loads to a mark of its own (`fhir-pipes upsert
-  load <uuid>`), in the same transaction, and the change log records the
-  mark. A table with another comment was written by another warehouse, a
-  `replace` load (which removes the mark), a restored backup, or a database
-  the connection string now reaches instead. Upsert replaces any comment you
-  set on the tables it loads;
-- its view calls `now()`, `today()` or `timeOfDay()` anywhere (columns,
-  `where`, nested selects): its rows can change while its resources do not,
-  so the table is loaded in full in every run;
+- the table was last written by another load. Each upsert load records a
+  mark of its own (a UUID) for every table it loads in a table of the same
+  schema, `fhir_pipes_loads` (`table_name`, `mark`), in the same
+  transaction, and the change log records the mark. A table without this
+  warehouse's mark there was written by another warehouse, a `replace` load
+  (which removes the marks of the tables it loads or empties), a restored
+  backup, or a database the connection string now reaches instead;
+- its view calls `now()`, `today()` or `timeOfDay()` in any expression
+  (columns, `where`, `forEach`, nested selects, `unionAll`), as the views
+  engine's FHIRPath parser reads it, so comments and delimited names such
+  as `` `now`() `` count too, and so does an expression that does not
+  parse: its rows can change while its resources do not, so the table is
+  loaded in full in every run;
 - its type is marked for a full reload;
 - what its rows are built from changed: its view, the partition column, the
   partition lookup and the contents of the lookup table, or the fhir-pipes
@@ -615,8 +618,29 @@ And for one table when:
 The step says which tables it loads in full and why. Only those tables are
 analyzed after the commit.
 
+**Privileges.** Neither mode needs to own the view tables once they exist:
+`SELECT`, `INSERT` and `DELETE` on them are enough (creating or recreating
+one needs `CREATE` on the schema, and dropping one its owner, as before).
+Upsert also needs `fhir_pipes_loads`: `CREATE` on the schema the first time,
+when it makes the table, and then `SELECT`, `INSERT`, `UPDATE` and `DELETE`
+on it. The key column's index is made only by the table's owner; for
+another role the step says the index is missing, and the deletes scan the
+table until the owner adds it. A `replace` load into a schema that has
+`fhir_pipes_loads` (an upsert loaded it before) removes the rows of the
+tables it loads, so it needs `SELECT` and `DELETE` on that table. Without
+them it stops and names the grant, rather than leave a mark that would let
+the next upsert keep the rows it replaced:
+
+```sql
+GRANT SELECT, DELETE ON analytics.fhir_pipes_loads TO loader;                   -- replace
+GRANT SELECT, INSERT, UPDATE, DELETE ON analytics.fhir_pipes_loads TO loader;   -- upsert
+```
+
+A schema that has no `fhir_pipes_loads` is loaded by `replace` exactly as
+before.
+
 Changes the log cannot see are not loaded: a file in `raw/` edited by hand
-before `--reuse-raw`, or rows changed by hand in a table that keeps the
+before `--reuse-raw`, or rows changed by hand in a table that keeps its
 mark. Run once with `--full` (or `mode = "replace"`) to bring the database
 back in line.
 

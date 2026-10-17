@@ -686,7 +686,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
                 .map(|v| database::Table {
                     dir: stage.read(&v.table),
                     key: database::key_column(&v.definition),
-                    time_dependent: database::time_dependent(&v.json),
+                    time_dependent: database::time_dependent(&v.definition),
                     resource: v.resource,
                     name: v.table,
                 })

@@ -24,12 +24,16 @@
 //! log cannot vouch for what the database holds (`upsert_loads`, `write`);
 //! only those tables are analyzed after the commit.
 //!
-//! Each upsert load sets every table's comment to a mark of its own
-//! (`fhir-pipes upsert load <uuid>`) in the same transaction, and the change
-//! log records it after the commit. A table whose comment is not the log's
-//! mark was last loaded by something else (another warehouse, a replace
-//! load, a restored backup, the same URL pointing elsewhere) and is loaded
-//! in full. A replace load removes the mark from the tables it loads.
+//! Each upsert load records a mark of its own (a UUID) for every table it
+//! loads in `<schema>.fhir_pipes_loads`, in the same transaction, and the
+//! change log records the mark after the commit. A table whose row there is
+//! not the log's mark was last loaded by something else (another warehouse,
+//! a replace load, a restored backup, the same URL pointing elsewhere) and
+//! is loaded in full. A replace load removes the rows of the tables it loads
+//! or empties, when that table exists; it needs no more privileges than
+//! before otherwise. A table only needs ordinary privileges (SELECT, INSERT,
+//! DELETE) for either mode; the key column's index is made only by the
+//! table's owner.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -74,37 +78,31 @@ pub struct Table {
     pub time_dependent: bool,
 }
 
-/// The start of the comment upsert sets on each table it loads.
-const MARK: &str = "fhir-pipes upsert load ";
+/// The table, in the target schema, where upsert records which load wrote
+/// each table last.
+const LOADS: &str = "fhir_pipes_loads";
 
-/// Whether the view `json` calls `now()`, `today()` or `timeOfDay()` in any
-/// of its expressions: its rows can change while its resources do not, so
-/// upsert loads its table in full every run. A name in a string literal or
-/// a description counts too, which only costs a full load.
-pub fn time_dependent(json: &serde_json::Value) -> bool {
-    match json {
-        serde_json::Value::String(text) => calls_time(text),
-        serde_json::Value::Array(items) => items.iter().any(time_dependent),
-        serde_json::Value::Object(fields) => fields.values().any(time_dependent),
-        _ => false,
+/// Whether the view `v` calls `now()`, `today()` or `timeOfDay()` in any of
+/// its expressions (columns, `where`, `forEach`, `repeat`, nested selects and
+/// `unionAll`): its rows can change while its resources do not, so upsert
+/// loads its table in full every run. The expressions are read with the
+/// views engine's FHIRPath parser, so comments and delimited names are no
+/// way round it; an expression that does not parse counts as calling one.
+pub fn time_dependent(v: &ViewDefinition) -> bool {
+    const TIME: [&str; 3] = ["now", "today", "timeOfDay"];
+    let calls = |path: &str| fhir_pipes_sof::calls_any(path, &TIME).unwrap_or(true);
+    fn walk(selects: &[SelectColumn], calls: &dyn Fn(&str) -> bool) -> bool {
+        selects.iter().any(|s| {
+            s.path.iter().any(|p| calls(p))
+                || s.for_each.iter().any(|p| calls(p))
+                || s.for_each_or_null.iter().any(|p| calls(p))
+                || s.repeat.iter().any(|p| calls(p))
+                || s.column.iter().flatten().any(|c| calls(&c.path))
+                || walk(&s.select, calls)
+                || s.union_all.as_deref().is_some_and(|u| walk(u, calls))
+        })
     }
-}
-
-/// Whether the FHIRPath `text` calls one of the time functions: the name as
-/// a whole word, then `(` after any spaces.
-fn calls_time(text: &str) -> bool {
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let mut rest = text;
-    while let Some(start) = rest.find(|c: char| word(c)) {
-        let after = &rest[start..];
-        let end = after.find(|c: char| !word(c)).unwrap_or(after.len());
-        let (name, tail) = after.split_at(end);
-        if ["now", "today", "timeOfDay"].contains(&name) && tail.trim_start().starts_with('(') {
-            return true;
-        }
-        rest = tail;
-    }
-    false
+    v.where_.iter().any(|w| calls(&w.path)) || walk(&v.select, &calls)
 }
 
 /// Each table the views step wrote in this run, with what its rows were
@@ -163,6 +161,12 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
         .ok()
         .filter(|v| !v.is_empty())
         .with_context(|| format!("[database] needs the connection string in ${}", d.url_env))?;
+    if upsert && tables.iter().any(|t| t.name == LOADS) {
+        return Err(usage(anyhow::anyhow!(
+            "[database] mode = \"upsert\" keeps its records in a table named {LOADS}, \
+             which is also a view's table; rename the view or leave it out of [database] tables"
+        )));
+    }
     let mut plans = Vec::new();
     for t in tables {
         let column = super::partition::partition_key(&t.dir, &s.partition_column);
@@ -175,7 +179,7 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
     }
     let (loads, marks) = if upsert {
         let (loads, last) = upsert_loads(s, tables, &plans, built)?;
-        let next = format!("{MARK}{}", uuid::Uuid::new_v4());
+        let next = uuid::Uuid::new_v4().to_string();
         (loads, Some((last, next)))
     } else {
         (plans.iter().map(|_| Load::Full(None)).collect(), None)
@@ -526,16 +530,40 @@ async fn write(
             if let Some(key) = p.key.as_deref()
                 && !has_index(&mut tx, &name(p), key).await?
             {
-                exec(
-                    &mut tx,
-                    &format!("CREATE INDEX ON {} ({})", name(p), ident(key)),
-                )
-                .await?;
+                // Only the owner can index a table; without the index the
+                // deletes scan the table, which is slower, not wrong.
+                if owns(&mut tx, &name(p)).await? {
+                    exec(
+                        &mut tx,
+                        &format!("CREATE INDEX ON {} ({})", name(p), ident(key)),
+                    )
+                    .await?;
+                } else {
+                    println!(
+                        "   {}: no index on {key}, and only the table's owner can make one; \
+                         upsert's deletes scan the table until the owner runs CREATE INDEX ON {} ({})",
+                        p.table,
+                        name(p),
+                        ident(key)
+                    );
+                }
             }
         }
     }
+    let loads_table = format!("{}.{}", ident(schema), ident(LOADS));
     // A table the last load of this log did not write may hold anything.
     if let Some((last, _)) = marks {
+        if !relation_exists(&mut tx, &loads_table).await? {
+            exec(
+                &mut tx,
+                &format!(
+                    "CREATE TABLE {loads_table} (table_name text PRIMARY KEY, mark text NOT NULL)"
+                ),
+            )
+            .await
+            .with_context(|| loads_grant(schema, "CREATE ON SCHEMA", &ident(schema)))?;
+        }
+        let written = marks_of(&mut tx, &loads_table, schema).await?;
         for (i, p) in plans
             .iter()
             .enumerate()
@@ -544,7 +572,7 @@ async fn write(
             if matches!(loads[i], Load::Full(_)) {
                 continue;
             }
-            if last.is_none() || comment(&mut tx, &name(p)).await? != *last {
+            if last.is_none() || written.get(&p.table) != last.as_ref() {
                 loads[i] = Load::Full(Some(
                     "the database's copy was not last loaded from this warehouse".to_string(),
                 ));
@@ -567,6 +595,8 @@ async fn write(
             };
         }
     }
+    // The tables emptied for want of files, whose marks are removed.
+    let mut emptied = Vec::new();
     for (p, load) in plans.iter().zip(loads) {
         let name = name(p);
         if p.files.is_empty() {
@@ -576,6 +606,7 @@ async fn write(
                 exec(&mut tx, &format!("DELETE FROM {name}")).await?;
                 println!("   {} → {schema}.{} (0 rows)", p.table, p.table);
                 loaded.push(name);
+                emptied.push(p.table.clone());
             } else {
                 println!(
                     "   {}: no files to take its columns from, not created; run the views step",
@@ -617,23 +648,42 @@ async fn write(
             Load::Unchanged => println!("   {} → {schema}.{} (unchanged)", p.table, p.table),
         }
     }
-    // The mark: this load's on each table in upsert; in replace, an upsert's
-    // mark is removed, so that upsert knows the rows are not its own.
-    for p in plans.iter().filter(|p| !p.files.is_empty()) {
-        let set = match marks {
-            Some((_, next)) => Some(next.as_str()),
-            None if comment(&mut tx, &name(p))
-                .await?
-                .is_some_and(|c| c.starts_with(MARK)) =>
-            {
-                None
-            }
-            None => continue,
-        };
-        let text = set.map_or("NULL".to_string(), |m| {
-            format!("'{}'", m.replace('\'', "''"))
-        });
-        exec(&mut tx, &format!("COMMENT ON TABLE {} IS {text}", name(p))).await?;
+    // The marks: in upsert, this load's for each table it loaded and none
+    // for one it emptied; in replace, none for any table it touched, so
+    // that upsert knows the rows are not its own. Without the records table
+    // (no upsert has loaded this schema) a replace does nothing here.
+    let filled: Vec<&str> = plans
+        .iter()
+        .filter(|p| !p.files.is_empty())
+        .map(|p| p.table.as_str())
+        .collect();
+    match marks {
+        Some((_, next)) => {
+            set_marks(&mut tx, &loads_table, &filled, next)
+                .await
+                .with_context(|| {
+                    loads_grant(schema, "SELECT, INSERT, UPDATE, DELETE ON", &loads_table)
+                })?;
+            let emptied: Vec<&str> = emptied.iter().map(String::as_str).collect();
+            remove_marks(&mut tx, &loads_table, &emptied)
+                .await
+                .with_context(|| {
+                    loads_grant(schema, "SELECT, INSERT, UPDATE, DELETE ON", &loads_table)
+                })?;
+        }
+        None if !plans.iter().any(|p| p.table == LOADS)
+            && relation_exists(&mut tx, &loads_table).await? =>
+        {
+            let touched: Vec<&str> = filled
+                .iter()
+                .copied()
+                .chain(emptied.iter().map(String::as_str))
+                .collect();
+            remove_marks(&mut tx, &loads_table, &touched)
+                .await
+                .with_context(|| loads_grant(schema, "SELECT, DELETE ON", &loads_table))?;
+        }
+        None => {}
     }
     tx.commit().await.context("committing")?;
     // Outside the load's transaction, so the lock it held is released and
@@ -678,14 +728,87 @@ async fn delete_ids(
     Ok(n)
 }
 
-/// The comment on table `name`, if it has one.
-async fn comment(conn: &mut PgConnection, name: &str) -> Result<Option<String>> {
-    sqlx_core::query::query("SELECT obj_description($1::text::regclass, 'pg_class')")
+/// Why a statement on the records table failed, as the grant it needs.
+fn loads_grant(schema: &str, privileges: &str, object: &str) -> String {
+    format!(
+        "{schema}.{LOADS} records which load wrote each table, for [database] mode = \"upsert\"; \
+         this load must update it: GRANT {privileges} {object} TO the role in the connection string"
+    )
+}
+
+/// The mark the records table `loads` has for each table of `schema`.
+async fn marks_of(
+    conn: &mut PgConnection,
+    loads: &str,
+    schema: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let sql = format!("SELECT table_name, mark FROM {loads}");
+    let rows = sqlx_core::query::query(AssertSqlSafe(sql.clone()))
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| loads_grant(schema, "SELECT, INSERT, UPDATE, DELETE ON", loads))?;
+    rows.iter()
+        .map(|r| Ok((r.try_get::<String, _>(0)?, r.try_get::<String, _>(1)?)))
+        .collect::<std::result::Result<_, sqlx_core::error::Error>>()
+        .with_context(|| format!("reading {sql}"))
+}
+
+/// Record `mark` for `tables` in the records table `loads`.
+async fn set_marks(
+    conn: &mut PgConnection,
+    loads: &str,
+    tables: &[&str],
+    mark: &str,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {loads} (table_name, mark) SELECT t, $2 FROM unnest($1::text[]) AS t \
+         ON CONFLICT (table_name) DO UPDATE SET mark = excluded.mark"
+    );
+    sqlx_core::query::query(AssertSqlSafe(sql.clone()))
+        .bind(tables.to_vec())
+        .bind(mark)
+        .execute(&mut *conn)
+        .await
+        .with_context(|| format!("running {sql}"))?;
+    Ok(())
+}
+
+/// Remove the marks of `tables` from the records table `loads`.
+async fn remove_marks(conn: &mut PgConnection, loads: &str, tables: &[&str]) -> Result<()> {
+    if tables.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("DELETE FROM {loads} WHERE table_name = ANY($1)");
+    sqlx_core::query::query(AssertSqlSafe(sql.clone()))
+        .bind(tables.to_vec())
+        .execute(&mut *conn)
+        .await
+        .with_context(|| format!("running {sql}"))?;
+    Ok(())
+}
+
+/// Whether the relation `name` exists, whatever the role may read of it
+/// (information_schema shows only what it has privileges on).
+async fn relation_exists(conn: &mut PgConnection, name: &str) -> Result<bool> {
+    sqlx_core::query::query("SELECT to_regclass($1) IS NOT NULL")
         .bind(name)
         .fetch_one(&mut *conn)
         .await
-        .and_then(|r| r.try_get::<Option<String>, _>(0))
-        .with_context(|| format!("reading the comment on {name}"))
+        .and_then(|r| r.try_get::<bool, _>(0))
+        .with_context(|| format!("looking for {name}"))
+}
+
+/// Whether the role in the connection owns table `name` (or is a member of
+/// the role that does).
+async fn owns(conn: &mut PgConnection, name: &str) -> Result<bool> {
+    sqlx_core::query::query(
+        "SELECT pg_has_role(relowner, 'USAGE') FROM pg_class WHERE oid = $1::text::regclass",
+    )
+    .bind(name)
+    .fetch_one(&mut *conn)
+    .await
+    .and_then(|r| r.try_get::<bool, _>(0))
+    .with_context(|| format!("reading the owner of {name}"))
 }
 
 /// Whether `name` has rows without a `key`.
@@ -1002,18 +1125,42 @@ mod tests {
 
     #[test]
     fn views_that_call_a_time_function_are_found() {
-        for path in ["now()", "today ( ).toString()", "a.where(b < timeOfDay())"] {
+        let view = |select: serde_json::Value, filter: serde_json::Value| {
+            ViewDefinition::from_json(&serde_json::json!({
+                "resourceType": "ViewDefinition", "resource": "Patient", "status": "active",
+                "select": select, "where": filter
+            }))
+            .unwrap()
+        };
+        let column = |path: &str| serde_json::json!([{"column": [{"name": "c", "path": path}]}]);
+        for path in [
+            "now()",
+            "today ( ).toString()",
+            "a.where(b < timeOfDay())",
+            "now /* a comment */ ().toString()",
+            "`now`().toString()",
+            "now // a comment\n().toString()",
+            "birthDate.now()",
+            // Not FHIRPath: it may call anything.
+            "now((",
+        ] {
             assert!(
-                time_dependent(&serde_json::json!({"select": [{"column": [{"path": path}]}]})),
+                time_dependent(&view(column(path), serde_json::json!([]))),
                 "{path}"
             );
         }
-        assert!(time_dependent(
-            &serde_json::json!({"where": [{"path": "period.end > now()"}]})
-        ));
-        for path in ["known()", "snow", "nowhere(x)", "today", "now.x"] {
+        assert!(time_dependent(&view(
+            column("id"),
+            serde_json::json!([{"path": "birthDate < today()"}])
+        )));
+        assert!(time_dependent(&view(
+            serde_json::json!([{"unionAll": [{"forEach": "name.where(period.end > now())",
+                "column": [{"name": "c", "path": "family"}]}]}]),
+            serde_json::json!([])
+        )));
+        for path in ["known()", "snow", "'now()'", "today", "now.x", "birthDate"] {
             assert!(
-                !time_dependent(&serde_json::json!({"select": [{"column": [{"path": path}]}]})),
+                !time_dependent(&view(column(path), serde_json::json!([]))),
                 "{path}"
             );
         }

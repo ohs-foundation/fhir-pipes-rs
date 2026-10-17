@@ -75,6 +75,31 @@ mod database {
             })
     }
 
+    /// Statements run when dropped, failures ignored: the cleanup of a test
+    /// that may fail part way.
+    struct Cleanup(Vec<String>);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let Some(url) = url() else { return };
+            let statements = std::mem::take(&mut self.0);
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(async {
+                    if let Ok(mut conn) = sqlx_postgres::PgConnection::connect(&url).await {
+                        for s in statements {
+                            let _ = sqlx_core::query::query(AssertSqlSafe(s))
+                                .execute(&mut conn)
+                                .await;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     fn one(statement: &str) -> String {
         sql(&[statement])[0][0].clone().unwrap_or_default()
     }
@@ -651,9 +676,9 @@ mod database {
         from_files(&replace, &views).assert().success();
         assert_eq!(
             one(&format!(
-                "SELECT coalesce(obj_description('\"{s}\".people'::regclass, 'pg_class'), 'none')"
+                "SELECT count(*)::text FROM \"{s}\".fhir_pipes_loads WHERE table_name = 'people'"
             )),
-            "none"
+            "0"
         );
         from_files(&one_config, &views)
             .assert()
@@ -666,33 +691,177 @@ mod database {
     }
 
     /// A view that calls now() can give other rows from the same resources:
-    /// its table is loaded in full every run.
+    /// its table is loaded in full every run, however the call is written.
     #[test]
     fn a_view_of_the_time_is_loaded_in_full() {
         if url().is_none() {
             return;
         }
-        let s = schema("now");
-        let (dir, config) = setup(NOWHERE, &upsert(&s));
+        for path in [
+            "now().toString()",
+            "now /* a comment */ ().toString()",
+            "`now`().toString()",
+        ] {
+            let s = schema("now");
+            let (dir, config) = setup(NOWHERE, &upsert(&s));
+            let views = people_view(
+                dir.path(),
+                &format!(
+                    r#"{{"name": "at", "path": {}, "type": "string"}}"#,
+                    json!(path)
+                ),
+            );
+            write_patients(
+                dir.path(),
+                &[json!({"resourceType": "Patient", "id": "p1"})],
+            );
+            from_files(&config, &views).assert().success();
+            let first = one(&format!("SELECT at FROM \"{s}\".people"));
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            from_files(&config, &views)
+                .assert()
+                .success()
+                .stdout(has(format!(
+                    "people → {s}.people (1 rows, in full: its view calls now(), today() or timeOfDay())"
+                )));
+            assert_ne!(
+                one(&format!("SELECT at FROM \"{s}\".people")),
+                first,
+                "{path}"
+            );
+            sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+        }
+    }
+
+    /// A replace load that empties a table for want of files removes the
+    /// table's mark too, so the upsert that wrote it last reloads it.
+    #[test]
+    fn a_table_emptied_by_another_load_is_loaded_in_full() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("emptied");
+        let (one_dir, one_config) = setup(NOWHERE, &upsert(&s));
+        let (other_dir, other_config) = setup(NOWHERE, &upsert(&s));
         let views = people_view(
-            dir.path(),
-            r#"{"name": "at", "path": "now().toString()", "type": "string"}"#,
+            one_dir.path(),
+            r#"{"name": "born", "path": "birthDate", "type": "date"}"#,
         );
         write_patients(
-            dir.path(),
-            &[json!({"resourceType": "Patient", "id": "p1"})],
+            one_dir.path(),
+            &[json!({"resourceType": "Patient", "id": "p1", "birthDate": "2020-01-01"})],
         );
-        from_files(&config, &views).assert().success();
-        let first = one(&format!("SELECT at FROM \"{s}\".people"));
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        from_files(&config, &views)
+        from_files(&one_config, &views).assert().success();
+        // The other warehouse has the table only as an empty directory.
+        fs::create_dir_all(other_dir.path().join("data/parquet/people")).unwrap();
+        let replace = other_config.with_file_name("replace.toml");
+        fs::write(
+            &replace,
+            fs::read_to_string(&other_config)
+                .unwrap()
+                .replace("mode = \"upsert\"\n", ""),
+        )
+        .unwrap();
+        cmd(&replace)
+            .args(["--only", "database", "--views"])
+            .arg(&views)
+            .assert()
+            .success()
+            .stdout(has(format!("people → {s}.people (0 rows)")));
+        from_files(&one_config, &views)
             .assert()
             .success()
             .stdout(has(format!(
-                "people → {s}.people (1 rows, in full: its view calls now(), today() or timeOfDay())"
+                "people → {s}.people (1 rows, in full: the database's copy was not last loaded from this warehouse)"
             )));
-        assert_ne!(one(&format!("SELECT at FROM \"{s}\".people")), first);
         sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// A role with table privileges, not the owner, loads in either mode.
+    /// Upsert's records table needs privileges of its own, and a replace
+    /// that cannot remove its tables' marks stops, naming the grant, rather
+    /// than leave a mark that would let upsert keep stale rows.
+    #[test]
+    fn a_role_that_does_not_own_the_tables_can_load() {
+        let Some(owner_url) = url() else {
+            return;
+        };
+        let s = schema("writer");
+        let role = format!("fhir_pipes_upsert_writer_{}", std::process::id());
+        let mut writer_url = url::Url::parse(&owner_url).unwrap();
+        writer_url.set_username(&role).unwrap();
+        writer_url.set_password(Some("writer")).unwrap();
+        const WRITER: &str = "FHIR_PIPES_UPSERT_WRITER_URL";
+        let database = one("SELECT current_database()");
+        let _cleanup = Cleanup(vec![
+            format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE"),
+            format!("DROP OWNED BY {role}"),
+            format!("DROP ROLE {role}"),
+        ]);
+        sql(&[
+            &format!("CREATE ROLE {role} LOGIN PASSWORD 'writer'"),
+            &format!("GRANT CREATE ON DATABASE \"{database}\" TO {role}"),
+        ]);
+
+        let (owner_dir, owner_config) = setup(NOWHERE, &upsert(&s));
+        let views = people_view(
+            owner_dir.path(),
+            r#"{"name": "born", "path": "birthDate", "type": "date"}"#,
+        );
+        let patient =
+            |id: &str| json!({"resourceType": "Patient", "id": id, "birthDate": "2020-01-01"});
+        write_patients(owner_dir.path(), &[patient("p1")]);
+        from_files(&owner_config, &views).assert().success();
+        sql(&[
+            &format!("GRANT USAGE ON SCHEMA \"{s}\" TO {role}"),
+            &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON \"{s}\".people TO {role}"),
+        ]);
+
+        let (writer_dir, writer_config) = setup(
+            NOWHERE,
+            &format!("\n[database]\nurl_env = \"{WRITER}\"\nschema = \"{s}\"\n"),
+        );
+        write_patients(writer_dir.path(), &[patient("q1"), patient("q2")]);
+        let writer = |config: &std::path::Path| {
+            let mut c = from_files(config, &views);
+            c.env(WRITER, writer_url.as_str());
+            c
+        };
+        writer(&writer_config)
+            .assert()
+            .failure()
+            .stderr(has(format!(
+                "GRANT SELECT, DELETE ON \"{s}\".\"fhir_pipes_loads\" TO the role in the connection string"
+            )));
+        assert_eq!(
+            one(&format!("SELECT string_agg(id, ',') FROM \"{s}\".people")),
+            "p1"
+        );
+        sql(&[&format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON \"{s}\".fhir_pipes_loads TO {role}"
+        )]);
+        writer(&writer_config).assert().success();
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',' ORDER BY id) FROM \"{s}\".people"
+            )),
+            "q1,q2"
+        );
+
+        // Upsert as the writer: its mark, then nothing to do.
+        let text = fs::read_to_string(&writer_config).unwrap();
+        fs::write(&writer_config, text + "mode = \"upsert\"\n").unwrap();
+        writer(&writer_config).assert().success();
+        writer(&writer_config)
+            .assert()
+            .success()
+            .stdout(has(format!("people → {s}.people (unchanged)")));
+        from_files(&owner_config, &views)
+            .assert()
+            .success()
+            .stdout(has(
+                "in full: the database's copy was not last loaded from this warehouse",
+            ));
     }
 
     /// Upsert finds rows by the getResourceKey() column; a view without one
