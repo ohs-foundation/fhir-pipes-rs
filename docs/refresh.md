@@ -545,6 +545,7 @@ the file are relative to the file.
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
+| | | `server.kind` | `generic`; `hapi` (the same), `medplum` or `aidbox` for those servers' search parameters, in both FHIR steps. See [servers.md](servers.md) |
 | | | `server.fetch` | `search`; `bulk` for `$export`; `hapi-db` for the HAPI server's database |
 | | `FHIR_PIPES_HAPI_DATABASE_URL` | | the HAPI database's connection string, with `fetch = "hapi-db"` |
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
@@ -576,6 +577,7 @@ views = "../ig/fsh-generated/resources"
 base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
+kind = "generic"            # "medplum" or "aidbox" for those servers; "hapi" is the same as "generic"
 fetch = "search"            # "bulk" for a Bulk Data $export, "hapi-db" for HAPI's database
 concurrency = 4             # search requests at a time
 # google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…

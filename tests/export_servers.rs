@@ -465,6 +465,74 @@ fn a_kick_off_without_bulk_storage_names_the_aidbox_setting() {
 }
 
 #[test]
+fn medplum_bulk_files_are_binary_references_read_with_the_token() {
+    // As Medplum 5 answers: each file is `Binary/<id>`, relative to the FHIR
+    // base, and needs the token although requiresAccessToken is false.
+    let server = Server::run();
+    let bearer = || request::headers(contains(("authorization", "Bearer tok")));
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/$export"),
+            bearer()
+        ])
+        .times(1)
+        .respond_with(
+            status_code(202).insert_header("Content-Location", "/fhir/bulkdata/export/job-1"),
+        ),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/bulkdata/export/job-1"),
+            bearer()
+        ])
+        .times(1)
+        .respond_with(
+            status_code(200).body(
+                json!({"transactionTime": "2026-10-15T08:00:00Z", "requiresAccessToken": false,
+                    "request": "x", "output": [{"type": "Patient", "url": "Binary/b-1"}],
+                    "error": [], "deleted": []})
+                .to_string(),
+            ),
+        ),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Binary/b-1"),
+            bearer()
+        ])
+        .times(1)
+        .respond_with(status_code(200).body(format!(
+            "{}\n",
+            json!({"resourceType": "Patient", "id": "p1", "meta": {"lastUpdated": "2026-10-15T07:00:00Z"}})
+        ))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path(
+            "DELETE",
+            "/fhir/bulkdata/export/job-1",
+        ))
+        .times(1)
+        .respond_with(status_code(202)),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    fhir_pipes()
+        .args(["export", "--bulk", "--server", &server.url_str("/fhir")])
+        .args([
+            "--type",
+            "Patient",
+            "--server-kind",
+            "medplum",
+            "--token",
+            "tok",
+        ])
+        .arg("--out")
+        .arg(dir.path())
+        .assert()
+        .success();
+    assert_eq!(ids(&dir.path().join("Patient.ndjson")), ["p1"]);
+}
+
+#[test]
 fn the_server_kind_is_one_of_four() {
     let a = fhir_pipes()
         .args(["export", "--server", "http://127.0.0.1:9/fhir"])

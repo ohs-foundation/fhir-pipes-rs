@@ -67,6 +67,10 @@ pub struct ManifestFile {
     #[serde(rename = "type")]
     pub resource_type: String,
     pub url: String,
+    /// The `url` as the manifest gave it, when that was a reference such as
+    /// `Binary/123` rather than a URL (see `read_references_from`).
+    #[serde(skip)]
+    pub reference: Option<String>,
 }
 
 /// How waiting for an export ended, when the server answered.
@@ -253,12 +257,51 @@ fn manifest(got: &Exchange, status_url: &str) -> Result<Manifest> {
         .chain(&mut m.deleted)
         .chain(&mut m.error)
     {
+        if is_reference(&f.url) {
+            f.reference = Some(f.url.clone());
+        }
         f.url = base
             .join(&f.url)
             .map_err(|_| PipesError::Environment(format!("{status_url}: {} is not a URL", f.url)))?
             .to_string();
     }
     Ok(m)
+}
+
+/// `Type/id`: a FHIR reference, relative to the server's base.
+fn is_reference(url: &str) -> bool {
+    url.split_once('/').is_some_and(|(t, id)| {
+        t.starts_with(|c: char| c.is_ascii_uppercase())
+            && t.chars().all(|c| c.is_ascii_alphabetic())
+            && !id.is_empty()
+            && id.len() <= 64
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    })
+}
+
+/// Medplum lists each file as a reference, `Binary/<id>`, relative to the
+/// FHIR base rather than the status URL, and serves it only with the access
+/// token, although the manifest says `requiresAccessToken: false`. When every
+/// file is such a reference, they are read from `server` with the token.
+pub fn read_references_from(m: &mut Manifest, server: &str) {
+    let files = || m.output.iter().chain(&m.deleted).chain(&m.error);
+    if files().next().is_none() || !files().all(|f| f.reference.is_some()) {
+        return;
+    }
+    let base = server.trim_end_matches('/');
+    for f in m
+        .output
+        .iter_mut()
+        .chain(&mut m.deleted)
+        .chain(&mut m.error)
+    {
+        if let Some(r) = &f.reference {
+            f.url = format!("{base}/{r}");
+        }
+    }
+    m.requires_access_token = true;
 }
 
 /// DELETE the status URL: cancels a running export, or tells the server it
@@ -411,6 +454,39 @@ mod tests {
         );
         let url = kick_off_url("http://h/fhir", &["Patient".into()], None).unwrap();
         assert_eq!(url.as_str(), "http://h/fhir/$export?_type=Patient");
+    }
+
+    #[test]
+    fn binary_references_are_read_from_the_fhir_base_with_the_token() {
+        let parse = |files: Value| {
+            let got = Exchange {
+                status: 200,
+                headers: Default::default(),
+                body: json!({"transactionTime": "t", "output": files})
+                    .to_string()
+                    .into(),
+                truncated: false,
+            };
+            manifest(&got, "https://m.example/fhir/R4/bulkdata/export/j1").unwrap()
+        };
+        let mut m = parse(json!([{"type": "Patient", "url": "Binary/b-1"}]));
+        assert_eq!(
+            m.output[0].url,
+            "https://m.example/fhir/R4/bulkdata/export/Binary/b-1"
+        );
+        read_references_from(&mut m, "https://m.example/fhir/R4/");
+        assert_eq!(m.output[0].url, "https://m.example/fhir/R4/Binary/b-1");
+        assert!(m.requires_access_token);
+        // A URL elsewhere among them: nothing changes.
+        let mut m = parse(json!([
+            {"type": "Patient", "url": "Binary/b-1"},
+            {"type": "Patient", "url": "https://s3.example/b-2?sig=x"}
+        ]));
+        read_references_from(&mut m, "https://m.example/fhir/R4");
+        assert!(m.output[0].url.contains("/bulkdata/export/"));
+        assert!(!m.requires_access_token);
+        assert!(!is_reference("https://x/Binary/1"));
+        assert!(!is_reference("../Binary/1"));
     }
 
     #[test]

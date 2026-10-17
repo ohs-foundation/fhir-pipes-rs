@@ -661,7 +661,7 @@ fn run_job(
         Some(s) => format!("changes since {s}"),
         None => "in full".to_string(),
     };
-    let (status_url, manifest) = loop {
+    let (status_url, mut manifest) = loop {
         let (status_url, resumed) = match state.bulk.as_ref().filter(|p| job.matches(p)) {
             Some(p) => {
                 println!(
@@ -710,6 +710,9 @@ fn run_job(
         return Err(PipesError::Environment(failed));
     };
 
+    if args.server_kind == ServerKind::Medplum {
+        bulk::read_references_from(&mut manifest, &args.server);
+    }
     let timeout = Duration::from_secs(args.bulk_timeout);
     let rejected = match &manifest.transaction_time {
         None => Some("the bulk export's manifest has no transactionTime".to_string()),

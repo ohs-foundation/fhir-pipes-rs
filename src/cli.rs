@@ -586,11 +586,11 @@ pub struct ExportArgs {
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
-    /// The kind of FHIR server, for its search parameters: medplum pages
-    /// with `_sort=_lastUpdated` and treats counts from a million on as
-    /// estimates; aidbox pages with `_total=none` and in `_lastUpdated`
-    /// windows of at most 50,000; generic and hapi add nothing. Not used
-    /// with --bulk or --hapi-db
+    /// The kind of FHIR server: medplum pages with `_sort=_lastUpdated`,
+    /// treats counts from a million on as estimates, and with --bulk reads
+    /// `Binary/<id>` output files from the FHIR base with the token; aidbox
+    /// pages with `_total=none` and in `_lastUpdated` windows of at most
+    /// 50,000; generic and hapi change nothing. Not used with --hapi-db
     #[arg(long, value_enum, default_value_t = ServerKind::Generic)]
     pub server_kind: ServerKind,
     /// Resource type to download, e.g. MeasureReport; repeat for several
