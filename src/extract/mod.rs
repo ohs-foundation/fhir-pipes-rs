@@ -146,6 +146,7 @@ fn run_phases(
     let paged = page_locations(
         &client,
         &args.server,
+        args.server_kind,
         since,
         &snap.incoming(),
         &mut report,
@@ -236,6 +237,7 @@ fn run_phases(
     let org_paged = page_resources(
         &client,
         &args.server,
+        args.server_kind,
         "Organization",
         org_since,
         &snap.incoming_organizations(),
@@ -277,6 +279,9 @@ fn run_phases(
             continue;
         }
         match count_resources(&client, &args.server, resource_type) {
+            Some(server_total) if args.server_kind.count_is_estimate(server_total) => eprintln!(
+                "count check unavailable for {resource_type}: the server's count ({server_total}) is an estimate"
+            ),
             Some(server_total) if server_total as usize != snapshot_total => {
                 let detail = if incremental {
                     format!(

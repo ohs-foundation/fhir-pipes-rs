@@ -108,8 +108,9 @@ pub fn kick_off(
     let url = kick_off_url(server, types, since)?;
     let got = client.get_async(url.as_str()).map_err(|e| match e {
         FetchError::Status { status, body } => PipesError::Environment(format!(
-            "the bulk export kick-off {url} failed with HTTP {status}: {}",
-            outcome_text(body.as_bytes()).unwrap_or(body)
+            "the bulk export kick-off {url} failed with HTTP {status}: {}{}",
+            outcome_text(body.as_bytes()).unwrap_or_else(|| body.clone()),
+            kick_off_hint(status, &body)
         )),
         other => PipesError::Environment(format!("{url}: {other}")),
     })?;
@@ -128,6 +129,18 @@ pub fn kick_off(
         PipesError::Environment(format!("{url}: Content-Location {location} is not a URL"))
     })?;
     Ok(status_url.to_string())
+}
+
+/// What to do about a kick-off failure whose cause is known, or nothing.
+/// Aidbox answers 500 "storage-type not specified" when it has no bulk
+/// export storage set up.
+fn kick_off_hint(status: u16, body: &str) -> &'static str {
+    if status == 500 && body.contains("storage-type") {
+        ". Aidbox needs a storage provider for bulk export: set \
+         BOX_FHIR_BULK_STORAGE_PROVIDER (gcp, aws or azure) and its account settings"
+    } else {
+        ""
+    }
 }
 
 /// Poll `status_url` until the export is done, has failed, or `deadline`

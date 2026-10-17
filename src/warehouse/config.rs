@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
 use crate::extract::google::{self, Credentials};
+use crate::extract::page::ServerKind;
 
 use super::Step;
 
@@ -62,6 +63,9 @@ pub struct ServerFile {
     pub base: Option<String>,
     pub name: Option<String>,
     pub token_url: Option<String>,
+    /// The kind of FHIR server, for its search parameters (`--server-kind`,
+    /// default `generic`).
+    pub kind: Option<ServerKind>,
     /// How the views step downloads resources (default `search`).
     pub fetch: Option<Fetch>,
     /// With `fetch = "bulk"`: seconds to wait for an export before cancelling
@@ -304,6 +308,8 @@ pub struct Settings {
     pub server_name: String,
     /// How to authenticate to the FHIR server, as the other commands take it.
     pub auth: AuthArgs,
+    /// The kind of FHIR server, for the searches of both FHIR steps.
+    pub server_kind: ServerKind,
     pub fetch: Fetch,
     pub bulk_timeout: u64,
     /// Search requests in flight at once in the views step.
@@ -540,6 +546,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
                 .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
         ),
         auth,
+        server_kind: file.server.kind.unwrap_or_default(),
         fetch: file.server.fetch.unwrap_or_default(),
         bulk_timeout: file
             .server
@@ -674,6 +681,24 @@ mod tests {
         let db = s("data = \"d\"\n[server]\nfetch = \"hapi-db\"");
         assert_eq!(db.fetch, Fetch::HapiDb);
         assert_eq!(db.fetch.name(), "hapi-db");
+    }
+
+    #[test]
+    fn the_server_kind_is_generic_unless_the_file_names_one() {
+        let s = |text: &str| {
+            let file: File = toml::from_str(text).unwrap();
+            settings(file, PathBuf::from("/b"), Overrides::default()).unwrap()
+        };
+        assert_eq!(s("data = \"d\"").server_kind, ServerKind::Generic);
+        assert_eq!(
+            s("data = \"d\"\n[server]\nkind = \"medplum\"").server_kind,
+            ServerKind::Medplum
+        );
+        assert_eq!(
+            s("data = \"d\"\n[server]\nkind = \"aidbox\"").server_kind,
+            ServerKind::Aidbox
+        );
+        assert!(toml::from_str::<File>("[server]\nkind = \"fhirbase\"").is_err());
     }
 
     #[test]

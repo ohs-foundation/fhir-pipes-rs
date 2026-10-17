@@ -16,6 +16,70 @@ use crate::report::Report;
 pub const PAGE_SIZE: usize = 1000;
 pub const MAX_PAGES: usize = 10_000;
 
+/// Medplum answers a count with an estimate from this many resources on
+/// (its `accurateCountThreshold`), and with an exact count below it.
+pub const MEDPLUM_EXACT_COUNT_BELOW: u64 = 1_000_000;
+
+/// The most resources an Aidbox `_lastUpdated` window holds: Aidbox pages
+/// with an offset (`_page`), which slows down deep into a large result.
+pub const AIDBOX_MAX_WINDOW: u64 = 50_000;
+
+/// The kind of FHIR server (`--server-kind`, `server.kind`). It changes only
+/// the search: the parameters every page asks for, the size of a
+/// `_lastUpdated` window, and which counts are exact. `generic` and `hapi`
+/// search the same way.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerKind {
+    /// Any FHIR R4 server: no extra parameters.
+    #[default]
+    Generic,
+    /// HAPI FHIR: the same as generic.
+    Hapi,
+    /// Medplum: `_sort=_lastUpdated` on every page, so it pages with
+    /// `_cursor` links instead of an `_offset` it refuses past 10,000.
+    Medplum,
+    /// Aidbox: `_total=none` on every page, so a page does not count the
+    /// whole result.
+    Aidbox,
+}
+
+impl ServerKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ServerKind::Generic => "generic",
+            ServerKind::Hapi => "hapi",
+            ServerKind::Medplum => "medplum",
+            ServerKind::Aidbox => "aidbox",
+        }
+    }
+
+    /// Added to every page search, and kept on the server's next links.
+    pub fn page_params(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            ServerKind::Generic | ServerKind::Hapi => &[],
+            ServerKind::Medplum => &[("_sort", "_lastUpdated")],
+            ServerKind::Aidbox => &[("_total", "none")],
+        }
+    }
+
+    /// The most resources one `_lastUpdated` window may hold. A type larger
+    /// than this is paged in windows even with `--concurrency 1`. Medplum's
+    /// limit keeps each window's count exact.
+    pub fn max_window(self) -> Option<u64> {
+        match self {
+            ServerKind::Generic | ServerKind::Hapi => None,
+            ServerKind::Medplum => Some(MEDPLUM_EXACT_COUNT_BELOW - 1),
+            ServerKind::Aidbox => Some(AIDBOX_MAX_WINDOW),
+        }
+    }
+
+    /// Whether the server's count `n` may be an estimate rather than exact.
+    pub fn count_is_estimate(self, n: u64) -> bool {
+        self == ServerKind::Medplum && n >= MEDPLUM_EXACT_COUNT_BELOW
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageNote {
     pub id: String,
@@ -82,6 +146,7 @@ pub fn boundary_url(resource: &Value, extra: &[String]) -> Option<String> {
 pub fn page_locations(
     client: &FhirClient,
     server: &str,
+    kind: ServerKind,
     since: Option<&str>,
     incoming: &Path,
     report: &mut Report,
@@ -90,6 +155,7 @@ pub fn page_locations(
     page_resources(
         client,
         server,
+        kind,
         "Location",
         since,
         incoming,
@@ -102,9 +168,11 @@ pub fn page_locations(
 /// resource to `incoming` and noting what the merge needs. Boundary URLs
 /// are noted for any type; only Locations carry them. `boundary_extensions`
 /// is the profile's, recognized beside the HL7 one.
+#[allow(clippy::too_many_arguments)]
 pub fn page_resources(
     client: &FhirClient,
     server: &str,
+    kind: ServerKind,
     resource_type: &str,
     since: Option<&str>,
     incoming: &Path,
@@ -115,6 +183,7 @@ pub fn page_resources(
     let paged = page_search(
         client,
         server,
+        kind,
         resource_type,
         since.as_slice(),
         incoming,
@@ -125,13 +194,14 @@ pub fn page_resources(
     Ok(paged.expect("paging stops early only when told to"))
 }
 
-/// `page_resources` with any search parameters (`_count` is added), and a
-/// look at the first page: when `after_first` returns false, paging stops
-/// there and the result is `None`.
+/// `page_resources` with any search parameters (`_count` and the server
+/// kind's are added), and a look at the first page: when `after_first`
+/// returns false, paging stops there and the result is `None`.
 #[allow(clippy::too_many_arguments)]
 pub fn page_search(
     client: &FhirClient,
     server: &str,
+    kind: ServerKind,
     resource_type: &str,
     params: &[(&str, String)],
     incoming: &Path,
@@ -145,6 +215,7 @@ pub fn page_search(
     {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("_count", &PAGE_SIZE.to_string());
+        qp.extend_pairs(kind.page_params());
         for (k, v) in params {
             qp.append_pair(k, v);
         }
@@ -238,6 +309,7 @@ pub fn page_search(
                         "the server's next link could not be resolved ({next})"
                     ))
                 })?;
+                keep_params(&mut url, kind.page_params());
             }
             None => break,
         }
@@ -249,6 +321,19 @@ pub fn page_search(
         last_page_full: last_page_len >= PAGE_SIZE,
         started,
     }))
+}
+
+/// Add each of `params` that `url` lacks: a next link that dropped the
+/// server kind's parameters gets them back.
+fn keep_params(url: &mut Url, params: &[(&str, &str)]) {
+    let missing: Vec<(&str, &str)> = params
+        .iter()
+        .filter(|(k, _)| !url.query_pairs().any(|(name, _)| name == *k))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        url.query_pairs_mut().extend_pairs(missing);
+    }
 }
 
 /// The server's total for `resource_type`, or `None` when it will not say.
@@ -356,6 +441,7 @@ mod tests {
         let got = page_resources(
             &client,
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             "Organization",
             None,
             &incoming,
@@ -428,6 +514,7 @@ mod tests {
         let res = page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &out,
             &mut report,
@@ -478,6 +565,7 @@ mod tests {
         let res = page_locations(
             &client(),
             &server.url("/fhir/").to_string(),
+            ServerKind::Generic,
             Some("2026-01-01T00:00:00Z"),
             &dir.path().join("i"),
             &mut Report::default(),
@@ -524,6 +612,7 @@ mod tests {
         let err = page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &dir.path().join("i"),
             &mut Report::default(),
@@ -545,6 +634,7 @@ mod tests {
         let err = page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &dir.path().join("i"),
             &mut Report::default(),
@@ -566,6 +656,7 @@ mod tests {
         let err = page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &dir.path().join("i"),
             &mut Report::default(),
@@ -588,6 +679,7 @@ mod tests {
         let err = page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &dir.path().join("i"),
             &mut Report::default(),
@@ -615,6 +707,7 @@ mod tests {
         page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             Some("2026-01-01T00:00:00+01:00"),
             &dir.path().join("i"),
             &mut Report::default(),
@@ -649,6 +742,7 @@ mod tests {
         let res = page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &dir.path().join("i"),
             &mut Report::default(),
@@ -673,6 +767,7 @@ mod tests {
         page_locations(
             &client(),
             &server.url("/fhir").to_string(),
+            ServerKind::Generic,
             None,
             &out,
             &mut Report::default(),
@@ -681,6 +776,65 @@ mod tests {
         .unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
+    }
+
+    #[test]
+    fn the_server_kinds_parameters_are_on_every_page() {
+        for (kind, param) in [
+            (ServerKind::Medplum, ("_sort", "_lastUpdated")),
+            (ServerKind::Aidbox, ("_total", "none")),
+        ] {
+            let server = Server::run();
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/fhir/Location"),
+                    request::query(url_decoded(contains(param))),
+                    request::query(url_decoded(not(contains(key("page"))))),
+                ])
+                .times(1)
+                // The next link leaves the parameter out; it is added back.
+                .respond_with(status_code(200).body(bundle(
+                    &[loc("a", "2026-01-01T00:00:00Z", None)],
+                    Some("/fhir/Location?_count=1000&page=2"),
+                ))),
+            );
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/fhir/Location"),
+                    request::query(url_decoded(contains(param))),
+                    request::query(url_decoded(contains(("page", "2")))),
+                ])
+                .times(1)
+                .respond_with(
+                    status_code(200).body(bundle(&[loc("b", "2026-01-01T00:00:00Z", None)], None)),
+                ),
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let res = page_locations(
+                &client(),
+                &server.url("/fhir").to_string(),
+                kind,
+                None,
+                &dir.path().join("i"),
+                &mut Report::default(),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(res.notes.len(), 2, "{kind:?}");
+        }
+        assert!(ServerKind::Generic.page_params().is_empty());
+        assert_eq!(
+            ServerKind::Hapi.page_params(),
+            ServerKind::Generic.page_params()
+        );
+    }
+
+    #[test]
+    fn only_medplums_large_counts_are_estimates() {
+        assert!(!ServerKind::Medplum.count_is_estimate(999_999));
+        assert!(ServerKind::Medplum.count_is_estimate(1_000_000));
+        assert!(!ServerKind::Generic.count_is_estimate(5_000_000));
+        assert!(!ServerKind::Aidbox.count_is_estimate(5_000_000));
     }
 
     #[test]

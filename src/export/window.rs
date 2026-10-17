@@ -11,9 +11,12 @@
 //! not the one that ends there (`lt`).
 //!
 //! Each window is counted, and one holding more than its share is halved
-//! until the windows are even or a second wide. The counts must add up to the
-//! type's; when they do not, the server is not filtering by `_lastUpdated` as
-//! asked, and the caller pages the type as one stream.
+//! until the windows are even or a second wide. A window holding more than
+//! the server kind's `max_window` is halved however many windows that makes.
+//! The counts must add up to the type's; when they do not, the server is not
+//! filtering by `_lastUpdated` as asked, and the caller pages the type as one
+//! stream. A type count that may be an estimate (Medplum's, from a million
+//! on) is not compared.
 //!
 //! Each window is paged into its own file. A window whose paged count is not
 //! its count is counted and paged again; a second difference is reported as
@@ -34,7 +37,7 @@ use url::Url;
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{
-    PAGE_SIZE, PageNote, PageResult, count_matching, count_resources, page_search,
+    PAGE_SIZE, PageNote, PageResult, ServerKind, count_matching, count_resources, page_search,
 };
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
@@ -49,6 +52,9 @@ const ATTEMPTS: usize = 2;
 /// What to download, and how.
 pub struct Options<'a> {
     pub server: &'a str,
+    pub kind: ServerKind,
+    /// The most resources a window may hold: the kind's `max_window`.
+    pub max_window: Option<u64>,
     pub resource_type: &'a str,
     /// The type's count, from the server.
     pub total: u64,
@@ -131,7 +137,7 @@ pub fn download(
     out: &Path,
     report: &mut Report,
 ) -> Result<Windowed> {
-    let (lo, hi, started) = match probe(client, o.server, o.resource_type) {
+    let (lo, hi, started) = match probe(client, o.server, o.kind, o.resource_type) {
         Ok(range) => range,
         Err(why) => return Ok(Windowed::Unsuitable(why)),
     };
@@ -148,17 +154,21 @@ pub fn download(
 
     // Halve the windows holding more than their share, largest first, so
     // updates bunched in time do not leave one window with most of the type.
+    // Up to `most` windows, except that one over the kind's limit is always
+    // halved.
     let share = (o.total / (2 * workers as u64)).max(PAGE_SIZE as u64);
     let most = 8 * workers;
+    let over = |c: u64| o.max_window.is_some_and(|m| c > m);
     loop {
         let mut big: Vec<usize> = (0..windows.len())
             .filter(|&i| {
                 let (a, b) = windows[i].span(lo, hi);
-                counts[i] > share && b - a >= 2
+                (counts[i] > share || over(counts[i])) && b - a >= 2
             })
             .collect();
         big.sort_by_key(|&i| std::cmp::Reverse(counts[i]));
-        big.truncate(most.saturating_sub(windows.len()));
+        let forced = big.iter().filter(|&&i| over(counts[i])).count();
+        big.truncate(most.saturating_sub(windows.len()).max(forced));
         if big.is_empty() {
             break;
         }
@@ -202,7 +212,10 @@ pub fn download(
 
     let sum: u64 = counts.iter().sum();
     // Counted again before giving up, in case resources were added since.
-    if sum != o.total && count_resources(client, o.server, o.resource_type) != Some(sum) {
+    if sum != o.total
+        && !o.kind.count_is_estimate(o.total)
+        && count_resources(client, o.server, o.resource_type) != Some(sum)
+    {
         return Ok(Windowed::Unsuitable(format!(
             "its _lastUpdated windows count {sum} resources but the server counts {} in all",
             o.total
@@ -274,10 +287,12 @@ fn no_count() -> Windowed {
 }
 
 /// The first and last second of the type's meta.lastUpdated, the second as
-/// an exclusive bound, and the server's `Date` on the first probe.
+/// an exclusive bound, and the server's `Date` on the first probe. The
+/// kind's page parameters are sent too, other than its `_sort`.
 fn probe(
     client: &FhirClient,
     server: &str,
+    kind: ServerKind,
     resource_type: &str,
 ) -> std::result::Result<(i64, i64, Option<String>), String> {
     let first = |sort: &str| -> std::result::Result<(i64, Option<String>), String> {
@@ -286,7 +301,8 @@ fn probe(
             .map_err(|_| format!("--server is not a valid URL: {server}"))?;
         url.query_pairs_mut()
             .append_pair("_sort", sort)
-            .append_pair("_count", "1");
+            .append_pair("_count", "1")
+            .extend_pairs(kind.page_params().iter().filter(|(k, _)| *k != "_sort"));
         let fetched = client
             .get(url.as_str())
             .map_err(|e| format!("the server did not sort by _lastUpdated ({e})"))?;
@@ -349,6 +365,7 @@ fn page_window(
         let paged = page_search(
             client,
             o.server,
+            o.kind,
             t,
             &window.params(),
             file,
@@ -363,7 +380,8 @@ fn page_window(
             .map(|n| n.id.as_str())
             .collect::<HashSet<_>>()
             .len() as u64;
-        if distinct != expected {
+        // A count that may be an estimate is not compared.
+        if distinct != expected && !o.kind.count_is_estimate(expected) {
             if attempt < ATTEMPTS {
                 println!(
                     "{t}: the window {} paged {distinct} resources but the server counted {expected}; downloading it again",
@@ -661,6 +679,16 @@ mod tests {
     }
 
     fn run(fake: &Fake, server: &Server, workers: usize, limit: usize) -> Run {
+        run_with(fake, server, workers, limit, None)
+    }
+
+    fn run_with(
+        fake: &Fake,
+        server: &Server,
+        workers: usize,
+        limit: usize,
+        max_window: Option<u64>,
+    ) -> Run {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.ndjson");
         let client = FhirClient::new(Auth::None, 1, Duration::from_secs(10))
@@ -672,6 +700,8 @@ mod tests {
             &client,
             &Options {
                 server: &base,
+                kind: ServerKind::Generic,
+                max_window,
                 resource_type: "Observation",
                 total: fake.data.len() as u64,
                 workers,
@@ -905,6 +935,42 @@ mod tests {
         // Two windows of time would put 3000 in the first; halving gives more.
         assert!(windows(&r) > 2, "{}", windows(&r));
         assert_eq!(r.lines.len(), 3300);
+    }
+
+    #[test]
+    fn no_window_holds_more_than_the_limit() {
+        // Two workers make at most 16 windows; 6000 resources at no more
+        // than 250 a window need at least 24.
+        let fake = Fake::new(spread(6000, 86_400));
+        let server = serve(&fake);
+        let r = run_with(&fake, &server, 2, 2, Some(250));
+        assert!(windows(&r) >= 24, "{}", windows(&r));
+        assert_eq!(r.lines.len(), 6000);
+        // Each window paged, by its bounds, holds at most 250.
+        let queries = fake.queries.lock().unwrap();
+        let firsts: Vec<&String> = queries
+            .iter()
+            .filter(|q| q.contains("_count=1000") && !q.contains("_offset"))
+            .collect();
+        assert_eq!(firsts.len(), windows(&r));
+        for q in firsts {
+            let mut held: Vec<i64> = fake
+                .data
+                .iter()
+                .map(|(_, u)| parse_instant(u).unwrap().0)
+                .collect();
+            for (k, v) in url::form_urlencoded::parse(q.as_bytes()) {
+                if k == "_lastUpdated" {
+                    let at = parse_instant(&v[2..]).unwrap().0;
+                    if v.starts_with("ge") {
+                        held.retain(|t| *t >= at);
+                    } else {
+                        held.retain(|t| *t < at);
+                    }
+                }
+            }
+            assert!(held.len() <= 250, "{q}: {}", held.len());
+        }
     }
 
     #[test]

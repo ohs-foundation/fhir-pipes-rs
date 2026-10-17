@@ -58,6 +58,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
             extract: ExtractArgs {
                 server: s.server.clone(),
                 auth: s.auth.clone(),
+                server_kind: s.server_kind,
                 snapshot,
                 full: s.full || from_files,
                 since: None,
@@ -104,6 +105,7 @@ pub fn export(s: &Settings, types: &[&str]) -> Result<()> {
     crate::export::run_export(&ExportArgs {
         server: s.server.clone(),
         auth: s.auth.clone(),
+        server_kind: s.server_kind,
         types: types.iter().map(|t| t.to_string()).collect(),
         out: s.raw_dir(),
         incremental: !s.full,
