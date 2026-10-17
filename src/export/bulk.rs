@@ -2,6 +2,10 @@
 //! level: the kick-off, polling the status URL until the export is done, and
 //! reading the manifest's files line by line as they download. What
 //! `export --bulk` does with the lines is in the parent module.
+//!
+//! A kick-off answered with 429 is tried again until the deadline, with the
+//! same waits as a status poll: a server that runs one export at a time
+//! (Aidbox) answers 429 while another is running.
 
 use std::io::BufRead;
 use std::time::{Duration, Instant};
@@ -13,6 +17,7 @@ use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::{Exchange, FetchError, FhirClient};
+use crate::snapshot::instant::{format_utc, parse_instant};
 
 /// The longest failure text shown from a status response.
 const DISPLAY_CAP: usize = 500;
@@ -40,7 +45,21 @@ pub struct Pending {
     /// The `_since`, when there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// This machine's clock when the kick-off answered, for display.
     pub started_at: String,
+    /// The server's clock then: the kick-off's `Date` header, as a FHIR
+    /// instant. None when the response had no valid `Date`, or the state
+    /// was saved by an earlier version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_time: Option<String>,
+}
+
+/// An export the kick-off started.
+#[derive(Debug)]
+pub struct Started {
+    pub status_url: String,
+    /// The kick-off's `Date`, as a FHIR instant (see `Pending::server_time`).
+    pub server_time: Option<String>,
 }
 
 /// The completion manifest, the parts that are used.
@@ -98,21 +117,43 @@ pub fn kick_off_url(server: &str, types: &[String], since: Option<&str>) -> Resu
 }
 
 /// Start a system-level export and return its status URL (the kick-off's
-/// `Content-Location`, resolved against the kick-off URL).
+/// `Content-Location`, resolved against the kick-off URL) and the server's
+/// clock. A 429 is tried again until `deadline`, waiting as `wait` does
+/// after one; None when the server was still busy then.
 pub fn kick_off(
     client: &FhirClient,
     server: &str,
     types: &[String],
     since: Option<&str>,
-) -> Result<String> {
+    deadline: Instant,
+) -> Result<Option<Started>> {
     let url = kick_off_url(server, types, since)?;
-    let got = client.get_async(url.as_str()).map_err(|e| match e {
-        FetchError::Status { status, body } => PipesError::Environment(format!(
-            "the bulk export kick-off {url} failed with HTTP {status}: {}",
-            outcome_text(body.as_bytes()).unwrap_or(body)
-        )),
-        other => PipesError::Environment(format!("{url}: {other}")),
-    })?;
+    let mut backoff = POLL_FIRST;
+    let mut busy = false;
+    let got = loop {
+        let got = client.get_async(url.as_str()).map_err(|e| match e {
+            FetchError::Status { status, body } => PipesError::Environment(format!(
+                "the bulk export kick-off {url} failed with HTTP {status}: {}",
+                outcome_text(body.as_bytes()).unwrap_or(body)
+            )),
+            other => PipesError::Environment(format!("{url}: {other}")),
+        })?;
+        if got.status != 429 {
+            break got;
+        }
+        if !busy {
+            let why = outcome_text(&got.body).map_or(String::new(), |t| format!(": {t}"));
+            println!("   bulk export: the server is busy (HTTP 429{why}); waiting to start");
+            busy = true;
+        }
+        let delay = next_wait(429, got.retry_after(), &mut backoff);
+        let now = Instant::now();
+        if now + delay >= deadline {
+            std::thread::sleep(deadline.saturating_duration_since(now));
+            return Ok(None);
+        }
+        std::thread::sleep(delay);
+    };
     if got.status != 202 {
         return Err(PipesError::Environment(format!(
             "{url}: expected 202 Accepted from a bulk export kick-off, got HTTP {}",
@@ -127,7 +168,30 @@ pub fn kick_off(
     let status_url = url.join(location).map_err(|_| {
         PipesError::Environment(format!("{url}: Content-Location {location} is not a URL"))
     })?;
-    Ok(status_url.to_string())
+    let server_time = got
+        .header("date")
+        .and_then(|d| httpdate::parse_http_date(d).ok())
+        .map(format_utc);
+    Ok(Some(Started {
+        status_url: status_url.to_string(),
+        server_time,
+    }))
+}
+
+/// The watermark an export gives its types: its `transactionTime`, or the
+/// server's clock at the kick-off when that is earlier. Medplum sets
+/// `transactionTime` when the last type has been read, so a resource changed
+/// while the export ran can be older than it and missing from the files; the
+/// next export's `_since` must not pass over it. The merge by id makes
+/// fetching a resource again harmless.
+pub fn watermark(transaction_time: &str, server_time: Option<&str>) -> String {
+    match (
+        parse_instant(transaction_time),
+        server_time.and_then(|s| parse_instant(s).map(|at| (s, at))),
+    ) {
+        (Some(tt), Some((s, at))) if at < tt => s.to_string(),
+        _ => transaction_time.to_string(),
+    }
 }
 
 /// Poll `status_url` until the export is done, has failed, or `deadline`
@@ -398,6 +462,22 @@ mod tests {
         );
         let url = kick_off_url("http://h/fhir", &["Patient".into()], None).unwrap();
         assert_eq!(url.as_str(), "http://h/fhir/$export?_type=Patient");
+    }
+
+    #[test]
+    fn the_watermark_is_the_earlier_of_transaction_time_and_the_kick_off() {
+        let tt = "2026-10-15T08:00:00Z";
+        assert_eq!(
+            watermark(tt, Some("2026-10-15T07:30:00Z")),
+            "2026-10-15T07:30:00Z"
+        );
+        assert_eq!(
+            watermark(tt, Some("2026-10-15T09:00:00+02:00")),
+            "2026-10-15T09:00:00+02:00"
+        );
+        assert_eq!(watermark(tt, Some("2026-10-15T08:30:00Z")), tt);
+        assert_eq!(watermark(tt, Some("not a time")), tt);
+        assert_eq!(watermark(tt, None), tt);
     }
 
     #[test]

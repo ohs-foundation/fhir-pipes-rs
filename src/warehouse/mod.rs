@@ -54,6 +54,7 @@ use serde_json::json;
 use config::Settings;
 
 use crate::error::usage;
+use crate::extract::client::TokenAuth;
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct RefreshArgs {
@@ -86,6 +87,14 @@ pub struct RefreshArgs {
     /// FHIR_PIPES_CLIENT_SECRET, which are read only from the environment.
     #[arg(long, env = "FHIR_PIPES_TOKEN_URL")]
     token_url: Option<String>,
+    /// How the client id and secret are sent to the token URL: `post` in
+    /// the form body (the default) or `basic` in a Basic Authorization
+    /// header, as Aidbox expects (as `server.token_auth`).
+    #[arg(long, env = "FHIR_PIPES_TOKEN_AUTH", value_enum)]
+    token_auth: Option<TokenAuth>,
+    /// The OAuth scope to ask for with the client id (as `server.scope`).
+    #[arg(long, env = "FHIR_PIPES_SCOPE")]
+    scope: Option<String>,
     /// Username for HTTP Basic auth, with the password from
     /// FHIR_PIPES_PASSWORD, which is read only from the environment.
     #[arg(long, env = "FHIR_PIPES_USERNAME")]
@@ -208,6 +217,8 @@ fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSe
             client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
             client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
             token_url: args.token_url.clone(),
+            token_auth: args.token_auth,
+            scope: args.scope.clone(),
             username: args.username.clone(),
             password: env_secret("FHIR_PIPES_PASSWORD"),
             google_auth: args.google_auth,

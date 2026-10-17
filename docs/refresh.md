@@ -225,8 +225,9 @@ bulk_timeout = 14400        # seconds to wait for the export; then it is cancell
 ```
 
 The downloads land in the same `raw/<server>/<TYPE>.ndjson` files, so the
-views and `--reuse-raw` work the same way. The export's `transactionTime` is
-the next refresh's `_since`, and the resources the export lists as deleted
+views and `--reuse-raw` work the same way. The export's `transactionTime`, or
+the server's `Date` on the kick-off when that is earlier, is the next
+refresh's `_since`, and the resources the export lists as deleted
 are removed. A refresh that stops while the server is still exporting polls
 the same export next time. `--full` exports every type without `_since`.
 The `locations` step still uses search. `Group/[id]/$export` and
@@ -544,6 +545,8 @@ the file are relative to the file.
 | `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local`; `files` with a file source |
 | `--token` | `FHIR_PIPES_TOKEN` | | no token |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | `server.token_url` | |
+| `--token-auth` | `FHIR_PIPES_TOKEN_AUTH` | `server.token_auth` | `post`: the client ID and secret in the token request's form body; `basic` sends them in a Basic `Authorization` header (Aidbox) |
+| `--scope` | `FHIR_PIPES_SCOPE` | `server.scope` | no `scope` in the token request |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
 | | | `server.fetch` | `search`; `bulk` for `$export`; `hapi-db` for the HAPI server's database |
 | | `FHIR_PIPES_HAPI_DATABASE_URL` | | the HAPI database's connection string, with `fetch = "hapi-db"` |
@@ -560,7 +563,9 @@ the file are relative to the file.
 
 The client ID and secret are read only from the environment, never from flags
 or the file. They are traded for a token with the client-credentials grant,
-and the token is renewed before it expires, as for the other commands. With a
+and the token is renewed before it expires, as for the other commands.
+`token_auth` and `scope` apply only with a client ID; see the
+[README](../README.md#connecting-to-a-fhir-server). With a
 username, the password is read only from `FHIR_PIPES_PASSWORD` and the two are
 sent as HTTP Basic auth. With `google_auth`, tokens come from Google
 Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`, gcloud's
@@ -576,6 +581,8 @@ views = "../ig/fsh-generated/resources"
 base = "https://fhir.example.org/fhir"
 name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
+# token_auth = "basic"      # the client ID and secret in a Basic header (Aidbox); default "post"
+# scope = "system/*.read"   # the scope asked for with the client ID
 fetch = "search"            # "bulk" for a Bulk Data $export, "hapi-db" for HAPI's database
 concurrency = 4             # search requests at a time
 # google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…
