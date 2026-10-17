@@ -63,7 +63,7 @@ fhir-pipes needed Python 3.11, a package manager, and a system GDAL built agains
 recent Arrow, because at the time GDAL was the only writer of the native
 Parquet geometry type. That is no longer true. The Rust Parquet implementation
 writes it directly, verified against GDAL, DuckDB and pyarrow (see
-[docs/superpowers/spikes/2026-09-05-rust-native-geoparquet](docs/superpowers/spikes/2026-09-05-rust-native-geoparquet)).
+[docs/superpowers/spikes/2026-09-05-rust-native-geoparquet](superpowers/spikes/2026-09-05-rust-native-geoparquet)).
 So fhir-pipes can be one file you copy onto a machine and run.
 
 ---
@@ -154,7 +154,7 @@ Steps 5 to 7 happen when someone has something to fix.
 ## Commands
 
 ```
-fhir-pipes extract   --server URL [AUTH] --snapshot DIR
+fhir-pipes extract   --server URL [AUTH] --snapshot DIR [--server-kind KIND]
                [--full] [--since INSTANT] [--timeout SECS]
                [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
                [--no-cache] [--refresh] [--cache-dir DIR]
@@ -164,7 +164,7 @@ fhir-pipes run       <extract flags> <transform flags>
 fhir-pipes inspect   --out DIR
 fhir-pipes diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
 fhir-pipes load      --server URL [AUTH] --in CHANGES.ndjson
-               [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
+               [--dry-run] [--batch-size 100] [--concurrency 1] [--retries 3] [--timeout SECS]
 fhir-pipes index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
                --out CHANGES.ndjson [--refresh] [--report FILE]
 fhir-pipes import location-boundaries --in BOUNDARIES.geojson --country NAME=CODE --level … --out UNITS.ndjson
@@ -177,6 +177,9 @@ fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
 
 `AUTH`, timeouts and retries work as for every command; see
 [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server).
+`--server-kind` (`generic` by default; `medplum` or `aidbox`) adds the search
+parameters those servers need to the Location and Organization searches, as
+for `export`; see [servers.md](servers.md).
 
 `extract` and `load` touch the network. `transform locations`, `inspect`, `diff`
 and `import` never do. That split is deliberate: a slow server or an expired token has
@@ -1140,7 +1143,7 @@ SELECT id, fhir_json->>'$.extension[0].url' FROM 'out/locations/**/*.parquet';
 ```
 
 **QGIS** opens the directory or a single partition file as a vector layer.
-The edit-and-push-back loop, step by step, is in [docs/qgis.md](docs/qgis.md).
+The edit-and-push-back loop, step by step, is in [docs/qgis.md](qgis.md).
 
 **GeoPandas** reads it with `read_parquet`.
 

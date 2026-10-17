@@ -5,6 +5,7 @@ imported org units become, and `load` for sending the NDJSON to a FHIR server.
 
 ```
 fhir-pipes dhis2 locations --dhis2 URL --instance NAME --out LOCATIONS.ndjson [--id-prefix P] [--country-code CC]
+                     [--facility-level N] [--root UID]
 fhir-pipes dhis2 measures  --dhis2 URL --instance NAME --indicator-group UID --out MEASURES.ndjson
 fhir-pipes dhis2 reports   --dhis2 URL --instance NAME --indicator-group UID --locations LOCATIONS.ndjson
                      --period LAST_12_MONTHS --level 2 --level 3 --out REPORTS.ndjson
@@ -18,6 +19,12 @@ ApiToken …`) or a username and password (`--dhis2-user` / `--dhis2-password`,
 `$FHIR_PIPES_DHIS2_URL`) is the instance's base URL; a trailing `/api` is fine.
 Use a read-only DHIS2 user: a token can do whatever its user can.
 
+Every `dhis2` command needs a profile with a `[dhis2]` section (`--profile`
+or `FHIR_PIPES_PROFILE`), which names the identifier systems and profiles it
+writes; without one it stops with exit 2. ICR's is
+[examples/profiles/icr.toml](../examples/profiles/icr.toml); see
+[profiles.md](profiles.md).
+
 `--instance` is a short name for the DHIS2 instance (letters, digits and
 hyphens, up to 16 characters, e.g. `sl-demo`). It names the identifier
 systems (`https://icr.healthcampaigns.org/identifiers/dhis2/NAME/orgunit`,
@@ -27,7 +34,7 @@ instance's resources can be found, or removed, as a set. Keep it the same
 across runs: ids are deterministic, so a re-run replaces the same resources.
 
 **locations** turns the org unit tree into ICR Locations. Levels above the
-facility level (by default the deepest level) become admin units; the
+facility level (`--facility-level N`; by default the deepest level) become admin units; the
 facility level becomes facility Locations, each paired with an
 `ICRFacilityOrganization` (`managingOrganization` → `org-<location id>`), as
 fhir-pipes models facilities everywhere else. Location ids are `PREFIX-<uid>`
