@@ -12,6 +12,9 @@ dependencies.
   writes, including edits made in a GIS tool and data imported from DHIS2,
   and copy what was downloaded from one FHIR server to another.
 
+It works with HAPI FHIR, Medplum, Aidbox, the Google Cloud Healthcare API and
+other FHIR R4 servers; see [Supported FHIR servers](#supported-fhir-servers).
+
 fhir-pipes is intended to move into
 [fhir-data-pipes](https://github.com/ohs-foundation/fhir-data-pipes) as a
 lighter replacement for its Java pipeline. It brings together two Recode Labs
@@ -25,14 +28,26 @@ what was decided against.
 ## Install
 
 Download the binary for your platform from the
-[releases](https://github.com/ohs-foundation/fhir-pipes-rs/releases): macOS (arm64,
-x86_64), Linux (x86_64, aarch64; static, no runtime dependencies) or Windows (x86_64).
-Each release has a `SHA256SUMS` file to check it against.
+[releases](https://github.com/ohs-foundation/fhir-pipes-rs/releases). The
+current release is v0.5.0, with five binaries:
+
+| Platform | File |
+|---|---|
+| macOS, Apple Silicon | `fhir-pipes-aarch64-apple-darwin` |
+| macOS, Intel | `fhir-pipes-x86_64-apple-darwin` |
+| Linux, x86_64 (static, no runtime dependencies) | `fhir-pipes-x86_64-unknown-linux-musl` |
+| Linux, aarch64 (static, no runtime dependencies) | `fhir-pipes-aarch64-unknown-linux-musl` |
+| Windows, x86_64 | `fhir-pipes-x86_64-pc-windows-msvc.exe` |
+
+Each release has a `SHA256SUMS` file to check the download against.
 
 ```sh
 # macOS on Apple Silicon, for example
 curl -LO https://github.com/ohs-foundation/fhir-pipes-rs/releases/latest/download/fhir-pipes-aarch64-apple-darwin
+curl -LO https://github.com/ohs-foundation/fhir-pipes-rs/releases/latest/download/SHA256SUMS
+shasum -a 256 -c SHA256SUMS --ignore-missing     # sha256sum -c … on Linux
 chmod +x fhir-pipes-aarch64-apple-darwin && mv fhir-pipes-aarch64-apple-darwin /usr/local/bin/fhir-pipes
+fhir-pipes --version
 ```
 
 Or build it with Rust:
@@ -40,6 +55,10 @@ Or build it with Rust:
 ```sh
 cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes
 ```
+
+This README describes the main branch. `--server-kind`, `--token-auth` and
+`--scope` were added after v0.5.0; until the next release, build from main
+to use them.
 
 ## Building a SQL-on-FHIR warehouse
 
@@ -120,8 +139,8 @@ data to show what each part does.
 | Command | Direction | What it does | Docs |
 |---|---|---|---|
 | `refresh` | out | Build or refresh a SQL-on-FHIR Parquet warehouse | [refresh.md](docs/refresh.md) |
-| `views run`, `sql`, `validate`, `lint`, `test` | | Run views over local FHIR files or PostgreSQL, generate their SQL, check them, run SQL-on-FHIR test cases | below |
-| `export` | out | Download every resource of the given types as NDJSON | below |
+| `views run`, `sql`, `validate`, `lint`, `test` | | Run views over local FHIR files or PostgreSQL, generate their SQL, check them, run SQL-on-FHIR test cases | [below](#running-viewdefinitions-directly) |
+| `export` | out | Download every resource of the given types as NDJSON, by search, Bulk Data `$export` or from a HAPI server's database | [below](#downloading-resources-as-ndjson) |
 | `extract` | out | Copy Locations and Organizations into a local snapshot, incrementally | [locations.md](docs/locations.md) |
 | `transform locations` | transform | Snapshot → partitioned GeoParquet, the first transform | [locations.md](docs/locations.md) |
 | `run` | out | `extract` then `transform locations` | [locations.md](docs/locations.md) |
@@ -146,13 +165,17 @@ the database, a tool such as duckdb or rclone, a hook, a disk write).
 `views validate`, `views lint`, `views test` and `profile check` exit 1 when
 they find problems.
 
+### Running ViewDefinitions directly
+
 `views` works with ViewDefinitions directly, without a warehouse:
 
 ```sh
 fhir-pipes views run patient_flat.json --input raw/Patient.ndjson          # CSV to stdout
 fhir-pipes views run views/ --input raw/ --output parquet --out tables/   # one file per view
 fhir-pipes views sql patient_flat.json --dialect duckdb                     # the SQL for a view
+fhir-pipes views sql patient_flat.json --ddl --dialect postgres             # a CREATE TABLE for its columns
 fhir-pipes views validate patient_flat.json                                 # structure checks
+fhir-pipes views validate patient_flat.json --sarif > validate.sarif        # findings for CI code scanning
 fhir-pipes views lint patient_flat.json --shareable                         # the portable FHIRPath subset
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
@@ -175,11 +198,20 @@ read with its subdirectories, skipping hidden files. An NDJSON file is read
 they are read; only the rows are kept until they are written. In a Bundle, a reference
 to another entry by its `urn:uuid` fullUrl, as transaction Bundles from
 Synthea have, is rewritten to that entry's `Type/id`, as a FHIR server would
-store it, so `getReferenceKey()` and joins work on Bundle files. `views run --db URL` runs
-against PostgreSQL holding FHIR resources as JSONB instead of files, and
-`views lint --package hl7.fhir.r4.core` checks selectors against a FHIR
-package it downloads; the second needs a build with the `fhir-packages`
-feature (see [Building and testing](#building-and-testing)).
+store it, so `getReferenceKey()` and joins work on Bundle files.
+
+`views run --db URL` (or `FHIR_PIPES_DATABASE_URL`) runs against PostgreSQL
+holding FHIR resources as JSONB instead of files; it needs the `postgres`
+feature, which the release binaries have. `views lint --package
+hl7.fhir.r4.core --version 4.0.1` checks selectors against a FHIR package,
+downloading it if it is not installed yet; without `--version` it uses only a
+package that is already installed. It needs a build with the `fhir-packages`
+feature (see [Building and testing](#building-and-testing)). `views validate` and
+`views lint` also write their findings as JSON (`--json`) or SARIF
+(`--sarif`), and `views lint --allow-fn NAME` exempts an engine-specific
+function from `--shareable`.
+
+### Downloading resources as NDJSON
 
 `export` downloads every resource of each `--type` to `DIR/<TYPE>.ndjson`:
 
@@ -412,6 +444,114 @@ or set the role's default `search_path`. The state file records the schema
 `refresh` reads this way with `fetch = "hapi-db"` (see
 [docs/refresh.md](docs/refresh.md#reading-the-hapi-servers-database)).
 
+### Locations, GIS edits and loading
+
+`extract` copies a server's Locations and Organizations into a local
+snapshot, incrementally; `transform locations` turns the snapshot into
+partitioned GeoParquet; `run` does both. Edits made in QGIS or another GIS
+tool go back with `diff` and `load`:
+
+```sh
+fhir-pipes run --server https://fhir.example.org/fhir --snapshot snapshot/ --out out/
+fhir-pipes inspect --out out/
+fhir-pipes diff --snapshot snapshot/ --in edits.geojson --out changes.ndjson
+fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson --dry-run
+fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson
+```
+
+`load` sends any NDJSON of FHIR resources, parents first, in transaction
+Bundles with `ifMatch` version checks; `--dry-run` prints the plan without
+sending anything. `extract` and `run` take `--server-kind` as `export`
+does. The commands that make new resources for `load` work offline:
+`import location-boundaries` (admin boundaries from GeoJSON),
+`import location-sites` (facilities, schools or settlements from CSV),
+`index` (spatial index identifiers) and `population` (population Groups
+from a raster such as WorldPop):
+
+```sh
+fhir-pipes import location-boundaries --profile examples/profiles/icr.toml \
+  --in sle_admbnda_adm3.geojson --country "Sierra Leone=SLE" \
+  --level province=ADM1_EN:ADM1_PCODE --level district=ADM2_EN:ADM2_PCODE \
+  --level chiefdom=ADM3_EN:ADM3_PCODE --out sle-units.ndjson
+fhir-pipes population --profile examples/profiles/icr.toml --snapshot snapshot/ \
+  --raster sle_ppp_2025.tif --level 2 --year 2025 --out groups.ndjson
+```
+
+[docs/locations.md](docs/locations.md) covers the snapshot, the GeoParquet
+columns, `diff`, `load`, `import`, `index` and `population`;
+[docs/qgis.md](docs/qgis.md) walks through an edit in QGIS.
+
+### Importing from DHIS2
+
+`dhis2 locations`, `dhis2 measures` and `dhis2 reports` read a DHIS2
+instance and write org units as Locations, indicators as Measures and their
+values as MeasureReports, as NDJSON for `load`. Nothing is written to DHIS2.
+The DHIS2 token is read from `FHIR_PIPES_DHIS2_TOKEN` when `--dhis2-token` is
+not given. `dhis2` needs a profile with a `[dhis2]` section, which names the
+identifier systems and profiles it writes; ICR's is
+[examples/profiles/icr.toml](examples/profiles/icr.toml).
+
+```sh
+export FHIR_PIPES_PROFILE=examples/profiles/icr.toml
+fhir-pipes dhis2 locations --dhis2 https://dhis2.example.org --instance sl-demo --country-code SLE --out locations.ndjson
+fhir-pipes dhis2 reports --dhis2 https://dhis2.example.org --instance sl-demo --indicator-group UID \
+  --locations locations.ndjson --period LAST_12_MONTHS --level 2 --level 3 --out reports.ndjson
+```
+
+[docs/dhis2.md](docs/dhis2.md) has the mapping, incremental runs with
+`--previous`, and computing values from raw data values.
+
+### Checking a profile against its IG
+
+`profile check` compares a profile with its implementation guide (a FHIR
+package or a directory of JSON resources) and exits 1 when they disagree,
+so it can run in the IG's CI:
+
+```sh
+fhir-pipes profile check --profile examples/profiles/icr.toml --ig https://icr.healthcampaigns.org/package.tgz
+```
+
+Against the published ICR package this currently exits 1, because the package
+is missing four items the example profile uses: `dhis2-period`,
+`dhis2-indicator`, `report-source` and `icr-report-source-cs`. See
+[docs/profiles.md](docs/profiles.md#checking-a-profile-against-its-ig).
+
+## Supported FHIR servers
+
+fhir-pipes reads every server below through its FHIR API, by paged search or
+by system-level Bulk Data `$export` (`--bulk`). Only HAPI can also be read
+from its database. `--server-kind` tells `export`, `extract`, `run` and
+`refresh` which search parameters the server needs; `refresh` also reads it
+from `FHIR_PIPES_SERVER_KIND` or `server.kind`.
+
+| Server | Reading | Authentication | `--server-kind` |
+|---|---|---|---|
+| Any FHIR R4 server | search; `--bulk` where the server has `$export` | none, `--token`, an OAuth client (`--client-id`), or HTTP Basic (`--username`) | `generic` (the default) |
+| HAPI FHIR | search; `--bulk` with `hapi.fhir.bulk_export_enabled=true`; `--hapi-db` reads its PostgreSQL database directly | whatever sits in front of it: often HTTP Basic, or an OAuth client through a gateway such as Keycloak; `--hapi-db` uses `FHIR_PIPES_HAPI_DATABASE_URL` | `generic` or `hapi` (the same) |
+| Google Cloud Healthcare API | search; `--bulk` uses the store's `$export` | `--google-auth` (Application Default Credentials) | `generic` |
+| Medplum | search; `--bulk` | an OAuth client: a ClientApplication with `--client-id`, `--client-secret` and `--token-url <server>/oauth2/token` | `medplum` |
+| Aidbox | search, at `<aidbox>/fhir`; `--bulk` once a storage provider is set up | a Client as HTTP Basic (`--username`, `--password`), or as an OAuth client with `--token-auth basic` and `--token-url <aidbox>/auth/token` | `aidbox` |
+
+```sh
+export FHIR_PIPES_CLIENT_SECRET=...
+fhir-pipes export --server https://api.medplum.com/fhir/R4 --server-kind medplum \
+  --client-id "$MEDPLUM_CLIENT_ID" --token-url https://api.medplum.com/oauth2/token \
+  --incremental --type Patient --type Observation --out raw/
+```
+
+`medplum` asks for `_sort=_lastUpdated` on every page, since Medplum refuses
+an `_offset` past 10,000, and reads Medplum's bulk output files with the
+token. `aidbox` asks for `_total=none`, so a page does not count the whole
+result, and splits a type of more than 50,000 resources into `_lastUpdated`
+windows. `generic` and `hapi` add nothing. The kind does not change
+authentication or `--hapi-db`. Writing (`load`, `sync`) needs only
+transaction Bundles and takes no kind. Aidbox has not been checked against a
+real server yet; Medplum was checked against a self-hosted Medplum 5.2.5.
+
+[docs/servers.md](docs/servers.md) has each server's setup: the client and
+AccessPolicy for Medplum and Aidbox, rate limits, bulk export storage, and
+what each kind changes.
+
 ## Connecting to a FHIR server
 
 Any FHIR R4 server that supports standard search with `_lastUpdated`,
@@ -421,8 +561,7 @@ system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
 Medplum and Aidbox need other search parameters: pass `--server-kind medplum`
 or `--server-kind aidbox` (in `refresh`, also `FHIR_PIPES_SERVER_KIND` or
-`server.kind`). `generic`, the default, and `hapi` add none. [docs/servers.md](docs/servers.md) says what
-each kind changes and how to set up a client on each server.
+`server.kind`; see [Supported FHIR servers](#supported-fhir-servers)).
 
 A server that needs authentication gets one of four kinds:
 
@@ -524,12 +663,41 @@ The account needs an IAM role on the store or its dataset:
 `export --bulk` uses the server's `$export`; the Healthcare API's own export
 to Cloud Storage is not used.
 
+## Using fhir-pipes with an AI agent
+
+[skills/fhir-pipes](skills/fhir-pipes) is an
+[Agent Skill](https://agentskills.io): instructions that tell a coding agent
+how to choose and run fhir-pipes commands. It covers servers, auth through
+environment variables, incremental and bulk downloads, `refresh` and exit
+codes, and has safety rules: secrets only in the environment, `--check` and
+`--dry-run` before writing, and no writes to production without the user's
+say-so. Copy or symlink the directory into the agent's skills directory:
+
+| Agent | Personal | Project |
+|---|---|---|
+| Claude Code | `~/.claude/skills/fhir-pipes` | `.claude/skills/fhir-pipes` |
+| OpenAI Codex | `~/.agents/skills/fhir-pipes` | `.agents/skills/fhir-pipes` |
+| Gemini CLI | `~/.gemini/skills/fhir-pipes` or `~/.agents/skills/fhir-pipes` | `.gemini/skills/fhir-pipes` or `.agents/skills/fhir-pipes` |
+| GitHub Copilot in VS Code | `~/.copilot/skills/fhir-pipes` | `.github/skills/fhir-pipes` |
+
+```sh
+git clone https://github.com/ohs-foundation/fhir-pipes-rs
+mkdir -p ~/.claude/skills
+ln -s "$PWD/fhir-pipes-rs/skills/fhir-pipes" ~/.claude/skills/fhir-pipes
+```
+
+The skill expects the `fhir-pipes` binary on the `PATH` (see [Install](#install)).
+
 ## Not done yet
 
 The open items are in [ROADMAP.md](ROADMAP.md#next). The main ones:
 
 - There is no nested Parquet-on-FHIR output (fhir-data-pipes' SQL-on-FHIR v1
   tables) yet.
+- Bulk Data export is system level only: `Group/[id]/$export` and
+  `Patient/$export` are not supported.
+- Aidbox support has not been checked against a real Aidbox server (see
+  [docs/servers.md](docs/servers.md#aidbox)).
 
 ## Building and testing
 
@@ -566,7 +734,8 @@ runtime linked statically, set in `.cargo/config.toml`), as single files with
 no runtime dependencies. CI tests every PR on Linux, macOS and Windows; the
 release builds are slow, so they run for a version tag (which publishes them),
 when run by hand from the Actions tab, for a change to `Cargo.toml`,
-`Cargo.lock`, `.cargo/config.toml` or the workflows, and weekly.
+`crates/*/Cargo.toml`, `Cargo.lock`, `.cargo/config.toml` or the workflows,
+and weekly.
 `cargo audit` checks `Cargo.lock` against the RustSec advisories on every PR
 and weekly; `.cargo/audit.toml` lists what fails the check and the advisories
 ignored, each with its reason.
@@ -585,6 +754,8 @@ when `FHIR_PIPES_TEST_MEDPLUM_URL` or `FHIR_PIPES_TEST_AIDBOX_URL` is set
 Cargo.toml        the fhir-pipes binary and the workspace
 src/
   main.rs, cli.rs, error.rs
+  fs.rs, work.rs, report.rs
+                  whole-file writes, the parallel work queue, data-quality issues
   warehouse/      refresh: config, views, partitioning, manifest, tiles, hooks, push
   views/          views: run, sql, validate, lint, test
   export/         export: search paging, Bulk Data $export (bulk.rs), HAPI database (hapi_db.rs)
@@ -606,8 +777,10 @@ crates/
   sof/            fhir-pipes-sof: the ViewDefinition engine (from octofhir/sof)
   sof-lint/       fhir-pipes-sof-lint: ViewDefinition checks
 tests/            integration tests per command; fixtures under tests/fixtures
+skills/fhir-pipes/
+                  the Agent Skill for AI coding agents
 docs/
-  refresh.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
+  refresh.md, servers.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
   notes/          the consolidation notes
   superpowers/    kiln's design specs, plans and spikes
 ```

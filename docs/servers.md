@@ -41,6 +41,13 @@ export, so a type whose count differs after an incremental export is exported
 again in full. See also
 [Reading a HAPI server's database](../README.md#reading-a-hapi-servers-database).
 
+## Google Cloud Healthcare API
+
+Use `generic`. The FHIR base is the store's URL, or the store path
+`projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>`, and `--google-auth`
+gets tokens from Google Application Default Credentials. See
+[Google Cloud Healthcare API](../README.md#google-cloud-healthcare-api).
+
 ## Medplum
 
 The FHIR base is `https://api.medplum.com/fhir/R4` for the hosted service, or
