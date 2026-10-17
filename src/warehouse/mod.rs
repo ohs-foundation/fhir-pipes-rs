@@ -178,15 +178,15 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
     // With a file source, whether the tiles step runs is known only once the
     // files are read (without Locations it is skipped), so its tools are
     // checked then.
-    let needed: Vec<(&str, &str)> = needed
-        .iter()
-        .map(|(t, w)| (t.as_str(), w.as_str()))
-        .collect();
     let (later, now): (Vec<_>, Vec<_>) = needed
-        .into_iter()
-        .partition(|&(_, w)| s.reads_files() && w == "tiles");
-    tools::require(&now)?;
-    refresh(&s, &steps, &later)
+        .iter()
+        .partition(|t| s.reads_files() && t.step == Step::Tiles);
+    tools::require(&now.iter().map(|t| t.pair()).collect::<Vec<_>>())?;
+    refresh(
+        &s,
+        &steps,
+        &later.iter().map(|t| t.pair()).collect::<Vec<_>>(),
+    )
 }
 
 /// The settings from the config file and flags, the steps to run and the
@@ -286,45 +286,80 @@ fn hook_program(s: &Settings, program: &str) -> String {
     }
 }
 
-/// External tools, each with what it is for.
-type Tools = Vec<(String, String)>;
+/// An external tool a step needs.
+#[derive(Debug)]
+struct Tool {
+    program: String,
+    /// The step that runs it.
+    step: Step,
+    /// What it is for, as messages name it: `tiles`, `catalog.duckdb`,
+    /// `hook <name>`.
+    purpose: String,
+}
 
-/// The external tools the chosen steps need, with what each is for.
+impl Tool {
+    /// (program, purpose), as `tools::require` takes them.
+    fn pair(&self) -> (&str, &str) {
+        (&self.program, &self.purpose)
+    }
+}
+
+type Tools = Vec<Tool>;
+
+/// The external tools the chosen steps need, each with its step.
 fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Tools> {
     let mut t = Vec::new();
+    let mut need = |program: &str, step: Step, purpose: String| {
+        t.push(Tool {
+            program: program.to_string(),
+            step,
+            purpose,
+        });
+    };
     if steps.contains(&Step::Views) && s.views.is_none() {
         bail!(
             "no views directory: pass --views, set FHIR_PIPES_VIEWS, or set `views` in the config"
         );
     }
     if steps.contains(&Step::Tiles) {
-        t.push((s.duckdb.clone(), "tiles".into()));
-        t.push((s.tippecanoe.clone(), "tiles".into()));
+        need(&s.duckdb, Step::Tiles, "tiles".into());
+        need(&s.tippecanoe, Step::Tiles, "tiles".into());
     }
     if let Some(c) = &s.catalog
         && c.duckdb_file
         && (steps.contains(&Step::Push) || (steps.contains(&Step::Catalog) && c.base_url.is_none()))
     {
-        t.push((s.duckdb.clone(), "catalog.duckdb".into()));
+        // With a base_url it is built during the push, else at publish
+        // after the catalog step.
+        let step = if c.base_url.is_some() {
+            Step::Push
+        } else {
+            Step::Catalog
+        };
+        need(&s.duckdb, step, "catalog.duckdb".into());
     }
     if steps.contains(&Step::Push) {
         if s.push.is_none() {
             bail!("--push needs a [push] section (remote, bucket) in the config");
         }
-        t.push((s.rclone.clone(), "push".into()));
+        need(&s.rclone, Step::Push, "push".into());
     }
     if steps.contains(&Step::Hooks) {
         for h in &s.hooks {
             let Some(program) = h.run.first() else {
                 bail!("hook {} has an empty `run`", h.name);
             };
-            t.push((hook_program(s, program), format!("hook {}", h.name)));
+            need(
+                &hook_program(s, program),
+                Step::Hooks,
+                format!("hook {}", h.name),
+            );
         }
     }
     Ok(t)
 }
 
-fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
+fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
     let names = |it: Vec<String>| it.join(", ");
     println!(
         "steps:      {}",
@@ -419,9 +454,13 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[(String, String)]) {
             );
         }
     }
-    for (tool, why) in needed {
-        let found = tools::find(tool).map_or("NOT FOUND".to_string(), |p| p.display().to_string());
-        println!("tool:       {tool} ({why}): {found}");
+    for Tool {
+        program, purpose, ..
+    } in needed
+    {
+        let found =
+            tools::find(program).map_or("NOT FOUND".to_string(), |p| p.display().to_string());
+        println!("tool:       {program} ({purpose}): {found}");
     }
     if let Some(dir) = &s.views {
         match views::discover(dir, &s.strip_prefix)
@@ -451,12 +490,43 @@ fn unwritten_tables(s: &Settings, written: BTreeSet<String>) -> Result<Vec<Strin
         .collect())
 }
 
+/// How long each part of a run took, in order, and which steps ran (what a
+/// hook's `after` names).
+#[derive(Default)]
+struct Ran {
+    timings: Vec<(&'static str, f64)>,
+    steps: BTreeSet<Step>,
+}
+
+impl Ran {
+    /// Runs `f` as the part `name`. When it succeeds its time is recorded,
+    /// and `step`, if given, counts as run.
+    fn run_step<T>(
+        &mut self,
+        name: &'static str,
+        step: Option<Step>,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let t = Instant::now();
+        let value = f()?;
+        self.record(name, step, t.elapsed().as_secs_f64());
+        Ok(value)
+    }
+
+    /// Records a part timed elsewhere.
+    fn record(&mut self, name: &'static str, step: Option<Step>, secs: f64) {
+        self.timings.push((name, secs));
+        if let Some(step) = step {
+            self.steps.insert(step);
+        }
+    }
+}
+
 /// `tiles_tools`: the tiles step's tools, when they are checked only once the
 /// step is known to run.
 fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -> Result<()> {
     let started = Instant::now();
-    let mut timings: Vec<(&str, f64)> = Vec::new();
-    let mut ran: BTreeSet<Step> = BTreeSet::new();
+    let mut ran = Ran::default();
     // Whether the run downloaded anything from the server, for the server
     // the manifest records.
     let mut contacted = false;
@@ -468,9 +538,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     // be; --reuse-raw reruns on the last split.
     let reads = steps.contains(&Step::Locations) || steps.contains(&Step::Views);
     if s.reads_files() && reads && !s.reuse_raw {
-        let t = Instant::now();
-        files::split(s)?;
-        timings.push(("files", t.elapsed().as_secs_f64()));
+        ran.run_step("files", None, || files::split(s))?;
     }
 
     if steps.contains(&Step::Locations) {
@@ -482,8 +550,11 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
             true
         };
         if built {
-            timings.push(("locations", t.elapsed().as_secs_f64()));
-            ran.insert(Step::Locations);
+            ran.record(
+                "locations",
+                Some(Step::Locations),
+                t.elapsed().as_secs_f64(),
+            );
         }
     }
 
@@ -521,8 +592,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     let mut mismatches = None;
     if let Some(v) = views {
         let (done, secs) = v.context("views")?;
-        timings.push(("views", secs));
-        ran.insert(Step::Views);
+        ran.record("views", Some(Step::Views), secs);
         contacted |= done.downloaded;
         view_tables = Some(done.tables);
         // Said as soon as the views step is done, so a later step that fails
@@ -532,81 +602,81 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     }
     let server = manifest::recorded_server(s, contacted);
     if let Some(t) = tiles {
-        timings.push(("tiles", t.context("tiles")?));
-        ran.insert(Step::Tiles);
+        ran.record("tiles", Some(Step::Tiles), t.context("tiles")?);
     }
 
     let mut refreshed_at = manifest::now();
     if steps.contains(&Step::Manifest) {
-        let t = Instant::now();
-        refreshed_at = manifest::write(s, &stage, server.as_deref())?;
-        timings.push(("manifest", t.elapsed().as_secs_f64()));
-        ran.insert(Step::Manifest);
+        refreshed_at = ran.run_step("manifest", Some(Step::Manifest), || {
+            manifest::write(s, &stage, server.as_deref())
+        })?;
     }
 
     if steps.contains(&Step::Catalog)
         && let Some(c) = &s.catalog
     {
-        let t = Instant::now();
-        catalog::write(s, c, &refreshed_at, &stage)?;
-        timings.push(("catalog", t.elapsed().as_secs_f64()));
-        ran.insert(Step::Catalog);
+        ran.run_step("catalog", Some(Step::Catalog), || {
+            catalog::write(s, c, &refreshed_at, &stage)
+        })?;
     }
 
     #[cfg(feature = "postgres")]
     if steps.contains(&Step::Database)
         && let Some(d) = &s.database
     {
-        let t = Instant::now();
-        let tables: Vec<(String, PathBuf)> = database_tables(s, d)?
-            .into_iter()
-            .map(|n| {
-                let dir = stage.read(&n);
-                (n, dir)
-            })
-            .collect();
-        database::load(s, d, &tables)?;
-        timings.push(("database", t.elapsed().as_secs_f64()));
-        ran.insert(Step::Database);
+        ran.run_step("database", Some(Step::Database), || {
+            let tables: Vec<(String, PathBuf)> = database_tables(s, d)?
+                .into_iter()
+                .map(|n| {
+                    let dir = stage.read(&n);
+                    (n, dir)
+                })
+                .collect();
+            database::load(s, d, &tables)
+        })?;
     }
 
     // Everything above wrote to the staging directories; swap it all in now,
     // the tables first, then the manifest and catalog.sql.
     if !stage.is_empty()? {
-        let t = Instant::now();
-        println!("== publish");
-        let (n, dirs) = stage.publish()?;
-        let dirs: String = dirs.iter().map(|d| format!(", {d}/")).collect();
-        println!("   {n} table(s){dirs}, then the manifest and catalog");
-        // DuckDB reads each table's schema from its files when it creates a
-        // view, so a catalog.duckdb with relative paths can only be built once
-        // the tables are in place. If that fails the run stops here, with the
-        // new tables, manifest and catalog.sql and the previous catalog.duckdb.
-        if ran.contains(&Step::Catalog)
-            && let Some(c) = &s.catalog
-            && c.duckdb_file
-            && c.base_url.is_none()
-        {
-            catalog::build_duckdb(s, c)?;
-        }
-        timings.push(("publish", t.elapsed().as_secs_f64()));
+        let catalog_ran = ran.steps.contains(&Step::Catalog);
+        ran.run_step("publish", None, || {
+            println!("== publish");
+            let (n, dirs) = stage.publish()?;
+            let dirs: String = dirs.iter().map(|d| format!(", {d}/")).collect();
+            println!("   {n} table(s){dirs}, then the manifest and catalog");
+            // DuckDB reads each table's schema from its files when it creates
+            // a view, so a catalog.duckdb with relative paths can only be
+            // built once the tables are in place. If that fails the run stops
+            // here, with the new tables, manifest and catalog.sql and the
+            // previous catalog.duckdb.
+            if catalog_ran
+                && let Some(c) = &s.catalog
+                && c.duckdb_file
+                && c.base_url.is_none()
+            {
+                catalog::build_duckdb(s, c)?;
+            }
+            Ok(())
+        })?;
     }
 
     if steps.contains(&Step::Hooks) {
-        let t = Instant::now();
-        for h in &s.hooks {
-            let wanted = h.after.is_none_or(|a| ran.contains(&a));
-            if wanted {
+        let wanted: Vec<_> = s
+            .hooks
+            .iter()
+            .filter(|h| h.after.is_none_or(|a| ran.steps.contains(&a)))
+            .collect();
+        ran.run_step("hooks", None, || {
+            for h in wanted {
                 push::hook(s, h, &hook_program(s, &h.run[0]), &refreshed_at)?;
             }
-        }
-        timings.push(("hooks", t.elapsed().as_secs_f64()));
+            Ok(())
+        })?;
     }
 
     if steps.contains(&Step::Push) {
-        let t = Instant::now();
-        push::push(s)?;
-        timings.push(("push", t.elapsed().as_secs_f64()));
+        ran.run_step("push", None, || push::push(s))?;
     }
 
     if let Some(written) = view_tables {
@@ -628,7 +698,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     println!(
         "done → {} in {total:.1}s ({})",
         s.data.display(),
-        timings
+        ran.timings
             .iter()
             .map(|(n, t)| format!("{n} {t:.1}s"))
             .collect::<Vec<_>>()
@@ -638,7 +708,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         "refreshed_at": refreshed_at,
         "server": server,
         "seconds": total,
-        "steps": timings.iter().map(|(n, t)| (n.to_string(), json!(t))).collect::<serde_json::Map<_, _>>(),
+        "steps": ran.timings.iter().map(|(n, t)| (n.to_string(), json!(t))).collect::<serde_json::Map<_, _>>(),
     });
     if s.reads_files() {
         report["files"] = json!(s.inputs());
