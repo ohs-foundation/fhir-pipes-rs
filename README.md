@@ -235,7 +235,8 @@ server for the type's count (the first page's `total`, else
 
 Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
 type. The limit covers types and windows together. A `Retry-After` on a 429
-or 5xx holds back every request, not only the one that got it.
+or 5xx, or the `RateLimit` wait on a 429, holds back every request, not only
+the one that got it.
 `--concurrency 1` downloads one type at a time, one page at a time. With
 `--bulk`, `--concurrency` is the number of the export's output files
 downloaded at once. It does not apply to `--hapi-db`.
@@ -279,11 +280,18 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
   watermark are exported together with `_since` the earliest of them and
   merged into their files by id; the types without one are exported in full
   in a second export.
+- A kick-off answered with 429 is tried again until `--bulk-timeout`, with
+  the waits of a status poll. Aidbox runs one export at a time and answers
+  429 while another is running. The kick-off requests, their retries after
+  a 5xx or a failed connection, and the waits between them all end by
+  `--bulk-timeout`. Nothing is saved in `.export-state.json` until the
+  server accepts the kick-off.
 - The status URL is polled with the server's `Retry-After`, or a backoff from
   one second up to a minute without one. While the export runs (202), the
   wait is at most 15 seconds, whatever `Retry-After` says: HAPI asks for two
   minutes on every poll. A 429 or 5xx is waited out for as long as its
-  `Retry-After` asks. Each new `X-Progress` is printed.
+  `Retry-After` asks (on a 429 without one, its `RateLimit` header's `t=`).
+  Each new `X-Progress` is printed.
 - The status URL is saved in `.export-state.json` as soon as the server
   returns it. A run that stops before the export is done (a crash, a lost
   connection) polls the same export next time instead of starting another.
@@ -303,7 +311,12 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
   checked after a merge, as for search, because not every server lists
   deletions (HAPI does not); a type whose count differs is exported again in
   full.
-- Every type's watermark becomes the manifest's `transactionTime`.
+- Every type's watermark becomes the manifest's `transactionTime`, or the
+  server's clock when it accepted the kick-off (the response's `Date`) when
+  that is earlier. Medplum sets `transactionTime` after it has read every
+  type, so a resource changed during the export can be older than it; the
+  next `_since` must not pass over that change. The `Date` is saved with the
+  status URL, so a resumed export uses it too.
 - An `OperationOutcome` from the kick-off or the status URL, or an error or
   fatal issue in the manifest's `error` files, fails the run with its text.
   Warnings and information go in the report.
@@ -411,6 +424,15 @@ A server that needs authentication gets one of four kinds:
   expires, so a long run does not outlive its token. A wrong secret or token
   URL fails before any FHIR request. `refresh` reads the client ID and secret
   only from the environment.
+
+  `--token-auth` (or `FHIR_PIPES_TOKEN_AUTH`) says how the client ID and
+  secret reach the token endpoint. `post`, the default, puts them in the
+  form body (`client_secret_post`). `basic` sends them in a Basic
+  `Authorization` header (`client_secret_basic`), each form-urlencoded
+  first as RFC 6749 section 2.3.1 says; Aidbox documents only this form.
+  `--scope` (or `FHIR_PIPES_SCOPE`) adds a `scope` to the token request,
+  such as `system/*.read` for a SMART Backend Services client; without it
+  none is sent.
 - `--username` and `--password` (or `FHIR_PIPES_USERNAME`,
   `FHIR_PIPES_PASSWORD`) are sent as HTTP Basic auth, as OpenMRS and many
   HAPI servers expect. Use HTTPS: Basic sends the password with every request.
@@ -433,8 +455,14 @@ fhir-pipes export --server https://gateway.example.org/fhir \
 `--timeout` is the total deadline for one HTTP request, 300 seconds by
 default. Connection errors, 429 and 5xx responses are retried up to
 `--retries` times with exponential backoff and jitter, honouring a
-`Retry-After` in seconds or as an HTTP-date, up to 30 seconds. Any other 4xx
-is final.
+`Retry-After` in seconds or as an HTTP-date, up to 30 seconds. A 429 without
+a `Retry-After` is waited out for the `t=` of its `RateLimit` header
+(draft-ietf-httpapi-ratelimit-headers), as Medplum sends it, with the same
+30-second limit: `RateLimit: "requests";r=0;t=60` waits 30 seconds. With
+several policies, in one header or in several `RateLimit` fields (Medplum
+sends `"requests"` and `"fhirInteractions"` on every response), the `t=` of
+the one whose `r=` is 0 is used, else the longest.
+Any other 4xx is final.
 
 Requests ask for gzip (`Accept-Encoding: gzip`); HAPI's search pages are
 about fifty times smaller compressed. Searches, counts and the Bulk Data

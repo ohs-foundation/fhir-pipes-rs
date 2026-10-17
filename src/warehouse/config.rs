@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
+use crate::extract::client::TokenAuth;
 use crate::extract::google::{self, Credentials};
 
 use super::Step;
@@ -62,6 +63,11 @@ pub struct ServerFile {
     pub base: Option<String>,
     pub name: Option<String>,
     pub token_url: Option<String>,
+    /// How the client id and secret are sent to `token_url`: `post` (the
+    /// default) or `basic` (`--token-auth`).
+    pub token_auth: Option<TokenAuth>,
+    /// The OAuth scope asked for with the client id (`--scope`).
+    pub scope: Option<String>,
     /// How the views step downloads resources (default `search`).
     pub fetch: Option<Fetch>,
     /// With `fetch = "bulk"`: seconds to wait for an export before cancelling
@@ -432,6 +438,8 @@ pub struct Overrides {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub token_url: Option<String>,
+    pub token_auth: Option<TokenAuth>,
+    pub scope: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     /// Given on the command line or in the environment, true or false; the
@@ -500,6 +508,8 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
                 token_url: Some(o.token_url.or(file.server.token_url).context(
                     "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
                 )?),
+                token_auth: o.token_auth.or(file.server.token_auth),
+                scope: o.scope.or(file.server.scope),
                 ..none
             },
             (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
@@ -652,6 +662,33 @@ mod tests {
             ..Default::default()
         };
         assert!(settings(file, PathBuf::from("/b"), o).is_err());
+    }
+
+    #[test]
+    fn token_auth_and_scope_come_from_the_file_or_the_flags() {
+        let text = "data = \"d\"\n[server]\ntoken_url = \"http://t\"\ntoken_auth = \"basic\"\nscope = \"system/*.read\"";
+        let credentials = || Overrides {
+            client_id: Some("id".into()),
+            client_secret: Some("s".into()),
+            ..Default::default()
+        };
+        let s = settings(
+            toml::from_str(text).unwrap(),
+            PathBuf::from("/b"),
+            credentials(),
+        )
+        .unwrap();
+        assert_eq!(s.auth.token_auth, Some(TokenAuth::Basic));
+        assert_eq!(s.auth.scope.as_deref(), Some("system/*.read"));
+        let o = Overrides {
+            token_auth: Some(TokenAuth::Post),
+            scope: Some("system/Patient.read".into()),
+            ..credentials()
+        };
+        let s = settings(toml::from_str(text).unwrap(), PathBuf::from("/b"), o).unwrap();
+        assert_eq!(s.auth.token_auth, Some(TokenAuth::Post));
+        assert_eq!(s.auth.scope.as_deref(), Some("system/Patient.read"));
+        assert!(toml::from_str::<File>("[server]\ntoken_auth = \"header\"").is_err());
     }
 
     #[test]

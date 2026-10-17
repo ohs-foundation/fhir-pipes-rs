@@ -12,7 +12,14 @@
 //! client-credentials grant (`--client-id`), or obtained from Google
 //! Application Default Credentials (`--google-auth`, see `google.rs`). In the
 //! last two cases the client gets a new token shortly before the current one
-//! expires, so a run can outlast any one token.
+//! expires, so a run can outlast any one token. The client id and secret go
+//! in the token request's form body (`client_secret_post`) or, with
+//! `--token-auth basic`, in a Basic Authorization header
+//! (`client_secret_basic`, which Aidbox expects).
+//!
+//! A 429 without a Retry-After is waited out for the `t=` of its `RateLimit`
+//! header (draft-ietf-httpapi-ratelimit-headers), which Medplum sends
+//! instead: the seconds until the quota is restored.
 //!
 //! Every request asks for gzip (`Accept-Encoding: gzip`) and callers see
 //! the decompressed body, streamed downloads included. The client decodes
@@ -77,9 +84,25 @@ pub enum Auth {
         token_url: String,
         client_id: String,
         client_secret: String,
+        /// How the id and secret are sent to `token_url`.
+        token_auth: TokenAuth,
+        /// The `scope` asked for, when given.
+        scope: Option<String>,
     },
     /// Google credentials, usually `Credentials::application_default()`.
     Google(Credentials),
+}
+
+/// How a client-credentials token request carries the client id and secret
+/// (OAuth 2.0, RFC 6749 section 2.3.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenAuth {
+    /// In the form body: `client_secret_post`.
+    #[default]
+    Post,
+    /// In a Basic Authorization header: `client_secret_basic`.
+    Basic,
 }
 
 impl Auth {
@@ -104,7 +127,12 @@ struct TokenSource {
 /// How a token is requested.
 enum Grant {
     /// POST a fixed form: OAuth client credentials, or a Google refresh token.
-    Form { url: String, form: String },
+    /// `authorization` is the Basic header of `client_secret_basic`.
+    Form {
+        url: String,
+        form: String,
+        authorization: Option<HeaderValue>,
+    },
     /// POST a newly signed JWT (a Google service account key).
     Jwt(google::ServiceAccount),
     /// GET from the Google metadata server.
@@ -134,6 +162,23 @@ fn renew_after(expires_in: u64) -> Duration {
     } else {
         expires_in / 2
     })
+}
+
+/// The Basic header of `client_secret_basic`: the id and secret are each
+/// form-urlencoded before they are joined and base64-encoded (RFC 6749
+/// section 2.3.1). Ids and secrets of letters, digits and `*-._` are sent
+/// as they are.
+fn client_basic(client_id: &str, client_secret: &str) -> Result<HeaderValue> {
+    use base64::Engine;
+    let encode = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+    let pair = format!("{}:{}", encode(client_id), encode(client_secret));
+    let mut v = HeaderValue::from_str(&format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(pair)
+    ))
+    .map_err(|_| PipesError::Usage("the client credentials are not valid in a header".into()))?;
+    v.set_sensitive(true);
+    Ok(v)
 }
 
 fn bearer(token: &str) -> Option<HeaderValue> {
@@ -182,9 +227,9 @@ impl Exchange {
         self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
-    /// The Retry-After header as a wait, read by `parse_retry_after`.
+    /// The wait the response asks for, read by `server_wait`.
     pub fn retry_after(&self) -> Option<Duration> {
-        parse_retry_after(self.header("retry-after"))
+        server_wait(self.status, &self.headers)
     }
 }
 
@@ -342,26 +387,40 @@ impl Gate {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Wait for a pause to end and a place to be free.
-    fn enter(&self) -> Pass<'_> {
+    /// Wait for a pause to end and a place to be free, giving up when
+    /// `deadline` passes first.
+    fn enter_by(&self, deadline: Option<Instant>) -> Option<Pass<'_>> {
         let mut state = self.lock();
         loop {
             let now = Instant::now();
-            if let Some(until) = state.paused_until.filter(|u| *u > now) {
-                state = self
-                    .changed
-                    .wait_timeout(state, until - now)
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .0;
-            } else if state.in_flight < state.limit {
+            if deadline.is_some_and(|d| d <= now) {
+                return None;
+            }
+            let wait = |until: Option<Instant>| {
+                // The earlier of the pause's end and the deadline; neither
+                // is a wait for a place.
+                match (until, deadline) {
+                    (Some(u), Some(d)) => Some(u.min(d) - now),
+                    (u, d) => u.or(d).map(|t| t - now),
+                }
+            };
+            let paused = state.paused_until.filter(|u| *u > now);
+            if paused.is_none() && state.in_flight < state.limit {
                 state.in_flight += 1;
-                return Pass(self);
-            } else {
-                state = self
+                return Some(Pass(self));
+            }
+            state = match wait(paused) {
+                Some(w) => {
+                    self.changed
+                        .wait_timeout(state, w)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => self
                     .changed
                     .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
-            }
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
         }
     }
 
@@ -414,6 +473,60 @@ pub fn parse_retry_after(value: Option<&str>) -> Option<Duration> {
     let at = httpdate::parse_http_date(value).ok()?;
     let wait = at.duration_since(SystemTime::now()).unwrap_or_default();
     Some(wait.min(RETRY_AFTER_MAX))
+}
+
+/// The wait a response asks for before the next request: its Retry-After,
+/// read by `parse_retry_after`, else, on a 429, the `t=` of its `RateLimit`
+/// header, read by `parse_ratelimit_reset`. On any other status a
+/// `RateLimit` header only reports the quota, so it is not a wait.
+pub fn server_wait(status: u16, headers: &HeaderMap) -> Option<Duration> {
+    let text = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    parse_retry_after(text(RETRY_AFTER)).or_else(|| {
+        if status != 429 {
+            return None;
+        }
+        // Several fields are one list (RFC 9110 section 5.3).
+        let fields: Vec<&str> = headers
+            .get_all("ratelimit")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        parse_ratelimit_reset((!fields.is_empty()).then(|| fields.join(", ")).as_deref())
+    })
+}
+
+/// A `RateLimit` header's wait: the `t=` (seconds until the quota is
+/// restored) of the policy that has run out, `r=0`, or the longest `t=`
+/// when none says so. Medplum sends `"requests";r=0;t=60`. Clamped to
+/// [0, RETRY_AFTER_MAX] as a Retry-After is; None when no item has a
+/// readable `t=`.
+pub fn parse_ratelimit_reset(value: Option<&str>) -> Option<Duration> {
+    let mut spent = None;
+    let mut any = None;
+    for item in value?.split(',') {
+        let mut remaining = None;
+        let mut reset = None;
+        for param in item.split(';').skip(1) {
+            let Some((key, v)) = param.split_once('=') else {
+                continue;
+            };
+            let v = v.trim().trim_matches('"');
+            match key.trim() {
+                "r" => remaining = v.parse::<f64>().ok(),
+                "t" => reset = v.parse::<f64>().ok().filter(|t| !t.is_nan()),
+                _ => {}
+            }
+        }
+        let Some(t) = reset else {
+            continue;
+        };
+        let wait = Duration::from_secs_f64(t.clamp(0.0, RETRY_AFTER_MAX.as_secs_f64()));
+        any = any.max(Some(wait));
+        if remaining.is_some_and(|r| r <= 0.0) {
+            spent = spent.max(Some(wait));
+        }
+    }
+    spent.or(any)
 }
 
 fn cap(body: String) -> String {
@@ -536,15 +649,26 @@ impl FhirClient {
                 token_url,
                 client_id,
                 client_secret,
+                token_auth,
+                scope,
             } => {
-                let form = url::form_urlencoded::Serializer::new(String::new())
-                    .append_pair("grant_type", "client_credentials")
-                    .append_pair("client_id", &client_id)
-                    .append_pair("client_secret", &client_secret)
-                    .finish();
+                let mut form = url::form_urlencoded::Serializer::new(String::new());
+                form.append_pair("grant_type", "client_credentials");
+                if let Some(scope) = &scope {
+                    form.append_pair("scope", scope);
+                }
+                let authorization = match token_auth {
+                    TokenAuth::Post => {
+                        form.append_pair("client_id", &client_id)
+                            .append_pair("client_secret", &client_secret);
+                        None
+                    }
+                    TokenAuth::Basic => Some(client_basic(&client_id, &client_secret)?),
+                };
                 client.renewing(Grant::Form {
                     url: token_url,
-                    form,
+                    form: form.finish(),
+                    authorization,
                 })?
             }
             Auth::Google(creds) => {
@@ -560,6 +684,7 @@ impl FhirClient {
                     google::Source::RefreshToken { token_uri, form } => Grant::Form {
                         url: token_uri.clone(),
                         form: form.clone(),
+                        authorization: None,
                     },
                     google::Source::Metadata { url } => Grant::Metadata { url: url.clone() },
                 };
@@ -587,9 +712,13 @@ impl FhirClient {
         self
     }
 
-    /// A place in the gate, when the client has one.
-    fn enter(&self) -> Option<Pass<'_>> {
-        self.gate.as_ref().map(Gate::enter)
+    /// A place in the gate, when the client has one, or Err when `deadline`
+    /// passes before one is free.
+    fn enter_by(&self, deadline: Option<Instant>) -> std::result::Result<Option<Pass<'_>>, ()> {
+        match &self.gate {
+            None => Ok(None),
+            Some(gate) => gate.enter_by(deadline).map(Some).ok_or(()),
+        }
     }
 
     /// A renewing authorizer, with its first token fetched now.
@@ -658,10 +787,22 @@ impl FhirClient {
     }
 
     /// GET with `Prefer: respond-async`, the Bulk Data kick-off. Retried as
-    /// `get` is; the 202 comes back with its headers, for `Content-Location`.
-    pub fn get_async(&self, url: &str) -> std::result::Result<Exchange, FetchError> {
-        self.send(
+    /// `get` is, except a 429, which comes back as an `Exchange` like the
+    /// 202 (with its headers, for `Content-Location`): a server that runs
+    /// one export at a time (Aidbox) answers 429 until the other one ends,
+    /// and the caller waits that out against its own deadline. Every
+    /// attempt and the waits between them end by `deadline`, as in
+    /// `exchange_by`; no attempt starts after it.
+    pub fn get_async(
+        &self,
+        url: &str,
+        deadline: Option<Instant>,
+    ) -> std::result::Result<Exchange, FetchError> {
+        self.retrying_by(
+            Attempt::Authorized,
             || self.fhir_get(url).header("prefer", "respond-async"),
+            |status| status == 429,
+            deadline,
             exchanged,
         )
     }
@@ -693,7 +834,9 @@ impl FhirClient {
             } else {
                 self.http.request(method.clone(), url)
             };
-            let pass = self.enter();
+            let Ok(pass) = self.enter_by(deadline) else {
+                break;
+            };
             // After the wait for a place, which can outlast a token.
             if let Some(v) = self.authorization()? {
                 request = self.authorize(request, &v);
@@ -762,24 +905,34 @@ impl FhirClient {
         grant: &Grant,
     ) -> std::result::Result<(HeaderValue, Instant), FetchError> {
         let started = Instant::now();
-        let post = |url: &str, form: String| {
+        let post = |url: &str, form: String, authorization: Option<&HeaderValue>| {
             self.retrying(
                 Attempt::Token,
                 || {
-                    self.http
+                    let request = self
+                        .http
                         .post(url)
                         .header(ACCEPT, "application/json")
                         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                        .body(form.clone())
+                        .body(form.clone());
+                    match authorization {
+                        Some(v) => request.header(AUTHORIZATION, v.clone()),
+                        None => request,
+                    }
                 },
                 fetched,
             )
         };
         let got = match grant {
-            Grant::Form { url, form } => post(url, form.clone())?,
+            Grant::Form {
+                url,
+                form,
+                authorization,
+            } => post(url, form.clone(), authorization.as_ref())?,
             Grant::Jwt(sa) => post(
                 &sa.token_uri,
                 sa.token_form().map_err(FetchError::Transport)?,
+                None,
             )?,
             Grant::Metadata { url } => self.retrying(
                 Attempt::Token,
@@ -849,20 +1002,41 @@ impl FhirClient {
     }
 
     /// The retry loop. Any 2xx is a success, handed to `success`; 429 and
-    /// 5xx retry with backoff (a Retry-After, seconds or an HTTP-date,
-    /// replaces the computed delay); any other status is final on the first
-    /// response.
+    /// 5xx retry with backoff (the wait the server asks for, by
+    /// `server_wait`, replaces the computed delay); any other status is
+    /// final on the first response.
     fn retrying<T>(
         &self,
         kind: Attempt,
         request: impl Fn() -> RequestBuilder,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
+        self.retrying_by(kind, request, |_| false, None, success)
+    }
+
+    /// `retrying`, with the statuses for which `handled` is true handed to
+    /// `success` as a 2xx is, not retried. With a `deadline`, each attempt
+    /// keeps the client's timeout, cut short when less time is left, the
+    /// waits between attempts end by it, and no attempt starts after it;
+    /// the last failure is then the error.
+    fn retrying_by<T>(
+        &self,
+        kind: Attempt,
+        request: impl Fn() -> RequestBuilder,
+        handled: impl Fn(u16) -> bool,
+        deadline: Option<Instant>,
+        success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
+    ) -> std::result::Result<T, FetchError> {
+        let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let sleep = |wait: Duration| std::thread::sleep(left().map_or(wait, |l| wait.min(l)));
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
             let pass = match kind {
                 Attempt::Token => None,
-                Attempt::Authorized | Attempt::Anonymous => self.enter(),
+                Attempt::Authorized | Attempt::Anonymous => match self.enter_by(deadline) {
+                    Ok(pass) => pass,
+                    Err(()) => break,
+                },
             };
             let mut request = request();
             // Chosen once admitted, for every attempt: the wait for a place
@@ -873,22 +1047,29 @@ impl FhirClient {
             {
                 request = self.authorize(request, &v);
             }
+            // After both: the wait for a place and a token renewal take from
+            // the time left.
+            if let Some(left) = left() {
+                if left.is_zero() {
+                    break;
+                }
+                request = request.timeout(self.timeout.min(left));
+            }
             match request.send() {
                 Err(e) => {
                     drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
-                        std::thread::sleep(jittered(backoff_delay(attempt, None)));
+                        sleep(jittered(backoff_delay(attempt, None)));
                     }
                 }
                 Ok(resp) => {
                     let status = resp.status().as_u16();
+                    if handled(status) {
+                        return success(resp);
+                    }
                     if status == 429 || status >= 500 {
-                        let ra = parse_retry_after(
-                            resp.headers()
-                                .get(RETRY_AFTER)
-                                .and_then(|v| v.to_str().ok()),
-                        );
+                        let ra = server_wait(status, resp.headers());
                         let delay = backoff_delay(attempt, ra);
                         let delay = if ra.is_some() { delay } else { jittered(delay) };
                         last = Some(FetchError::Status {
@@ -902,7 +1083,7 @@ impl FhirClient {
                             gate.pause(delay);
                         }
                         if attempt < self.retries {
-                            std::thread::sleep(delay);
+                            sleep(delay);
                         }
                     } else if !(200..300).contains(&status) {
                         return Err(FetchError::Status {
@@ -915,7 +1096,14 @@ impl FhirClient {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| FetchError::Transport("no attempts made".to_string())))
+        Err(last.unwrap_or_else(|| {
+            let why = if deadline.is_some() {
+                "the deadline passed"
+            } else {
+                "no attempts made"
+            };
+            FetchError::Transport(why.to_string())
+        }))
     }
 }
 
@@ -931,12 +1119,12 @@ mod tests {
     #[test]
     fn the_gate_lets_in_only_its_limit() {
         let gate = Gate::new(2);
-        let a = gate.enter();
-        let _b = gate.enter();
+        let a = gate.enter_by(None).unwrap();
+        let _b = gate.enter_by(None).unwrap();
         let entered = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|s| {
             s.spawn(|| {
-                let _c = gate.enter();
+                let _c = gate.enter_by(None).unwrap();
                 entered.store(true, std::sync::atomic::Ordering::SeqCst);
             });
             std::thread::sleep(Duration::from_millis(100));
@@ -953,8 +1141,37 @@ mod tests {
         // A shorter pause does not cut the longer one short.
         gate.pause(Duration::from_millis(10));
         let started = Instant::now();
-        let _pass = gate.enter();
+        let _pass = gate.enter_by(None).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn a_wait_for_the_gate_gives_up_at_the_deadline() {
+        let gate = Gate::new(1);
+        gate.pause(Duration::from_secs(5));
+        let started = Instant::now();
+        assert!(
+            gate.enter_by(Some(started + Duration::from_millis(200)))
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // No pause, no free place: the same.
+        let gate = Gate::new(1);
+        let _held = gate.enter_by(None).unwrap();
+        let started = Instant::now();
+        assert!(
+            gate.enter_by(Some(started + Duration::from_millis(200)))
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1028,6 +1245,8 @@ mod tests {
                 token_url: server.url_str("/token"),
                 client_id: "id".into(),
                 client_secret: "secret".into(),
+                token_auth: TokenAuth::Post,
+                scope: None,
             },
             1,
             Duration::from_secs(5),
@@ -1072,6 +1291,8 @@ mod tests {
                 token_url: server.url_str("/token"),
                 client_id: "id".into(),
                 client_secret: "secret".into(),
+                token_auth: TokenAuth::Post,
+                scope: None,
             },
             3,
             Duration::from_secs(5),
@@ -1120,6 +1341,82 @@ mod tests {
             wait > Duration::from_secs(110) && wait <= Duration::from_secs(120),
             "{wait:?}"
         );
+    }
+
+    #[test]
+    fn a_ratelimit_header_gives_the_reset_of_the_spent_policy() {
+        let reset = |v: &str| parse_ratelimit_reset(Some(v));
+        assert_eq!(
+            reset(r#""requests";r=0;t=60"#),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(reset("default;r=0;t=2"), Some(Duration::from_secs(2)));
+        // The policy that has run out, not the longer wait of one that has not.
+        assert_eq!(
+            reset(r#""fhir";r=500;t=50, "requests";r=0;t=30"#),
+            Some(Duration::from_secs(30))
+        );
+        // None has run out: the longest.
+        assert_eq!(
+            reset(r#""a";r=5;t=10, "b";r=3;t=40"#),
+            Some(Duration::from_secs(40))
+        );
+        assert_eq!(reset(r#""a";r=0;t=1e300"#), Some(RETRY_AFTER_MAX));
+        assert_eq!(reset(r#""a";r=0;t=-3"#), Some(Duration::ZERO));
+        assert_eq!(reset(r#""a";r=0;t=NaN"#), None);
+        // The older draft's form has no `t=`.
+        assert_eq!(reset("limit=100, remaining=0, reset=60"), None);
+        assert_eq!(reset(""), None);
+        assert_eq!(parse_ratelimit_reset(None), None);
+    }
+
+    #[test]
+    fn a_ratelimit_header_is_a_wait_only_on_a_429_without_a_retry_after() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.append(*k, HeaderValue::from_static(v));
+            }
+            h
+        };
+        let limited = headers(&[("ratelimit", "\"requests\";r=0;t=7")]);
+        assert_eq!(server_wait(429, &limited), Some(Duration::from_secs(7)));
+        assert_eq!(server_wait(202, &limited), None);
+        assert_eq!(server_wait(503, &limited), None);
+        let both = headers(&[("retry-after", "3"), ("ratelimit", "\"requests\";r=0;t=7")]);
+        assert_eq!(server_wait(429, &both), Some(Duration::from_secs(3)));
+        // Two RateLimit fields are read as one list.
+        let two = headers(&[
+            ("ratelimit", "\"fhir\";r=9;t=50"),
+            ("ratelimit", "\"requests\";r=0;t=20"),
+        ]);
+        assert_eq!(server_wait(429, &two), Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn medplums_two_ratelimit_fields_are_read_as_it_sends_them() {
+        // Self-hosted Medplum 5.2.5 sends both fields on every response and
+        // no Retry-After on a 429.
+        let headers = |requests: &'static str, fhir: &'static str| {
+            let mut h = HeaderMap::new();
+            h.append("ratelimit", HeaderValue::from_static(requests));
+            h.append("ratelimit", HeaderValue::from_static(fhir));
+            h
+        };
+        let quota = headers(
+            "\"requests\";r=59990;t=60",
+            "\"fhirInteractions\";r=49980;t=60",
+        );
+        // Not a 429: the fields only report the quota.
+        assert_eq!(server_wait(200, &quota), None);
+        assert_eq!(server_wait(202, &quota), None);
+        // A 429 with neither spent: the longest reset.
+        assert_eq!(server_wait(429, &quota), Some(Duration::from_secs(60)));
+        // One spent: its reset, not the other's.
+        let spent = headers("\"requests\";r=59990;t=60", "\"fhirInteractions\";r=0;t=45");
+        assert_eq!(server_wait(429, &spent), Some(Duration::from_secs(45)));
+        let spent = headers("\"requests\";r=0;t=12", "\"fhirInteractions\";r=49980;t=60");
+        assert_eq!(server_wait(429, &spent), Some(Duration::from_secs(12)));
     }
 
     #[test]
@@ -1280,7 +1577,7 @@ mod tests {
         );
         let c = client(1);
         assert_eq!(
-            c.get_async(&server.url_str("/fhir/$export"))
+            c.get_async(&server.url_str("/fhir/$export"), None)
                 .unwrap()
                 .status,
             202
@@ -1367,6 +1664,60 @@ mod tests {
     }
 
     #[test]
+    fn a_429_with_only_a_ratelimit_header_waits_for_its_reset() {
+        // Medplum's form: no Retry-After. The backoff alone would retry
+        // after half a second.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/r"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(429).append_header("RateLimit", "\"requests\";r=0;t=2"),
+                    status_code(200).body("ok")
+                ]),
+        );
+        let t = Instant::now();
+        client(3).get(&server.url_str("/r")).unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_429_with_medplums_two_ratelimit_fields_waits_for_the_spent_one() {
+        // The `requests` policy's 60 s would be capped at 30 s; the spent
+        // `fhirInteractions` policy asks for 2 s.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/r"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(429)
+                        .append_header("RateLimit", "\"requests\";r=59990;t=60")
+                        .append_header("RateLimit", "\"fhirInteractions\";r=0;t=2"),
+                    status_code(200).body("ok")
+                ]),
+        );
+        let t = Instant::now();
+        client(3).get(&server.url_str("/r")).unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_bulk_kick_off_hands_a_429_back_without_retrying() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/$export"))
+                .times(1)
+                .respond_with(status_code(429).append_header("Retry-After", "5")),
+        );
+        let got = client(3)
+            .get_async(&server.url_str("/fhir/$export"), None)
+            .unwrap();
+        assert_eq!(got.status, 429);
+        assert_eq!(got.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
     fn a_404_is_not_retried() {
         let server = Server::run();
         server.expect(
@@ -1425,6 +1776,8 @@ mod tests {
             token_url: server.url("/token").to_string(),
             client_id: "key-x".into(),
             client_secret: "s3cret&=".into(),
+            token_auth: TokenAuth::Post,
+            scope: None,
         }
     }
 
@@ -1473,6 +1826,85 @@ mod tests {
         let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5)).unwrap();
         c.get(&server.url("/t").to_string()).unwrap();
         c.get(&server.url("/t").to_string()).unwrap();
+    }
+
+    #[test]
+    fn token_auth_basic_sends_the_id_and_secret_only_in_a_basic_header() {
+        // base64("key-x:s3cret%26%3D"): each part form-urlencoded first.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::headers(contains((
+                    "authorization",
+                    "Basic a2V5LXg6czNjcmV0JTI2JTNE"
+                ))),
+                request::body(url_decoded(contains(("grant_type", "client_credentials")))),
+                request::body(url_decoded(not(contains(key("client_id"))))),
+                request::body(url_decoded(not(contains(key("client_secret"))))),
+                request::body(url_decoded(not(contains(key("scope"))))),
+            ])
+            .times(1)
+            .respond_with(token("abc", 3600)),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/t"),
+                request::headers(contains(("authorization", "Bearer abc"))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body("ok")),
+        );
+        let Auth::ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            ..
+        } = credentials(&server)
+        else {
+            unreachable!()
+        };
+        let auth = Auth::ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            token_auth: TokenAuth::Basic,
+            scope: None,
+        };
+        let c = FhirClient::new(auth, 1, Duration::from_secs(5)).unwrap();
+        c.get(&server.url_str("/t")).unwrap();
+    }
+
+    #[test]
+    fn a_scope_is_sent_with_the_token_request() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::body(url_decoded(contains(("scope", "system/*.read")))),
+                request::body(url_decoded(contains(("client_id", "key-x")))),
+            ])
+            .times(1)
+            .respond_with(token("abc", 3600)),
+        );
+        let Auth::ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            token_auth,
+            ..
+        } = credentials(&server)
+        else {
+            unreachable!()
+        };
+        let auth = Auth::ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            token_auth,
+            scope: Some("system/*.read".into()),
+        };
+        FhirClient::new(auth, 1, Duration::from_secs(5)).unwrap();
     }
 
     #[test]
