@@ -757,3 +757,28 @@ fn a_corrupt_gzip_input_is_named() {
         }
     }
 }
+
+#[test]
+fn a_closed_stdout_fails_the_run() {
+    // The read end is closed before the run starts, so every write to
+    // stdout fails, however small the output and whatever is buffered.
+    for format in ["ndjson", "csv"] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let run = std::process::Command::new(env!("CARGO_BIN_EXE_fhir-pipes"))
+            .env_remove("FHIR_PIPES_DATABASE_URL")
+            .arg("views")
+            .arg("run")
+            .arg(fixtures().join("views/Binary-IcrObs.json"))
+            .arg("--input")
+            .arg(fixtures().join("raw/Observation.ndjson"))
+            .args(["--output", format])
+            .stdout(writer)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(1), "{format}: {stderr}");
+        assert!(stderr.contains("writing"), "{format}: {stderr}");
+        assert!(!stderr.contains("3 rows"), "{format}: {stderr}");
+    }
+}

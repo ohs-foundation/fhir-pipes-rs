@@ -629,14 +629,13 @@ fn open_sink(out: Option<&PathBuf>) -> Result<Output<Box<dyn Write>>> {
 }
 
 /// Finish writing what `open_sink` opened: the end of a gzip stream, then
-/// a flush. A file that cannot be finished is an error; stdout's flush is
-/// not checked.
+/// a flush. Both are buffered, so this is where most of a small output is
+/// written, and an error here (a full disk, a closed pipe) fails the run.
 fn close_sink(sink: Output<Box<dyn Write>>, out: Option<&PathBuf>) -> Result<()> {
-    let done = sink.finish();
-    if let Some(path) = out {
-        done.with_context(|| format!("writing {}", path.display()))?;
-    }
-    Ok(())
+    sink.finish().map(drop).with_context(|| match out {
+        Some(path) => format!("writing {}", path.display()),
+        None => "writing to stdout".to_string(),
+    })
 }
 
 /// Resource text of unknown shape (stdin has no extension to go by): one JSON
