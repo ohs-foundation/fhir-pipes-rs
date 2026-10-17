@@ -448,7 +448,6 @@ async fn write(
     if upsert {
         for p in plans.iter().filter(|p| !p.files.is_empty()) {
             if let Some(key) = p.key.as_deref()
-                && key != "id"
                 && !has_index(&mut tx, &name(p), key).await?
             {
                 exec(

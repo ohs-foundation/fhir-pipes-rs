@@ -27,6 +27,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
 | Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
+| Load only the rows of the resources that changed since the last load (`mode = "upsert"`): ids from search and bulk merges, `deleted[]`, HAPI's database, and full downloads and file sources compared with the old file; a full load when the log cannot vouch for the database (#38) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |
 | Spark SQL tables for a Spark Thrift server: `catalog.spark.sql` with a table per warehouse table over `s3a://`, `hdfs://` or local paths, plus your own Spark SQL; the Locations table needs Spark 4.1 (#31) | `refresh` (`[catalog] spark`) | next release |
 | Authenticate to a FHIR server with a bearer token or an OAuth client (client-credentials grant, refreshed before expiry); retry 429, 5xx and connection errors. The `dhis2` commands use a DHIS2 personal access token or basic auth instead | `extract`, `export`, `run`, `load`, `refresh` | 0.3.0 |

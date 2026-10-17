@@ -107,6 +107,7 @@ concurrency = 4
 url_env = "FHIR_PIPES_DATABASE_URL"
 schema = "public"
 # tables = ["indicator_value"]   # default: every view table
+# mode = "upsert"                # default "replace"
 
 [catalog]
 base_url = "https://data.example.org/warehouse"
@@ -142,6 +143,17 @@ only from the variable `url_env` names (default `FHIR_PIPES_DATABASE_URL`).
 Its `sslmode` sets TLS; managed databases usually need `require` or more.
 A build without the `postgres` feature stops with exit 2; `--skip database`
 runs the rest.
+
+`mode = "upsert"` rewrites only the rows of resources that changed since the
+last load: `DELETE FROM t WHERE id = ANY($1)`, then `COPY` of those ids'
+rows from the Parquet. The changes are kept in `raw/<server>/.changes.json`
+(search and bulk merges, `deleted[]`, full downloads and file sources
+compared with the old file). Each loaded view needs a column with path
+`getResourceKey()` outside any `forEach`; a view without one stops the run
+with exit 2. It loads in full on the first run, after a refresh that did not
+finish, with `--full`, without the views step in the run, and for a table
+that is new, whose columns changed, or whose view or partition lookup
+changed. Edits to `raw/` by hand are not seen: run `--full` after one.
 
 Before loading into a database, confirm with the user which database it
 is. Do not load into a production database unless the user says so.
