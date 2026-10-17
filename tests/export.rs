@@ -16,6 +16,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_TOKEN_AUTH",
+        "FHIR_PIPES_SCOPE",
         "FHIR_PIPES_USERNAME",
         "FHIR_PIPES_PASSWORD",
         "FHIR_PIPES_GOOGLE_AUTH",
@@ -606,6 +608,139 @@ fn basic_auth_needs_a_password_and_no_other_credentials() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("cannot be used with"));
+}
+
+/// A token endpoint that takes the client id and secret only in a Basic
+/// header (client_secret_basic, the form Aidbox documents), with the scope.
+#[test]
+fn token_auth_basic_sends_the_client_credentials_in_a_basic_header() {
+    let server = Server::run();
+    let base = server.url_str("/fhir");
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/token"),
+            // base64("key-x:shh")
+            request::headers(contains(("authorization", "Basic a2V5LXg6c2ho"))),
+            request::body(url_decoded(contains(("grant_type", "client_credentials")))),
+            request::body(url_decoded(contains(("scope", "system/*.read")))),
+            request::body(url_decoded(not(contains(key("client_secret"))))),
+        ])
+        .times(1)
+        .respond_with(json_encoded(
+            json!({"access_token": "tok", "expires_in": 3600}),
+        )),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Patient"),
+            request::headers(contains(("authorization", "Bearer tok"))),
+        ])
+        .respond_with(status_code(200).body(bundle(
+            vec![json!({"resourceType": "Patient", "id": "p1"})],
+            None,
+        ))),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    fhir_pipes()
+        .args(["export", "--server", &base, "--type", "Patient"])
+        .args(["--client-id", "key-x", "--token-url"])
+        .arg(server.url_str("/token"))
+        .args(["--token-auth", "basic", "--scope", "system/*.read"])
+        .arg("--out")
+        .arg(dir.path())
+        .env("FHIR_PIPES_CLIENT_SECRET", "shh")
+        .assert()
+        .success();
+    assert_eq!(read_ndjson(&dir.path().join("Patient.ndjson")).len(), 1);
+}
+
+#[test]
+fn token_auth_and_scope_need_a_client_id() {
+    let dir = tempfile::tempdir().unwrap();
+    for flag in [["--token-auth", "basic"], ["--scope", "system/*.read"]] {
+        fhir_pipes()
+            .args([
+                "export",
+                "--server",
+                "http://127.0.0.1:9/fhir",
+                "--type",
+                "Patient",
+            ])
+            .args(flag)
+            .arg("--out")
+            .arg(dir.path())
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("--client-id"));
+    }
+}
+
+/// A request quota of one window: 429 with Medplum's `RateLimit` header
+/// (seconds left in `t=`, no Retry-After) until `window` after the first
+/// request, then `body`.
+#[derive(Clone)]
+struct Quota {
+    window: std::time::Duration,
+    first: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    body: String,
+}
+
+impl Responder for Quota {
+    fn respond<'a>(
+        &mut self,
+        _req: &'a httptest::http::Request<httptest::bytes::Bytes>,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = httptest::http::Response<httptest::bytes::Bytes>> + Send + 'a>,
+    > {
+        let first = *self
+            .first
+            .lock()
+            .unwrap()
+            .get_or_insert_with(std::time::Instant::now);
+        let left = self.window.saturating_sub(first.elapsed());
+        let response = httptest::http::Response::builder();
+        let response = if left.is_zero() {
+            response
+                .status(200)
+                .body(httptest::bytes::Bytes::from(self.body.clone()))
+        } else {
+            response
+                .status(429)
+                .header(
+                    "RateLimit",
+                    format!("\"requests\";r=0;t={}", left.as_secs_f64().ceil()),
+                )
+                .body(httptest::bytes::Bytes::new())
+        };
+        let response = response.unwrap();
+        Box::pin(async move { response })
+    }
+}
+
+/// Medplum answers a 429 with `RateLimit: …;t=<seconds>` and no
+/// Retry-After. The search waits that long; the backoff alone (0.5, 1 s)
+/// would use up the three tries inside the window.
+#[test]
+fn a_429_with_only_a_ratelimit_header_waits_for_its_reset() {
+    let server = Server::run();
+    let base = server.url_str("/fhir");
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Patient"))
+            .times(2)
+            .respond_with(Quota {
+                window: std::time::Duration::from_secs(2),
+                first: Default::default(),
+                body: bundle(vec![json!({"resourceType": "Patient", "id": "p1"})], None),
+            }),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    fhir_pipes()
+        .args(["export", "--server", &base, "--type", "Patient"])
+        .arg("--out")
+        .arg(dir.path())
+        .assert()
+        .success();
+    assert_eq!(read_ndjson(&dir.path().join("Patient.ndjson")).len(), 1);
 }
 
 /// A service account key file with the test-only key under

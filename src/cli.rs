@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::error::{PipesError, Result};
-use crate::extract::client::Auth;
+use crate::extract::client::{Auth, TokenAuth};
 use crate::extract::google::{Credentials, parse_server};
 use crate::extract::page::ServerKind;
 
@@ -459,6 +459,17 @@ pub struct AuthArgs {
     /// OAuth token endpoint the client id and secret are sent to; falls back to $FHIR_PIPES_TOKEN_URL
     #[arg(long, env = "FHIR_PIPES_TOKEN_URL", requires = "client_id")]
     pub token_url: Option<String>,
+    /// How the client id and secret are sent to the token URL: `post` in the form body (client_secret_post, the default) or `basic` in a Basic Authorization header (client_secret_basic, as Aidbox expects). Falls back to $FHIR_PIPES_TOKEN_AUTH
+    #[arg(
+        long,
+        env = "FHIR_PIPES_TOKEN_AUTH",
+        value_enum,
+        requires = "client_id"
+    )]
+    pub token_auth: Option<TokenAuth>,
+    /// The OAuth scope to ask for with the client id, e.g. `system/*.read`; none by default. Falls back to $FHIR_PIPES_SCOPE
+    #[arg(long, env = "FHIR_PIPES_SCOPE", requires = "client_id")]
+    pub scope: Option<String>,
     /// Username for HTTP Basic auth; falls back to $FHIR_PIPES_USERNAME
     #[arg(
         long,
@@ -492,6 +503,8 @@ impl AuthArgs {
             client_id: None,
             client_secret: None,
             token_url: None,
+            token_auth: None,
+            scope: None,
             username: None,
             password: None,
             google_auth: false,
@@ -525,6 +538,8 @@ impl AuthArgs {
                     token_url: url.clone(),
                     client_id: id.clone(),
                     client_secret: secret.clone(),
+                    token_auth: self.token_auth.unwrap_or_default(),
+                    scope: self.scope.clone(),
                 },
                 _ => match (&self.username, &self.password) {
                     (Some(user), Some(password)) => Auth::basic(user, password),

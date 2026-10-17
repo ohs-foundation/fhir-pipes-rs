@@ -152,7 +152,8 @@ run. HAPI supports it without stating it, which gives a warning.
 ## Authentication
 
 `sync` talks only to the sink, so the usual options are the sink's:
-`--token`, `--client-id`/`--client-secret`/`--token-url`,
+`--token`, `--client-id`/`--client-secret`/`--token-url` (with
+`--token-auth` and `--scope`),
 `--username`/`--password` and `--google-auth`, or their `FHIR_PIPES_*`
 environment variables (see [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server)).
 The source's credentials are only needed by `export`. When the two need

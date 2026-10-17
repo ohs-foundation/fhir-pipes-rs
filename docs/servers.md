@@ -97,7 +97,7 @@ costs 20 points, so about 2,500 searches a minute). A self-hosted server sets
 them with `defaultRateLimit` and `defaultFhirQuota`
 (`MEDPLUM_DEFAULT_RATE_LIMIT`, `MEDPLUM_DEFAULT_FHIR_QUOTA`). A 429 answer
 carries `RateLimit` headers (`"fhirInteractions";r=0;t=45`) and no
-`Retry-After`.
+`Retry-After`; fhir-pipes waits for the `t=` of the spent limit.
 
 Checked against a self-hosted Medplum 5.2.5: search of 12,499 Observations as
 one stream (13 pages) and in 12 windows, incremental search, and bulk export
@@ -132,9 +132,10 @@ and an AccessPolicy that lets it read:
 
 Pass the client id and secret with `--username` and `--password` (or
 `FHIR_PIPES_USERNAME` and `FHIR_PIPES_PASSWORD`). For the client-credentials
-grant instead (`grant_types: ["client_credentials"]`, token URL
-`<aidbox>/auth/token`), Aidbox documents only the request with the id and
-secret in a Basic header, not in the form body that fhir-pipes sends today.
+grant instead (`grant_types: ["client_credentials"]`), pass `--client-id`,
+`--client-secret`, `--token-url <aidbox>/auth/token` and `--token-auth basic`
+(`server.token_auth = "basic"` in `refresh`): Aidbox documents only the token
+request with the id and secret in a Basic header.
 
 **Paging.** By default Aidbox counts the whole result on every page
 (`_total=accurate`), which is slow on a large type and counts against its
@@ -151,7 +152,8 @@ matching account resource (for example `AwsAccount`, which also works with
 MinIO). Without it the kick-off answers 500 "storage-type not specified", and
 fhir-pipes says which setting is missing. The output files are signed URLs,
 downloaded without the token. Aidbox runs one export at a time and answers a
-second kick-off with 429.
+second kick-off with 429; fhir-pipes waits and asks again until
+`--bulk-timeout`.
 
 Not yet checked against a real Aidbox server, which needs a licence: the
 largest `_count`, `_sort=_lastUpdated` (windows need it; without it the type

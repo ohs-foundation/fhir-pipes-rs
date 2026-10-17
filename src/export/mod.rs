@@ -14,7 +14,8 @@
 //! earliest of their watermarks and merged by id; types without one are
 //! exported in full in a second export. The export's `deleted` resources are
 //! removed from the files, and every type's watermark becomes the manifest's
-//! `transactionTime`. The count check after a merge is the same as above.
+//! `transactionTime`, or the server's clock at the kick-off (its `Date`)
+//! when that is earlier. The count check after a merge is the same as above.
 //! The output files download `--concurrency` at a time, through the same
 //! limit, and each type's are joined in manifest order.
 //!
@@ -647,7 +648,10 @@ fn cancel(client: &FhirClient, status_url: &str) {
 ///
 /// The saved status URL is cleared when the export failed, timed out (it is
 /// cancelled) or was read; it stays when the server could not be reached or
-/// a download failed, so the next run picks the same export up.
+/// a download failed, so the next run picks the same export up. A kick-off
+/// the server answers with 429 is tried again until `--bulk-timeout`; the
+/// wait counts towards that timeout, and nothing is saved until the server
+/// accepts the kick-off.
 fn run_job(
     client: &FhirClient,
     args: &ExportArgs,
@@ -661,34 +665,53 @@ fn run_job(
         Some(s) => format!("changes since {s}"),
         None => "in full".to_string(),
     };
-    let (status_url, mut manifest) = loop {
-        let (status_url, resumed) = match state.bulk.as_ref().filter(|p| job.matches(p)) {
-            Some(p) => {
-                println!(
-                    "{names}: resuming the bulk export ({what}) started at {}",
-                    p.started_at
-                );
-                (p.status_url.clone(), true)
-            }
-            None => {
-                let url = bulk::kick_off(client, &args.server, &job.types, job.since.as_deref())?;
-                println!("{names}: bulk export ({what}), status at {url}");
-                state.bulk = Some(bulk::Pending {
-                    status_url: url.clone(),
-                    types: job.types.clone(),
-                    since: job.since.clone(),
-                    started_at: format_utc(SystemTime::now()),
-                });
-                // Before waiting, so a run that stops now resumes this export.
-                state.write(&args.out)?;
-                (url, false)
-            }
-        };
+    let (status_url, server_time, mut manifest) = loop {
+        let (status_url, server_time, resumed) =
+            match state.bulk.as_ref().filter(|p| job.matches(p)) {
+                Some(p) => {
+                    println!(
+                        "{names}: resuming the bulk export ({what}) started at {}",
+                        p.started_at
+                    );
+                    (p.status_url.clone(), p.server_time.clone(), true)
+                }
+                None => {
+                    let Some(started) = bulk::kick_off(
+                        client,
+                        &args.server,
+                        &job.types,
+                        job.since.as_deref(),
+                        deadline,
+                    )?
+                    else {
+                        return Err(PipesError::Environment(format!(
+                            "the server did not accept the bulk export kick-off within \
+                             --bulk-timeout ({} s); no export was started",
+                            args.bulk_timeout
+                        )));
+                    };
+                    let url = started.status_url;
+                    println!("{names}: bulk export ({what}), status at {url}");
+                    state.bulk = Some(bulk::Pending {
+                        status_url: url.clone(),
+                        types: job.types.clone(),
+                        since: job.since.clone(),
+                        started_at: format_utc(SystemTime::now()),
+                        server_time: started.server_time.clone(),
+                    });
+                    // Before waiting, so a run that stops now resumes this export.
+                    state.write(&args.out)?;
+                    (url, started.server_time, false)
+                }
+            };
         let failed = match bulk::wait(client, &status_url, deadline)? {
-            bulk::Polled::Done(m) => break (status_url, m),
+            bulk::Polled::Done(m) => break (status_url, server_time, m),
             bulk::Polled::Gone if resumed => {
                 println!("the server no longer has the saved bulk export; starting another");
+                // Written now, so a kick-off that times out does not leave
+                // the gone export saved.
                 state.bulk = None;
+                state.write(&args.out)?;
                 continue;
             }
             bulk::Polled::Gone => {
@@ -724,7 +747,10 @@ fn run_job(
         state.write(&args.out)?;
         return Err(PipesError::Environment(message));
     }
-    let transaction_time = manifest.transaction_time.clone().unwrap_or_default();
+    let transaction_time = bulk::watermark(
+        manifest.transaction_time.as_deref().unwrap_or_default(),
+        server_time.as_deref(),
+    );
     for f in manifest
         .output
         .iter()

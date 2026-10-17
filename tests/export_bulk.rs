@@ -19,6 +19,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_CLIENT_ID",
         "FHIR_PIPES_CLIENT_SECRET",
         "FHIR_PIPES_TOKEN_URL",
+        "FHIR_PIPES_TOKEN_AUTH",
+        "FHIR_PIPES_SCOPE",
         "FHIR_PIPES_USERNAME",
         "FHIR_PIPES_PASSWORD",
         "FHIR_PIPES_GOOGLE_AUTH",
@@ -1022,4 +1024,217 @@ fn a_status_request_keeps_the_request_timeout() {
         .failure();
     let err = stderr(&a);
     assert!(err.contains("polling"), "{err}");
+}
+
+/// A kick-off for `Patient` answered by `responder`.
+fn expect_kick_off_with(server: &Server, times: usize, responder: impl Responder + 'static) {
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/$export"),
+            request::query(url_decoded(contains(("_type", "Patient")))),
+        ])
+        .times(times)
+        .respond_with(responder),
+    );
+}
+
+/// The status URL answers with `m`, the one file is read, and the export
+/// is deleted.
+fn expect_done(server: &Server, status: &str, m: &Value) {
+    server.expect(
+        Expectation::matching(request::method_path("GET", status.to_string()))
+            .times(1)
+            .respond_with(done(m)),
+    );
+    expect_file(
+        server,
+        "/files/p.ndjson",
+        ndjson(&[patient("a", "2026-10-01T00:00:00Z")]),
+    );
+    expect_delete(server, status);
+}
+
+/// Aidbox runs one export at a time and answers another kick-off with 429.
+/// More 429s than --retries: the kick-off is tried until the server takes it.
+#[test]
+fn a_kick_off_answered_with_429_is_tried_again_until_it_is_accepted() {
+    let server = Server::run();
+    let busy = || status_code(429).insert_header("Retry-After", "1");
+    expect_kick_off_with(
+        &server,
+        4,
+        cycle![
+            busy(),
+            busy(),
+            busy(),
+            status_code(202).insert_header("Content-Location", server.url_str("/status/20")),
+        ],
+    );
+    let m = manifest(&server, &[("Patient", "/files/p.ndjson")], false);
+    expect_done(&server, "/status/20", &m);
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .assert()
+        .success();
+    assert!(started.elapsed() >= Duration::from_secs(3), "Retry-After");
+    let text = stdout(&a);
+    assert!(
+        text.contains("bulk export: the server is busy (HTTP 429); waiting to start"),
+        "{text}"
+    );
+    assert_eq!(ids(&dir.path().join("Patient.ndjson")), ["a"]);
+}
+
+/// A server still busy at --bulk-timeout: the run fails and saves no export.
+#[test]
+fn a_kick_off_still_busy_at_the_bulk_timeout_starts_nothing() {
+    let server = Server::run();
+    expect_kick_off_with(
+        &server,
+        2,
+        status_code(429).insert_header("Retry-After", "1"),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--bulk-timeout", "2"])
+        .assert()
+        .failure();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let err = stderr(&a);
+    assert!(
+        err.contains(
+            "did not accept the bulk export kick-off within --bulk-timeout (2 s); no export was started"
+        ),
+        "{err}"
+    );
+    let path = dir.path().join(".export-state.json");
+    assert!(!path.exists() || state(dir.path()).get("bulk").is_none());
+}
+
+/// Medplum sets transactionTime after the last type is read. The watermark
+/// is the server's clock at the kick-off, its Date, when that is earlier.
+#[test]
+fn the_watermark_is_the_kick_offs_date_when_transaction_time_is_later() {
+    let server = Server::run();
+    expect_kick_off_with(
+        &server,
+        1,
+        status_code(202)
+            .insert_header("Content-Location", server.url_str("/status/21"))
+            .insert_header("Date", "Thu, 15 Oct 2026 07:30:00 GMT"),
+    );
+    // TRANSACTION_TIME is 08:00, half an hour after the kick-off.
+    let m = manifest(&server, &[("Patient", "/files/p.ndjson")], false);
+    expect_done(&server, "/status/21", &m);
+    let dir = tempfile::tempdir().unwrap();
+    export_bulk(&server, dir.path(), &["Patient"])
+        .assert()
+        .success();
+    assert_eq!(
+        state(dir.path())["types"]["Patient"]["watermark"],
+        "2026-10-15T07:30:00Z"
+    );
+}
+
+/// The kick-off's Date is saved with the export, so a run that resumes it
+/// uses it too.
+#[test]
+fn a_resumed_export_uses_the_saved_kick_off_date() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".export-state.json"),
+        json!({"server": server.url_str("/fhir"), "types": {}, "bulk": {
+            "status_url": server.url_str("/status/22"), "types": ["Patient"],
+            "started_at": "2026-10-15T07:00:05Z", "server_time": "2026-10-15T07:00:00Z"}})
+        .to_string(),
+    )
+    .unwrap();
+    let m = manifest(&server, &[("Patient", "/files/p.ndjson")], false);
+    expect_done(&server, "/status/22", &m);
+    export_bulk(&server, dir.path(), &["Patient"])
+        .assert()
+        .success();
+    assert_eq!(
+        state(dir.path())["types"]["Patient"]["watermark"],
+        "2026-10-15T07:00:00Z"
+    );
+}
+
+/// The client's own retries of a kick-off end by --bulk-timeout too: after a
+/// 429, a 503 asks for three seconds, longer than the time left. Without the
+/// deadline the third kick-off is sent at about four seconds and starts an
+/// export after the timeout.
+#[test]
+fn a_kick_off_retried_after_a_5xx_stops_at_the_bulk_timeout() {
+    let server = Server::run();
+    expect_kick_off_with(
+        &server,
+        2,
+        cycle![
+            status_code(429).insert_header("Retry-After", "1"),
+            status_code(503).insert_header("Retry-After", "3"),
+            status_code(202).insert_header("Content-Location", server.url_str("/status/23")),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--bulk-timeout", "2", "--timeout", "5"])
+        .assert()
+        .failure();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let err = stderr(&a);
+    assert!(
+        err.contains("did not accept the bulk export kick-off within --bulk-timeout (2 s)"),
+        "{err}"
+    );
+    let path = dir.path().join(".export-state.json");
+    assert!(!path.exists() || state(dir.path()).get("bulk").is_none());
+}
+
+/// A kick-off that answers slowly after a 429 is cut off at --bulk-timeout,
+/// not at the longer request timeout.
+#[test]
+fn a_slow_kick_off_after_a_429_is_cut_off_at_the_bulk_timeout() {
+    let server = Server::run();
+    expect_kick_off_with(
+        &server,
+        2,
+        cycle![
+            status_code(429).insert_header("Retry-After", "1"),
+            delay_and_then(
+                Duration::from_secs(6),
+                status_code(202).insert_header("Content-Location", server.url_str("/status/24")),
+            ),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--bulk-timeout", "2", "--timeout", "30"])
+        .assert()
+        .failure();
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+    let err = stderr(&a);
+    assert!(
+        err.contains("did not accept the bulk export kick-off within --bulk-timeout (2 s)"),
+        "{err}"
+    );
+    let path = dir.path().join(".export-state.json");
+    assert!(!path.exists() || state(dir.path()).get("bulk").is_none());
 }
