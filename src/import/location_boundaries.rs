@@ -20,14 +20,15 @@ use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use geo::orient::{Direction, Orient};
-use geo::{Geometry, LineString, MultiPolygon, Polygon};
+use geo::{Geometry, MultiPolygon, Polygon};
 use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{LocationBoundariesArgs, Shape, slugify, split_pair, text_of};
 use crate::dhis2::NdjsonWriter;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
+use crate::geometry::{convert_value, to_geojson_bytes};
 use crate::profile::Profile;
 use crate::report::Report;
 
@@ -122,9 +123,7 @@ fn feature_shape(geometry: Option<&Value>, id: &str, report: &mut Report) -> Opt
         );
         return None;
     }
-    let parsed = serde_json::from_value::<geojson::Geometry>(geometry.cloned().unwrap_or_default())
-        .map_err(|e| e.to_string())
-        .and_then(crate::geometry::geojson::convert);
+    let parsed = convert_value(geometry.cloned().unwrap_or_default());
     let (shape, z_dropped) = match parsed {
         Ok(p) => p,
         Err(e) => {
@@ -164,30 +163,6 @@ fn orient(shape: Geometry) -> Geometry {
     }
 }
 
-fn ring_json(ring: &LineString) -> Value {
-    ring.coords().map(|c| json!([c.x, c.y])).collect()
-}
-
-fn polygon_json(p: &Polygon) -> Value {
-    std::iter::once(p.exterior())
-        .chain(p.interiors())
-        .map(ring_json)
-        .collect()
-}
-
-/// Compact GeoJSON of a Polygon or MultiPolygon.
-pub fn geometry_bytes(shape: &Geometry) -> Vec<u8> {
-    let value = match shape {
-        Geometry::Polygon(p) => json!({"type": "Polygon", "coordinates": polygon_json(p)}),
-        Geometry::MultiPolygon(mp) => json!({
-            "type": "MultiPolygon",
-            "coordinates": mp.0.iter().map(polygon_json).collect::<Vec<_>>(),
-        }),
-        _ => unreachable!("only polygons are boundaries"),
-    };
-    value.to_string().into_bytes()
-}
-
 /// A feature geometry checked, rewound and serialized; None if unusable.
 #[cfg(test)]
 pub fn normalize_geometry(
@@ -195,7 +170,7 @@ pub fn normalize_geometry(
     id: &str,
     report: &mut Report,
 ) -> Option<Vec<u8>> {
-    feature_shape(geometry, id, report).map(|s| geometry_bytes(&s))
+    feature_shape(geometry, id, report).map(|s| to_geojson_bytes(&s))
 }
 
 fn polygons(shape: Geometry) -> Vec<Polygon> {
@@ -369,7 +344,7 @@ impl<F: FnMut(&Value) -> Result<()>> Builder<'_, '_, F> {
                     )));
                 }
                 let geometry = feature_shape(feature.get("geometry"), &slug, self.report);
-                let boundary = geometry.as_ref().map(geometry_bytes);
+                let boundary = geometry.as_ref().map(to_geojson_bytes);
                 let resource = opts.shape.admin_unit(
                     &slug,
                     name,
@@ -613,7 +588,7 @@ fn dissolve<'a>(parts: impl Iterator<Item = &'a Polygon>) -> Option<Vec<u8>> {
         1 => Geometry::Polygon(union.0[0].clone()),
         _ => Geometry::MultiPolygon(union),
     };
-    Some(geometry_bytes(&orient(boundary)))
+    Some(to_geojson_bytes(&orient(boundary)))
 }
 
 pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
@@ -699,6 +674,7 @@ mod tests {
     use crate::import::icr_shape;
     use base64::Engine;
     use geo::Area;
+    use serde_json::json;
 
     const CODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/national-admin-code";
 

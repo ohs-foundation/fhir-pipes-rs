@@ -3,13 +3,64 @@
 //! plus the profile's Organization columns (ICR puts a facility's registry
 //! codes and type labels there).
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::fhir::location::{Identifier, str_field};
+use crate::fhir::location::{Identifier, non_empty, resource, str_field};
 use crate::report::Report;
 
 pub const ORGANIZATION_TYPE_SYSTEM: &str =
     "http://terminology.hl7.org/CodeSystem/organization-type";
+
+/// The `prov` (Healthcare Provider) type every facility Organization has first.
+pub fn provider_type() -> Value {
+    json!({"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]})
+}
+
+/// The top-level keys of a `NewOrganization` after `resourceType` and `id`,
+/// in the order a writer puts them (see `LocationKey`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrganizationKey {
+    Meta,
+    Identifier,
+    Active,
+    Type,
+    Name,
+}
+
+/// A facility Organization fhir-pipes writes from scratch (`import
+/// location-sites --paired-org`, `dhis2 locations`, a `diff` create): `prov`
+/// first in its type. Empty lists and `None` are left out.
+#[derive(Debug, Default)]
+pub struct NewOrganization<'a> {
+    pub id: &'a str,
+    pub meta: Option<Value>,
+    pub identifier: Vec<Value>,
+    pub active: bool,
+    /// Types after `prov`.
+    pub extra_types: Vec<Value>,
+    pub name: Option<&'a str>,
+}
+
+impl NewOrganization<'_> {
+    /// The resource, its keys in `order`.
+    pub fn into_json(self, order: &[OrganizationKey; 5]) -> Value {
+        let types = std::iter::once(provider_type())
+            .chain(self.extra_types)
+            .collect();
+        let fields = vec![
+            (OrganizationKey::Meta, "meta", self.meta),
+            (
+                OrganizationKey::Identifier,
+                "identifier",
+                non_empty(self.identifier),
+            ),
+            (OrganizationKey::Active, "active", Some(json!(self.active))),
+            (OrganizationKey::Type, "type", Some(Value::Array(types))),
+            (OrganizationKey::Name, "name", self.name.map(|n| json!(n))),
+        ];
+        resource("Organization", self.id, fields, order)
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Organization {
@@ -114,6 +165,24 @@ impl Organization {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_organization_puts_prov_first_and_its_keys_in_the_given_order() {
+        use OrganizationKey::*;
+        let org = NewOrganization {
+            id: "org-a",
+            identifier: vec![crate::fhir::location::identifier("s", "v")],
+            active: true,
+            extra_types: vec![serde_json::json!({"text": "x"})],
+            name: Some("A"),
+            ..Default::default()
+        };
+        assert_eq!(
+            org.into_json(&[Name, Type, Meta, Active, Identifier])
+                .to_string(),
+            r#"{"resourceType":"Organization","id":"org-a","name":"A","type":[{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/organization-type","code":"prov","display":"Healthcare Provider"}]},{"text":"x"}],"active":true,"identifier":[{"system":"s","value":"v"}]}"#
+        );
+    }
 
     const ORG: &str = r#"{"resourceType":"Organization","id":"org-1","active":true,"name":"Siyi Health Post",
         "meta":{"versionId":"7","lastUpdated":"2026-08-06T02:59:22Z"},

@@ -15,14 +15,39 @@ use super::{Instance, NdjsonWriter, check_out, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
-use crate::fhir::location::PHYSICAL_TYPE_SYSTEM;
-use crate::fhir::location::boundary_extension;
-use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
+use crate::fhir::location::{
+    LocationKey, NewLocation, PhysicalType, boundary_extension, identifier,
+};
+use crate::fhir::organization::{NewOrganization, OrganizationKey};
 use crate::report::Report;
 use crate::transform::write_report;
 
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
+
+/// The key order of the Locations dhis2 locations writes.
+const LOCATION_KEYS: [LocationKey; 11] = [
+    LocationKey::Meta,
+    LocationKey::Extension,
+    LocationKey::Identifier,
+    LocationKey::Status,
+    LocationKey::Name,
+    LocationKey::Alias,
+    LocationKey::Type,
+    LocationKey::PhysicalType,
+    LocationKey::Position,
+    LocationKey::ManagingOrganization,
+    LocationKey::PartOf,
+];
+
+/// The key order of the facility Organizations dhis2 locations writes.
+const ORGANIZATION_KEYS: [OrganizationKey; 5] = [
+    OrganizationKey::Meta,
+    OrganizationKey::Identifier,
+    OrganizationKey::Active,
+    OrganizationKey::Type,
+    OrganizationKey::Name,
+];
 
 const ORG_UNIT_FIELDS: &str =
     "id,code,name,shortName,level,parent[id],openingDate,closedDate,geometry";
@@ -121,7 +146,7 @@ fn identifiers(unit: &OrgUnit, opts: &Options) -> Vec<Value> {
         "value": unit.id,
     })];
     if let Some(code) = &unit.code {
-        out.push(json!({"system": opts.instance.orgunit_code_system(), "value": code}));
+        out.push(identifier(&opts.instance.orgunit_code_system(), code));
     }
     out
 }
@@ -145,11 +170,7 @@ pub fn resources(
         return Vec::new();
     }
     let facility = unit.level == opts.facility_level;
-    let mut loc = json!({
-        "resourceType": "Location",
-        "id": id,
-        "meta": {"profile": [opts.instance.urls.location_profile], "tag": [opts.instance.tag()]},
-    });
+    let mut extension = Vec::new();
     let mut position = None;
     match unit
         .geometry
@@ -164,10 +185,10 @@ pub fn resources(
                 .as_ref()
                 .map(Value::to_string)
                 .unwrap_or_default();
-            loc["extension"] = json!([boundary_extension(
+            extension.push(boundary_extension(
                 &opts.instance.boundary_extension,
-                geojson.as_bytes()
-            )]);
+                geojson.as_bytes(),
+            ));
         }
         Some("Point") => {
             let c = unit
@@ -179,7 +200,7 @@ pub fn resources(
                 Some((lon, lat))
                     if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) =>
                 {
-                    position = Some(json!({"longitude": lon, "latitude": lat}));
+                    position = Some((lon, lat));
                 }
                 _ => report.add(
                     "bad_geometry",
@@ -196,30 +217,18 @@ pub fn resources(
     }
     let mut ids = identifiers(unit, opts);
     if is_top && let Some(cc) = opts.country_code {
-        ids.push(json!({"system": opts.instance.urls.country_code_system, "value": cc}));
-    }
-    loc["identifier"] = Value::Array(ids);
-    loc["status"] = json!(if unit.closed_date.is_some() {
-        "inactive"
-    } else {
-        "active"
-    });
-    loc["name"] = json!(unit.name);
-    if let Some(short) = unit.short_name.as_ref().filter(|s| **s != unit.name) {
-        loc["alias"] = json!([short]);
+        ids.push(identifier(&opts.instance.urls.country_code_system, cc));
     }
     // run_locations checked both are in the profile.
-    let (type_code, physical, physical_display) = if facility {
+    let (type_code, physical) = if facility {
         (
             opts.instance.facility_type.as_deref().unwrap_or_default(),
-            "si",
-            "Site",
+            PhysicalType::Site,
         )
     } else {
         (
             opts.instance.admin_unit_type.as_deref().unwrap_or_default(),
-            "jdn",
-            "Jurisdiction",
+            PhysicalType::Jurisdiction,
         )
     };
     let group_types: Vec<Value> = opts
@@ -229,44 +238,61 @@ pub fn resources(
         .flatten()
         .map(|g| g.concept(opts.instance))
         .collect();
-    let mut types = vec![
-        json!({"coding": [{"system": opts.instance.urls.location_type_system, "code": type_code}]}),
-    ];
-    types.extend(group_types.iter().cloned());
-    loc["type"] = Value::Array(types);
-    loc["physicalType"] = json!({"coding": [{"system": PHYSICAL_TYPE_SYSTEM, "code": physical, "display": physical_display}]});
-    if let Some(p) = position {
-        loc["position"] = p;
-    }
     let org_id = format!("{}{id}", opts.instance.org_id_prefix);
-    if facility {
-        loc["managingOrganization"] = json!({"reference": format!("Organization/{org_id}")});
-    }
-    match &unit.parent {
-        Some(p) if parent_known => {
-            loc["partOf"] =
-                json!({"reference": format!("Location/{}", location_id(opts.prefix, p))});
+    let parent = match &unit.parent {
+        Some(p) if parent_known => Some(location_id(opts.prefix, p)),
+        Some(p) if !is_top => {
+            report.add(
+                "parent_not_exported",
+                &unit.id,
+                &format!(
+                    "parent org unit {p} is not in the export; Location written without partOf"
+                ),
+            );
+            None
         }
-        Some(p) if !is_top => report.add(
-            "parent_not_exported",
-            &unit.id,
-            &format!("parent org unit {p} is not in the export; Location written without partOf"),
-        ),
-        _ => {}
+        _ => None,
+    };
+    let meta = |profile: &str| json!({"profile": [profile], "tag": [opts.instance.tag()]});
+    let loc = NewLocation {
+        id: &id,
+        meta: Some(meta(&opts.instance.urls.location_profile)),
+        extension,
+        identifier: ids,
+        status: if unit.closed_date.is_some() {
+            "inactive"
+        } else {
+            "active"
+        },
+        name: &unit.name,
+        alias: unit
+            .short_name
+            .as_ref()
+            .filter(|s| **s != unit.name)
+            .map(std::slice::from_ref)
+            .unwrap_or_default(),
+        type_system: &opts.instance.urls.location_type_system,
+        type_code,
+        extra_types: group_types.clone(),
+        physical_type: Some(physical),
+        position,
+        managing_organization: facility.then_some(org_id.as_str()),
+        part_of: parent.as_deref(),
     }
+    .into_json(&LOCATION_KEYS);
     let mut out = Vec::new();
     if facility {
-        out.push(json!({
-            "resourceType": "Organization",
-            "id": org_id,
-            "meta": {"profile": [opts.instance.urls.facility_organization_profile], "tag": [opts.instance.tag()]},
-            "identifier": identifiers(unit, opts),
-            "active": unit.closed_date.is_none(),
-            "type": std::iter::once(json!({"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}))
-                .chain(group_types)
-                .collect::<Vec<_>>(),
-            "name": unit.name,
-        }));
+        out.push(
+            NewOrganization {
+                id: &org_id,
+                meta: Some(meta(&opts.instance.urls.facility_organization_profile)),
+                identifier: identifiers(unit, opts),
+                active: unit.closed_date.is_none(),
+                extra_types: group_types,
+                name: Some(&unit.name),
+            }
+            .into_json(&ORGANIZATION_KEYS),
+        );
     }
     out.push(loc);
     out
@@ -282,9 +308,7 @@ fn polygons(geometry: &Value, id: &str, report: &mut Report) -> Option<geo::Mult
     ) {
         return None;
     }
-    let parsed = serde_json::from_value::<geojson::Geometry>(geometry.clone())
-        .map_err(|e| e.to_string())
-        .and_then(crate::geometry::convert);
+    let parsed = crate::geometry::convert_value(geometry.clone());
     match parsed {
         Ok((geo::Geometry::Polygon(p), _)) => Some(geo::MultiPolygon(vec![p])),
         Ok((geo::Geometry::MultiPolygon(mp), _)) => Some(mp),
@@ -330,19 +354,17 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
             continue;
         }
         let union = geo::unary_union(parts.iter());
-        let value = geojson::Geometry::new(geojson::GeometryValue::from(&union));
-        if let Ok(v) = serde_json::to_value(value) {
-            report.add(
-                "boundary_from_children",
-                &units[i].id,
-                &format!(
-                    "no geometry in DHIS2; boundary is the union of {} of its {} children",
-                    parts.len(),
-                    kids.len()
-                ),
-            );
-            units[i].geometry = Some(v);
-        }
+        report.add(
+            "boundary_from_children",
+            &units[i].id,
+            &format!(
+                "no geometry in DHIS2; boundary is the union of {} of its {} children",
+                parts.len(),
+                kids.len()
+            ),
+        );
+        let union = geo::Geometry::MultiPolygon(union);
+        units[i].geometry = Some(crate::geometry::to_geojson_value(&union));
     }
 }
 

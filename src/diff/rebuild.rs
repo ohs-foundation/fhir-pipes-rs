@@ -2,19 +2,19 @@
 //! touch the JSON; everything else on the resource is left exactly as the
 //! snapshot had it, which is what makes the round trip lossless.
 
-use base64::Engine;
 use geo::Geometry;
 use serde_json::{Map, Value, json};
 
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
 use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow};
 use crate::fhir::location::{
-    GEOJSON_CONTENT_TYPE, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension,
+    self, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension,
 };
-use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
+use crate::fhir::organization::NewOrganization;
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
 use crate::fhir::{Boundary, Location};
-use crate::geometry::{kind_name, parse_boundary, validity};
+use crate::geometry::{kind_name, parse_boundary, to_geojson_bytes, validity};
+use crate::import::ORGANIZATION_KEYS;
 use crate::profile::{Column, Kind, Profile};
 use crate::report::Report;
 
@@ -494,13 +494,7 @@ fn apply_position(obj: &mut Object, row: &InputRow, id: &str, report: &mut Repor
 /// geometry with rounded coordinates, the shape the fixture and the
 /// Python wrote.
 pub fn boundary_attachment(geom: &Geometry<f64>) -> Value {
-    let value = geojson::GeometryValue::from(&round_geometry(geom));
-    let text = serde_json::to_string(&geojson::Geometry::new(value))
-        .expect("a GeoJSON geometry serialises");
-    json!({
-        "contentType": GEOJSON_CONTENT_TYPE,
-        "data": base64::engine::general_purpose::STANDARD.encode(text),
-    })
+    location::boundary_attachment(&to_geojson_bytes(&round_geometry(geom)))
 }
 
 /// Replace the boundary attachment, or add one under the profile's first
@@ -719,18 +713,19 @@ pub fn new_organization(
     profile: &Profile,
     report: &mut Report,
 ) -> Value {
-    let base = json!({
-        "resourceType": "Organization",
-        "id": org_id,
-        "active": true,
-        "type": [{"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}],
-    });
+    let base = NewOrganization {
+        id: org_id,
+        active: true,
+        ..Default::default()
+    }
+    .into_json(&ORGANIZATION_KEYS);
     rebuild_organization(&base, row, None, profile, report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
     use base64::Engine;
     use geo::{line_string, polygon};
     use serde_json::json;

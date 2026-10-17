@@ -44,12 +44,40 @@ pub mod location_sites;
 
 use std::path::PathBuf;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::error::{PipesError, Result};
-use crate::fhir::location::{PHYSICAL_TYPE_SYSTEM, boundary_extension};
-use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
+use crate::fhir::location::{
+    LocationKey, NewLocation, PhysicalType, boundary_extension, identifier,
+};
+use crate::fhir::organization::{NewOrganization, OrganizationKey};
 use crate::profile::Profile;
+
+/// The key order of the Locations import writes: kiln's, so the output is
+/// byte for byte what kiln wrote.
+const LOCATION_KEYS: [LocationKey; 11] = [
+    LocationKey::Meta,
+    LocationKey::Name,
+    LocationKey::Status,
+    LocationKey::Type,
+    LocationKey::PhysicalType,
+    LocationKey::Identifier,
+    LocationKey::PartOf,
+    LocationKey::Alias,
+    LocationKey::Position,
+    LocationKey::ManagingOrganization,
+    LocationKey::Extension,
+];
+
+/// The key order of the facility Organizations import (and a `diff`
+/// create) writes: kiln's.
+pub(crate) const ORGANIZATION_KEYS: [OrganizationKey; 5] = [
+    OrganizationKey::Meta,
+    OrganizationKey::Active,
+    OrganizationKey::Name,
+    OrganizationKey::Type,
+    OrganizationKey::Identifier,
+];
 
 #[derive(clap::Subcommand, Debug)]
 pub enum ImportCommand {
@@ -265,19 +293,13 @@ impl Shape {
         })
     }
 
-    fn start(resource_type: &str, id: &str, profile: Option<&str>) -> Map<String, Value> {
-        let mut r = Map::new();
-        r.insert("resourceType".into(), json!(resource_type));
-        r.insert("id".into(), json!(id));
-        if let Some(p) = profile {
-            r.insert("meta".into(), json!({"profile": [p]}));
-        }
-        r
+    fn meta(profile: Option<&str>) -> Option<Value> {
+        profile.map(|p| json!({"profile": [p]}))
     }
 
-    fn identifiers(ids: &[(String, String)]) -> Value {
+    fn identifiers(ids: &[(String, String)]) -> Vec<Value> {
         ids.iter()
-            .map(|(system, value)| json!({"system": system, "value": value}))
+            .map(|(system, value)| identifier(system, value))
             .collect()
     }
 
@@ -293,32 +315,24 @@ impl Shape {
         boundary: Option<&[u8]>,
     ) -> Value {
         debug_assert!(!identifiers.is_empty(), "admin unit {id} has no identifier");
-        let mut r = Self::start("Location", id, self.location_profile.as_deref());
-        r.insert("name".into(), json!(name));
-        r.insert("status".into(), json!("active"));
-        r.insert(
-            "type".into(),
-            json!([{"coding": [{"system": self.type_system, "code": self.admin_unit_type.as_deref().unwrap_or_default()}]}]),
-        );
-        r.insert(
-            "physicalType".into(),
-            json!({"coding": [{"system": PHYSICAL_TYPE_SYSTEM, "code": "jdn", "display": "Jurisdiction"}]}),
-        );
-        r.insert("identifier".into(), Self::identifiers(identifiers));
-        if let Some(parent) = parent {
-            r.insert(
-                "partOf".into(),
-                json!({"reference": format!("Location/{parent}")}),
-            );
+        NewLocation {
+            id,
+            meta: Self::meta(self.location_profile.as_deref()),
+            extension: boundary
+                .map(|geojson| boundary_extension(&self.boundary_extension, geojson))
+                .into_iter()
+                .collect(),
+            identifier: Self::identifiers(identifiers),
+            status: "active",
+            name,
+            alias: aliases,
+            type_system: &self.type_system,
+            type_code: self.admin_unit_type.as_deref().unwrap_or_default(),
+            physical_type: Some(PhysicalType::Jurisdiction),
+            part_of: parent,
+            ..Default::default()
         }
-        if !aliases.is_empty() {
-            r.insert("alias".into(), json!(aliases));
-        }
-        let mut value = Value::Object(r);
-        if let Some(geojson) = boundary {
-            self.attach_boundary(&mut value, geojson);
-        }
-        value
+        .into_json(&LOCATION_KEYS)
     }
 
     /// Add the boundary extension to a Location.
@@ -337,42 +351,23 @@ impl Shape {
 
     /// A site: `si` physical type, a position rather than a boundary.
     pub fn site(&self, s: &Site) -> Value {
-        let mut r = Self::start("Location", s.id, self.location_profile.as_deref());
-        r.insert("name".into(), json!(s.name));
-        r.insert("status".into(), json!("active"));
-        let mut types =
-            vec![json!({"coding": [{"system": self.type_system, "code": s.type_code}]})];
-        types.extend(s.extra_types.iter().map(TypeConcept::json));
-        r.insert("type".into(), Value::Array(types));
-        r.insert(
-            "physicalType".into(),
-            json!({"coding": [{"system": PHYSICAL_TYPE_SYSTEM, "code": "si", "display": "Site"}]}),
-        );
-        if !s.identifiers.is_empty() {
-            r.insert("identifier".into(), Self::identifiers(&s.identifiers));
+        NewLocation {
+            id: s.id,
+            meta: Self::meta(self.location_profile.as_deref()),
+            extension: s.extensions.clone(),
+            identifier: Self::identifiers(&s.identifiers),
+            status: "active",
+            name: s.name,
+            type_system: &self.type_system,
+            type_code: s.type_code,
+            extra_types: s.extra_types.iter().map(TypeConcept::json).collect(),
+            physical_type: Some(PhysicalType::Site),
+            position: s.position,
+            managing_organization: s.managing_organization,
+            part_of: s.parent,
+            ..Default::default()
         }
-        if let Some(parent) = s.parent {
-            r.insert(
-                "partOf".into(),
-                json!({"reference": format!("Location/{parent}")}),
-            );
-        }
-        if let Some((longitude, latitude)) = s.position {
-            r.insert(
-                "position".into(),
-                json!({"longitude": longitude, "latitude": latitude}),
-            );
-        }
-        if let Some(org) = s.managing_organization {
-            r.insert(
-                "managingOrganization".into(),
-                json!({"reference": format!("Organization/{org}")}),
-            );
-        }
-        if !s.extensions.is_empty() {
-            r.insert("extension".into(), Value::Array(s.extensions.clone()));
-        }
-        Value::Object(r)
+        .into_json(&LOCATION_KEYS)
     }
 
     /// The facility Organization paired with a site: `prov` first, then
@@ -384,18 +379,15 @@ impl Shape {
         identifiers: &[(String, String)],
         types: &[TypeConcept],
     ) -> Value {
-        let mut r = Self::start("Organization", id, self.organization_profile.as_deref());
-        r.insert("active".into(), json!(true));
-        r.insert("name".into(), json!(name));
-        let mut all = vec![
-            json!({"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}),
-        ];
-        all.extend(types.iter().map(TypeConcept::json));
-        r.insert("type".into(), Value::Array(all));
-        if !identifiers.is_empty() {
-            r.insert("identifier".into(), Self::identifiers(identifiers));
+        NewOrganization {
+            id,
+            meta: Self::meta(self.organization_profile.as_deref()),
+            identifier: Self::identifiers(identifiers),
+            active: true,
+            extra_types: types.iter().map(TypeConcept::json).collect(),
+            name: Some(name),
         }
-        Value::Object(r)
+        .into_json(&ORGANIZATION_KEYS)
     }
 }
 
@@ -407,6 +399,7 @@ pub(crate) fn icr_shape() -> Shape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fhir::location::PHYSICAL_TYPE_SYSTEM;
     use base64::Engine;
 
     const ICR_LOCATION: &str = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation";

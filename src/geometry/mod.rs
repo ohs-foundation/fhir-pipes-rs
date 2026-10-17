@@ -13,7 +13,9 @@ pub mod wkb;
 
 use geo::{BoundingRect, Geometry, InteriorPoint, Intersects};
 
-pub use geojson::{convert, kind_name, parse_boundary};
+pub use geojson::{
+    convert, convert_value, kind_name, parse_boundary, to_geojson_bytes, to_geojson_value,
+};
 pub use wkb::to_wkb;
 
 use crate::fhir::{Boundary, Location};
