@@ -492,6 +492,21 @@ mod database {
             .stdout(has("every table in full: the last refresh did not finish"))
             .stdout(has(format!("patient → {s}.patient (3 rows)")));
 
+        // The same Patients from a gzip input, p1 changed: only p1 differs
+        // from the last split.
+        let text = patients(&[
+            ("p1", "2019-01-01"),
+            ("p2", "2021-02-02"),
+            ("p4", "2020-04-04"),
+        ]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, text.as_bytes()).unwrap();
+        fs::remove_file(input.join("Patient.ndjson")).unwrap();
+        fs::write(input.join("Patient.ndjson.gz"), gz.finish().unwrap()).unwrap();
+        run(&config).assert().success().stdout(has(format!(
+            "patient → {s}.patient (1 resources changed or deleted: 1 rows deleted, 1 copied)"
+        )));
+
         // A changed view loads its table in full, the others as before.
         let views = views_with(dir.path(), &[], false);
         let path = views.join("Binary-IcrPatient.json");
