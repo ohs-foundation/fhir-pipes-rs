@@ -640,14 +640,17 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     let mut view_tables = None;
     let mut mismatches = None;
     // What the views step built, for an upsert.
-    #[cfg_attr(not(feature = "postgres"), allow(unused_variables, unused_assignments))]
+    #[cfg(feature = "postgres")]
     let mut built = None;
     if let Some(v) = views {
         let (done, secs) = v.context("views")?;
         ran.record("views", Some(Step::Views), secs);
         contacted |= done.downloaded;
         view_tables = Some(done.tables);
-        built = Some(done.built);
+        #[cfg(feature = "postgres")]
+        {
+            built = Some(done.built);
+        }
         // Said as soon as the views step is done, so a later step that fails
         // (a hook, the push) does not hide them once the tables are published.
         print_mismatches(&done.mismatches);
@@ -917,7 +920,8 @@ struct ViewsDone {
     /// The tables the views wrote.
     tables: BTreeSet<String>,
     /// For an upsert: each table with what its rows were built from
-    /// (`TableWriter::fingerprint`).
+    /// (`fingerprint`).
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     built: BTreeMap<String, String>,
     /// Each table's values that did not match their column's type, in the
     /// order the tables were written.

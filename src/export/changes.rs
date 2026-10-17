@@ -74,6 +74,7 @@ pub struct TypeChanges {
 
 impl TypeChanges {
     /// Every id whose rows are to be rewritten.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     pub fn ids(&self) -> BTreeSet<&str> {
         self.changed
             .iter()
