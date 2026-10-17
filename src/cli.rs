@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use crate::error::{PipesError, Result};
 use crate::extract::client::{Auth, TokenAuth};
 use crate::extract::google::{Credentials, parse_server};
+use crate::extract::page::ServerKind;
 
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
 pub const DEFAULT_PARTITION_BY: &str = "country,geom_type,type";
@@ -556,6 +557,11 @@ pub struct ExtractArgs {
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
+    /// The kind of FHIR server, for its search parameters: medplum pages
+    /// with `_sort=_lastUpdated`, aidbox with `_total=none`; generic and
+    /// hapi add nothing
+    #[arg(long, value_enum, default_value_t = ServerKind::Generic)]
+    pub server_kind: ServerKind,
     /// Snapshot directory to create or update
     #[arg(long)]
     pub snapshot: PathBuf,
@@ -595,6 +601,13 @@ pub struct ExportArgs {
     pub server: String,
     #[command(flatten)]
     pub auth: AuthArgs,
+    /// The kind of FHIR server: medplum pages with `_sort=_lastUpdated`,
+    /// treats counts from a million on as estimates, and with --bulk reads
+    /// `Binary/<id>` output files from the FHIR base with the token; aidbox
+    /// pages with `_total=none` and in `_lastUpdated` windows of up to about
+    /// 50,000; generic and hapi change nothing. Not used with --hapi-db
+    #[arg(long, value_enum, default_value_t = ServerKind::Generic)]
+    pub server_kind: ServerKind,
     /// Resource type to download, e.g. MeasureReport; repeat for several
     #[arg(long = "type", value_name = "TYPE", required = true)]
     pub types: Vec<String>,

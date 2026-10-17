@@ -548,6 +548,7 @@ the file are relative to the file.
 | `--token-auth` | `FHIR_PIPES_TOKEN_AUTH` | `server.token_auth` | `post`: the client ID and secret in the token request's form body; `basic` sends them in a Basic `Authorization` header (Aidbox) |
 | `--scope` | `FHIR_PIPES_SCOPE` | `server.scope` | no `scope` in the token request |
 | | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET` | | no token |
+| | | `server.kind` | `generic`; `hapi` (the same), `medplum` or `aidbox` for those servers' search parameters (both FHIR steps) and Medplum's bulk output files. See [servers.md](servers.md) |
 | | | `server.fetch` | `search`; `bulk` for `$export`; `hapi-db` for the HAPI server's database |
 | | `FHIR_PIPES_HAPI_DATABASE_URL` | | the HAPI database's connection string, with `fetch = "hapi-db"` |
 | | | `server.bulk_timeout` | 14400 (four hours), with `fetch = "bulk"` |
@@ -583,6 +584,7 @@ name = "prod"
 token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
 # token_auth = "basic"      # the client ID and secret in a Basic header (Aidbox); default "post"
 # scope = "system/*.read"   # the scope asked for with the client ID
+kind = "generic"            # "medplum" or "aidbox" for those servers; "hapi" is the same as "generic"
 fetch = "search"            # "bulk" for a Bulk Data $export, "hapi-db" for HAPI's database
 concurrency = 4             # search requests at a time
 # google_auth = true        # a Cloud Healthcare API store; base can be projects/…/fhirStores/…

@@ -386,6 +386,7 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
         }
     } else {
         println!("server:     {} (raw/{})", s.server, s.server_name);
+        println!("kind:       {}", s.server_kind.name());
         println!("auth:       {}", s.auth_description());
         match s.fetch {
             config::Fetch::Bulk => println!(

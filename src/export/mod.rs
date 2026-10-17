@@ -46,7 +46,7 @@ use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{
-    PageNote, PageResult, count_resources, next_link, page_resources, page_search,
+    PageNote, PageResult, ServerKind, count_resources, next_link, page_resources, page_search,
 };
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
@@ -291,6 +291,7 @@ fn export_changes(
     let paged = match page_resources(
         client,
         &args.server,
+        args.server_kind,
         resource_type,
         Some(since),
         &incoming,
@@ -317,6 +318,7 @@ fn export_changes(
     if merged_count_differs(
         client,
         &args.server,
+        args.server_kind,
         resource_type,
         stats.total,
         out,
@@ -342,16 +344,28 @@ fn export_changes(
 
 /// Whether the server's count of `resource_type` differs from the merged
 /// file's `total`, which means the type must be downloaded in full. A server
-/// that gives no count is taken at its word, with a warning.
+/// that gives no count, or a count that may be an estimate, is taken at its
+/// word, with a warning.
 fn merged_count_differs(
     client: &FhirClient,
     server: &str,
+    kind: ServerKind,
     resource_type: &str,
     total: usize,
     out: &Path,
     report: &mut Report,
 ) -> bool {
     match count_resources(client, server, resource_type) {
+        Some(server_total)
+            if server_total as usize != total && kind.count_is_estimate(server_total) =>
+        {
+            eprintln!(
+                "count check unavailable for {resource_type}: the server's count ({server_total}) is an estimate, \
+                 so resources deleted on the server stay in {}",
+                out.display()
+            );
+            false
+        }
         Some(server_total) if server_total as usize != total => {
             println!(
                 "{resource_type}: the server has {server_total} resources and the merged file {total}; \
@@ -409,6 +423,9 @@ fn export_all(
     // request (a count over a large table is not free).
     if paged.last_page_full {
         match count_resources(client, &args.server, resource_type) {
+            Some(server_total) if args.server_kind.count_is_estimate(server_total) => eprintln!(
+                "count check unavailable for {resource_type}: the server's count ({server_total}) is an estimate"
+            ),
             Some(server_total) if server_total as usize != total => report.add(
                 "count_mismatch",
                 resource_type,
@@ -448,10 +465,11 @@ fn export_all(
 
 /// Page `resource_type` into `tmp`, as one stream or, for a type of at least
 /// `window::MIN_RESOURCES` with `--concurrency` above 1, as `_lastUpdated`
-/// windows side by side. The first page tells which: a type that fits on it
-/// costs no more requests than before; for one that does not, the count
-/// comes from the page's `total` or a count request. Returns how many
-/// windows were used, if any.
+/// windows side by side. A type larger than the server kind's `max_window`
+/// is paged in windows whatever the concurrency. The first page tells which:
+/// a type that fits on it costs no more requests than before; for one that
+/// does not, the count comes from the page's `total` or a count request.
+/// Returns how many windows were used, if any.
 fn download_all(
     client: &FhirClient,
     args: &ExportArgs,
@@ -459,25 +477,31 @@ fn download_all(
     tmp: &Path,
     report: &mut Report,
 ) -> Result<(PageResult, Option<usize>)> {
+    let kind = args.server_kind;
+    let side_by_side = args.concurrency >= 2;
     let mut large = None;
     let mut issues = Report::default();
     let stream = page_search(
         client,
         &args.server,
+        kind,
         resource_type,
         &[],
         tmp,
         &mut issues,
         &[],
         &mut |first| {
-            if args.concurrency < 2 || next_link(first).is_none() {
+            if !(side_by_side || kind.max_window().is_some()) || next_link(first).is_none() {
                 return true;
             }
             large = first
                 .get("total")
                 .and_then(Value::as_u64)
                 .or_else(|| count_resources(client, &args.server, resource_type))
-                .filter(|n| *n >= window::MIN_RESOURCES);
+                .filter(|&n| {
+                    (side_by_side && n >= window::MIN_RESOURCES)
+                        || kind.max_window().is_some_and(|most| n > most)
+                });
             large.is_none()
         },
     )?;
@@ -487,6 +511,8 @@ fn download_all(
     }
     let options = window::Options {
         server: &args.server,
+        kind,
+        max_window: kind.max_window(),
         resource_type,
         total: large.expect("paging stops for a large type"),
         workers: args.concurrency,
@@ -496,8 +522,16 @@ fn download_all(
         window::Windowed::Done { paged, windows } => Ok((paged, Some(windows))),
         window::Windowed::Unsuitable(why) => {
             println!("{resource_type}: {why}; paging it as one stream");
-            let paged =
-                page_resources(client, &args.server, resource_type, None, tmp, report, &[])?;
+            let paged = page_resources(
+                client,
+                &args.server,
+                kind,
+                resource_type,
+                None,
+                tmp,
+                report,
+                &[],
+            )?;
             Ok((paged, None))
         }
     }
@@ -631,7 +665,7 @@ fn run_job(
         Some(s) => format!("changes since {s}"),
         None => "in full".to_string(),
     };
-    let (status_url, server_time, manifest) = loop {
+    let (status_url, server_time, mut manifest) = loop {
         let (status_url, server_time, resumed) =
             match state.bulk.as_ref().filter(|p| job.matches(p)) {
                 Some(p) => {
@@ -699,6 +733,9 @@ fn run_job(
         return Err(PipesError::Environment(failed));
     };
 
+    if args.server_kind == ServerKind::Medplum {
+        bulk::read_references_from(&mut manifest, &args.server);
+    }
     let timeout = Duration::from_secs(args.bulk_timeout);
     let rejected = match &manifest.transaction_time {
         None => Some("the bulk export's manifest has no transactionTime".to_string()),
@@ -745,7 +782,16 @@ fn run_job(
         let files = d.files;
         let stats = bulk_type(args, job, t, d, deleted.get(t), report)?;
         let (total, removed) = (stats.total, stats.removed);
-        if job.since.is_some() && merged_count_differs(client, &args.server, t, total, &out, report)
+        if job.since.is_some()
+            && merged_count_differs(
+                client,
+                &args.server,
+                args.server_kind,
+                t,
+                total,
+                &out,
+                report,
+            )
         {
             redo.push(t.clone());
             continue;

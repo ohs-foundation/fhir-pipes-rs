@@ -232,6 +232,13 @@ server for the type's count (the first page's `total`, else
 - A server that rejects `_sort=_lastUpdated`, gives no count for a window, or
   whose window counts do not add up to the type's is paged as one stream,
   with a line saying why.
+- With `--server-kind aidbox`, a window holding more than 50,000 resources
+  is halved, and a larger type is split into windows even with
+  `--concurrency 1`. With `--server-kind medplum`, the limit is 1,000,000,
+  so each window's count is exact. A window is never cut below one second,
+  so a second holding more than the limit stays one window. Past the usual
+  number of windows, halving stops when a window's halves do not count up
+  to it (see [docs/servers.md](docs/servers.md)).
 
 Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
 type. The limit covers types and windows together. A `Retry-After` on a 429
@@ -412,6 +419,11 @@ Any FHIR R4 server that supports standard search with `_lastUpdated`,
 on any vendor's extensions. `export --bulk` also needs the server's
 system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
+Medplum and Aidbox need other search parameters: pass `--server-kind medplum`
+or `--server-kind aidbox` (`server.kind` in `refresh`). `generic`, the
+default, and `hapi` add none. [docs/servers.md](docs/servers.md) says what
+each kind changes and how to set up a client on each server.
+
 A server that needs authentication gets one of four kinds:
 
 - `--token` (or `FHIR_PIPES_TOKEN`) is sent as a fixed bearer token. Getting
@@ -563,6 +575,9 @@ Some tests check output with DuckDB when it is on `PATH` and skip that check
 otherwise. DuckDB is never linked into fhir-pipes. The SQL-on-FHIR
 conformance suite runs in memory as part of `cargo test`; the generated-SQL
 runs need DuckDB, or PostgreSQL through `SOF_CONFORMANCE_DB`.
+`tests/export_servers.rs` also runs against a real Medplum or Aidbox server
+when `FHIR_PIPES_TEST_MEDPLUM_URL` or `FHIR_PIPES_TEST_AIDBOX_URL` is set
+(see [docs/servers.md](docs/servers.md#tests-against-real-servers)).
 
 ## Repository layout
 
