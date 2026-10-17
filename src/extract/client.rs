@@ -387,26 +387,40 @@ impl Gate {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Wait for a pause to end and a place to be free.
-    fn enter(&self) -> Pass<'_> {
+    /// Wait for a pause to end and a place to be free, giving up when
+    /// `deadline` passes first.
+    fn enter_by(&self, deadline: Option<Instant>) -> Option<Pass<'_>> {
         let mut state = self.lock();
         loop {
             let now = Instant::now();
-            if let Some(until) = state.paused_until.filter(|u| *u > now) {
-                state = self
-                    .changed
-                    .wait_timeout(state, until - now)
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .0;
-            } else if state.in_flight < state.limit {
+            if deadline.is_some_and(|d| d <= now) {
+                return None;
+            }
+            let wait = |until: Option<Instant>| {
+                // The earlier of the pause's end and the deadline; neither
+                // is a wait for a place.
+                match (until, deadline) {
+                    (Some(u), Some(d)) => Some(u.min(d) - now),
+                    (u, d) => u.or(d).map(|t| t - now),
+                }
+            };
+            let paused = state.paused_until.filter(|u| *u > now);
+            if paused.is_none() && state.in_flight < state.limit {
                 state.in_flight += 1;
-                return Pass(self);
-            } else {
-                state = self
+                return Some(Pass(self));
+            }
+            state = match wait(paused) {
+                Some(w) => {
+                    self.changed
+                        .wait_timeout(state, w)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => self
                     .changed
                     .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
-            }
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
         }
     }
 
@@ -698,9 +712,13 @@ impl FhirClient {
         self
     }
 
-    /// A place in the gate, when the client has one.
-    fn enter(&self) -> Option<Pass<'_>> {
-        self.gate.as_ref().map(Gate::enter)
+    /// A place in the gate, when the client has one, or Err when `deadline`
+    /// passes before one is free.
+    fn enter_by(&self, deadline: Option<Instant>) -> std::result::Result<Option<Pass<'_>>, ()> {
+        match &self.gate {
+            None => Ok(None),
+            Some(gate) => gate.enter_by(deadline).map(Some).ok_or(()),
+        }
     }
 
     /// A renewing authorizer, with its first token fetched now.
@@ -772,12 +790,19 @@ impl FhirClient {
     /// `get` is, except a 429, which comes back as an `Exchange` like the
     /// 202 (with its headers, for `Content-Location`): a server that runs
     /// one export at a time (Aidbox) answers 429 until the other one ends,
-    /// and the caller waits that out against its own deadline.
-    pub fn get_async(&self, url: &str) -> std::result::Result<Exchange, FetchError> {
-        self.retrying_or(
+    /// and the caller waits that out against its own deadline. Every
+    /// attempt and the waits between them end by `deadline`, as in
+    /// `exchange_by`; no attempt starts after it.
+    pub fn get_async(
+        &self,
+        url: &str,
+        deadline: Option<Instant>,
+    ) -> std::result::Result<Exchange, FetchError> {
+        self.retrying_by(
             Attempt::Authorized,
             || self.fhir_get(url).header("prefer", "respond-async"),
             |status| status == 429,
+            deadline,
             exchanged,
         )
     }
@@ -809,7 +834,9 @@ impl FhirClient {
             } else {
                 self.http.request(method.clone(), url)
             };
-            let pass = self.enter();
+            let Ok(pass) = self.enter_by(deadline) else {
+                break;
+            };
             // After the wait for a place, which can outlast a token.
             if let Some(v) = self.authorization()? {
                 request = self.authorize(request, &v);
@@ -984,23 +1011,32 @@ impl FhirClient {
         request: impl Fn() -> RequestBuilder,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
-        self.retrying_or(kind, request, |_| false, success)
+        self.retrying_by(kind, request, |_| false, None, success)
     }
 
     /// `retrying`, with the statuses for which `handled` is true handed to
-    /// `success` as a 2xx is, not retried.
-    fn retrying_or<T>(
+    /// `success` as a 2xx is, not retried. With a `deadline`, each attempt
+    /// keeps the client's timeout, cut short when less time is left, the
+    /// waits between attempts end by it, and no attempt starts after it;
+    /// the last failure is then the error.
+    fn retrying_by<T>(
         &self,
         kind: Attempt,
         request: impl Fn() -> RequestBuilder,
         handled: impl Fn(u16) -> bool,
+        deadline: Option<Instant>,
         success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
     ) -> std::result::Result<T, FetchError> {
+        let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let sleep = |wait: Duration| std::thread::sleep(left().map_or(wait, |l| wait.min(l)));
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
             let pass = match kind {
                 Attempt::Token => None,
-                Attempt::Authorized | Attempt::Anonymous => self.enter(),
+                Attempt::Authorized | Attempt::Anonymous => match self.enter_by(deadline) {
+                    Ok(pass) => pass,
+                    Err(()) => break,
+                },
             };
             let mut request = request();
             // Chosen once admitted, for every attempt: the wait for a place
@@ -1011,12 +1047,20 @@ impl FhirClient {
             {
                 request = self.authorize(request, &v);
             }
+            // After both: the wait for a place and a token renewal take from
+            // the time left.
+            if let Some(left) = left() {
+                if left.is_zero() {
+                    break;
+                }
+                request = request.timeout(self.timeout.min(left));
+            }
             match request.send() {
                 Err(e) => {
                     drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
-                        std::thread::sleep(jittered(backoff_delay(attempt, None)));
+                        sleep(jittered(backoff_delay(attempt, None)));
                     }
                 }
                 Ok(resp) => {
@@ -1039,7 +1083,7 @@ impl FhirClient {
                             gate.pause(delay);
                         }
                         if attempt < self.retries {
-                            std::thread::sleep(delay);
+                            sleep(delay);
                         }
                     } else if !(200..300).contains(&status) {
                         return Err(FetchError::Status {
@@ -1052,7 +1096,14 @@ impl FhirClient {
                 }
             }
         }
-        Err(last.unwrap_or_else(|| FetchError::Transport("no attempts made".to_string())))
+        Err(last.unwrap_or_else(|| {
+            let why = if deadline.is_some() {
+                "the deadline passed"
+            } else {
+                "no attempts made"
+            };
+            FetchError::Transport(why.to_string())
+        }))
     }
 }
 
@@ -1068,12 +1119,12 @@ mod tests {
     #[test]
     fn the_gate_lets_in_only_its_limit() {
         let gate = Gate::new(2);
-        let a = gate.enter();
-        let _b = gate.enter();
+        let a = gate.enter_by(None).unwrap();
+        let _b = gate.enter_by(None).unwrap();
         let entered = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|s| {
             s.spawn(|| {
-                let _c = gate.enter();
+                let _c = gate.enter_by(None).unwrap();
                 entered.store(true, std::sync::atomic::Ordering::SeqCst);
             });
             std::thread::sleep(Duration::from_millis(100));
@@ -1090,8 +1141,37 @@ mod tests {
         // A shorter pause does not cut the longer one short.
         gate.pause(Duration::from_millis(10));
         let started = Instant::now();
-        let _pass = gate.enter();
+        let _pass = gate.enter_by(None).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn a_wait_for_the_gate_gives_up_at_the_deadline() {
+        let gate = Gate::new(1);
+        gate.pause(Duration::from_secs(5));
+        let started = Instant::now();
+        assert!(
+            gate.enter_by(Some(started + Duration::from_millis(200)))
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // No pause, no free place: the same.
+        let gate = Gate::new(1);
+        let _held = gate.enter_by(None).unwrap();
+        let started = Instant::now();
+        assert!(
+            gate.enter_by(Some(started + Duration::from_millis(200)))
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1471,7 +1551,7 @@ mod tests {
         );
         let c = client(1);
         assert_eq!(
-            c.get_async(&server.url_str("/fhir/$export"))
+            c.get_async(&server.url_str("/fhir/$export"), None)
                 .unwrap()
                 .status,
             202
@@ -1584,7 +1664,7 @@ mod tests {
                 .respond_with(status_code(429).append_header("Retry-After", "5")),
         );
         let got = client(3)
-            .get_async(&server.url_str("/fhir/$export"))
+            .get_async(&server.url_str("/fhir/$export"), None)
             .unwrap();
         assert_eq!(got.status, 429);
         assert_eq!(got.retry_after(), Some(Duration::from_secs(5)));

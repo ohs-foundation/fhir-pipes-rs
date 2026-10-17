@@ -651,8 +651,8 @@ fn run_job(
                     )?
                     else {
                         return Err(PipesError::Environment(format!(
-                            "the server answered the bulk export kick-off with HTTP 429 (busy) \
-                             until --bulk-timeout ({} s); no export was started",
+                            "the server did not accept the bulk export kick-off within \
+                             --bulk-timeout ({} s); no export was started",
                             args.bulk_timeout
                         )));
                     };

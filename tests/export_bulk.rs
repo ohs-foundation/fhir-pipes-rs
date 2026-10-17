@@ -1108,7 +1108,9 @@ fn a_kick_off_still_busy_at_the_bulk_timeout_starts_nothing() {
     );
     let err = stderr(&a);
     assert!(
-        err.contains("HTTP 429 (busy) until --bulk-timeout (2 s); no export was started"),
+        err.contains(
+            "did not accept the bulk export kick-off within --bulk-timeout (2 s); no export was started"
+        ),
         "{err}"
     );
     let path = dir.path().join(".export-state.json");
@@ -1163,4 +1165,76 @@ fn a_resumed_export_uses_the_saved_kick_off_date() {
         state(dir.path())["types"]["Patient"]["watermark"],
         "2026-10-15T07:00:00Z"
     );
+}
+
+/// The client's own retries of a kick-off end by --bulk-timeout too: after a
+/// 429, a 503 asks for three seconds, longer than the time left. Without the
+/// deadline the third kick-off is sent at about four seconds and starts an
+/// export after the timeout.
+#[test]
+fn a_kick_off_retried_after_a_5xx_stops_at_the_bulk_timeout() {
+    let server = Server::run();
+    expect_kick_off_with(
+        &server,
+        2,
+        cycle![
+            status_code(429).insert_header("Retry-After", "1"),
+            status_code(503).insert_header("Retry-After", "3"),
+            status_code(202).insert_header("Content-Location", server.url_str("/status/23")),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--bulk-timeout", "2", "--timeout", "5"])
+        .assert()
+        .failure();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let err = stderr(&a);
+    assert!(
+        err.contains("did not accept the bulk export kick-off within --bulk-timeout (2 s)"),
+        "{err}"
+    );
+    let path = dir.path().join(".export-state.json");
+    assert!(!path.exists() || state(dir.path()).get("bulk").is_none());
+}
+
+/// A kick-off that answers slowly after a 429 is cut off at --bulk-timeout,
+/// not at the longer request timeout.
+#[test]
+fn a_slow_kick_off_after_a_429_is_cut_off_at_the_bulk_timeout() {
+    let server = Server::run();
+    expect_kick_off_with(
+        &server,
+        2,
+        cycle![
+            status_code(429).insert_header("Retry-After", "1"),
+            delay_and_then(
+                Duration::from_secs(6),
+                status_code(202).insert_header("Content-Location", server.url_str("/status/24")),
+            ),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let a = export_bulk(&server, dir.path(), &["Patient"])
+        .args(["--bulk-timeout", "2", "--timeout", "30"])
+        .assert()
+        .failure();
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+    let err = stderr(&a);
+    assert!(
+        err.contains("did not accept the bulk export kick-off within --bulk-timeout (2 s)"),
+        "{err}"
+    );
+    let path = dir.path().join(".export-state.json");
+    assert!(!path.exists() || state(dir.path()).get("bulk").is_none());
 }

@@ -282,8 +282,10 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
   in a second export.
 - A kick-off answered with 429 is tried again until `--bulk-timeout`, with
   the waits of a status poll. Aidbox runs one export at a time and answers
-  429 while another is running. Nothing is saved in `.export-state.json`
-  until the server accepts the kick-off.
+  429 while another is running. The kick-off requests, their retries after
+  a 5xx or a failed connection, and the waits between them all end by
+  `--bulk-timeout`. Nothing is saved in `.export-state.json` until the
+  server accepts the kick-off.
 - The status URL is polled with the server's `Retry-After`, or a backoff from
   one second up to a minute without one. While the export runs (202), the
   wait is at most 15 seconds, whatever `Retry-After` says: HAPI asks for two

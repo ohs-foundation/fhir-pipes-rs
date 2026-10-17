@@ -119,7 +119,9 @@ pub fn kick_off_url(server: &str, types: &[String], since: Option<&str>) -> Resu
 /// Start a system-level export and return its status URL (the kick-off's
 /// `Content-Location`, resolved against the kick-off URL) and the server's
 /// clock. A 429 is tried again until `deadline`, waiting as `wait` does
-/// after one; None when the server was still busy then.
+/// after one. The requests, the client's own retries of a 5xx or a failed
+/// connection, and every wait end by `deadline`: None when the server had
+/// not accepted the kick-off by then.
 pub fn kick_off(
     client: &FhirClient,
     server: &str,
@@ -131,13 +133,19 @@ pub fn kick_off(
     let mut backoff = POLL_FIRST;
     let mut busy = false;
     let got = loop {
-        let got = client.get_async(url.as_str()).map_err(|e| match e {
-            FetchError::Status { status, body } => PipesError::Environment(format!(
-                "the bulk export kick-off {url} failed with HTTP {status}: {}",
-                outcome_text(body.as_bytes()).unwrap_or(body)
-            )),
-            other => PipesError::Environment(format!("{url}: {other}")),
-        })?;
+        let got = match client.get_async(url.as_str(), Some(deadline)) {
+            Ok(got) => got,
+            // Cut short by the deadline: a failure that would have been
+            // tried again, not a final answer.
+            Err(e) if Instant::now() >= deadline && retried(&e) => return Ok(None),
+            Err(FetchError::Status { status, body }) => {
+                return Err(PipesError::Environment(format!(
+                    "the bulk export kick-off {url} failed with HTTP {status}: {}",
+                    outcome_text(body.as_bytes()).unwrap_or(body)
+                )));
+            }
+            Err(other) => return Err(PipesError::Environment(format!("{url}: {other}"))),
+        };
         if got.status != 429 {
             break got;
         }
@@ -176,6 +184,15 @@ pub fn kick_off(
         status_url: status_url.to_string(),
         server_time,
     }))
+}
+
+/// Whether the client tries a request again after `e`: a failed
+/// connection, a 429 or a 5xx. Any other status is a final answer.
+fn retried(e: &FetchError) -> bool {
+    match e {
+        FetchError::Transport(_) => true,
+        FetchError::Status { status, .. } => *status == 429 || *status >= 500,
+    }
 }
 
 /// The watermark an export gives its types: its `transactionTime`, or the
