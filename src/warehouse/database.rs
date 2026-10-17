@@ -12,55 +12,288 @@
 //! After the commit each loaded table is analyzed, so the planner's
 //! statistics describe the new rows at once rather than after autovacuum's
 //! next analyze.
+//!
+//! With `mode = "upsert"`, only the rows of the resources that changed since
+//! the last load are rewritten, as the Java pipeline's JdbcResourceWriter
+//! does: for each table, `DELETE FROM t WHERE <key> = ANY($1)` for the ids
+//! the change log (export/changes.rs) lists for its view's resource type,
+//! changed and deleted alike, then a COPY of the rows with those ids, read
+//! from the table's Parquet files. `<key>` is the view's column with the path
+//! `getResourceKey()` (`key_column`). The tables still go in one
+//! transaction. A table is loaded in full instead, as in replace, when the
+//! log cannot vouch for what the database holds (`upsert_loads`); only those
+//! tables are analyzed after the commit.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use arrow::array::{Array, AsArray, RecordBatch};
+use arrow::array::{Array, AsArray, BooleanArray, RecordBatch};
 use arrow::datatypes::{
     DataType, Float64Type, Int64Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
 use arrow::util::display::{ArrayFormatter, FormatOptions};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use fhir_pipes_sof::{SelectColumn, ViewDefinition};
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use sqlx_core::connection::Connection;
 use sqlx_core::row::Row;
 use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::PgConnection;
 
-use super::config::{Database, Settings};
+use crate::error::usage;
+use crate::export::changes::Changes;
+
+use super::config::{Database, Mode, Settings};
 use super::partition::table_files_checked;
 use super::sql::ident;
 
 /// Rows sent to COPY per message.
 const COPY_ROWS: usize = 4096;
 
-/// Load `tables` (each a name and the directory to read it from) into the
-/// database `d` points at.
-pub fn load(s: &Settings, d: &Database, tables: &[(String, PathBuf)]) -> Result<()> {
-    println!("== database ({})", d.schema);
+/// A view table to load.
+pub struct Table {
+    pub name: String,
+    /// Where to read it: the run's staged copy, else parquet/.
+    pub dir: PathBuf,
+    /// The resource type its view reads.
+    pub resource: String,
+    /// Its view's `getResourceKey()` column (`key_column`).
+    pub key: Option<String>,
+}
+
+/// Each table the views step wrote in this run, with what its rows were
+/// built from (a fingerprint of its view, its partition lookup and the
+/// fhir-pipes version). None when the views step did not run.
+pub type Built = BTreeMap<String, String>;
+
+/// The column of `v` upsert finds a resource's rows by: one whose path is
+/// `getResourceKey()`, in a select that keeps the resource as its focus (no
+/// `forEach`, `forEachOrNull`, `repeat` or `path`, where `getResourceKey()`
+/// would key the element, as for a contained resource) and not in a
+/// `unionAll`. The one named `id` if there are several, else the first.
+pub fn key_column(v: &ViewDefinition) -> Option<String> {
+    fn walk(selects: &[SelectColumn], found: &mut Vec<String>) {
+        for s in selects {
+            if s.for_each.is_some()
+                || s.for_each_or_null.is_some()
+                || !s.repeat.is_empty()
+                || s.path.is_some()
+            {
+                continue;
+            }
+            for c in s.column.iter().flatten() {
+                if c.path.trim() == "getResourceKey()" && c.collection != Some(true) {
+                    found.push(c.name.clone());
+                }
+            }
+            walk(&s.select, found);
+        }
+    }
+    let mut found = Vec::new();
+    walk(&v.select, &mut found);
+    found.iter().find(|n| *n == "id").or(found.first()).cloned()
+}
+
+/// Why upsert refuses the view `view`, which writes `table`.
+pub fn no_key(view: &str, table: &str) -> String {
+    format!(
+        "[database] mode = \"upsert\" finds a resource's rows by a column with the path \
+         getResourceKey(), outside any forEach, and view {view} (table {table}) has none; \
+         add {{\"name\": \"id\", \"path\": \"getResourceKey()\"}} to its select, leave {table} \
+         out of [database] tables, or use mode = \"replace\""
+    )
+}
+
+/// Load `tables` into the database `d` points at. `built`: what the views
+/// step wrote in this run, for upsert.
+pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>) -> Result<()> {
+    let upsert = d.mode == Mode::Upsert;
+    if upsert {
+        println!("== database ({}, upsert)", d.schema);
+    } else {
+        println!("== database ({})", d.schema);
+    }
     let url = std::env::var(&d.url_env)
         .ok()
         .filter(|v| !v.is_empty())
         .with_context(|| format!("[database] needs the connection string in ${}", d.url_env))?;
     let mut plans = Vec::new();
-    for (table, dir) in tables {
-        let column = super::partition::partition_key(dir, &s.partition_column);
-        plans.push(plan(dir, table, &column)?);
+    for t in tables {
+        let column = super::partition::partition_key(&t.dir, &s.partition_column);
+        let mut p = plan(&t.dir, &t.name, &column)?;
+        if upsert {
+            p.key = t.key.clone();
+        }
+        plans.push(p);
     }
+    let loads = if upsert {
+        upsert_loads(s, &identity(&url, &d.schema), tables, &plans, built)?
+    } else {
+        plans.iter().map(|_| Load::Full(None)).collect()
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("starting the database runtime")?;
-    rt.block_on(write(&url, &d.schema, &plans))
+    rt.block_on(write(&url, &d.schema, &plans, loads, upsert))?;
+    if upsert {
+        record_load(s, &identity(&url, &d.schema), &plans, built)?;
+    }
+    Ok(())
 }
 
-/// One table to load: its columns and files.
+/// How a table is loaded.
+enum Load {
+    /// Every row; in upsert, with why, when that is the table's own.
+    Full(Option<String>),
+    /// The rows of these resources, and the rows without a key.
+    Ids {
+        key: String,
+        ids: Arc<HashSet<String>>,
+    },
+    /// None of its resources changed.
+    Unchanged,
+}
+
+/// How upsert loads each table. Every table in full when the change log
+/// cannot vouch for the database: there is none, a refresh did not finish,
+/// `--full` asked for it, the views step did not run in this refresh (the
+/// Parquet may predate what the log lists), or the last load went to another
+/// database or schema. A table in full when what its rows are built from
+/// changed, or its type is marked `full`. Its ids otherwise; a new table or
+/// one whose columns changed is found to need a full load in `write`.
+fn upsert_loads(
+    s: &Settings,
+    identity: &str,
+    tables: &[Table],
+    plans: &[Plan],
+    built: Option<&Built>,
+) -> Result<Vec<Load>> {
+    let log = Changes::read(&s.raw_dir());
+    let all = match (&log, built) {
+        (Err(why), _) => Some(why.clone()),
+        (Ok(None), _) => Some("no record of the last load".to_string()),
+        (Ok(Some(c)), _) if c.reload.is_some() => c.reload.clone(),
+        (_, None) => Some("the views step did not run in this refresh".to_string()),
+        (Ok(Some(c)), _) if c.database.as_deref() != Some(identity) => {
+            Some("the last load went to another database or schema".to_string())
+        }
+        _ => None,
+    };
+    if let Some(why) = &all {
+        println!("   every table in full: {why}");
+    }
+    let mut loads = Vec::new();
+    for (t, p) in tables.iter().zip(plans) {
+        let key = t
+            .key
+            .clone()
+            .ok_or_else(|| usage(anyhow::anyhow!(no_key(&t.name, &t.name))))?;
+        match p.columns.iter().find(|(n, _)| *n == key) {
+            Some((_, "text")) => {}
+            Some((_, other)) => bail!(
+                "{}.{key}: the getResourceKey() column is {other} in the Parquet files, not text",
+                t.name
+            ),
+            None if p.files.is_empty() => {}
+            None => bail!(
+                "{}: its Parquet files have no column {key}; run the views step",
+                t.name
+            ),
+        }
+        let (Ok(Some(c)), None, Some(built)) = (&log, &all, built) else {
+            loads.push(Load::Full(None));
+            continue;
+        };
+        let last = c.tables.get(&t.name);
+        if last.is_none() || last != built.get(&t.name) {
+            loads.push(Load::Full(Some(
+                if last.is_none() {
+                    "not in the last load"
+                } else {
+                    "its view, its partition lookup or fhir-pipes changed"
+                }
+                .to_string(),
+            )));
+            continue;
+        }
+        loads.push(match c.types.get(&t.resource) {
+            None => Load::Unchanged,
+            Some(tc) if tc.full => Load::Full(Some(format!(
+                "every {} is reloaded (read without an old file to compare, or most changed)",
+                t.resource
+            ))),
+            Some(tc) => {
+                let ids: HashSet<String> = tc.ids().into_iter().map(str::to_string).collect();
+                if ids.is_empty() {
+                    Load::Unchanged
+                } else {
+                    Load::Ids {
+                        key,
+                        ids: Arc::new(ids),
+                    }
+                }
+            }
+        });
+    }
+    Ok(loads)
+}
+
+/// After an upsert's commit: the change log now starts from this load. With
+/// the views step in this run, what it listed is in the database, and each
+/// table is recorded with what it was built from. Without it the Parquet may
+/// be older than the log, so the ids are kept and no table is recorded, and
+/// the next load is in full.
+fn record_load(s: &Settings, identity: &str, plans: &[Plan], built: Option<&Built>) -> Result<()> {
+    let raw = s.raw_dir();
+    let mut c = match Changes::read(&raw) {
+        Ok(Some(c)) => c,
+        _ => Changes {
+            running: true,
+            ..Changes::default()
+        },
+    };
+    c.database = Some(identity.to_string());
+    match built {
+        Some(built) => {
+            c.reload = None;
+            c.types.clear();
+            c.tables = plans
+                .iter()
+                .filter(|p| !p.files.is_empty())
+                .filter_map(|p| built.get(&p.table).map(|f| (p.table.clone(), f.clone())))
+                .collect();
+        }
+        None => c.tables.clear(),
+    }
+    c.write(&raw)?;
+    Ok(())
+}
+
+/// The database a URL names and the schema, without credentials, for the
+/// change log.
+fn identity(url: &str, schema: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(u) => format!(
+            "{}:{}{} schema {schema}",
+            u.host_str().unwrap_or_default(),
+            u.port().unwrap_or(5432),
+            u.path()
+        ),
+        Err(_) => format!("schema {schema}"),
+    }
+}
+
+/// One table to load: its columns and files, and in upsert its key column.
 struct Plan {
     table: String,
     columns: Vec<(String, &'static str)>,
     files: Vec<PathBuf>,
+    key: Option<String>,
 }
 
 /// A table's columns, from its Parquet files, which must all agree.
@@ -105,6 +338,7 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
         table: table.to_string(),
         columns: columns.unwrap_or_default(),
         files,
+        key: None,
     })
 }
 
@@ -125,7 +359,13 @@ fn pg_type(t: &DataType) -> Option<&'static str> {
     })
 }
 
-async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
+async fn write(
+    url: &str,
+    schema: &str,
+    plans: &[Plan],
+    mut loads: Vec<Load>,
+    upsert: bool,
+) -> Result<()> {
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
     crate::extract::client::ensure_crypto_provider();
@@ -151,7 +391,11 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
     let mut created = Vec::new();
     // The tables this load fills or empties, analyzed after the commit.
     let mut loaded = Vec::new();
-    for p in plans.iter().filter(|p| !p.files.is_empty()) {
+    for (i, p) in plans
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.files.is_empty())
+    {
         let existing = existing_columns(&mut tx, schema, &p.table).await?;
         let wanted: Vec<(String, String)> = p
             .columns
@@ -160,6 +404,14 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
             .collect();
         if existing == wanted {
             continue;
+        }
+        if upsert {
+            let why = if existing.is_empty() {
+                "a new table"
+            } else {
+                "its columns changed"
+            };
+            loads[i] = Load::Full(Some(why.to_string()));
         }
         if !existing.is_empty() {
             exec(&mut tx, &format!("DROP TABLE {}", name(p)))
@@ -181,16 +433,32 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
             &format!("CREATE TABLE {} ({})", name(p), cols.join(", ")),
         )
         .await?;
-        created.push(p);
+        created.push(i);
     }
     // Then their indexes: unnamed, made with the table, so later runs find
-    // them in place.
-    for p in created {
+    // them in place. Upsert also needs one on the key column, which a table
+    // made by replace may lack.
+    for &i in &created {
+        let p = &plans[i];
         if p.columns.iter().any(|(n, _)| n == "id") {
             exec(&mut tx, &format!("CREATE INDEX ON {} (id)", name(p))).await?;
         }
     }
-    for p in plans {
+    if upsert {
+        for p in plans.iter().filter(|p| !p.files.is_empty()) {
+            if let Some(key) = p.key.as_deref()
+                && key != "id"
+                && !has_index(&mut tx, &name(p), key).await?
+            {
+                exec(
+                    &mut tx,
+                    &format!("CREATE INDEX ON {} ({})", name(p), ident(key)),
+                )
+                .await?;
+            }
+        }
+    }
+    for (p, load) in plans.iter().zip(loads) {
         let name = name(p);
         if p.files.is_empty() {
             // A table written before empty results got an empty file has no
@@ -207,10 +475,31 @@ async fn write(url: &str, schema: &str, plans: &[Plan]) -> Result<()> {
             }
             continue;
         }
-        exec(&mut tx, &format!("DELETE FROM {name}")).await?;
-        let rows = copy(&mut tx, &name, p).await?;
-        println!("   {} → {schema}.{} ({rows} rows)", p.table, p.table);
-        loaded.push(name);
+        match load {
+            Load::Full(why) => {
+                exec(&mut tx, &format!("DELETE FROM {name}")).await?;
+                let rows = copy(&mut tx, &name, p, None).await?;
+                match why {
+                    None => println!("   {} → {schema}.{} ({rows} rows)", p.table, p.table),
+                    Some(why) => println!(
+                        "   {} → {schema}.{} ({rows} rows, in full: {why})",
+                        p.table, p.table
+                    ),
+                }
+                loaded.push(name);
+            }
+            Load::Ids { key, ids } => {
+                let deleted = delete_ids(&mut tx, &name, &key, &ids).await?;
+                let rows = copy(&mut tx, &name, p, Some((&key, &ids))).await?;
+                println!(
+                    "   {} → {schema}.{} ({} resources changed or deleted: {deleted} rows deleted, {rows} copied)",
+                    p.table,
+                    p.table,
+                    ids.len()
+                );
+            }
+            Load::Unchanged => println!("   {} → {schema}.{} (unchanged)", p.table, p.table),
+        }
     }
     tx.commit().await.context("committing")?;
     // Outside the load's transaction, so the lock it held is released and
@@ -227,6 +516,47 @@ async fn exec(conn: &mut PgConnection, sql: &str) -> Result<()> {
         .await
         .with_context(|| format!("running {sql}"))?;
     Ok(())
+}
+
+/// Delete the rows of `ids` from `name`, and the rows without a key, which
+/// are copied again with the changed ones. Returns the rows deleted.
+async fn delete_ids(
+    conn: &mut PgConnection,
+    name: &str,
+    key: &str,
+    ids: &HashSet<String>,
+) -> Result<u64> {
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    // Two statements rather than one with OR, so each can use the index.
+    let by_id = format!("DELETE FROM {name} WHERE {} = ANY($1)", ident(key));
+    let mut n = sqlx_core::query::query(AssertSqlSafe(by_id.clone()))
+        .bind(ids)
+        .execute(&mut *conn)
+        .await
+        .with_context(|| format!("running {by_id}"))?
+        .rows_affected();
+    let no_key = format!("DELETE FROM {name} WHERE {} IS NULL", ident(key));
+    n += sqlx_core::query::query(AssertSqlSafe(no_key.clone()))
+        .execute(&mut *conn)
+        .await
+        .with_context(|| format!("running {no_key}"))?
+        .rows_affected();
+    Ok(n)
+}
+
+/// Whether `name` has an index whose first column is `column`.
+async fn has_index(conn: &mut PgConnection, name: &str, column: &str) -> Result<bool> {
+    sqlx_core::query::query(
+        "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_attribute a \
+         ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
+         WHERE i.indrelid = $1::text::regclass AND a.attname = $2)",
+    )
+    .bind(name)
+    .bind(column)
+    .fetch_one(&mut *conn)
+    .await
+    .and_then(|r| r.try_get::<bool, _>(0))
+    .with_context(|| format!("reading the indexes of {name}"))
 }
 
 async fn table_exists(conn: &mut PgConnection, schema: &str, table: &str) -> Result<bool> {
@@ -254,8 +584,15 @@ async fn existing_columns(
         .context("reading information_schema.columns")
 }
 
-/// COPY every row of `p`'s files into `name`. Returns the row count.
-async fn copy(conn: &mut PgConnection, name: &str, p: &Plan) -> Result<u64> {
+/// COPY the rows of `p`'s files into `name`: every row, or with `only`
+/// (a key column and ids) the rows whose key is one of the ids or null.
+/// Returns the row count.
+async fn copy(
+    conn: &mut PgConnection,
+    name: &str,
+    p: &Plan,
+    only: Option<(&str, &Arc<HashSet<String>>)>,
+) -> Result<u64> {
     let cols: Vec<String> = p.columns.iter().map(|(n, _)| ident(n)).collect();
     let mut sink = conn
         .copy_in_raw(&format!(
@@ -265,9 +602,15 @@ async fn copy(conn: &mut PgConnection, name: &str, p: &Plan) -> Result<u64> {
         .await
         .with_context(|| format!("starting COPY into {name}"))?;
     for f in &p.files {
-        let reader = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(f)?)?
-            .with_batch_size(COPY_ROWS)
-            .build()?;
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(f)?)?
+            .with_batch_size(COPY_ROWS);
+        if let Some((key, ids)) = only {
+            let mask = ProjectionMask::columns(builder.parquet_schema(), [key]);
+            builder = builder.with_row_filter(RowFilter::new(vec![Box::new(
+                ArrowPredicateFn::new(mask, key_filter(Arc::clone(ids))),
+            )]));
+        }
+        let reader = builder.build()?;
         for batch in reader {
             let batch = batch.with_context(|| format!("reading {}", f.display()))?;
             let text = csv(&batch).with_context(|| format!("{}: {}", p.table, f.display()))?;
@@ -279,6 +622,23 @@ async fn copy(conn: &mut PgConnection, name: &str, p: &Plan) -> Result<u64> {
     sink.finish()
         .await
         .with_context(|| format!("finishing COPY into {name}"))
+}
+
+/// The row filter of an upsert's COPY, over the key column alone: a row is
+/// kept when its key is one of `ids`, or null. The other columns are decoded
+/// only for the rows kept.
+fn key_filter(
+    ids: Arc<HashSet<String>>,
+) -> impl FnMut(RecordBatch) -> std::result::Result<BooleanArray, arrow::error::ArrowError>
++ Send
++ 'static {
+    move |batch| {
+        let keys = arrow::compute::cast(batch.column(0), &DataType::Utf8)?;
+        let keys = keys.as_string::<i32>();
+        Ok((0..keys.len())
+            .map(|i| Some(keys.is_null(i) || ids.contains(keys.value(i))))
+            .collect())
+    }
 }
 
 /// A batch as CSV for COPY: NULL is an empty unquoted field, every string is

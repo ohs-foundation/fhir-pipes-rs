@@ -251,6 +251,19 @@ pub struct DatabaseFile {
     pub schema: Option<String>,
     /// The view tables to load (default: all of them).
     pub tables: Option<Vec<String>>,
+    /// How the tables are loaded (default `replace`).
+    pub mode: Option<Mode>,
+}
+
+/// How the database step loads a table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Every row, every run.
+    #[default]
+    Replace,
+    /// Only the rows of the resources that changed since the last load.
+    Upsert,
 }
 
 /// `[database]`, with its defaults.
@@ -261,6 +274,7 @@ pub struct Database {
     // Read only by the database step, which needs the postgres feature.
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     pub tables: Option<Vec<String>>,
+    pub mode: Mode,
 }
 
 /// An external command run after the manifest is written.
@@ -345,6 +359,13 @@ impl Settings {
     /// Whether the run reads files instead of a FHIR server.
     pub fn reads_files(&self) -> bool {
         !self.files.is_empty()
+    }
+
+    /// Whether `[database]` loads only what changed (`mode = "upsert"`).
+    pub fn upsert(&self) -> bool {
+        self.database
+            .as_ref()
+            .is_some_and(|d| d.mode == Mode::Upsert)
     }
 
     /// The server the run reads, for the manifest, last-refresh.json and the
@@ -583,6 +604,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
                 .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into()),
             schema: d.schema.unwrap_or_else(|| "public".into()),
             tables: d.tables,
+            mode: d.mode.unwrap_or_default(),
         }),
         hooks: file.hooks,
         profile: o.profile.or_else(|| {
