@@ -459,7 +459,9 @@ default. Connection errors, 429 and 5xx responses are retried up to
 a `Retry-After` is waited out for the `t=` of its `RateLimit` header
 (draft-ietf-httpapi-ratelimit-headers), as Medplum sends it, with the same
 30-second limit: `RateLimit: "requests";r=0;t=60` waits 30 seconds. With
-several policies in the header, the `t=` of the one whose `r=` is 0 is used.
+several policies, in one header or in several `RateLimit` fields (Medplum
+sends `"requests"` and `"fhirInteractions"` on every response), the `t=` of
+the one whose `r=` is 0 is used, else the longest.
 Any other 4xx is final.
 
 Requests ask for gzip (`Accept-Encoding: gzip`); HAPI's search pages are

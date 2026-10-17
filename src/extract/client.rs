@@ -1394,6 +1394,32 @@ mod tests {
     }
 
     #[test]
+    fn medplums_two_ratelimit_fields_are_read_as_it_sends_them() {
+        // Self-hosted Medplum 5.2.5 sends both fields on every response and
+        // no Retry-After on a 429.
+        let headers = |requests: &'static str, fhir: &'static str| {
+            let mut h = HeaderMap::new();
+            h.append("ratelimit", HeaderValue::from_static(requests));
+            h.append("ratelimit", HeaderValue::from_static(fhir));
+            h
+        };
+        let quota = headers(
+            "\"requests\";r=59990;t=60",
+            "\"fhirInteractions\";r=49980;t=60",
+        );
+        // Not a 429: the fields only report the quota.
+        assert_eq!(server_wait(200, &quota), None);
+        assert_eq!(server_wait(202, &quota), None);
+        // A 429 with neither spent: the longest reset.
+        assert_eq!(server_wait(429, &quota), Some(Duration::from_secs(60)));
+        // One spent: its reset, not the other's.
+        let spent = headers("\"requests\";r=59990;t=60", "\"fhirInteractions\";r=0;t=45");
+        assert_eq!(server_wait(429, &spent), Some(Duration::from_secs(45)));
+        let spent = headers("\"requests\";r=0;t=12", "\"fhirInteractions\";r=49980;t=60");
+        assert_eq!(server_wait(429, &spent), Some(Duration::from_secs(12)));
+    }
+
+    #[test]
     fn each_thread_draws_its_own_jitter() {
         // Seeded from the clock's elapsed nanoseconds, every thread's first
         // factor was about 0, so retries after a shared 5xx stayed in step.
@@ -1653,6 +1679,27 @@ mod tests {
         let t = Instant::now();
         client(3).get(&server.url_str("/r")).unwrap();
         assert!(t.elapsed() >= Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_429_with_medplums_two_ratelimit_fields_waits_for_the_spent_one() {
+        // The `requests` policy's 60 s would be capped at 30 s; the spent
+        // `fhirInteractions` policy asks for 2 s.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/r"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(429)
+                        .append_header("RateLimit", "\"requests\";r=59990;t=60")
+                        .append_header("RateLimit", "\"fhirInteractions\";r=0;t=2"),
+                    status_code(200).body("ok")
+                ]),
+        );
+        let t = Instant::now();
+        client(3).get(&server.url_str("/r")).unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
     }
 
     #[test]
