@@ -232,10 +232,13 @@ server for the type's count (the first page's `total`, else
 - A server that rejects `_sort=_lastUpdated`, gives no count for a window, or
   whose window counts do not add up to the type's is paged as one stream,
   with a line saying why.
-- With `--server-kind aidbox`, no window holds more than 50,000 resources,
-  and a larger type is split into windows even with `--concurrency 1`. With
-  `--server-kind medplum`, no window holds 1,000,000 or more, so each
-  window's count is exact (see [docs/servers.md](docs/servers.md)).
+- With `--server-kind aidbox`, a window holding more than 50,000 resources
+  is halved, and a larger type is split into windows even with
+  `--concurrency 1`. With `--server-kind medplum`, the limit is 1,000,000,
+  so each window's count is exact. A window is never cut below one second,
+  so a second holding more than the limit stays one window. Past the usual
+  number of windows, halving stops when a window's halves do not count up
+  to it (see [docs/servers.md](docs/servers.md)).
 
 Incremental downloads (`_lastUpdated=ge<watermark>`) stay one stream per
 type. The limit covers types and windows together. A `Retry-After` on a 429

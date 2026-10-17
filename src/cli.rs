@@ -589,7 +589,7 @@ pub struct ExportArgs {
     /// The kind of FHIR server: medplum pages with `_sort=_lastUpdated`,
     /// treats counts from a million on as estimates, and with --bulk reads
     /// `Binary/<id>` output files from the FHIR base with the token; aidbox
-    /// pages with `_total=none` and in `_lastUpdated` windows of at most
+    /// pages with `_total=none` and in `_lastUpdated` windows of up to about
     /// 50,000; generic and hapi change nothing. Not used with --hapi-db
     #[arg(long, value_enum, default_value_t = ServerKind::Generic)]
     pub server_kind: ServerKind,

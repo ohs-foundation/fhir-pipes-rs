@@ -11,12 +11,14 @@
 //! not the one that ends there (`lt`).
 //!
 //! Each window is counted, and one holding more than its share is halved
-//! until the windows are even or a second wide. A window holding more than
-//! the server kind's `max_window` is halved however many windows that makes.
-//! The counts must add up to the type's; when they do not, the server is not
-//! filtering by `_lastUpdated` as asked, and the caller pages the type as one
-//! stream. A type count that may be an estimate (Medplum's, from a million
-//! on) is not compared.
+//! until the windows are even or a second wide. The counts must add up to the
+//! type's, before the halving and after it; when they do not, the server is
+//! not filtering by `_lastUpdated` as asked, and the caller pages the type as
+//! one stream. A type count that may be an estimate (Medplum's, from a million
+//! on) is not compared. A window holding more than `max_window` (the server
+//! kind's) is halved past the usual number of windows, for as long as its
+//! halves count up to it and it is two seconds wide or more, so the limit is
+//! a target: one second's resources are never split.
 //!
 //! Each window is paged into its own file. A window whose paged count is not
 //! its count is counted and paged again; a second difference is reported as
@@ -53,7 +55,7 @@ const ATTEMPTS: usize = 2;
 pub struct Options<'a> {
     pub server: &'a str,
     pub kind: ServerKind,
-    /// The most resources a window may hold: the kind's `max_window`.
+    /// The most resources a window should hold: the kind's `max_window`.
     pub max_window: Option<u64>,
     pub resource_type: &'a str,
     /// The type's count, from the server.
@@ -151,11 +153,31 @@ pub fn download(
     let Some(mut counts) = count_all(client, o, &windows) else {
         return Ok(no_count());
     };
+    // The windows' counts must add up to the type's (counted again before
+    // giving up, in case resources were added since), here and after the
+    // halving. A count that may be an estimate is not compared.
+    let unsuitable = |counts: &[u64]| -> Option<Windowed> {
+        let sum: u64 = counts.iter().sum();
+        (sum != o.total
+            && !o.kind.count_is_estimate(o.total)
+            && count_resources(client, o.server, o.resource_type) != Some(sum))
+        .then(|| {
+            Windowed::Unsuitable(format!(
+                "its _lastUpdated windows count {sum} resources but the server counts {} in all",
+                o.total
+            ))
+        })
+    };
+    // Checked before any halving, so a server that does not filter by
+    // _lastUpdated is found with the first counts.
+    if let Some(why) = unsuitable(&counts) {
+        return Ok(why);
+    }
 
     // Halve the windows holding more than their share, largest first, so
     // updates bunched in time do not leave one window with most of the type.
-    // Up to `most` windows, except that one over the kind's limit is always
-    // halved.
+    // Up to `most` windows, except that one over the kind's limit is halved
+    // past that, for as long as each window's halves add up to it.
     let share = (o.total / (2 * workers as u64)).max(PAGE_SIZE as u64);
     let most = 8 * workers;
     let over = |c: u64| o.max_window.is_some_and(|m| c > m);
@@ -167,8 +189,9 @@ pub fn download(
             })
             .collect();
         big.sort_by_key(|&i| std::cmp::Reverse(counts[i]));
+        let room = most.saturating_sub(windows.len());
         let forced = big.iter().filter(|&&i| over(counts[i])).count();
-        big.truncate(most.saturating_sub(windows.len()).max(forced));
+        big.truncate(room.max(forced));
         if big.is_empty() {
             break;
         }
@@ -193,6 +216,17 @@ pub fn download(
         let Some(half_counts) = count_all(client, o, &halves) else {
             return Ok(no_count());
         };
+        // Past `most`, halves that do not add up to their window mean the
+        // server's counts cannot be trusted to shrink: stop halving, and
+        // leave it to the check below.
+        if big.len() > room
+            && big
+                .iter()
+                .enumerate()
+                .any(|(k, &i)| half_counts[2 * k] + half_counts[2 * k + 1] != counts[i])
+        {
+            break;
+        }
         let at: HashMap<usize, usize> = big.iter().enumerate().map(|(k, &i)| (i, k)).collect();
         let (mut next_windows, mut next_counts) = (Vec::new(), Vec::new());
         for (i, (w, c)) in windows.iter().zip(&counts).enumerate() {
@@ -210,16 +244,8 @@ pub fn download(
         (windows, counts) = (next_windows, next_counts);
     }
 
-    let sum: u64 = counts.iter().sum();
-    // Counted again before giving up, in case resources were added since.
-    if sum != o.total
-        && !o.kind.count_is_estimate(o.total)
-        && count_resources(client, o.server, o.resource_type) != Some(sum)
-    {
-        return Ok(Windowed::Unsuitable(format!(
-            "its _lastUpdated windows count {sum} resources but the server counts {} in all",
-            o.total
-        )));
+    if let Some(why) = unsuitable(&counts) {
+        return Ok(why);
     }
     // An empty window is left out, but never the last: a resource updated
     // during the run lands there.
@@ -532,6 +558,9 @@ mod tests {
         data: Arc<Vec<(String, String)>>,
         sorts: bool,
         filters: bool,
+        /// Counts doubled for a window bounded on both sides and narrower
+        /// than this many seconds.
+        inflate_below: Option<i64>,
         /// First pages of a window to serve one resource short.
         shorten: Arc<AtomicUsize>,
         delay: Duration,
@@ -546,6 +575,7 @@ mod tests {
                 data: Arc::new(data),
                 sorts: true,
                 filters: true,
+                inflate_below: None,
                 shorten: Arc::new(AtomicUsize::new(0)),
                 delay: Duration::ZERO,
                 in_flight: Arc::new(AtomicUsize::new(0)),
@@ -581,9 +611,20 @@ mod tests {
                 }
             }
             if get("_summary") == ["count"] {
+                let bound = |op: &str| {
+                    get("_lastUpdated")
+                        .iter()
+                        .find(|v| v.starts_with(op))
+                        .map(|v| at(&v[2..]).0)
+                };
+                let narrow = match (bound("ge"), bound("lt"), self.inflate_below) {
+                    (Some(a), Some(b), Some(n)) => b - a < n,
+                    _ => false,
+                };
+                let total = rows.len() * if narrow { 2 } else { 1 };
                 return (
                     200,
-                    serde_json::json!({"resourceType":"Bundle","total":rows.len()}).to_string(),
+                    serde_json::json!({"resourceType":"Bundle","total":total}).to_string(),
                 );
             }
             if let Some(sort) = get("_sort").first() {
@@ -1045,6 +1086,51 @@ mod tests {
             Windowed::Unsuitable(why) => assert!(why.contains("server counts 3000"), "{why}"),
             Windowed::Done { .. } => panic!("windowed"),
         }
+    }
+
+    #[test]
+    fn a_server_that_ignores_the_window_bounds_is_found_before_halving() {
+        // Every window counts the whole type, so every one is over the
+        // limit; halving them down to a second each would take thousands of
+        // counts.
+        let mut fake = Fake::new(spread(3000, 3600));
+        fake.filters = false;
+        let server = serve(&fake);
+        let r = run_with(&fake, &server, 2, 2, Some(500));
+        match r.result {
+            Windowed::Unsuitable(why) => assert!(why.contains("server counts 3000"), "{why}"),
+            Windowed::Done { .. } => panic!("windowed"),
+        }
+        let counts = fake
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|q| q.contains("_summary=count"))
+            .count();
+        assert!(counts <= 3, "{counts} counts");
+    }
+
+    #[test]
+    fn halves_that_do_not_add_up_stop_the_halving_past_the_usual_limit() {
+        // Two workers halve up to 16 windows of 225 s, about 190 resources
+        // each, which is over the limit of 100. A window narrower than 200 s
+        // counts double, so the next halves do not add up: the halving stops
+        // there instead of going on to one-second windows.
+        let mut fake = Fake::new(spread(3000, 3600));
+        fake.inflate_below = Some(200);
+        let server = serve(&fake);
+        let r = run_with(&fake, &server, 2, 2, Some(100));
+        assert_eq!(windows(&r), 16);
+        assert_eq!(r.lines.len(), 3000);
+        let counts = fake
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|q| q.contains("_summary=count"))
+            .count();
+        assert!(counts <= 100, "{counts} counts");
     }
 
     #[test]

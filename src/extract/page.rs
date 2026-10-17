@@ -20,8 +20,8 @@ pub const MAX_PAGES: usize = 10_000;
 /// (its `accurateCountThreshold`), and with an exact count below it.
 pub const MEDPLUM_EXACT_COUNT_BELOW: u64 = 1_000_000;
 
-/// The most resources an Aidbox `_lastUpdated` window holds: Aidbox pages
-/// with an offset (`_page`), which slows down deep into a large result.
+/// The most resources an Aidbox `_lastUpdated` window should hold: Aidbox
+/// pages with an offset (`_page`), which slows down deep into a large result.
 pub const AIDBOX_MAX_WINDOW: u64 = 50_000;
 
 /// The kind of FHIR server (`--server-kind`, `server.kind`). It changes only
@@ -63,9 +63,10 @@ impl ServerKind {
         }
     }
 
-    /// The most resources one `_lastUpdated` window may hold. A type larger
-    /// than this is paged in windows even with `--concurrency 1`. Medplum's
-    /// limit keeps each window's count exact.
+    /// The most resources one `_lastUpdated` window should hold: windows over
+    /// it are halved, though never below one second. A type larger than this
+    /// is paged in windows even with `--concurrency 1`. Medplum's limit keeps
+    /// each window's count exact.
     pub fn max_window(self) -> Option<u64> {
         match self {
             ServerKind::Generic | ServerKind::Hapi => None,

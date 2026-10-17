@@ -10,12 +10,18 @@ that `export`, `extract` and `run` send them:
 |---|---|
 | `generic` (default) | Nothing. |
 | `hapi` | Nothing: HAPI FHIR searches as `generic` does. |
-| `medplum` | Every page asks for `_sort=_lastUpdated`. A count from 1,000,000 on is taken as an estimate. `_lastUpdated` windows hold fewer than 1,000,000 resources. With `--bulk`, `Binary/<id>` output files are read from the FHIR base with the token. |
-| `aidbox` | Every page asks for `_total=none`. `_lastUpdated` windows hold at most 50,000 resources, and a larger type is paged in windows even with `--concurrency 1`. |
+| `medplum` | Every page asks for `_sort=_lastUpdated`. A count from 1,000,000 on is taken as an estimate. `_lastUpdated` windows are halved until they hold fewer than 1,000,000 resources. With `--bulk`, `Binary/<id>` output files are read from the FHIR base with the token. |
+| `aidbox` | Every page asks for `_total=none`. `_lastUpdated` windows are halved until they hold at most 50,000 resources, and a larger type is paged in windows even with `--concurrency 1`. |
 
 The kind's parameters are added to the first page of each search and kept on
 the server's next links. The kind does not change authentication or
 `--hapi-db`.
+
+The window limits are targets, not guarantees. The windows' counts
+must add up to the type's before any halving, and past the usual number of
+windows (eight per `--concurrency`), halving stops at a window whose halves
+do not count up to it. A server whose window counts do not add up is paged
+as one stream.
 
 ```sh
 fhir-pipes export --server https://api.medplum.com/fhir/R4 --server-kind medplum \
@@ -73,7 +79,9 @@ more, Medplum gives `_cursor` next links instead, which have no limit.
 there on. fhir-pipes does not compare an estimate with the file: the count
 check after an incremental search is skipped, with a warning, so a resource
 deleted from such a type stays in the file until a full download. Windowed
-downloads keep each window below 1,000,000, so every window's count is exact.
+downloads halve each window until it holds fewer than 1,000,000, so its count
+is exact. A window is never cut below one second, so a second holding a
+million or more stays one window, with an estimated count.
 
 **Bulk export.** A system-level `$export` covers the whole project. The
 output files are listed as `Binary/<id>`, relative to the FHIR base, and need
@@ -132,8 +140,10 @@ secret in a Basic header, not in the form body that fhir-pipes sends today.
 (`_total=accurate`), which is slow on a large type and counts against its
 search timeout. With the kind, every page asks for `_total=none`. Aidbox pages
 with an offset (`_page`), which slows down deep into a large result, so a
-type of more than 50,000 resources is split into `_lastUpdated` windows of at
-most 50,000, even with `--concurrency 1`.
+type of more than 50,000 resources is split into `_lastUpdated` windows, even
+with `--concurrency 1`, and each window holding more than 50,000 is halved.
+50,000 is a target, not a guarantee: a window is never cut below one second,
+so a second holding more than 50,000 resources stays one window.
 
 **Bulk export.** `$export` needs a storage provider for its files:
 `BOX_FHIR_BULK_STORAGE_PROVIDER` set to `gcp`, `aws` or `azure`, with the
