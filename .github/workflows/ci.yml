@@ -63,7 +63,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      # A PostgreSQL with TLS for the database step's tests (tests/refresh.rs,
+      # A PostgreSQL with TLS for the database step's tests (tests/refresh_database.rs,
       # module database), which run only with this URL: every load goes over
       # an encrypted connection (sslmode=require), with the image's
       # self-signed certificate.
