@@ -21,8 +21,15 @@
 //! from the table's Parquet files. `<key>` is the view's column with the path
 //! `getResourceKey()` (`key_column`). The tables still go in one
 //! transaction. A table is loaded in full instead, as in replace, when the
-//! log cannot vouch for what the database holds (`upsert_loads`); only those
-//! tables are analyzed after the commit.
+//! log cannot vouch for what the database holds (`upsert_loads`, `write`);
+//! only those tables are analyzed after the commit.
+//!
+//! Each upsert load sets every table's comment to a mark of its own
+//! (`fhir-pipes upsert load <uuid>`) in the same transaction, and the change
+//! log records it after the commit. A table whose comment is not the log's
+//! mark was last loaded by something else (another warehouse, a replace
+//! load, a restored backup, the same URL pointing elsewhere) and is loaded
+//! in full. A replace load removes the mark from the tables it loads.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -63,6 +70,41 @@ pub struct Table {
     pub resource: String,
     /// Its view's `getResourceKey()` column (`key_column`).
     pub key: Option<String>,
+    /// Its view calls a function of the time (`time_dependent`).
+    pub time_dependent: bool,
+}
+
+/// The start of the comment upsert sets on each table it loads.
+const MARK: &str = "fhir-pipes upsert load ";
+
+/// Whether the view `json` calls `now()`, `today()` or `timeOfDay()` in any
+/// of its expressions: its rows can change while its resources do not, so
+/// upsert loads its table in full every run. A name in a string literal or
+/// a description counts too, which only costs a full load.
+pub fn time_dependent(json: &serde_json::Value) -> bool {
+    match json {
+        serde_json::Value::String(text) => calls_time(text),
+        serde_json::Value::Array(items) => items.iter().any(time_dependent),
+        serde_json::Value::Object(fields) => fields.values().any(time_dependent),
+        _ => false,
+    }
+}
+
+/// Whether the FHIRPath `text` calls one of the time functions: the name as
+/// a whole word, then `(` after any spaces.
+fn calls_time(text: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| word(c)) {
+        let after = &rest[start..];
+        let end = after.find(|c: char| !word(c)).unwrap_or(after.len());
+        let (name, tail) = after.split_at(end);
+        if ["now", "today", "timeOfDay"].contains(&name) && tail.trim_start().starts_with('(') {
+            return true;
+        }
+        rest = tail;
+    }
+    false
 }
 
 /// Each table the views step wrote in this run, with what its rows were
@@ -125,63 +167,99 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
     for t in tables {
         let column = super::partition::partition_key(&t.dir, &s.partition_column);
         let mut p = plan(&t.dir, &t.name, &column)?;
-        if upsert {
-            p.key = t.key.clone();
+        if upsert && let Some(key) = &t.key {
+            p.key_nulls = key_has_nulls(&p.files, key)?;
+            p.key = Some(key.clone());
         }
         plans.push(p);
     }
-    let loads = if upsert {
-        upsert_loads(s, &identity(&url, &d.schema), tables, &plans, built)?
+    let (loads, marks) = if upsert {
+        let (loads, last) = upsert_loads(s, tables, &plans, built)?;
+        let next = format!("{MARK}{}", uuid::Uuid::new_v4());
+        (loads, Some((last, next)))
     } else {
-        plans.iter().map(|_| Load::Full(None)).collect()
+        (plans.iter().map(|_| Load::Full(None)).collect(), None)
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("starting the database runtime")?;
-    rt.block_on(write(&url, &d.schema, &plans, loads, upsert))?;
-    if upsert {
-        record_load(s, &identity(&url, &d.schema), &plans, built)?;
+    rt.block_on(write(&url, &d.schema, &plans, loads, marks.as_ref()))?;
+    if let Some((_, next)) = &marks {
+        record_load(s, next, &plans, built)?;
     }
     Ok(())
+}
+
+/// Whether some row of `files` may have no `key`: by the files' statistics,
+/// and yes where a file has none.
+fn key_has_nulls(files: &[PathBuf], key: &str) -> Result<bool> {
+    for f in files {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(
+            fs::File::open(f).with_context(|| format!("opening {}", f.display()))?,
+        )
+        .with_context(|| format!("reading {}", f.display()))?;
+        let Some(i) = builder
+            .parquet_schema()
+            .columns()
+            .iter()
+            .position(|c| c.path().string() == key)
+        else {
+            continue;
+        };
+        for rg in builder.metadata().row_groups() {
+            if rg.num_rows() == 0 {
+                continue;
+            }
+            match rg.column(i).statistics().and_then(|s| s.null_count_opt()) {
+                Some(0) => {}
+                _ => return Ok(true),
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// How a table is loaded.
 enum Load {
     /// Every row; in upsert, with why, when that is the table's own.
     Full(Option<String>),
-    /// The rows of these resources, and the rows without a key.
+    /// The rows of these resources, and the rows without a key (which no
+    /// id names, so they are rewritten whenever there are any).
     Ids {
         key: String,
         ids: Arc<HashSet<String>>,
     },
-    /// None of its resources changed.
+    /// None of its resources changed; its rows without a key, if there are
+    /// any, are rewritten all the same.
     Unchanged,
 }
 
-/// How upsert loads each table. Every table in full when the change log
-/// cannot vouch for the database: there is none, a refresh did not finish,
-/// `--full` asked for it, the views step did not run in this refresh (the
-/// Parquet may predate what the log lists), or the last load went to another
-/// database or schema. A table in full when what its rows are built from
-/// changed, or its type is marked `full`. Its ids otherwise; a new table or
-/// one whose columns changed is found to need a full load in `write`.
+/// How upsert loads each table, and the last load's mark, if the log has
+/// one. Every table in full when the change log cannot vouch for the
+/// database: there is none, a refresh did not finish, `--full` asked for it,
+/// or the views step did not run in this refresh (the Parquet may predate
+/// what the log lists). A table in full when its view depends on the time,
+/// what its rows are built from changed, or its type is marked `full`. Its
+/// ids otherwise; `write` finds a table that is new, whose columns changed,
+/// or that another load wrote last.
 fn upsert_loads(
     s: &Settings,
-    identity: &str,
     tables: &[Table],
     plans: &[Plan],
     built: Option<&Built>,
-) -> Result<Vec<Load>> {
+) -> Result<(Vec<Load>, Option<String>)> {
     let log = Changes::read(&s.raw_dir());
+    let last = log
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .and_then(|c| c.load.clone());
     let all = match (&log, built) {
         (Err(why), _) => Some(why.clone()),
         (Ok(None), _) => Some("no record of the last load".to_string()),
         (Ok(Some(c)), _) if c.reload.is_some() => c.reload.clone(),
         (_, None) => Some("the views step did not run in this refresh".to_string()),
-        (Ok(Some(c)), _) if c.database.as_deref() != Some(identity) => {
-            Some("the last load went to another database or schema".to_string())
-        }
         _ => None,
     };
     if let Some(why) = &all {
@@ -209,6 +287,12 @@ fn upsert_loads(
             loads.push(Load::Full(None));
             continue;
         };
+        if t.time_dependent {
+            loads.push(Load::Full(Some(
+                "its view calls now(), today() or timeOfDay()".to_string(),
+            )));
+            continue;
+        }
         let last = c.tables.get(&t.name);
         if last.is_none() || last != built.get(&t.name) {
             loads.push(Load::Full(Some(
@@ -240,7 +324,7 @@ fn upsert_loads(
             }
         });
     }
-    Ok(loads)
+    Ok((loads, last))
 }
 
 /// After an upsert's commit: the change log now starts from this load. With
@@ -248,7 +332,7 @@ fn upsert_loads(
 /// table is recorded with what it was built from. Without it the Parquet may
 /// be older than the log, so the ids are kept and no table is recorded, and
 /// the next load is in full.
-fn record_load(s: &Settings, identity: &str, plans: &[Plan], built: Option<&Built>) -> Result<()> {
+fn record_load(s: &Settings, mark: &str, plans: &[Plan], built: Option<&Built>) -> Result<()> {
     let raw = s.raw_dir();
     let mut c = match Changes::read(&raw) {
         Ok(Some(c)) => c,
@@ -257,7 +341,7 @@ fn record_load(s: &Settings, identity: &str, plans: &[Plan], built: Option<&Buil
             ..Changes::default()
         },
     };
-    c.database = Some(identity.to_string());
+    c.load = Some(mark.to_string());
     match built {
         Some(built) => {
             c.reload = None;
@@ -274,26 +358,14 @@ fn record_load(s: &Settings, identity: &str, plans: &[Plan], built: Option<&Buil
     Ok(())
 }
 
-/// The database a URL names and the schema, without credentials, for the
-/// change log.
-fn identity(url: &str, schema: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(u) => format!(
-            "{}:{}{} schema {schema}",
-            u.host_str().unwrap_or_default(),
-            u.port().unwrap_or(5432),
-            u.path()
-        ),
-        Err(_) => format!("schema {schema}"),
-    }
-}
-
-/// One table to load: its columns and files, and in upsert its key column.
+/// One table to load: its columns and files, and in upsert its key column
+/// and whether some rows may have no key.
 struct Plan {
     table: String,
     columns: Vec<(String, &'static str)>,
     files: Vec<PathBuf>,
     key: Option<String>,
+    key_nulls: bool,
 }
 
 /// A table's columns, from its Parquet files, which must all agree.
@@ -339,6 +411,7 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
         columns: columns.unwrap_or_default(),
         files,
         key: None,
+        key_nulls: false,
     })
 }
 
@@ -359,13 +432,16 @@ fn pg_type(t: &DataType) -> Option<&'static str> {
     })
 }
 
+/// `marks`, in upsert: the last load's mark as the log has it, and this
+/// load's.
 async fn write(
     url: &str,
     schema: &str,
     plans: &[Plan],
     mut loads: Vec<Load>,
-    upsert: bool,
+    marks: Option<&(Option<String>, String)>,
 ) -> Result<()> {
+    let upsert = marks.is_some();
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
     crate::extract::client::ensure_crypto_provider();
@@ -458,6 +534,39 @@ async fn write(
             }
         }
     }
+    // A table the last load of this log did not write may hold anything.
+    if let Some((last, _)) = marks {
+        for (i, p) in plans
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.files.is_empty())
+        {
+            if matches!(loads[i], Load::Full(_)) {
+                continue;
+            }
+            if last.is_none() || comment(&mut tx, &name(p)).await? != *last {
+                loads[i] = Load::Full(Some(
+                    "the database's copy was not last loaded from this warehouse".to_string(),
+                ));
+            }
+        }
+    }
+    // Rows without a key are not named by any id: rewritten whenever the
+    // files or the table have any.
+    for (i, p) in plans
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.files.is_empty())
+    {
+        if let (Load::Unchanged, Some(key)) = (&loads[i], &p.key)
+            && (p.key_nulls || has_null_keys(&mut tx, &name(p), key).await?)
+        {
+            loads[i] = Load::Ids {
+                key: key.clone(),
+                ids: Arc::default(),
+            };
+        }
+    }
     for (p, load) in plans.iter().zip(loads) {
         let name = name(p);
         if p.files.is_empty() {
@@ -491,15 +600,40 @@ async fn write(
             Load::Ids { key, ids } => {
                 let deleted = delete_ids(&mut tx, &name, &key, &ids).await?;
                 let rows = copy(&mut tx, &name, p, Some((&key, &ids))).await?;
-                println!(
-                    "   {} → {schema}.{} ({} resources changed or deleted: {deleted} rows deleted, {rows} copied)",
-                    p.table,
-                    p.table,
-                    ids.len()
-                );
+                if ids.is_empty() {
+                    println!(
+                        "   {} → {schema}.{} (rows without an id: {deleted} deleted, {rows} copied)",
+                        p.table, p.table
+                    );
+                } else {
+                    println!(
+                        "   {} → {schema}.{} ({} resources changed or deleted: {deleted} rows deleted, {rows} copied)",
+                        p.table,
+                        p.table,
+                        ids.len()
+                    );
+                }
             }
             Load::Unchanged => println!("   {} → {schema}.{} (unchanged)", p.table, p.table),
         }
+    }
+    // The mark: this load's on each table in upsert; in replace, an upsert's
+    // mark is removed, so that upsert knows the rows are not its own.
+    for p in plans.iter().filter(|p| !p.files.is_empty()) {
+        let set = match marks {
+            Some((_, next)) => Some(next.as_str()),
+            None if comment(&mut tx, &name(p))
+                .await?
+                .is_some_and(|c| c.starts_with(MARK)) =>
+            {
+                None
+            }
+            None => continue,
+        };
+        let text = set.map_or("NULL".to_string(), |m| {
+            format!("'{}'", m.replace('\'', "''"))
+        });
+        exec(&mut tx, &format!("COMMENT ON TABLE {} IS {text}", name(p))).await?;
     }
     tx.commit().await.context("committing")?;
     // Outside the load's transaction, so the lock it held is released and
@@ -542,6 +676,29 @@ async fn delete_ids(
         .with_context(|| format!("running {no_key}"))?
         .rows_affected();
     Ok(n)
+}
+
+/// The comment on table `name`, if it has one.
+async fn comment(conn: &mut PgConnection, name: &str) -> Result<Option<String>> {
+    sqlx_core::query::query("SELECT obj_description($1::text::regclass, 'pg_class')")
+        .bind(name)
+        .fetch_one(&mut *conn)
+        .await
+        .and_then(|r| r.try_get::<Option<String>, _>(0))
+        .with_context(|| format!("reading the comment on {name}"))
+}
+
+/// Whether `name` has rows without a `key`.
+async fn has_null_keys(conn: &mut PgConnection, name: &str, key: &str) -> Result<bool> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM {name} WHERE {} IS NULL)",
+        ident(key)
+    );
+    sqlx_core::query::query(AssertSqlSafe(sql.clone()))
+        .fetch_one(&mut *conn)
+        .await
+        .and_then(|r| r.try_get::<bool, _>(0))
+        .with_context(|| format!("running {sql}"))
 }
 
 /// Whether `name` has an index whose first column is `column`.
@@ -844,6 +1001,25 @@ mod tests {
     }
 
     #[test]
+    fn views_that_call_a_time_function_are_found() {
+        for path in ["now()", "today ( ).toString()", "a.where(b < timeOfDay())"] {
+            assert!(
+                time_dependent(&serde_json::json!({"select": [{"column": [{"path": path}]}]})),
+                "{path}"
+            );
+        }
+        assert!(time_dependent(
+            &serde_json::json!({"where": [{"path": "period.end > now()"}]})
+        ));
+        for path in ["known()", "snow", "nowhere(x)", "today", "now.x"] {
+            assert!(
+                !time_dependent(&serde_json::json!({"select": [{"column": [{"path": path}]}]})),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn the_key_filter_keeps_listed_and_null_keys() {
         let ids: HashSet<String> = ["a".to_string(), "c".to_string()].into();
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
@@ -859,17 +1035,6 @@ mod tests {
         .unwrap();
         let kept = key_filter(Arc::new(ids))(batch).unwrap();
         assert_eq!(kept, BooleanArray::from(vec![true, false, true, true]));
-    }
-
-    #[test]
-    fn the_database_is_named_without_credentials() {
-        assert_eq!(
-            identity(
-                "postgres://u:secret@db.example.org/analytics?sslmode=require",
-                "s"
-            ),
-            "db.example.org:5432/analytics schema s"
-        );
     }
 
     #[test]

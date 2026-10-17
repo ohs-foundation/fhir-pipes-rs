@@ -538,14 +538,16 @@ For each table, in the same single transaction:
 
 ```sql
 DELETE FROM t WHERE id = ANY($1);   -- the ids that changed or were deleted
-DELETE FROM t WHERE id IS NULL;     -- rows without a key, copied again
+DELETE FROM t WHERE id IS NULL;     -- rows without an id, copied again
 COPY t (...) FROM STDIN;            -- the rows of those ids, from the Parquet
 ```
 
 The rows come from the Parquet files the views step wrote in this run,
 filtered by id: the views still run over every resource, so `parquet/` is
 the same in either mode, and the database gets the same rows as a full load.
-A table whose type has no changes is left as it is.
+A table whose type has no changes is left as it is. Rows without an id (from
+a resource that has none) are not named by any id, so they are deleted and
+copied again in every run that finds such rows in the Parquet or the table.
 
 **The id column.** Each loaded view needs a column whose path is
 `getResourceKey()`, in a `select` that keeps the resource as its focus: not
@@ -587,21 +589,35 @@ its ids.
 - the views step did not run in this refresh (`--only database`), since the
   Parquet may then be older than the log; such a load also clears the
   log's record of the tables, so the next run with the views loads in full
-  too;
-- the last load went to another database or schema.
+  too.
 
-And for one table when the table is new or its columns changed, its type is
-marked for a full reload, or what its rows are built from changed: its view,
-the partition column, the partition lookup and the contents of the lookup
-table, or the fhir-pipes version. A view row depends on its own resource
-only, except for the partition column, which comes from the lookup table
-(such as `locations`); a change there can move the rows of resources that
-did not change, so the table is reloaded. The step says which tables it
-loads in full and why. Only those tables are analyzed after the commit.
+And for one table when:
+
+- the table is new or its columns changed;
+- the table was last written by another load. Each upsert load sets the
+  comment of every table it loads to a mark of its own (`fhir-pipes upsert
+  load <uuid>`), in the same transaction, and the change log records the
+  mark. A table with another comment was written by another warehouse, a
+  `replace` load (which removes the mark), a restored backup, or a database
+  the connection string now reaches instead. Upsert replaces any comment you
+  set on the tables it loads;
+- its view calls `now()`, `today()` or `timeOfDay()` anywhere (columns,
+  `where`, nested selects): its rows can change while its resources do not,
+  so the table is loaded in full in every run;
+- its type is marked for a full reload;
+- what its rows are built from changed: its view, the partition column, the
+  partition lookup and the contents of the lookup table, or the fhir-pipes
+  version. A view row depends on its own resource only, except for the
+  partition column, which comes from the lookup table (such as
+  `locations`); a change there can move the rows of resources that did not
+  change, so the table is reloaded.
+
+The step says which tables it loads in full and why. Only those tables are
+analyzed after the commit.
 
 Changes the log cannot see are not loaded: a file in `raw/` edited by hand
-before `--reuse-raw`, or a database restored from a backup or changed by
-hand. Run once with `--full` (or `mode = "replace"`) to bring the database
+before `--reuse-raw`, or rows changed by hand in a table that keeps the
+mark. Run once with `--full` (or `mode = "replace"`) to bring the database
 back in line.
 
 On a table of 3,000,000 rows (one Observation view, from files, on an

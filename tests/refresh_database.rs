@@ -537,6 +537,164 @@ mod database {
         ]);
     }
 
+    /// A views directory under `dir` with one Patient view, `IcrPeople`,
+    /// whose columns are `id` (getResourceKey()) and `columns`.
+    fn people_view(dir: &std::path::Path, columns: &str) -> std::path::PathBuf {
+        let views = dir.join("people-views");
+        fs::create_dir_all(&views).unwrap();
+        fs::write(
+            views.join("IcrPeople.json"),
+            format!(
+                r#"{{"resourceType": "ViewDefinition", "name": "IcrPeople", "status": "active", "resource": "Patient",
+                    "select": [{{"column": [{{"name": "id", "path": "getResourceKey()"}}, {columns}]}}]}}"#
+            ),
+        )
+        .unwrap();
+        views
+    }
+
+    /// Run `config` on the files in `dir/input` with `views`.
+    fn from_files(config: &std::path::Path, views: &std::path::Path) -> assert_cmd::Command {
+        let mut c = cmd(config);
+        c.arg("--input")
+            .arg(config.with_file_name("input"))
+            .args(["--only", "views", "--views"])
+            .arg(views);
+        c
+    }
+
+    fn write_patients(dir: &std::path::Path, patients: &[serde_json::Value]) {
+        inputs(dir, &[("Patient.ndjson", lines(patients))]);
+    }
+
+    /// A resource without an id gives rows without a key, which no id names:
+    /// they are rewritten whenever there are any, so a change to one is
+    /// loaded although the change log lists no id.
+    #[test]
+    fn rows_without_an_id_are_rewritten() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("no_id");
+        let (dir, config) = setup(NOWHERE, &upsert(&s));
+        let views = people_view(
+            dir.path(),
+            r#"{"name": "active", "path": "active", "type": "boolean"}"#,
+        );
+        let patients = |active: bool| {
+            vec![
+                json!({"resourceType": "Patient", "id": "p1", "active": true}),
+                json!({"resourceType": "Patient", "active": active}),
+            ]
+        };
+        write_patients(dir.path(), &patients(true));
+        from_files(&config, &views).assert().success();
+        write_patients(dir.path(), &patients(false));
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "people → {s}.people (rows without an id: 1 deleted, 1 copied)"
+            )));
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(coalesce(id, 'null') || '=' || active::text, ',' ORDER BY id) FROM \"{s}\".people"
+            )),
+            "p1=true,null=false"
+        );
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// Two warehouses loading the same schema, or a replace load into it:
+    /// each table carries the mark of the load that wrote it last, and a
+    /// table with another load's mark is loaded in full.
+    #[test]
+    fn a_table_another_load_wrote_is_loaded_in_full() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("other_load");
+        let (one_dir, one_config) = setup(NOWHERE, &upsert(&s));
+        let (other_dir, other_config) = setup(NOWHERE, &upsert(&s));
+        let views = people_view(
+            one_dir.path(),
+            r#"{"name": "born", "path": "birthDate", "type": "date"}"#,
+        );
+        let patient =
+            |id: &str| json!({"resourceType": "Patient", "id": id, "birthDate": "2020-01-01"});
+        write_patients(one_dir.path(), &[patient("p1")]);
+        write_patients(other_dir.path(), &[patient("q1"), patient("q2")]);
+        from_files(&one_config, &views).assert().success();
+        from_files(&other_config, &views).assert().success();
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',' ORDER BY id) FROM \"{s}\".people"
+            )),
+            "q1,q2"
+        );
+        from_files(&one_config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "people → {s}.people (1 rows, in full: the database's copy was not last loaded from this warehouse)"
+            )));
+        assert_eq!(one(&format!("SELECT id FROM \"{s}\".people")), "p1");
+        // A replace load removes the mark.
+        let replace = other_config.with_file_name("replace.toml");
+        fs::write(
+            &replace,
+            fs::read_to_string(&other_config)
+                .unwrap()
+                .replace("mode = \"upsert\"\n", ""),
+        )
+        .unwrap();
+        from_files(&replace, &views).assert().success();
+        assert_eq!(
+            one(&format!(
+                "SELECT coalesce(obj_description('\"{s}\".people'::regclass, 'pg_class'), 'none')"
+            )),
+            "none"
+        );
+        from_files(&one_config, &views)
+            .assert()
+            .success()
+            .stdout(has(
+                "in full: the database's copy was not last loaded from this warehouse",
+            ));
+        assert_eq!(one(&format!("SELECT id FROM \"{s}\".people")), "p1");
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
+    /// A view that calls now() can give other rows from the same resources:
+    /// its table is loaded in full every run.
+    #[test]
+    fn a_view_of_the_time_is_loaded_in_full() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("now");
+        let (dir, config) = setup(NOWHERE, &upsert(&s));
+        let views = people_view(
+            dir.path(),
+            r#"{"name": "at", "path": "now().toString()", "type": "string"}"#,
+        );
+        write_patients(
+            dir.path(),
+            &[json!({"resourceType": "Patient", "id": "p1"})],
+        );
+        from_files(&config, &views).assert().success();
+        let first = one(&format!("SELECT at FROM \"{s}\".people"));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "people → {s}.people (1 rows, in full: its view calls now(), today() or timeOfDay())"
+            )));
+        assert_ne!(one(&format!("SELECT at FROM \"{s}\".people")), first);
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
     /// Upsert finds rows by the getResourceKey() column; a view without one
     /// is refused before anything runs.
     #[test]

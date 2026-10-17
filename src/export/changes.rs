@@ -22,8 +22,8 @@
 //!
 //! `running` says a refresh started and has not finished, and `reload` why
 //! the next load must reload every table in full; while it is set the ids are
-//! not recorded, since they would not be read. `database` and `tables`
-//! describe the last load (warehouse/database.rs).
+//! not recorded, since they would not be read. `load` and `tables` describe
+//! the last load (warehouse/database.rs).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -49,9 +49,10 @@ pub struct Changes {
     /// The next load reloads every table in full, for this reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reload: Option<String>,
-    /// The database and schema of the last load, without credentials.
+    /// The last load's mark, which it also set as the comment of each table
+    /// it loaded (warehouse/database.rs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub database: Option<String>,
+    pub load: Option<String>,
     /// Each table of the last load, with what its rows were built from.
     #[serde(default)]
     pub tables: BTreeMap<String, String>,

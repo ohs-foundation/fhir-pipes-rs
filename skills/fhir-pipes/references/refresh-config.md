@@ -152,8 +152,10 @@ compared with the old file). Each loaded view needs a column with path
 `getResourceKey()` outside any `forEach`; a view without one stops the run
 with exit 2. It loads in full on the first run, after a refresh that did not
 finish, with `--full`, without the views step in the run, and for a table
-that is new, whose columns changed, or whose view or partition lookup
-changed. Edits to `raw/` by hand are not seen: run `--full` after one.
+that is new, whose columns changed, whose view or partition lookup changed,
+whose view calls `now()`, `today()` or `timeOfDay()`, or that another load
+wrote last (each upsert sets the table comment to its own mark). Edits to
+`raw/` by hand are not seen: run `--full` after one.
 
 Before loading into a database, confirm with the user which database it
 is. Do not load into a production database unless the user says so.
