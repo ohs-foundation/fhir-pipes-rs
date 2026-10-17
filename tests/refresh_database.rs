@@ -777,6 +777,81 @@ mod database {
         sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
     }
 
+    /// A relation named fhir_pipes_loads that upsert did not create (a table
+    /// of other columns, an updatable view, a table of the same columns
+    /// without upsert's comment) is never written to: replace leaves it
+    /// alone with a note, and upsert refuses to load with exit 2.
+    #[test]
+    fn a_relation_named_like_the_records_table_is_left_alone() {
+        if url().is_none() {
+            return;
+        }
+        let cases = [
+            (
+                "a table",
+                "CREATE TABLE {s}.fhir_pipes_loads (table_name text PRIMARY KEY, mark text, payload text); \
+                 INSERT INTO {s}.fhir_pipes_loads VALUES ('people', 'x', 'keep')",
+                "SELECT string_agg(table_name || mark || payload, ',') FROM {s}.fhir_pipes_loads",
+                "peoplexkeep",
+            ),
+            (
+                "a view",
+                "CREATE TABLE {s}.business (table_name text PRIMARY KEY, mark text NOT NULL); \
+                 INSERT INTO {s}.business VALUES ('people', 'x'); \
+                 CREATE VIEW {s}.fhir_pipes_loads AS SELECT table_name, mark FROM {s}.business",
+                "SELECT string_agg(table_name || mark, ',') FROM {s}.business",
+                "peoplex",
+            ),
+            (
+                "a table",
+                "CREATE TABLE {s}.fhir_pipes_loads (table_name text PRIMARY KEY, mark text NOT NULL); \
+                 INSERT INTO {s}.fhir_pipes_loads VALUES ('people', 'x')",
+                "SELECT string_agg(table_name || mark, ',') FROM {s}.fhir_pipes_loads",
+                "peoplex",
+            ),
+        ];
+        for (what, create, check, rows) in cases {
+            let s = schema("collision");
+            let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+            let quoted = format!("\"{s}\"");
+            let mut statements = vec![format!("CREATE SCHEMA {quoted}")];
+            statements.extend(create.split("; ").map(|c| c.replace("{s}", &quoted)));
+            sql(&statements.iter().map(String::as_str).collect::<Vec<_>>());
+            let check = check.replace("{s}", &quoted);
+            let (dir, config) = setup(NOWHERE, &upsert(&s));
+            let views = people_view(
+                dir.path(),
+                r#"{"name": "born", "path": "birthDate", "type": "date"}"#,
+            );
+            write_patients(
+                dir.path(),
+                &[json!({"resourceType": "Patient", "id": "p1", "birthDate": "2020-01-01"})],
+            );
+            let replace = config.with_file_name("replace.toml");
+            fs::write(
+                &replace,
+                fs::read_to_string(&config)
+                    .unwrap()
+                    .replace("mode = \"upsert\"\n", ""),
+            )
+            .unwrap();
+            from_files(&replace, &views)
+                .assert()
+                .success()
+                .stdout(has(format!(
+                    "note: {s}.fhir_pipes_loads is {what}, not fhir-pipes' load records; left alone"
+                )));
+            assert_eq!(one(&check), rows, "{create}");
+            from_files(&config, &views)
+                .assert()
+                .code(2)
+                .stderr(has(format!(
+                    "{s}.fhir_pipes_loads is {what}, not the table where [database] mode = \"upsert\" records its loads"
+                )));
+            assert_eq!(one(&check), rows, "{create}");
+        }
+    }
+
     /// A role with table privileges, not the owner, loads in either mode.
     /// Upsert's records table needs privileges of its own, and a replace
     /// that cannot remove its tables' marks stops, naming the grant, rather

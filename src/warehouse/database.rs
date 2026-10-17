@@ -31,7 +31,8 @@
 //! a replace load, a restored backup, the same URL pointing elsewhere) and
 //! is loaded in full. A replace load removes the rows of the tables it loads
 //! or empties, when that table exists; it needs no more privileges than
-//! before otherwise. A table only needs ordinary privileges (SELECT, INSERT,
+//! before otherwise. A relation of that name is taken for the records table
+//! only when upsert made it (`records`); any other is never written to. A table only needs ordinary privileges (SELECT, INSERT,
 //! DELETE) for either mode; the key column's index is made only by the
 //! table's owner.
 
@@ -81,6 +82,20 @@ pub struct Table {
 /// The table, in the target schema, where upsert records which load wrote
 /// each table last.
 const LOADS: &str = "fhir_pipes_loads";
+
+/// The comment upsert gives `fhir_pipes_loads` when it creates it. A
+/// relation of that name is taken for the records table only when it is an
+/// ordinary table with this comment and exactly its columns (`records`).
+const RECORDS: &str = "fhir-pipes load records, version 1";
+
+/// What the relation named `fhir_pipes_loads` in the target schema is.
+enum Records {
+    Absent,
+    /// The records table, as upsert created it.
+    Ours,
+    /// Something else of that name, with what it is.
+    Other(String),
+}
 
 /// Whether the view `v` calls `now()`, `today()` or `timeOfDay()` in any of
 /// its expressions (columns, `where`, `forEach`, `repeat`, nested selects and
@@ -466,6 +481,36 @@ async fn write(
     )
     .await?;
     let name = |p: &Plan| format!("{}.{}", ident(schema), ident(&p.table));
+    let loads_table = format!("{}.{}", ident(schema), ident(LOADS));
+    // Upsert's records table, made here the first time; a relation of its
+    // name that is not it is never written to. Upsert stops; replace, which
+    // does not need it, leaves it alone and says so.
+    let mut records = records(&mut tx, &loads_table).await?;
+    if let Records::Other(what) = &records {
+        if upsert {
+            return Err(usage(anyhow::anyhow!(
+                "{schema}.{LOADS} is {what}, not the table where [database] mode = \"upsert\" \
+                 records its loads; rename it, load into another schema, or use mode = \"replace\""
+            )));
+        }
+        println!("   note: {schema}.{LOADS} is {what}, not fhir-pipes' load records; left alone");
+    }
+    if upsert && matches!(records, Records::Absent) {
+        exec(
+            &mut tx,
+            &format!(
+                "CREATE TABLE {loads_table} (table_name text PRIMARY KEY, mark text NOT NULL)"
+            ),
+        )
+        .await
+        .with_context(|| loads_grant(schema, "CREATE ON SCHEMA", &ident(schema)))?;
+        exec(
+            &mut tx,
+            &format!("COMMENT ON TABLE {loads_table} IS '{RECORDS}'"),
+        )
+        .await?;
+        records = Records::Ours;
+    }
     // First every table, so that indexes, which PostgreSQL names to avoid
     // the relations that exist, cannot take a name a table of this load needs.
     let mut created = Vec::new();
@@ -550,19 +595,8 @@ async fn write(
             }
         }
     }
-    let loads_table = format!("{}.{}", ident(schema), ident(LOADS));
     // A table the last load of this log did not write may hold anything.
     if let Some((last, _)) = marks {
-        if !relation_exists(&mut tx, &loads_table).await? {
-            exec(
-                &mut tx,
-                &format!(
-                    "CREATE TABLE {loads_table} (table_name text PRIMARY KEY, mark text NOT NULL)"
-                ),
-            )
-            .await
-            .with_context(|| loads_grant(schema, "CREATE ON SCHEMA", &ident(schema)))?;
-        }
         let written = marks_of(&mut tx, &loads_table, schema).await?;
         for (i, p) in plans
             .iter()
@@ -671,9 +705,7 @@ async fn write(
                     loads_grant(schema, "SELECT, INSERT, UPDATE, DELETE ON", &loads_table)
                 })?;
         }
-        None if !plans.iter().any(|p| p.table == LOADS)
-            && relation_exists(&mut tx, &loads_table).await? =>
-        {
+        None if matches!(records, Records::Ours) => {
             let touched: Vec<&str> = filled
                 .iter()
                 .copied()
@@ -787,15 +819,48 @@ async fn remove_marks(conn: &mut PgConnection, loads: &str, tables: &[&str]) -> 
     Ok(())
 }
 
-/// Whether the relation `name` exists, whatever the role may read of it
-/// (information_schema shows only what it has privileges on).
-async fn relation_exists(conn: &mut PgConnection, name: &str) -> Result<bool> {
-    sqlx_core::query::query("SELECT to_regclass($1) IS NOT NULL")
-        .bind(name)
-        .fetch_one(&mut *conn)
-        .await
-        .and_then(|r| r.try_get::<bool, _>(0))
-        .with_context(|| format!("looking for {name}"))
+/// What the relation `name` is, read from the catalogs, which show it
+/// whatever the role may read of it (information_schema shows only what it
+/// has privileges on).
+async fn records(conn: &mut PgConnection, name: &str) -> Result<Records> {
+    let row = sqlx_core::query::query(
+        "SELECT c.relkind::text, obj_description(c.oid, 'pg_class'), \
+         (SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ' \
+          ORDER BY a.attnum) FROM pg_attribute a \
+          WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped) \
+         FROM pg_class c WHERE c.oid = to_regclass($1)",
+    )
+    .bind(name)
+    .fetch_optional(&mut *conn)
+    .await
+    .with_context(|| format!("looking for {name}"))?;
+    let Some(row) = row else {
+        return Ok(Records::Absent);
+    };
+    let (kind, comment, columns) = (|| {
+        Ok::<_, sqlx_core::error::Error>((
+            row.try_get::<String, _>(0)?,
+            row.try_get::<Option<String>, _>(1)?,
+            row.try_get::<Option<String>, _>(2)?,
+        ))
+    })()
+    .with_context(|| format!("reading what {name} is"))?;
+    let what = match kind.as_str() {
+        "r" => "a table",
+        "v" => "a view",
+        "m" => "a materialized view",
+        "p" => "a partitioned table",
+        "f" => "a foreign table",
+        _ => "a relation",
+    };
+    if kind == "r"
+        && comment.as_deref() == Some(RECORDS)
+        && columns.as_deref() == Some("table_name text, mark text")
+    {
+        Ok(Records::Ours)
+    } else {
+        Ok(Records::Other(what.to_string()))
+    }
 }
 
 /// Whether the role in the connection owns table `name` (or is a member of

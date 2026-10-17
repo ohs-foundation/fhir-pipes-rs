@@ -600,7 +600,13 @@ And for one table when:
   transaction, and the change log records the mark. A table without this
   warehouse's mark there was written by another warehouse, a `replace` load
   (which removes the marks of the tables it loads or empties), a restored
-  backup, or a database the connection string now reaches instead;
+  backup, or a database the connection string now reaches instead. Upsert
+  creates `fhir_pipes_loads` with the comment `fhir-pipes load records,
+  version 1`, and uses a relation of that name only when it is an ordinary
+  table with that comment and exactly the columns `table_name text` and
+  `mark text`. Any other relation of that name (your own table, a view) is
+  never written to: upsert stops with exit 2 and names it, and `replace`
+  loads as usual and notes that it left it alone;
 - its view calls `now()`, `today()` or `timeOfDay()` in any expression
   (columns, `where`, `forEach`, nested selects, `unionAll`), as the views
   engine's FHIRPath parser reads it, so comments and delimited names such
