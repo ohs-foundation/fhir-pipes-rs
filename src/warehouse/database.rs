@@ -405,7 +405,8 @@ async fn write(
         if existing == wanted {
             continue;
         }
-        if upsert {
+        // A table already loaded in full keeps the reason said for all.
+        if upsert && !matches!(loads[i], Load::Full(_)) {
             let why = if existing.is_empty() {
                 "a new table"
             } else {
@@ -806,6 +807,70 @@ mod tests {
         ]))))
         .unwrap();
         assert_eq!(ok, "2020-05-01 00:00:00.000000\n");
+    }
+
+    #[test]
+    fn the_key_column_is_a_resource_level_get_resource_key() {
+        let key = |select: serde_json::Value| {
+            let v = ViewDefinition::from_json(&serde_json::json!({
+                "resourceType": "ViewDefinition", "resource": "Patient", "status": "active",
+                "select": select
+            }))
+            .unwrap();
+            key_column(&v)
+        };
+        let column = |name: &str, path: &str| serde_json::json!({"name": name, "path": path});
+        assert_eq!(
+            key(serde_json::json!([{"column": [column("pid", " getResourceKey() ")]}])),
+            Some("pid".into())
+        );
+        // In a nested select; `id` wins over an earlier one.
+        assert_eq!(
+            key(serde_json::json!([
+                {"column": [column("key", "getResourceKey()")]},
+                {"select": [{"column": [column("id", "getResourceKey()")]}]}
+            ])),
+            Some("id".into())
+        );
+        // Under a forEach it keys the element (a contained resource); in a
+        // unionAll, a path, or `id` alone, it is not taken.
+        assert_eq!(
+            key(serde_json::json!([
+                {"forEach": "contained", "column": [column("id", "getResourceKey()")]},
+                {"unionAll": [{"column": [column("u", "getResourceKey()")]}]},
+                {"column": [column("id", "id")]}
+            ])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_key_filter_keeps_listed_and_null_keys() {
+        let ids: HashSet<String> = ["a".to_string(), "c".to_string()].into();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec![
+                Some("a"),
+                Some("b"),
+                None,
+                Some("c"),
+            ]))],
+        )
+        .unwrap();
+        let kept = key_filter(Arc::new(ids))(batch).unwrap();
+        assert_eq!(kept, BooleanArray::from(vec![true, false, true, true]));
+    }
+
+    #[test]
+    fn the_database_is_named_without_credentials() {
+        assert_eq!(
+            identity(
+                "postgres://u:secret@db.example.org/analytics?sslmode=require",
+                "s"
+            ),
+            "db.example.org:5432/analytics schema s"
+        );
     }
 
     #[test]
