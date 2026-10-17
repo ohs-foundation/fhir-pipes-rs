@@ -1240,6 +1240,131 @@ fn unique<T: Clone + PartialEq>(list: &[T]) -> Vec<T> {
 }
 
 pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -> Result<()> {
+    check_args(args)?;
+    let from_values = args.source == ReportSource::DataValues;
+    let instance = Instance::new(&args.conn.instance, profile)?;
+    let ranges = unique(&args.ranges)
+        .iter()
+        .map(|r| DateRange::parse(r))
+        .collect::<Result<Vec<_>>>()?;
+    if let Some(c) = &args.campaign {
+        check_campaign(c)?;
+    }
+    if !args.locations.is_file() {
+        return Err(PipesError::Usage(format!(
+            "--locations {}: no such file",
+            args.locations.display()
+        )));
+    }
+    let system = instance.orgunit_system();
+    let mapping = load_mapping(&args.locations, &system)?;
+    if mapping.is_empty() {
+        return Err(PipesError::Usage(format!(
+            "no Location in {} carries an identifier under {system}; run `fhir-pipes dhis2 locations --instance {}` and load its output first",
+            args.locations.display(),
+            instance.name
+        )));
+    }
+
+    let api = Dhis2::connect(&args.conn)?;
+    if !from_values {
+        match &api.info.last_analytics {
+            Some(t) => eprintln!("DHIS2 analytics tables last built {t}"),
+            None => eprintln!("DHIS2 does not say when its analytics tables were last built"),
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        if let Some(warning) = check_analytics_age(&api.info, args.max_analytics_age, now)? {
+            eprintln!("{warning}");
+        }
+    }
+    let indicators = fetch_indicators(&api, &args.select)?;
+    let ids: Vec<String> = indicators.keys().cloned().collect();
+    check_range_ids(&instance, &ranges, &ids)?;
+
+    let plan = plan_run(args, &api, &indicators, &ids, &system, ranges)?;
+    let total = plan.units.len();
+    let fingerprint = fingerprint(args, &instance, &api, &ids, &plan);
+    let checkpoint = Checkpoint::path(&args.out);
+    let saved = resume_point(args, &checkpoint, &fingerprint)?;
+
+    let previous = match &args.previous {
+        Some(p) => {
+            let prev = Previous::load(p)?;
+            eprintln!("{}: {} previous reports", p.display(), prev.len());
+            Some(prev)
+        }
+        None => None,
+    };
+    let start = saved.as_ref().map_or(0, |s| s.units_done);
+    let (out, changed, state) = open_outputs(args, saved, fingerprint, total)?;
+    // From data values, a report's `date` is when the run started.
+    let info = match &state.as_of {
+        Some(t) if from_values => ServerInfo {
+            last_analytics: Some(t.clone()),
+            utc: true,
+            ..api.info.clone()
+        },
+        _ => api.info.clone(),
+    };
+    let values = match &plan.raw {
+        Some(src) => Values::DataValues {
+            raw: src,
+            indicators: &indicators,
+        },
+        None => Values::Analytics {
+            root: args.root.as_deref(),
+        },
+    };
+    let mut w = Writer {
+        out: out.keep_partial(),
+        changed: changed.map(NdjsonWriter::keep_partial),
+        previous,
+        instance: &instance,
+        info: &info,
+        indicators: &indicators,
+        mapping: &mapping,
+        campaign: args.campaign.as_deref(),
+        source: args.source,
+        state,
+        checkpoint: checkpoint.clone(),
+        tally: Tally::default(),
+    };
+    if start > 0 {
+        w.recount()?;
+    }
+    w.save(start)?;
+    fetch_and_write(&mut w, &api, values, args, &plan.units, start)?;
+
+    let (removed, kept) = compare_with_previous(&mut w, args, &ids, &plan)?;
+    let Writer {
+        out,
+        changed,
+        state,
+        tally,
+        ..
+    } = w;
+    if let Some(c) = changed {
+        c.finish()?;
+    }
+    if let (Some(path), Some(ids)) = (&args.removed, &removed) {
+        write_lines(path, ids)?;
+    }
+    out.finish()?;
+    std::fs::remove_file(&checkpoint).map_err(|e| PipesError::io(&checkpoint, e))?;
+    print_summary(
+        args,
+        indicators.len(),
+        &tally,
+        &state,
+        removed.as_deref(),
+        kept,
+    )
+}
+
+/// The checks of the flags alone, before anything is read or requested.
+fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
     check_out(&args.out)?;
     if args.chunk == 0 {
         return Err(PipesError::Usage("--chunk must be at least 1".into()));
@@ -1289,49 +1414,14 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             p.display()
         )));
     }
-    let instance = Instance::new(&args.conn.instance, profile)?;
-    let ranges = unique(&args.ranges)
-        .iter()
-        .map(|r| DateRange::parse(r))
-        .collect::<Result<Vec<_>>>()?;
-    if let Some(c) = &args.campaign {
-        check_campaign(c)?;
-    }
-    if !args.locations.is_file() {
-        return Err(PipesError::Usage(format!(
-            "--locations {}: no such file",
-            args.locations.display()
-        )));
-    }
-    let system = instance.orgunit_system();
-    let mapping = load_mapping(&args.locations, &system)?;
-    if mapping.is_empty() {
-        return Err(PipesError::Usage(format!(
-            "no Location in {} carries an identifier under {system}; run `fhir-pipes dhis2 locations --instance {}` and load its output first",
-            args.locations.display(),
-            instance.name
-        )));
-    }
+    Ok(())
+}
 
-    let api = Dhis2::connect(&args.conn)?;
-    if !from_values {
-        match &api.info.last_analytics {
-            Some(t) => eprintln!("DHIS2 analytics tables last built {t}"),
-            None => eprintln!("DHIS2 does not say when its analytics tables were last built"),
-        }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        if let Some(warning) = check_analytics_age(&api.info, args.max_analytics_age, now)? {
-            eprintln!("{warning}");
-        }
-    }
-    let indicators = fetch_indicators(&api, &args.select)?;
-    let ids: Vec<String> = indicators.keys().cloned().collect();
-    // A range's code is longer than a period's: check now that every
-    // report id still fits, rather than skip every row as invalid_id.
-    for range in &ranges {
-        for dx in &ids {
+/// A range's code is longer than a period's: check now that every report
+/// id still fits, rather than skip every row as invalid_id.
+fn check_range_ids(instance: &Instance, ranges: &[DateRange], ids: &[String]) -> Result<()> {
+    for range in ranges {
+        for dx in ids {
             let id = format!(
                 "{}-{}-{}-{}",
                 instance.name,
@@ -1348,26 +1438,53 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             }
         }
     }
+    Ok(())
+}
 
+/// The batches of a run and what decided them.
+struct Planned {
+    /// `--period`, less those with no updated values under `--updated-since`.
+    periods: Vec<String>,
+    /// `--range`, likewise.
+    ranges: Vec<DateRange>,
+    /// From data values: the data elements and org unit tree to compute with.
+    raw: Option<RawSource>,
+    /// Each `--level` with its org unit count.
+    levels: Vec<(u32, u64)>,
+    units: Vec<Unit>,
+}
+
+/// Plans the batches. From data values each level's org units are read (and
+/// with `--updated-since` only the periods with updated values are kept);
+/// from analytics requests are sized from each level's org unit count, so
+/// several periods can share one.
+fn plan_run(
+    args: &Dhis2ReportsArgs,
+    api: &Dhis2,
+    indicators: &BTreeMap<String, Indicator>,
+    ids: &[String],
+    system: &str,
+    ranges: Vec<DateRange>,
+) -> Result<Planned> {
     let mut periods = unique(&args.periods);
     let mut ranges = ranges;
     let mut raw: Option<RawSource> = None;
     let mut levels: Vec<(u32, u64)> = Vec::new();
-    let units = if from_values {
+    let units = if args.source == ReportSource::DataValues {
         if let Some(p) = periods.iter().find(|p| Span::of_period(p).is_none()) {
             return Err(PipesError::Usage(format!(
                 "--period {p}: --source data-values knows the dates of days, ISO weeks, months, bi-months, quarters, six-months and years only (no relative periods); use --range for other spans"
             )));
         }
-        let mut src = prepare(&api, &indicators, &args.breakdowns)?;
+        let mut src = prepare(api, indicators, &args.breakdowns)?;
         let mut by_level = Vec::new();
         for level in unique(&args.levels) {
-            let ous = org_unit_ids(&api, level, args.root.as_deref())?;
+            let ous = org_unit_ids(api, level, args.root.as_deref())?;
             eprintln!("level {level}: {} org units", ous.len());
             levels.push((level, ous.len() as u64));
             by_level.push((level, ous));
         }
-        let parents = load_parents(&args.locations, &system)?;
+        let parents = load_parents(&args.locations, system)?;
         src.place(&parents, &by_level, args.root.as_deref());
         if let Some(since) = &args.updated_since {
             let spans: Vec<Span> = periods
@@ -1375,7 +1492,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
                 .filter_map(|p| Span::of_period(p))
                 .chain(ranges.iter().filter_map(Span::of_range))
                 .collect();
-            let changed = src.changed(&api, &src.elements_of(&ids), &spans, since)?;
+            let changed = src.changed(api, &src.elements_of(ids), &spans, since)?;
             let before = periods.len() + ranges.len();
             periods.retain(|p| changed.contains(p));
             ranges.retain(|r| changed.contains(&r.code()));
@@ -1389,7 +1506,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             parents.len() as u64,
             &periods,
             &ranges,
-            &ids,
+            ids,
             args.chunk,
             args.max_rows,
             &|chunk| src.elements_of(chunk).len(),
@@ -1398,14 +1515,12 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         raw = Some(src);
         units
     } else {
-        // Requests are sized from each level's org unit count, so several
-        // periods can share one.
         for level in unique(&args.levels) {
-            let n = org_unit_count(&api, level, args.root.as_deref())?;
+            let n = org_unit_count(api, level, args.root.as_deref())?;
             eprintln!("level {level}: {n} org units");
             levels.push((level, n));
         }
-        let units = plan(&levels, &periods, &ranges, &ids, args.chunk, args.max_rows);
+        let units = plan(&levels, &periods, &ranges, ids, args.chunk, args.max_rows);
         eprintln!(
             "{} batches, {} analytics requests unless DHIS2 calls some too large",
             units.len(),
@@ -1413,11 +1528,26 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         );
         units
     };
-    let total = units.len();
+    Ok(Planned {
+        periods,
+        ranges,
+        raw,
+        levels,
+        units,
+    })
+}
 
-    // Everything that decides the batches and what goes in them. An
-    // interrupted run is continued only under the same plan.
-    let fingerprint = json!({
+/// Everything that decides the batches and what goes in them. An
+/// interrupted run is continued only under the same plan.
+fn fingerprint(
+    args: &Dhis2ReportsArgs,
+    instance: &Instance,
+    api: &Dhis2,
+    ids: &[String],
+    plan: &Planned,
+) -> Value {
+    let from_values = args.source == ReportSource::DataValues;
+    json!({
         "dhis2": args.conn.url,
         "instance": instance.name,
         "source": args.source.code(),
@@ -1425,9 +1555,9 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         // Data values do not depend on the analytics build.
         "last_analytics": if from_values { None } else { api.info.last_analytics.clone() },
         "indicators": ids,
-        "levels": levels,
-        "periods": periods,
-        "ranges": ranges.iter().map(DateRange::label).collect::<Vec<_>>(),
+        "levels": plan.levels,
+        "periods": plan.periods,
+        "ranges": plan.ranges.iter().map(DateRange::label).collect::<Vec<_>>(),
         "root": args.root,
         "breakdowns": args.breakdowns,
         "chunk": args.chunk,
@@ -1436,11 +1566,20 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         "locations": file_stamp(&args.locations),
         "previous": args.previous.as_deref().map(file_stamp),
         "changed": args.changed.as_ref().map(|p| p.display().to_string()),
-    });
-    let checkpoint = Checkpoint::path(&args.out);
+    })
+}
+
+/// With `--resume`, the checkpoint of the interrupted run at `--out`, if
+/// its partial output is still there; it must have been planned as
+/// `fingerprint`. Without, `None`.
+fn resume_point(
+    args: &Dhis2ReportsArgs,
+    checkpoint: &Path,
+    fingerprint: &Value,
+) -> Result<Option<Checkpoint>> {
     let saved = if args.resume {
         let saved =
-            Checkpoint::read(&checkpoint)?.filter(|_| NdjsonWriter::tmp_path(&args.out).is_file());
+            Checkpoint::read(checkpoint)?.filter(|_| NdjsonWriter::tmp_path(&args.out).is_file());
         if saved.is_none() {
             eprintln!(
                 "no interrupted run to resume at {}; starting from the beginning",
@@ -1458,7 +1597,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         None
     };
     if let Some(s) = &saved {
-        let differ = plan_differences(&s.plan, &fingerprint);
+        let differ = plan_differences(&s.plan, fingerprint);
         if !differ.is_empty() {
             return Err(PipesError::Usage(format!(
                 "--resume: the interrupted run at {} was planned differently ({} changed); run without --resume to start over",
@@ -1467,17 +1606,18 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             )));
         }
     }
+    Ok(saved)
+}
 
-    let previous = match &args.previous {
-        Some(p) => {
-            let prev = Previous::load(p)?;
-            eprintln!("{}: {} previous reports", p.display(), prev.len());
-            Some(prev)
-        }
-        None => None,
-    };
-    let start = saved.as_ref().map_or(0, |s| s.units_done);
-    let (out, changed, state) = match saved {
+/// `--out` and `--changed`, continued where `saved` stopped or new, and the
+/// state the run carries on with.
+fn open_outputs(
+    args: &Dhis2ReportsArgs,
+    saved: Option<Checkpoint>,
+    fingerprint: Value,
+    total: usize,
+) -> Result<(NdjsonWriter, Option<NdjsonWriter>, Checkpoint)> {
+    Ok(match saved {
         Some(s) => {
             let out = NdjsonWriter::resume(&args.out, s.out_bytes)?;
             let changed = match (&args.changed, s.changed_bytes) {
@@ -1486,7 +1626,8 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
                 (None, _) => None,
             };
             eprintln!(
-                "resuming after batch {start} of {total} ({})",
+                "resuming after batch {} of {total} ({})",
+                s.units_done,
                 NdjsonWriter::tmp_path(&args.out).display()
             );
             (out, changed, s)
@@ -1499,52 +1640,28 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
                 .transpose()?,
             Checkpoint {
                 plan: fingerprint,
-                as_of: from_values.then(now_utc),
+                as_of: (args.source == ReportSource::DataValues).then(now_utc),
                 ..Checkpoint::default()
             },
         ),
-    };
-    // From data values, a report's `date` is when the run started.
-    let info = match &state.as_of {
-        Some(t) if from_values => ServerInfo {
-            last_analytics: Some(t.clone()),
-            utc: true,
-            ..api.info.clone()
-        },
-        _ => api.info.clone(),
-    };
-    let values = match &raw {
-        Some(src) => Values::DataValues {
-            raw: src,
-            indicators: &indicators,
-        },
-        None => Values::Analytics {
-            root: args.root.as_deref(),
-        },
-    };
-    let mut w = Writer {
-        out: out.keep_partial(),
-        changed: changed.map(NdjsonWriter::keep_partial),
-        previous,
-        instance: &instance,
-        info: &info,
-        indicators: &indicators,
-        mapping: &mapping,
-        campaign: args.campaign.as_deref(),
-        source: args.source,
-        state,
-        checkpoint: checkpoint.clone(),
-        tally: Tally::default(),
-    };
-    if start > 0 {
-        w.recount()?;
-    }
-    w.save(start)?;
+    })
+}
 
-    // Workers fetch units from a shared counter; this thread writes them in
-    // planned order, holding back any that finish early. A worker does not
-    // start a unit more than `window` ahead of the last one written, so
-    // memory stays at a few units, not the whole export.
+/// Fetches `units[start..]` on `--concurrency` workers and writes them.
+/// Workers fetch units from a shared counter; this thread writes them in
+/// planned order, holding back any that finish early. A worker does not
+/// start a unit more than `window` ahead of the last one written, so memory
+/// stays at a few units, not the whole export. On a failure what was
+/// written is kept for `--resume`.
+fn fetch_and_write(
+    w: &mut Writer,
+    api: &Dhis2,
+    values: Values,
+    args: &Dhis2ReportsArgs,
+    units: &[Unit],
+    start: usize,
+) -> Result<()> {
+    let total = units.len();
     let workers = args.concurrency.min(total - start).max(1);
     let window = workers * 2;
     let stop = AtomicBool::new(false);
@@ -1575,7 +1692,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
-            Some((i, fetch_unit(&api, values, &args.breakdowns, &units[i])))
+            Some((i, fetch_unit(api, values, &args.breakdowns, &units[i])))
         },
         |fetched| {
             // After a failure, what workers still mid-request send is dropped.
@@ -1622,81 +1739,92 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             true
         },
     );
-    if let Some(e) = failure {
-        eprintln!(
-            "{cursor} of {total} batches written to {}; run again with --resume to continue from there",
-            w.out.tmp().display()
-        );
-        return Err(e);
+    match failure {
+        Some(e) => {
+            eprintln!(
+                "{cursor} of {total} batches written to {}; run again with --resume to continue from there",
+                w.out.tmp().display()
+            );
+            Err(e)
+        }
+        None => Ok(()),
     }
+}
 
-    // Previous reports this run would have written but DHIS2 no longer has.
-    // Read before --out is renamed, as it may be the --previous file. With
-    // --updated-since, the previous reports for the periods not recomputed
-    // are kept in --out, so it stays the whole baseline.
+/// The ids of the previous reports this run would have written but DHIS2 no
+/// longer has (`None` without `--previous`), and how many previous reports
+/// were kept in `--out`. Read before `--out` is renamed, as it may be the
+/// `--previous` file. With `--updated-since`, the previous reports for the
+/// periods not recomputed are kept in `--out`, so it stays the whole
+/// baseline.
+fn compare_with_previous(
+    w: &mut Writer,
+    args: &Dhis2ReportsArgs,
+    ids: &[String],
+    plan: &Planned,
+) -> Result<(Option<Vec<String>>, usize)> {
     let mut kept = 0usize;
     let keep_rest = args.updated_since.is_some();
-    let removed = match &w.previous {
-        Some(prev) => {
-            let mut scope = Scope {
-                measures: ids
-                    .iter()
-                    .map(|dx| instance.measure_url(&fhir_key(dx)))
-                    .collect(),
-                subjects: w
-                    .state
-                    .scope_org_units
-                    .iter()
-                    .filter_map(|ou| mapping.get(ou))
-                    .map(|t| format!("Location/{}", t.id))
-                    .collect(),
-                periods: w.state.scope_periods.iter().cloned().collect(),
-            };
-            scope
-                .periods
-                .extend(periods.iter().filter(|p| period_kind(p).is_some()).cloned());
-            scope.periods.extend(ranges.iter().map(DateRange::label));
-            let out = &mut w.out;
-            Some(prev.removed(
-                |r| scope.contains(r, &instance.urls.period_extension),
-                |r| {
-                    if keep_rest {
-                        kept += 1;
-                        out.write(r)?;
-                    }
-                    Ok(())
-                },
-            )?)
-        }
-        None => None,
+    let Some(prev) = &w.previous else {
+        return Ok((None, kept));
     };
+    let instance = w.instance;
+    let mut scope = Scope {
+        measures: ids
+            .iter()
+            .map(|dx| instance.measure_url(&fhir_key(dx)))
+            .collect(),
+        subjects: w
+            .state
+            .scope_org_units
+            .iter()
+            .filter_map(|ou| w.mapping.get(ou))
+            .map(|t| format!("Location/{}", t.id))
+            .collect(),
+        periods: w.state.scope_periods.iter().cloned().collect(),
+    };
+    scope.periods.extend(
+        plan.periods
+            .iter()
+            .filter(|p| period_kind(p).is_some())
+            .cloned(),
+    );
+    scope
+        .periods
+        .extend(plan.ranges.iter().map(DateRange::label));
+    let out = &mut w.out;
+    let removed = prev.removed(
+        |r| scope.contains(r, &instance.urls.period_extension),
+        |r| {
+            if keep_rest {
+                kept += 1;
+                out.write(r)?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok((Some(removed), kept))
+}
 
-    let Writer {
-        out,
-        changed,
-        state,
-        tally,
-        ..
-    } = w;
-    if let Some(c) = changed {
-        c.finish()?;
-    }
-    if let (Some(path), Some(ids)) = (&args.removed, &removed) {
-        write_lines(path, ids)?;
-    }
-    out.finish()?;
-    std::fs::remove_file(&checkpoint).map_err(|e| PipesError::io(&checkpoint, e))?;
-
+/// What the run wrote, on stdout, and the run report.
+fn print_summary(
+    args: &Dhis2ReportsArgs,
+    indicators: usize,
+    tally: &Tally,
+    state: &Checkpoint,
+    removed: Option<&[String]>,
+    kept: usize,
+) -> Result<()> {
     println!(
         "Wrote {} MeasureReports to {} ({} indicators, {} Locations, {} periods; {} values from {} {} requests)",
         tally.written,
         args.out.display(),
-        indicators.len(),
+        indicators,
         tally.locations.len(),
         tally.periods.len(),
         state.values,
         state.requests,
-        if from_values {
+        if args.source == ReportSource::DataValues {
             "dataValueSets"
         } else {
             "analytics"
@@ -1709,7 +1837,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             args.breakdowns.len()
         );
     }
-    if let (Some(prev), Some(removed)) = (&args.previous, &removed) {
+    if let (Some(prev), Some(removed)) = (&args.previous, removed) {
         println!(
             "Compared with {}: {} new, {} changed, {} unchanged, {} removed",
             prev.display(),
@@ -1728,7 +1856,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         if let Some(p) = &args.removed {
             println!("Wrote {} removed ids to {}", removed.len(), p.display());
         }
-        if keep_rest {
+        if args.updated_since.is_some() {
             println!(
                 "Kept {kept} MeasureReports from {} for periods with no updated data values",
                 prev.display()
