@@ -852,6 +852,160 @@ mod database {
         }
     }
 
+    /// The records table is checked under a lock that a rename waits for:
+    /// a replace paused in its COPY (a trigger waits on an advisory lock the
+    /// test holds) keeps the table it checked, and another relation put in
+    /// its place meanwhile is never written to.
+    #[test]
+    fn the_records_table_cannot_be_swapped_during_a_load() {
+        let Some(url) = url() else {
+            return;
+        };
+        let s = schema("swap");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let (dir, config) = setup(NOWHERE, &upsert(&s));
+        let views = people_view(
+            dir.path(),
+            r#"{"name": "born", "path": "birthDate", "type": "date"}"#,
+        );
+        write_patients(
+            dir.path(),
+            &[json!({"resourceType": "Patient", "id": "p1", "birthDate": "2020-01-01"})],
+        );
+        from_files(&config, &views).assert().success();
+        let key = 0x5157_0000_i64 + i64::from(std::process::id() % 0xffff);
+        sql(&[
+            &format!(
+                "CREATE FUNCTION \"{s}\".wait() RETURNS trigger LANGUAGE plpgsql AS \
+                 $$ BEGIN PERFORM pg_advisory_lock({key}); PERFORM pg_advisory_unlock({key}); \
+                 RETURN NULL; END $$"
+            ),
+            &format!(
+                "CREATE TRIGGER wait BEFORE INSERT ON \"{s}\".people \
+                 FOR EACH STATEMENT EXECUTE FUNCTION \"{s}\".wait()"
+            ),
+        ]);
+        let replace = config.with_file_name("replace.toml");
+        fs::write(
+            &replace,
+            fs::read_to_string(&config)
+                .unwrap()
+                .replace("mode = \"upsert\"\n", ""),
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let run = |conn: &mut sqlx_postgres::PgConnection, q: &str| {
+            rt.block_on(sqlx_core::query::query(AssertSqlSafe(q.to_string())).execute(&mut *conn))
+        };
+        let mut holder = rt
+            .block_on(sqlx_postgres::PgConnection::connect(&url))
+            .unwrap();
+        let mut other = rt
+            .block_on(sqlx_postgres::PgConnection::connect(&url))
+            .unwrap();
+        run(&mut holder, &format!("SELECT pg_advisory_lock({key})")).unwrap();
+        let mut load = std::process::Command::new(env!("CARGO_BIN_EXE_fhir-pipes"))
+            .current_dir(replace.parent().unwrap())
+            .args(["refresh", "--config"])
+            .arg(&replace)
+            .args(["--only", "database", "--views"])
+            .arg(&views)
+            .env_remove("FHIR_PIPES_DATA")
+            .env_remove("FHIR_PIPES_VIEWS")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // Until the load waits in the trigger, past its check of the table.
+        let waiting = format!(
+            "SELECT count(*)::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+             AND objid = {key}"
+        );
+        let started = std::time::Instant::now();
+        while one(&waiting) == "0" {
+            assert!(
+                started.elapsed().as_secs() < 60,
+                "the load never reached the trigger"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        run(&mut other, "SET lock_timeout = '1s'").unwrap();
+        let renamed = run(
+            &mut other,
+            &format!("ALTER TABLE \"{s}\".fhir_pipes_loads RENAME TO fhir_pipes_loads_old"),
+        );
+        if renamed.is_ok() {
+            for q in [
+                format!(
+                    "CREATE TABLE \"{s}\".fhir_pipes_loads (table_name text PRIMARY KEY, mark text, payload text)"
+                ),
+                format!("INSERT INTO \"{s}\".fhir_pipes_loads VALUES ('people', 'x', 'keep')"),
+            ] {
+                run(&mut other, &q).unwrap();
+            }
+        }
+        run(&mut holder, &format!("SELECT pg_advisory_unlock({key})")).unwrap();
+        assert!(load.wait().unwrap().success());
+        match renamed {
+            Ok(_) => assert_eq!(
+                one(&format!(
+                    "SELECT string_agg(payload, ',') FROM \"{s}\".fhir_pipes_loads"
+                )),
+                "keep",
+                "the load wrote to the relation put in place of the records table"
+            ),
+            Err(e) => {
+                assert!(e.to_string().contains("lock timeout"), "{e}");
+                // The load removed its table's mark from the table it checked.
+                assert_eq!(
+                    one(&format!(
+                        "SELECT count(*)::text FROM \"{s}\".fhir_pipes_loads WHERE table_name = 'people'"
+                    )),
+                    "0"
+                );
+            }
+        }
+    }
+
+    /// The records table is made after the view tables, so a view table
+    /// may take the name its primary key's index would have had.
+    #[test]
+    fn a_view_table_may_be_named_like_the_records_index() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("pkey");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let (dir, config) = setup(NOWHERE, &upsert(&s));
+        let views = dir.path().join("pkey-views");
+        fs::create_dir_all(&views).unwrap();
+        fs::write(
+            views.join("FhirPipesLoadsPkey.json"),
+            r#"{"resourceType": "ViewDefinition", "name": "FhirPipesLoadsPkey", "status": "active",
+                "resource": "Patient", "select": [{"column": [{"name": "id", "path": "getResourceKey()"}]}]}"#,
+        )
+        .unwrap();
+        write_patients(
+            dir.path(),
+            &[json!({"resourceType": "Patient", "id": "p1"})],
+        );
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "fhir_pipes_loads_pkey → {s}.fhir_pipes_loads_pkey (1 rows)"
+            )));
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "fhir_pipes_loads_pkey → {s}.fhir_pipes_loads_pkey (unchanged)"
+            )));
+    }
+
     /// A role with table privileges, not the owner, loads in either mode.
     /// Upsert's records table needs privileges of its own, and a replace
     /// that cannot remove its tables' marks stops, naming the grant, rather
@@ -912,8 +1066,9 @@ mod database {
             one(&format!("SELECT string_agg(id, ',') FROM \"{s}\".people")),
             "p1"
         );
+        // SELECT and DELETE are enough for replace, the lock included.
         sql(&[&format!(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON \"{s}\".fhir_pipes_loads TO {role}"
+            "GRANT SELECT, DELETE ON \"{s}\".fhir_pipes_loads TO {role}"
         )]);
         writer(&writer_config).assert().success();
         assert_eq!(
@@ -924,6 +1079,9 @@ mod database {
         );
 
         // Upsert as the writer: its mark, then nothing to do.
+        sql(&[&format!(
+            "GRANT INSERT, UPDATE ON \"{s}\".fhir_pipes_loads TO {role}"
+        )]);
         let text = fs::read_to_string(&writer_config).unwrap();
         fs::write(&writer_config, text + "mode = \"upsert\"\n").unwrap();
         writer(&writer_config).assert().success();

@@ -32,7 +32,7 @@
 //! is loaded in full. A replace load removes the rows of the tables it loads
 //! or empties, when that table exists; it needs no more privileges than
 //! before otherwise. A relation of that name is taken for the records table
-//! only when upsert made it (`records`); any other is never written to. A table only needs ordinary privileges (SELECT, INSERT,
+//! only when upsert made it (`classify_records`); any other is never written to. A table only needs ordinary privileges (SELECT, INSERT,
 //! DELETE) for either mode; the key column's index is made only by the
 //! table's owner.
 
@@ -85,7 +85,7 @@ const LOADS: &str = "fhir_pipes_loads";
 
 /// The comment upsert gives `fhir_pipes_loads` when it creates it. A
 /// relation of that name is taken for the records table only when it is an
-/// ordinary table with this comment and exactly its columns (`records`).
+/// ordinary table with this comment and exactly its columns (`classify_records`).
 const RECORDS: &str = "fhir-pipes load records, version 1";
 
 /// What the relation named `fhir_pipes_loads` in the target schema is.
@@ -482,10 +482,28 @@ async fn write(
     .await?;
     let name = |p: &Plan| format!("{}.{}", ident(schema), ident(&p.table));
     let loads_table = format!("{}.{}", ident(schema), ident(LOADS));
-    // Upsert's records table, made here the first time; a relation of its
-    // name that is not it is never written to. Upsert stops; replace, which
-    // does not need it, leaves it alone and says so.
-    let mut records = records(&mut tx, &loads_table).await?;
+    // Upsert's records table; a relation of its name that is not it is
+    // never written to. Upsert stops; replace, which does not need it,
+    // leaves it alone and says so. The records table is locked (ROW
+    // EXCLUSIVE, which INSERT, UPDATE or DELETE on it allows, and which a
+    // RENAME, DROP or ALTER waits for until this transaction ends) and
+    // checked again under the lock, so the table written below is the one
+    // checked.
+    let mut records = classify_records(&mut tx, &loads_table).await?;
+    if matches!(records, Records::Ours) {
+        let grant = if upsert {
+            "SELECT, INSERT, UPDATE, DELETE ON"
+        } else {
+            "SELECT, DELETE ON"
+        };
+        exec(
+            &mut tx,
+            &format!("LOCK TABLE {loads_table} IN ROW EXCLUSIVE MODE"),
+        )
+        .await
+        .with_context(|| loads_grant(schema, grant, &loads_table))?;
+        records = classify_records(&mut tx, &loads_table).await?;
+    }
     if let Records::Other(what) = &records {
         if upsert {
             return Err(usage(anyhow::anyhow!(
@@ -494,22 +512,6 @@ async fn write(
             )));
         }
         println!("   note: {schema}.{LOADS} is {what}, not fhir-pipes' load records; left alone");
-    }
-    if upsert && matches!(records, Records::Absent) {
-        exec(
-            &mut tx,
-            &format!(
-                "CREATE TABLE {loads_table} (table_name text PRIMARY KEY, mark text NOT NULL)"
-            ),
-        )
-        .await
-        .with_context(|| loads_grant(schema, "CREATE ON SCHEMA", &ident(schema)))?;
-        exec(
-            &mut tx,
-            &format!("COMMENT ON TABLE {loads_table} IS '{RECORDS}'"),
-        )
-        .await?;
-        records = Records::Ours;
     }
     // First every table, so that indexes, which PostgreSQL names to avoid
     // the relations that exist, cannot take a name a table of this load needs.
@@ -594,6 +596,24 @@ async fn write(
                 }
             }
         }
+    }
+    // Made the first time after the view tables and their indexes, so that
+    // its primary key's index cannot take a name one of them needs.
+    if upsert && matches!(records, Records::Absent) {
+        exec(
+            &mut tx,
+            &format!(
+                "CREATE TABLE {loads_table} (table_name text PRIMARY KEY, mark text NOT NULL)"
+            ),
+        )
+        .await
+        .with_context(|| loads_grant(schema, "CREATE ON SCHEMA", &ident(schema)))?;
+        exec(
+            &mut tx,
+            &format!("COMMENT ON TABLE {loads_table} IS '{RECORDS}'"),
+        )
+        .await?;
+        records = Records::Ours;
     }
     // A table the last load of this log did not write may hold anything.
     if let Some((last, _)) = marks {
@@ -822,7 +842,7 @@ async fn remove_marks(conn: &mut PgConnection, loads: &str, tables: &[&str]) -> 
 /// What the relation `name` is, read from the catalogs, which show it
 /// whatever the role may read of it (information_schema shows only what it
 /// has privileges on).
-async fn records(conn: &mut PgConnection, name: &str) -> Result<Records> {
+async fn classify_records(conn: &mut PgConnection, name: &str) -> Result<Records> {
     let row = sqlx_core::query::query(
         "SELECT c.relkind::text, obj_description(c.oid, 'pg_class'), \
          (SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ' \

@@ -633,7 +633,10 @@ on it. The key column's index is made only by the table's owner; for
 another role the step says the index is missing, and the deletes scan the
 table until the owner adds it. A `replace` load into a schema that has
 `fhir_pipes_loads` (an upsert loaded it before) removes the rows of the
-tables it loads, so it needs `SELECT` and `DELETE` on that table. Without
+tables it loads, so it needs `SELECT` and `DELETE` on that table. Either
+mode locks `fhir_pipes_loads` in `ROW EXCLUSIVE` mode (which those
+privileges allow) and checks it again under the lock, so it cannot be
+renamed or replaced while the load runs. Without
 them it stops and names the grant, rather than leave a mark that would let
 the next upsert keep the rows it replaced:
 
