@@ -22,6 +22,10 @@
 //! With `--hapi-db`, the files come from a HAPI FHIR JPA server's PostgreSQL
 //! database instead of its API (see `hapi_db`), with watermarks of their own.
 //!
+//! Where `OUT/.changes.json` exists (refresh with `[database] mode =
+//! "upsert"`), each merge and each file replaced whole also records the ids
+//! that changed or were deleted (see `changes`).
+//!
 //! Searches run `--concurrency` requests at a time, through one limit in the
 //! client: that many types are brought up to date side by side, and a full
 //! download of a large type is split into `_lastUpdated` windows paged side
@@ -29,6 +33,7 @@
 //! setting, except that a windowed file is in window order.
 
 mod bulk;
+pub(crate) mod changes;
 #[cfg(feature = "postgres")]
 mod hapi_db;
 mod window;
@@ -304,6 +309,12 @@ fn export_changes(
             return Err(e);
         }
     };
+    changes::record(
+        &args.out,
+        resource_type,
+        paged.notes.iter().map(|n| n.id.as_str()),
+        [],
+    )?;
     let stats = merge_file(
         &MergeFiles {
             existing: out.to_path_buf(),
@@ -416,6 +427,7 @@ fn export_all(
 ) -> Result<TypeState> {
     let tmp = crate::fs::AtomicFile::adopt(out, tmp_path(&args.out, resource_type));
     let (paged, windows) = download_all(client, args, resource_type, tmp.tmp(), report)?;
+    changes::record_replaced(&args.out, resource_type, out, tmp.tmp())?;
     tmp.commit()?;
     let total = paged.notes.len();
     // As in extract: a last page that was full with no next link may mean
@@ -1002,11 +1014,23 @@ fn bulk_type(
     // A resource in this export's output existed at its transactionTime,
     // whatever the deleted list says; the merge keeps every id it reads.
     let gone: HashSet<&str> = deleted.into_iter().flatten().map(String::as_str).collect();
+    let existing = ndjson_path(&args.out, resource_type);
+    let incoming = incoming_path(&args.out, resource_type);
+    if job.since.is_none() {
+        changes::record_replaced(&args.out, resource_type, &existing, &incoming)?;
+    } else {
+        changes::record(
+            &args.out,
+            resource_type,
+            downloaded.notes.iter().map(|n| n.id.as_str()),
+            gone.iter().copied(),
+        )?;
+    }
     merge_file(
         &MergeFiles {
-            existing: ndjson_path(&args.out, resource_type),
+            existing,
             tmp: tmp_path(&args.out, resource_type),
-            incoming: incoming_path(&args.out, resource_type),
+            incoming,
             unparsed_kind: "export_line_unparsed",
         },
         &downloaded.notes,

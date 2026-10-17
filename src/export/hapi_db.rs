@@ -738,9 +738,11 @@ async fn read_all(
             },
         )
         .await?;
-        w.into_inner()
-            .map_err(|e| PipesError::io(&tmp, e.into_error()))?
-            .commit()
+        let file = w
+            .into_inner()
+            .map_err(|e| PipesError::io(&tmp, e.into_error()))?;
+        super::changes::record_replaced(&args.out, resource_type, &out, &tmp)?;
+        file.commit()
     }
     .await;
     result?;
@@ -821,6 +823,12 @@ async fn read_changes(
     // A resource deleted and created again is live: its row says so, and
     // the merge keeps an id it reads.
     let gone: HashSet<&str> = deleted.iter().map(String::as_str).collect();
+    super::changes::record(
+        &args.out,
+        resource_type,
+        notes.iter().map(|n| n.id.as_str()),
+        gone.iter().copied(),
+    )?;
     let stats = merge_file(
         &MergeFiles {
             existing: out.clone(),
