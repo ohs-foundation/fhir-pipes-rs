@@ -11,13 +11,13 @@ Compared on 2026-10-15:
   `experimental/` and the `exp/rust-fhir-pipes` branch, which
   [ROADMAP.md](../../ROADMAP.md#compared-with-the-fhir-data-pipes-rust-rfc)
   covers.
-- fhir-pipes `main` at `f389b35`: v0.4.0 plus everything merged since, from
-  #22 to #69.
+- fhir-pipes `main` at `a79476c`: v0.4.0 plus everything merged since, from
+  #22 to #76, to be released as v0.5.0.
 
 First written on 2026-10-15 and updated on 2026-10-16 as the gaps it found
 were closed: #36, #37, #39, #40, #41, #42, #43, #45, #46, #47, #48 and #49.
 Updated again on 2026-10-16 after a code review of fhir-pipes (issues #51 to
-#62) and the fixes merged from it (#63 to #69).
+#62) and the fixes merged from it (#63 to #76).
 
 Status in the tables:
 
@@ -78,7 +78,7 @@ Closed since the first version of this comparison:
 - **The warehouse from files** (#32): `refresh --input` (#47).
 - **Reading a HAPI server's database** (#33): `export --hapi-db` (#49).
 
-Changed by the code review (#63 to #69):
+Changed by the code review (#63 to #76):
 
 - **Stale search results.** fhir-pipes now sends `Cache-Control: no-cache`
   on searches and counts, as the Java pipeline does; without it HAPI could
@@ -97,6 +97,24 @@ Changed by the code review (#63 to #69):
   NULL without a message. Now `5.0` in an integer column is written as `5`,
   a dateTime in a `date` column as its date, and anything else as NULL with a
   count per column printed by the run (#68).
+- **Memory.** The views step reads each type in chunks of 20,000 lines
+  instead of whole files: the ICR views step went from 2.1 GB to 630 MB peak
+  (#70). `load` reads its input in two passes instead of holding it: the ICR
+  Location file went from 3.8 GB to 262 MB (#73). `import location-sites` on
+  the national GRID3 facility list went from 851 MB to 22 MB (#72).
+- **View engine.** Each resource is converted once and every path compiled
+  once per view: two ICR and Synthea views used 39–46% less CPU on one
+  thread (#71). FHIRPath fixes
+  for constants inside strings, `%resource` and `%context`, `ofType` on
+  resource types, boundaries on expressions and contained references inside
+  `forEach` (#74). Rows are byte-identical to before on the ICR and
+  fhir-data-pipes views.
+- **Exit codes.** `refresh` and `views` now exit 2 for configuration and
+  flag errors, ViewDefinitions that do not compile, and input files that are
+  missing or not valid JSON; they exit 1 for failures while running,
+  including an input file that exists but cannot be read, as the other
+  commands do (#75). `views validate`, `views lint` and `views test` still
+  exit 1 when they report findings.
 
 The OpenMRS database mode is not needed: OpenMRS works over FHIR search, which
 fhir-pipes supports (to be checked in #29).
@@ -193,8 +211,8 @@ into FHIR, release binaries for five platforms, and view linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Engine | Apache Beam: DirectRunner, Flink (local or cluster), Dataflow and Spark (Maven profiles). The controller uses local Flink only | One process, all CPUs (rayon); each resource type read once for all its views | Not needed (different design) |
-| Memory and speed | Sizing guidance, not a measurement: `docker/.env` gives about 6.7 GB of JVM for 48 cores and 32 MB row groups; the image defaults to `-Xms6g -Xmx6g` | Measured: on the 46,497-resource Synthea sample, the 12 views ran in 0.79 s with 0.87 GB peak (2026-10-14 notes); the ICR warehouse (349k Locations, 164k MeasureReports) rebuilds in about 25 s from data already downloaded. The ICR views step peaks at about 2.1 GB, because each type's file is held in memory (reading in chunks is #58). Release binaries use mimalloc (#67): on Linux the ICR views step went from 84.6 s to 4.9 s, on macOS from 6.0 s to 4.4 s | Not compared: the two have not been run on the same workload |
-| Very large data | Distributed runners | One machine; each type's resources are held in memory while its views run | Partial: a limit for very large types |
+| Memory and speed | Sizing guidance, not a measurement: `docker/.env` gives about 6.7 GB of JVM for 48 cores and 32 MB row groups; the image defaults to `-Xms6g -Xmx6g` | Measured: on the 46,497-resource Synthea sample, the 12 views ran in 0.79 s with 0.87 GB peak (2026-10-14 notes); the ICR warehouse (349k Locations, 164k MeasureReports) rebuilds in about 25 s from data already downloaded. The ICR views step peaks at about 630 MB: resources are read in chunks, and a type's rows are kept until its views finish (#70). Release binaries use mimalloc (#67): on Linux the ICR views step went from 84.6 s to 4.9 s, on macOS from 6.0 s to 4.4 s | Not compared: the two have not been run on the same workload |
+| Very large data | Distributed runners | One machine; resources are read in chunks, but each view's rows for a type are kept in memory until that type's tables are written (#70) | Partial: a limit for very large output tables |
 | Parallel fetching | Parallel page segments on HAPI | Resource types fetched in parallel, and a large type split into `_lastUpdated` windows paged in parallel, under one shared request limit (#46); works on any server that sorts by `_lastUpdated`. ICR's 350k Locations: 712 s → 302 s | Same, not HAPI-specific |
 
 ## 10. Outputs and sinks
@@ -221,7 +239,7 @@ into FHIR, release binaries for five platforms, and view linting.
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
 | Distribution | Docker image (`us-docker.pkg.dev/cloud-build-fhir/fhir-analytics/main`), jars, compose files for HAPI, OpenMRS, Spark, OpenHIM | Release binaries for macOS, Linux (static musl) and Windows (C runtime linked in, no redistributable needed) with checksums; `cargo install` | Missing: no image or compose files |
-| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | 884 tests with default features on Linux, macOS and Windows for every PR, including the official SQL-on-FHIR suite and fake FHIR servers; on Linux also 904 with all features and the database tests against PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
+| Tests | JUnit and Mockito, including the official SQL-on-FHIR suite (with 5 skips); end-to-end on Cloud Build against HAPI, OpenMRS, bulk export, controller with Spark, FHIR-to-FHIR sync | Tests with default features on Linux, macOS and Windows for every PR (933 on Linux, 920 on Windows, where some tests are Unix-only), including the official SQL-on-FHIR suite and fake FHIR servers; on Linux also 953 with all features and the database tests against PostgreSQL over TLS; `cargo audit` on every PR and weekly (#65); bulk export, `sync` and the HAPI database source were checked by hand against HAPI 8.12, not in CI; nothing against OpenMRS yet (#29) | Partial |
 | Docs | mkdocs site: concepts, installation (Docker, controller, pipeline), tutorials (single machine, test servers, Superset, GCP), schema | README, ROADMAP, `docs/` per command, profile walkthrough | Partial: no install-with-Docker or dashboard tutorials |
 | Licence | Apache-2.0, Google CLA | Apache-2.0 (sof crates MIT OR Apache-2.0) | Same; CLA needed to contribute |
 
