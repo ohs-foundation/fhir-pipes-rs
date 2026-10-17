@@ -26,8 +26,8 @@ needed to pick flags.
 | `--client-id` | `FHIR_PIPES_CLIENT_ID` | | OAuth client credentials; fhir-pipes gets and renews its own token |
 | `--client-secret` | `FHIR_PIPES_CLIENT_SECRET` | | use the env var, not the flag |
 | `--token-url` | `FHIR_PIPES_TOKEN_URL` | | OAuth token endpoint |
-| `--token-auth post\|basic` | `FHIR_PIPES_TOKEN_AUTH` | `post` | `basic` puts id and secret in a Basic header (Aidbox). After v0.5.0 |
-| `--scope` | `FHIR_PIPES_SCOPE` | none | e.g. `system/*.read`. After v0.5.0 |
+| `--token-auth post\|basic` | `FHIR_PIPES_TOKEN_AUTH` | `post` | `basic` puts id and secret in a Basic header (Aidbox). v0.6.0 and later |
+| `--scope` | `FHIR_PIPES_SCOPE` | none | e.g. `system/*.read`. v0.6.0 and later |
 | `--username` | `FHIR_PIPES_USERNAME` | | HTTP Basic |
 | `--password` | `FHIR_PIPES_PASSWORD` | | use the env var, not the flag |
 | `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH` | off | Google Application Default Credentials |
@@ -87,7 +87,7 @@ and counted on stderr; the run does not fail.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--server-kind generic\|hapi\|medplum\|aidbox` | `generic` | search parameters the server needs. After v0.5.0 |
+| `--server-kind generic\|hapi\|medplum\|aidbox` | `generic` | search parameters the server needs. v0.6.0 and later |
 | `--incremental` | off | only what changed since the last run into `--out`, merged by id |
 | `--bulk` | off | system-level Bulk Data `$export` instead of search |
 | `--bulk-timeout SECS` | 14400 | wait for the export, then cancel it; also per-file download limit |

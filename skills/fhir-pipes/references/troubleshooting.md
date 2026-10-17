@@ -16,7 +16,7 @@ Errors go to stderr, starting with `fhir-pipes:`. Clap's own argument errors
 
 | Message or symptom | Cause | Fix |
 |---|---|---|
-| `unexpected argument '--server-kind'` (or `--token-auth`, `--scope`) | the binary is v0.5.0 or older | build from main: `cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes` |
+| `unexpected argument '--server-kind'` (or `--token-auth`, `--scope`) | the binary is v0.5.0 or older | install v0.6.0 or later (see Install in SKILL.md) |
 | `--db needs PostgreSQL support, which this fhir-pipes was built without` | a `--no-default-features` build | use a release binary or build with default features |
 | `--package needs FHIR package support…` | `views lint --package` without `fhir-packages` | build with `--features fhir-packages`, or use `--shareable` only |
 | `… needs a profile with a [dhis2] section …` or `… needs the system of the Location type codes …` | no profile | pass `--profile` or set `FHIR_PIPES_PROFILE` |
