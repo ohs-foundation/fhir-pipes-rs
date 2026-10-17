@@ -470,16 +470,23 @@ fn valid_column_name(name: &str) -> bool {
 }
 
 fn fetch(url: &str) -> Result<String> {
+    let body = fetch_bytes(url, "--profile", Duration::from_secs(60))?;
+    String::from_utf8(body)
+        .map_err(|_| PipesError::Usage(format!("--profile {url}: not UTF-8 text")))
+}
+
+/// The body of `url`, unauthenticated, with the usual retries; an error
+/// names `flag`, the option the URL came from.
+pub(crate) fn fetch_bytes(url: &str, flag: &str, timeout: Duration) -> Result<Vec<u8>> {
     let client = crate::extract::client::FhirClient::new(
         crate::extract::client::Auth::None,
         crate::cli::DEFAULT_RETRIES,
-        Duration::from_secs(60),
+        timeout,
     )?;
-    let fetched = client
+    client
         .get(url)
-        .map_err(|e| PipesError::Environment(format!("--profile {url}: {e}")))?;
-    String::from_utf8(fetched.body)
-        .map_err(|_| PipesError::Usage(format!("--profile {url}: not UTF-8 text")))
+        .map(|f| f.body)
+        .map_err(|e| PipesError::Environment(format!("{flag} {url}: {e}")))
 }
 
 #[cfg(test)]

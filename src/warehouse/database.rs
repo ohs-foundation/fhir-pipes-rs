@@ -30,6 +30,8 @@ use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::PgConnection;
 
 use super::config::{Database, Settings};
+use super::partition::table_files_checked;
+use super::sql::ident;
 
 /// Rows sent to COPY per message.
 const COPY_ROWS: usize = 4096;
@@ -63,7 +65,9 @@ struct Plan {
 
 /// A table's columns, from its Parquet files, which must all agree.
 fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
-    let files = parquet_files(dir, partition_column).with_context(|| {
+    // A missing or unreadable directory is an error, so a wrong `--data` or a
+    // missing mount cannot empty the database.
+    let files = table_files_checked(dir, partition_column).with_context(|| {
         format!("{table}: cannot read its Parquet; the database was not changed")
     })?;
     let mut columns: Option<Vec<(String, &'static str)>> = None;
@@ -102,45 +106,6 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
         columns: columns.unwrap_or_default(),
         files,
     })
-}
-
-/// A table's Parquet files: those under its `<column>=` directories, as the
-/// views step writes them. Unlike `partition::table_files`, a missing or
-/// unreadable directory is an error, not an empty table, so a wrong `--data`
-/// or a missing mount cannot empty the database.
-fn parquet_files(dir: &Path, column: &str) -> Result<Vec<PathBuf>> {
-    fn entries(dir: &Path) -> Result<Vec<PathBuf>> {
-        let mut paths = fs::read_dir(dir)
-            .and_then(|it| {
-                it.map(|e| e.map(|e| e.path()))
-                    .collect::<std::io::Result<Vec<_>>>()
-            })
-            .with_context(|| format!("reading {}", dir.display()))?;
-        paths.sort();
-        Ok(paths)
-    }
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-        for p in entries(dir)? {
-            if p.is_dir() {
-                walk(&p, out)?;
-            } else if p.extension().is_some_and(|x| x == "parquet") {
-                out.push(p);
-            }
-        }
-        Ok(())
-    }
-    let prefix = format!("{column}=");
-    let mut files = Vec::new();
-    for part in entries(dir)? {
-        if part.is_dir()
-            && part
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
-        {
-            walk(&part, &mut files)?;
-        }
-    }
-    Ok(files)
 }
 
 /// The PostgreSQL type for a column the views step writes, as
@@ -406,11 +371,6 @@ fn quote(out: &mut String, s: &str) {
     out.push('"');
     out.push_str(&s.replace('"', "\"\""));
     out.push('"');
-}
-
-/// A quoted SQL identifier.
-fn ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ mod files;
 mod manifest;
 mod partition;
 mod push;
+mod sql;
 mod stage;
 mod tiles;
 mod tools;
@@ -535,9 +536,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         ran.insert(Step::Tiles);
     }
 
-    let mut refreshed_at = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%S+00:00")
-        .to_string();
+    let mut refreshed_at = manifest::now();
     if steps.contains(&Step::Manifest) {
         let t = Instant::now();
         refreshed_at = manifest::write(s, &stage, server.as_deref())?;

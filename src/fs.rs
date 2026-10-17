@@ -12,6 +12,26 @@ use std::path::{Path, PathBuf};
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::with_suffix;
 
+/// The paths in `dir`, sorted. An entry the directory listing fails on is
+/// skipped.
+pub fn sorted_entries(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+/// As `sorted_entries`, but an entry the listing fails on is an error.
+#[cfg(feature = "postgres")]
+pub fn sorted_entries_strict(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = std::fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    Ok(paths)
+}
+
 /// Writes `bytes` to `path` through `<path>.tmp`.
 pub fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
     let mut f = AtomicFile::create(path)?;

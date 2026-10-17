@@ -41,6 +41,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::config::{Catalog, Settings};
 use super::partition::{partition_key, table_files};
+use super::sql::{ident, sql_str};
 use super::stage::Stage;
 
 pub const SQL_FILE: &str = "catalog.sql";
@@ -488,17 +489,6 @@ fn spark_str(s: &str) -> String {
 /// A Spark SQL identifier in backticks, so a keyword (`group`) works.
 fn spark_ident(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
-}
-
-/// A SQL string literal.
-fn sql_str(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
-/// A table name as a quoted SQL identifier, so a name that is a keyword
-/// (`group`) works. Queries can still name it unquoted where DuckDB allows.
-fn ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// A relative file path as a URL path: bytes outside the unreserved set, `/`

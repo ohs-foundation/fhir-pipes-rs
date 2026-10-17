@@ -517,9 +517,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             },
         }
     };
-    let threads = o
-        .threads
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let threads = o.threads.unwrap_or_else(crate::work::default_threads);
     let countries = if o.countries.is_empty() {
         file.tiles.countries
     } else {

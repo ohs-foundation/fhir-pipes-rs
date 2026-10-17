@@ -5,6 +5,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError, mpsc};
 
+/// The thread count when none is given: one per available core.
+pub fn default_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 /// Runs `work` on `workers` scoped threads over the items `next` hands out.
 /// `next` is called on the worker threads one call at a time, so items are
 /// taken in order, until it returns `None` or the run is stopped. `on_done`

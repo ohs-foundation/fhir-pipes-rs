@@ -49,40 +49,49 @@ pub fn partition_key(table_dir: &Path, default: &str) -> String {
 
 /// The parquet files of a partitioned table: those under a `<column>=` directory,
 /// which leaves out metadata kept beside the data (e.g. a catalog's items.parquet).
+/// A missing or unreadable directory counts as empty.
 pub fn table_files(table_dir: &Path, column: &str) -> Vec<PathBuf> {
-    let prefix = format!("{column}=");
-    let mut files = Vec::new();
-    let Ok(entries) = fs::read_dir(table_dir) else {
-        return files;
-    };
-    let mut parts: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
-        })
-        .collect();
-    parts.sort();
-    for dir in parts {
-        collect_parquet(&dir, &mut files);
-    }
-    files
+    list_table_files(table_dir, column, |dir| {
+        Ok(crate::fs::sorted_entries(dir).unwrap_or_default())
+    })
+    .unwrap_or_default()
 }
 
-fn collect_parquet(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    paths.sort();
-    for p in paths {
+/// As `table_files`, but a missing or unreadable directory is an error, not
+/// an empty table.
+#[cfg(feature = "postgres")]
+pub fn table_files_checked(table_dir: &Path, column: &str) -> Result<Vec<PathBuf>> {
+    list_table_files(table_dir, column, |dir| {
+        crate::fs::sorted_entries_strict(dir).with_context(|| format!("reading {}", dir.display()))
+    })
+}
+
+type Entries = fn(&Path) -> Result<Vec<PathBuf>>;
+
+fn list_table_files(table_dir: &Path, column: &str, entries: Entries) -> Result<Vec<PathBuf>> {
+    let prefix = format!("{column}=");
+    let mut files = Vec::new();
+    for part in entries(table_dir)? {
+        if part.is_dir()
+            && part
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        {
+            collect_parquet(&part, entries, &mut files)?;
+        }
+    }
+    Ok(files)
+}
+
+fn collect_parquet(dir: &Path, entries: Entries, out: &mut Vec<PathBuf>) -> Result<()> {
+    for p in entries(dir)? {
         if p.is_dir() {
-            collect_parquet(&p, out);
+            collect_parquet(&p, entries, out)?;
         } else if p.extension().is_some_and(|x| x == "parquet") {
             out.push(p);
         }
     }
+    Ok(())
 }
 
 /// key → partition value, read from a warehouse table. Where a key has several
