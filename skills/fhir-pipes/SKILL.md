@@ -186,7 +186,9 @@ fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson
   `[ -n "$FHIR_PIPES_CLIENT_SECRET" ] && echo set`.
 - **Look before writing.** Run `refresh --check` before a refresh,
   `load --dry-run` before `load`, `sync --dry-run` before `sync`, and
-  `refresh --push --dry-run` before a push. Show the user the result.
+  `refresh --only push --dry-run` before a push. Show the user the result.
+  `refresh --push --dry-run` is not a preview: it runs the whole refresh
+  (views, database, publish, hooks) and only the upload is a dry run.
 - **Production needs the user's say-so.** Do not run `load` or `sync`
   against a production FHIR server, or a `refresh` with `[database]`
   against a production database, unless the user has said that is the

@@ -37,7 +37,10 @@ Errors go to stderr, starting with `fhir-pipes:`. Clap's own argument errors
 
 - `fhir-pipes refresh --check`: settings and tools; no network writes.
 - `fhir-pipes load … --dry-run`, `fhir-pipes sync … --dry-run`: the plan, nothing sent.
-- `fhir-pipes refresh --push --dry-run`: what the push would change.
+- `fhir-pipes refresh --only push --dry-run`: what pushing the existing
+  warehouse would change, with no other step run. `refresh --push --dry-run`
+  is different: it runs the whole refresh, writing tables, the database and
+  running hooks, and only the upload is a dry run.
 - `fhir-pipes views validate VIEW`, `views run VIEW --input sample.ndjson`: views offline.
 
 To check that a secret is set without showing it:

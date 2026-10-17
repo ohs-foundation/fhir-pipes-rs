@@ -6,7 +6,12 @@ and `views lint --package` needs `fhir-packages` (not in the release
 binaries). Without the feature the command exits 2 and names it.
 
 `--profile FILE|URL` (or `FHIR_PIPES_PROFILE`) is accepted by every command.
-NDJSON paths ending in `.gz` are read and written gzipped. Run
+Most commands read and write an NDJSON path ending in `.gz` as gzip. The
+exceptions:
+`views run --input FILE.gz` reads the compressed bytes and fails, `views run
+--out FILE.gz` writes plain NDJSON, and directory inputs for `views` and
+`refresh --input` skip `.gz` files. For those, decompress first (`gunzip -k`)
+and compress the output yourself. Run
 `fhir-pipes <command> --help` for the full text; this file lists what is
 needed to pick flags.
 
@@ -44,7 +49,7 @@ warehouse from `fhir-pipes.toml` (or `--config`, `FHIR_PIPES_CONFIG`).
 | `--full` | download everything again instead of only changes |
 | `--reuse-raw` | rerun on the last download in `raw/<name>/` |
 | `--input PATH` (repeat) | read NDJSON/Bundle/JSON files, directories or globs instead of a server |
-| `--push`, `--dry-run` | also push with rclone; `--dry-run` shows what the push would change |
+| `--push`, `--dry-run` | also push with rclone; `--dry-run` makes only the upload a dry run, so use `--only push --dry-run` to preview a push without running the other steps |
 | `--data`, `--views`, `--server`, `--server-name` | override the config (`FHIR_PIPES_DATA`, `FHIR_PIPES_VIEWS`, `FHIR_PIPES_SERVER`, `FHIR_PIPES_SERVER_NAME`) |
 | `--token`, `--token-url`, `--token-auth`, `--scope`, `--username`, `--google-auth` | auth; client id, client secret and password come only from the environment |
 | `--countries` | countries to build tiles for |
@@ -137,7 +142,7 @@ Auth: `--dhis2-token` (`FHIR_PIPES_DHIS2_TOKEN`) or `--dhis2-user` and
 
 - `dhis2 locations --dhis2 URL --instance NAME --out FILE [--country-code CC] [--facility-level N] [--root UID] [--id-prefix P]`
 - `dhis2 measures --dhis2 URL --instance NAME --out FILE (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) …`
-- `dhis2 reports --dhis2 URL --instance NAME --locations LOCATIONS.ndjson --level N … (--period P … | --range START:END …) --out FILE [--source analytics|data-values] [--previous FILE --changed FILE --removed FILE] [--resume] [--concurrency 4]`
+- `dhis2 reports --dhis2 URL --instance NAME --locations LOCATIONS.ndjson --level N … (--period P … | --range START:END …) (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) … --out FILE [--source analytics|data-values] [--previous FILE --changed FILE --removed FILE] [--resume] [--concurrency 4]`: needs at least one of the same selection flags as `measures`.
 
 ## profile check
 

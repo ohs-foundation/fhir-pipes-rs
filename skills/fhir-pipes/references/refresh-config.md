@@ -29,8 +29,14 @@ every step not picked, including `hooks`, is left out.
 `--skip tiles` leaves one out. The tiles step expects ICR-shaped columns;
 with another profile, use `--skip tiles`.
 
-A failed run leaves the previous tables, `views/`, `tiles/`, `manifest.json`
-and `catalog.sql` as they were. Only `raw/` moves forward.
+A run that fails before the publish step leaves the previous tables,
+`views/`, `tiles/`, `manifest.json` and `catalog.sql` as they were; only
+`raw/` moves forward. The publish step swaps in the new tables, manifest and
+`catalog.sql`, then builds `catalog.duckdb`, and the hooks and push run after
+it. A failure from then on (the `catalog.duckdb` build, a hook, the push)
+exits 1 with the new tables and manifest already published; a failed
+`catalog.duckdb` build keeps the previous `catalog.duckdb`. The run's output
+names the step that failed.
 
 ## Output layout
 
