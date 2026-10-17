@@ -56,7 +56,7 @@ mod sql_generator;
 mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
-pub use eval::{CompiledView, execute, execute_blocking, execute_parallel};
+pub use eval::{CompiledView, calls_any, execute, execute_blocking, execute_parallel};
 pub use runner::ViewResult;
 #[cfg(feature = "postgres")]
 pub use runner::ViewRunner;

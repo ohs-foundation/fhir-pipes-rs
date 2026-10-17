@@ -957,6 +957,23 @@ fn defined_variables(path: &str) -> Vec<String> {
     names
 }
 
+/// Whether the FHIRPath `path` calls a function named in `names`, as a
+/// function (`now()`) or a method (`x.now()`), however the call is written
+/// (comments, a delimited name). `None` when the path does not parse.
+pub fn calls_any(path: &str, names: &[&str]) -> Option<bool> {
+    let ast = octofhir_fhirpath::parse_ast(path).ok()?;
+    let mut found = false;
+    visit(&ast, &mut |node| {
+        let name = match node {
+            ExpressionNode::MethodCall(m) => &m.method,
+            ExpressionNode::FunctionCall(f) => &f.name,
+            _ => return,
+        };
+        found |= names.contains(&name.as_str());
+    });
+    Some(found)
+}
+
 /// Call `f` on `node` and every node below it.
 fn visit(node: &ExpressionNode, f: &mut impl FnMut(&ExpressionNode)) {
     f(node);

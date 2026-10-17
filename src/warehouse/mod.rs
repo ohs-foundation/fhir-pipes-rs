@@ -16,7 +16,9 @@
 //!   catalog    catalog.sql: a DuckDB view per table, and catalog.spark.sql
 //!              with spark = true; only with [catalog]
 //!   database   the view tables into PostgreSQL; only with [database] and a
-//!              build with the postgres feature
+//!              build with the postgres feature. With mode = "upsert", only
+//!              the rows of the resources that changed, from the change log
+//!              raw/<server>/.changes.json (`begin_changes`)
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 //!
@@ -256,6 +258,19 @@ fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSe
              build it with `--features postgres`, or --skip database"
         );
     }
+    // Upsert finds a resource's rows by its view's getResourceKey() column:
+    // a view without one is refused before anything is downloaded.
+    #[cfg(feature = "postgres")]
+    if steps.contains(&Step::Database)
+        && s.upsert()
+        && let Some(d) = &s.database
+    {
+        for v in database_tables(&s, d)? {
+            if database::key_column(&v.definition).is_none() {
+                bail!(database::no_key(&v.name, &v.table));
+            }
+        }
+    }
     let needed = required_tools(&s, &steps)?;
     Ok((s, steps, needed))
 }
@@ -451,9 +466,14 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
     );
     if let Some(d) = &s.database {
         println!(
-            "database:   ${} → schema {}{}",
+            "database:   ${} → schema {}{}{}",
             d.url_env,
             d.schema,
+            if d.mode == config::Mode::Upsert {
+                ", upsert"
+            } else {
+                ""
+            },
             if cfg!(feature = "postgres") {
                 ""
             } else {
@@ -561,6 +581,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     std::fs::create_dir_all(s.raw_dir())?;
     std::fs::create_dir_all(s.parquet_dir())?;
     let stage = stage::Stage::new(s)?;
+    begin_changes(s)?;
 
     // A file source is split by type into raw/ first, as a download would
     // be; --reuse-raw reruns on the last split.
@@ -618,11 +639,18 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     });
     let mut view_tables = None;
     let mut mismatches = None;
+    // What the views step built, for an upsert.
+    #[cfg(feature = "postgres")]
+    let mut built = None;
     if let Some(v) = views {
         let (done, secs) = v.context("views")?;
         ran.record("views", Some(Step::Views), secs);
         contacted |= done.downloaded;
         view_tables = Some(done.tables);
+        #[cfg(feature = "postgres")]
+        {
+            built = Some(done.built);
+        }
         // Said as soon as the views step is done, so a later step that fails
         // (a hook, the push) does not hide them once the tables are published.
         print_mismatches(&done.mismatches);
@@ -653,14 +681,17 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         && let Some(d) = &s.database
     {
         ran.run_step("database", Some(Step::Database), || {
-            let tables: Vec<(String, PathBuf)> = database_tables(s, d)?
+            let tables: Vec<database::Table> = database_tables(s, d)?
                 .into_iter()
-                .map(|n| {
-                    let dir = stage.read(&n);
-                    (n, dir)
+                .map(|v| database::Table {
+                    dir: stage.read(&v.table),
+                    key: database::key_column(&v.definition),
+                    time_dependent: database::time_dependent(&v.definition),
+                    resource: v.resource,
+                    name: v.table,
                 })
                 .collect();
-            database::load(s, d, &tables)
+            database::load(s, d, &tables, built.as_ref())
         })?;
     }
 
@@ -748,6 +779,62 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         s.raw_dir().join("last-refresh.json"),
         serde_json::to_string_pretty(&report)?,
     )?;
+    finish_changes(s)?;
+    Ok(())
+}
+
+/// Start the change log of an upsert run (export/changes.rs), which the
+/// exports and the file source add to. A log still marked running is from a
+/// refresh that did not finish: what it lists may not match what the
+/// database holds, so the next load is in full, as with `--full` and when
+/// there is no log. In any other mode the log is removed, so that a later
+/// upsert run starts with a full load.
+fn begin_changes(s: &Settings) -> Result<()> {
+    use crate::export::changes::{Changes, FILE};
+    let raw = s.raw_dir();
+    if !s.upsert() {
+        let path = raw.join(FILE);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    let mut log = match Changes::read(&raw) {
+        Ok(Some(log)) => log,
+        Ok(None) => Changes {
+            reload: Some("no record of the last load".into()),
+            ..Changes::default()
+        },
+        Err(why) => Changes {
+            reload: Some(why),
+            ..Changes::default()
+        },
+    };
+    if log.running && log.reload.is_none() {
+        log.reload = Some("the last refresh did not finish".into());
+    }
+    if s.full {
+        log.reload = Some("--full".into());
+    }
+    if log.reload.is_some() {
+        log.types.clear();
+    }
+    log.running = true;
+    log.write(&raw)?;
+    Ok(())
+}
+
+/// The end of a refresh that finished: its change log is no longer running.
+fn finish_changes(s: &Settings) -> Result<()> {
+    use crate::export::changes::Changes;
+    if !s.upsert() {
+        return Ok(());
+    }
+    let raw = s.raw_dir();
+    if let Ok(Some(mut log)) = Changes::read(&raw) {
+        log.running = false;
+        log.write(&raw)?;
+    }
     Ok(())
 }
 
@@ -798,30 +885,31 @@ fn mismatch_report(m: &[(String, WriteSummary)]) -> serde_json::Value {
     tables.into()
 }
 
-/// The view tables [database] loads: every table a view writes, or those
-/// `tables` names, each of which must be one.
+/// The views whose tables [database] loads: every view's, sorted by table,
+/// or those of the tables `tables` names, in its order, each of which must
+/// be a view's.
 #[cfg(feature = "postgres")]
-fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<String>> {
+fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<views::View>> {
     let dir = s
         .views
         .as_ref()
         .context("[database] loads the view tables, so it needs the views directory")
         .map_err(usage)?;
-    let all: BTreeSet<String> = views::discover(dir, &s.strip_prefix)
+    let mut all: BTreeMap<String, views::View> = views::discover(dir, &s.strip_prefix)
         .map_err(usage)?
         .into_iter()
-        .map(|v| v.table)
+        .map(|v| (v.table.clone(), v))
         .collect();
     match &d.tables {
-        None => Ok(all.into_iter().collect()),
+        None => Ok(all.into_values().collect()),
         Some(names) => {
-            if let Some(bad) = names.iter().find(|n| !all.contains(*n)) {
+            if let Some(bad) = names.iter().find(|n| !all.contains_key(*n)) {
                 return Err(usage(anyhow::anyhow!(
                     "[database] tables: `{bad}` is not a view table ({})",
-                    all.iter().cloned().collect::<Vec<_>>().join(", ")
+                    all.keys().cloned().collect::<Vec<_>>().join(", ")
                 )));
             }
-            Ok(names.clone())
+            Ok(names.iter().filter_map(|n| all.remove(n)).collect())
         }
     }
 }
@@ -832,6 +920,10 @@ struct ViewsDone {
     downloaded: bool,
     /// The tables the views wrote.
     tables: BTreeSet<String>,
+    /// For an upsert: each table with what its rows were built from
+    /// (`fingerprint`).
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    built: BTreeMap<String, String>,
     /// Each table's values that did not match their column's type, in the
     /// order the tables were written.
     mismatches: Vec<(String, WriteSummary)>,
@@ -920,6 +1012,8 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
         s,
         stage,
         lookups: HashMap::new(),
+        digests: HashMap::new(),
+        built: BTreeMap::new(),
         mismatches: Vec::new(),
     };
     let mut held = Vec::new();
@@ -940,10 +1034,51 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
     let mut mismatches = writer.mismatches;
     mismatches.sort_by_key(|(i, _, _)| write_order(*i));
     Ok(ViewsDone {
+        built: writer.built,
         downloaded,
         mismatches: mismatches.into_iter().map(|(_, t, w)| (t, w)).collect(),
         tables: all.into_iter().map(|v| v.table).collect(),
     })
+}
+
+/// What a table's rows are built from besides its resources, for an upsert,
+/// which rewrites only the rows of resources that changed: its view, its
+/// partition column and lookup (`lookup`, with a digest of the lookup's
+/// keys and values), and the fhir-pipes version, whose views engine could
+/// give other rows. When it differs from the last load's, the table is
+/// loaded in full.
+fn fingerprint(v: &views::View, partition_column: &str, lookup: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [
+        env!("CARGO_PKG_VERSION"),
+        &v.json.to_string(),
+        partition_column,
+        lookup,
+    ] {
+        h.update(part.as_bytes());
+        h.update([0]);
+    }
+    hex(&h.finalize())
+}
+
+/// A digest of a lookup: its keys and values, sorted.
+fn lookup_digest(m: &HashMap<String, String>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut entries: Vec<(&String, &String)> = m.iter().collect();
+    entries.sort();
+    let mut h = Sha256::new();
+    for (k, v) in entries {
+        h.update(k.as_bytes());
+        h.update([0]);
+        h.update(v.as_bytes());
+        h.update([0]);
+    }
+    hex(&h.finalize())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Writes the views' tables to the staging directory, reading the lookup
@@ -953,6 +1088,10 @@ struct TableWriter<'a> {
     stage: &'a stage::Stage,
     /// (table, key) → key → partition value.
     lookups: HashMap<(String, String), HashMap<String, String>>,
+    /// (table, key) → a digest of that lookup, for an upsert.
+    digests: HashMap<(String, String), String>,
+    /// Each table written, with its fingerprint, for an upsert.
+    built: BTreeMap<String, String>,
     /// Each table written, by its view's index, with the values that did not
     /// match their column's type.
     mismatches: Vec<(usize, String, WriteSummary)>,
@@ -984,10 +1123,33 @@ impl TableWriter<'_> {
                 if !self.lookups.contains_key(&cache_key) {
                     let m = partition::read_lookup(&table_dir, &key, &s.partition_column)
                         .with_context(|| format!("reading lookup table {}", l.table))?;
+                    if s.upsert() {
+                        self.digests.insert(cache_key.clone(), lookup_digest(&m));
+                    }
                     self.lookups.insert(cache_key.clone(), m);
                 }
                 map = self.lookups.get(&cache_key);
             }
+        }
+        if s.upsert() {
+            let lookup = match &lookup_table {
+                None => "none".to_string(),
+                Some((l, key, present)) => format!(
+                    "{} in {}.{}: {}",
+                    l.key,
+                    l.table,
+                    key,
+                    if *present {
+                        &self.digests[&(l.table.clone(), key.clone())]
+                    } else {
+                        "no table"
+                    }
+                ),
+            };
+            self.built.insert(
+                v.table.clone(),
+                fingerprint(v, &s.partition_column, &lookup),
+            );
         }
         let col = rule.map(|(_, c)| c);
         // Rows whose key is null, and rows whose key is not in the lookup

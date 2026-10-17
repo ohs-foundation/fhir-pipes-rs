@@ -282,7 +282,9 @@ impl Drop for RemoveOnDrop {
 /// resource seen twice (same type and id) is kept once: the one with the later
 /// `meta.lastUpdated`; on a tie, or when neither has one, the one read later.
 /// A `<Type>.ndjson` left from an earlier run, of a type the files no longer
-/// have, is removed, so the views do not read it.
+/// have, is removed, so the views do not read it. With a change log in raw/
+/// (`[database] mode = "upsert"`), what differs from the previous split is
+/// recorded in it, type by type (export/changes.rs).
 ///
 /// The inputs are read twice, so they are never held whole. The first pass
 /// keeps, for each type and id, the resource that wins and where its text
@@ -388,6 +390,7 @@ pub fn split(s: &Settings) -> Result<()> {
     sources.check_unchanged()?;
     for ((rtype, t), file) in types.iter().zip(written) {
         let path = raw.join(format!("{rtype}.ndjson"));
+        crate::export::changes::record_replaced(&raw, rtype, &path, file.tmp())?;
         file.commit()
             .with_context(|| format!("renaming {} into place", path.display()))?;
         if t.duplicates > 0 {
@@ -403,6 +406,7 @@ pub fn split(s: &Settings) -> Result<()> {
     for stale in raw_types(&raw)? {
         if !types.contains_key(&stale) {
             let path = raw.join(format!("{stale}.ndjson"));
+            crate::export::changes::record_full(&raw, &stale)?;
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             println!("   {stale}: no longer in the files; removed raw/{stale}.ndjson");
         }

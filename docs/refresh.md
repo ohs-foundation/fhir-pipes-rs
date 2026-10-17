@@ -492,6 +492,7 @@ refresh with `[database]` before it runs (`--skip database` runs the rest).
 url_env = "FHIR_PIPES_DATABASE_URL"   # the variable holding the connection string (the default)
 schema = "public"                      # the default
 tables = ["indicator_value", "coverage"]   # default: every view table
+mode = "replace"                       # the default; "upsert" rewrites only what changed
 ```
 
 The connection string (`postgres://user:password@host:5432/db`) is read only
@@ -525,8 +526,139 @@ A table whose Parquet cannot be read (a wrong `--data`, a missing mount) stops
 the step before anything in the database changes. Two refreshes loading into
 the same schema at once take turns: the second waits for the first to commit.
 
-Every run reloads every table. On the ICR warehouse (10 view tables, 229,082
-rows, 161,216 in the largest) that takes about half a second.
+With `mode = "replace"` (the default), every run reloads every table. On
+the ICR warehouse (10 view tables, 229,082 rows, 161,216 in the largest)
+that takes about half a second.
+
+### Upsert
+
+With `mode = "upsert"`, a run rewrites only the rows of the resources that
+changed since the last load, as fhir-data-pipes' `JdbcResourceWriter` does.
+For each table, in the same single transaction:
+
+```sql
+DELETE FROM t WHERE id = ANY($1);   -- the ids that changed or were deleted
+DELETE FROM t WHERE id IS NULL;     -- rows without an id, copied again
+COPY t (...) FROM STDIN;            -- the rows of those ids, from the Parquet
+```
+
+The rows come from the Parquet files the views step wrote in this run,
+filtered by id: the views still run over every resource, so `parquet/` is
+the same in either mode, and the database gets the same rows as a full load.
+A table whose type has no changes is left as it is. Rows without an id (from
+a resource that has none) are not named by any id, so they are deleted and
+copied again in every run that finds such rows in the Parquet or the table.
+
+**The id column.** Each loaded view needs a column whose path is
+`getResourceKey()`, in a `select` that keeps the resource as its focus: not
+under `forEach`, `forEachOrNull` or `repeat` (where it keys the element, such
+as a contained resource), and not in a `unionAll`. If several match, the one
+named `id` is used, else the first. A view without one stops the run before
+anything is downloaded, with exit 2; add
+`{"name": "id", "path": "getResourceKey()"}` to its `select`, leave its table
+out of `tables`, or use `replace`. The column gets an index if it has none.
+
+**What changed.** The run keeps a change log, `raw/<server>/.changes.json`:
+per resource type, the ids that changed or were deleted since the last load.
+It is written before each type's file is replaced, so a run that stops
+part way never misses an id:
+
+- An incremental search, a bulk `$export` with `_since`, or an incremental
+  read of HAPI's database: the ids it read, and the ids in the export's
+  `deleted` list or deleted in HAPI's database.
+- A type downloaded in full (after a count mismatch, a full bulk export, a
+  type with no watermark): the new file is compared with the old one by id
+  and by each resource's text. The ids that differ or are new count as
+  changed, and the ids gone from the file as deleted.
+- A file source (`--input`, `[source] files`): each type's split file is
+  compared with the previous split the same way, so only the resources that
+  differ are rewritten. A type that is no longer in the files is reloaded.
+
+A type with no old file to compare, or with more than half of its resources
+changed (and over 10,000), is marked for a full reload instead of listing
+its ids.
+
+**When a table is loaded in full.** Upsert falls back to a full load, as
+`replace` does it, for every table when:
+
+- there is no change log yet (the first upsert run, or after a run in
+  `replace` mode, which removes it);
+- the last refresh did not finish (the log is marked as running from the
+  start of a run to its end);
+- the run has `--full`;
+- the views step did not run in this refresh (`--only database`), since the
+  Parquet may then be older than the log; such a load also clears the
+  log's record of the tables, so the next run with the views loads in full
+  too.
+
+And for one table when:
+
+- the table is new or its columns changed;
+- the table was last written by another load. Each upsert load records a
+  mark of its own (a UUID) for every table it loads in a table of the same
+  schema, `fhir_pipes_loads` (`table_name`, `mark`), in the same
+  transaction, and the change log records the mark. A table without this
+  warehouse's mark there was written by another warehouse, a `replace` load
+  (which removes the marks of the tables it loads or empties), a restored
+  backup, or a database the connection string now reaches instead. Upsert
+  creates `fhir_pipes_loads` with the comment `fhir-pipes load records,
+  version 1`, and uses a relation of that name only when it is an ordinary
+  table with that comment and exactly the columns `table_name text` and
+  `mark text`. Any other relation of that name (your own table, a view) is
+  never written to: upsert stops with exit 2 and names it, and `replace`
+  loads as usual and notes that it left it alone;
+- its view calls `now()`, `today()` or `timeOfDay()` in any expression
+  (columns, `where`, `forEach`, nested selects, `unionAll`), as the views
+  engine's FHIRPath parser reads it, so comments and delimited names such
+  as `` `now`() `` count too, and so does an expression that does not
+  parse: its rows can change while its resources do not, so the table is
+  loaded in full in every run;
+- its type is marked for a full reload;
+- what its rows are built from changed: its view, the partition column, the
+  partition lookup and the contents of the lookup table, or the fhir-pipes
+  version. A view row depends on its own resource only, except for the
+  partition column, which comes from the lookup table (such as
+  `locations`); a change there can move the rows of resources that did not
+  change, so the table is reloaded.
+
+The step says which tables it loads in full and why. Only those tables are
+analyzed after the commit.
+
+**Privileges.** Neither mode needs to own the view tables once they exist:
+`SELECT`, `INSERT` and `DELETE` on them are enough (creating or recreating
+one needs `CREATE` on the schema, and dropping one its owner, as before).
+Upsert also needs `fhir_pipes_loads`: `CREATE` on the schema the first time,
+when it makes the table, and then `SELECT`, `INSERT`, `UPDATE` and `DELETE`
+on it. The key column's index is made only by the table's owner; for
+another role the step says the index is missing, and the deletes scan the
+table until the owner adds it. A `replace` load into a schema that has
+`fhir_pipes_loads` (an upsert loaded it before) removes the rows of the
+tables it loads, so it needs `SELECT` and `DELETE` on that table. Either
+mode locks `fhir_pipes_loads` in `ROW EXCLUSIVE` mode (which those
+privileges allow) and checks it again under the lock, so it cannot be
+renamed or replaced while the load runs. Without
+them it stops and names the grant, rather than leave a mark that would let
+the next upsert keep the rows it replaced:
+
+```sql
+GRANT SELECT, DELETE ON analytics.fhir_pipes_loads TO loader;                   -- replace
+GRANT SELECT, INSERT, UPDATE, DELETE ON analytics.fhir_pipes_loads TO loader;   -- upsert
+```
+
+A schema that has no `fhir_pipes_loads` is loaded by `replace` exactly as
+before.
+
+Changes the log cannot see are not loaded: a file in `raw/` edited by hand
+before `--reuse-raw`, or rows changed by hand in a table that keeps its
+mark. Run once with `--full` (or `mode = "replace"`) to bring the database
+back in line.
+
+On a table of 3,000,000 rows (one Observation view, from files, on an
+Apple M4 with PostgreSQL 17 in Docker), a run with 120 changed, deleted or
+new resources took 10.0 to 11.5 seconds in the database step with
+`replace` and 0.1 seconds with `upsert`; with 10,120 changed, 0.9 seconds.
+Comparing the split files to find the changes added about 2.7 seconds to
+the file source's split; an incremental search finds them without that.
 
 The `DELETE` leaves each replaced row as a dead tuple until `VACUUM` reclaims
 its space. PostgreSQL's autovacuum does that in the background, and is on by

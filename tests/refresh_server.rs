@@ -382,6 +382,77 @@ fn views_read_a_bulk_export_as_they_read_a_search() {
     assert!(sle.iter().any(|r| get(r, "value") == "30"));
 }
 
+/// With `[database] mode = "upsert"`, a bulk export's changes and its
+/// `deleted` list go into the change log the database step reads.
+#[test]
+fn a_bulk_export_records_what_changed_for_an_upsert() {
+    let mut server = Server::run();
+    let fixture = |t: &str| read_ndjson(&fixtures().join(format!("raw/{t}.ndjson")));
+    serve_bulk(
+        &server,
+        "1",
+        None,
+        "2026-10-01T00:00:00Z",
+        &[
+            ("Observation", fixture("Observation")),
+            ("Patient", fixture("Patient")),
+        ],
+        &[],
+    );
+    let (dir, config) = setup(
+        &server.url_str("/fhir"),
+        "\n[database]\nmode = \"upsert\"\n",
+    );
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("name = \"test\"", "name = \"test\"\nfetch = \"bulk\"");
+    fs::write(&config, text).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--skip", "database"])
+        .assert()
+        .success();
+    server.verify_and_clear();
+    // No load yet, so nothing was recorded; as after one, from here on.
+    let log = dir.path().join("data/raw/test/.changes.json");
+    let read = || serde_json::from_str::<Value>(&fs::read_to_string(&log).unwrap()).unwrap();
+    assert_eq!(read()["reload"], "no record of the last load");
+    fs::write(&log, r#"{"running": false}"#).unwrap();
+
+    let mut changed = fixture("Observation").remove(0);
+    changed["valueInteger"] = json!(30);
+    serve_bulk(
+        &server,
+        "2",
+        Some("2026-10-01T00:00:00Z"),
+        "2026-10-02T00:00:00Z",
+        &[("Observation", vec![changed])],
+        &["Patient/p2"],
+    );
+    for (t, n) in [("Observation", 3), ("Patient", 1)] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", format!("/fhir/{t}")),
+                request::query(url_decoded(contains(("_summary", "count")))),
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(
+                json!({"resourceType": "Bundle", "type": "searchset", "total": n}).to_string(),
+            )),
+        );
+    }
+    cmd(&config)
+        .args(["--only", "views", "--skip", "database"])
+        .assert()
+        .success();
+    assert_eq!(
+        read(),
+        json!({"running": false, "tables": {}, "types": {
+            "Observation": {"changed": ["o1"]},
+            "Patient": {"deleted": ["p2"]},
+        }})
+    );
+}
+
 /// The username from the config, the password only from the environment.
 #[test]
 fn locations_are_extracted_with_basic_auth() {
