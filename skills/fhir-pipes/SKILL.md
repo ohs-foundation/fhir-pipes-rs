@@ -2,7 +2,7 @@
 name: fhir-pipes
 description: Run the fhir-pipes command-line tool to move data into and out of FHIR R4 servers. Use when the user wants to export or extract FHIR resources to NDJSON from HAPI FHIR, Medplum, Aidbox, Google Cloud Healthcare API or another FHIR server (paged search, Bulk Data $export, or HAPI's PostgreSQL database), build SQL-on-FHIR ViewDefinitions into Parquet tables, refresh a warehouse with fhir-pipes.toml, load view tables into PostgreSQL, turn Location registries and admin boundaries into GeoParquet or map tiles, load or sync resources into a FHIR server, import DHIS2 data, work with fhir-pipes profiles, or explain a fhir-pipes error or exit code.
 license: Apache-2.0
-compatibility: Needs the fhir-pipes binary (release v0.5.0 or a build from main) and a shell. Network access only for the FHIR servers, databases and DHIS2 instances the user names.
+compatibility: Needs the fhir-pipes binary (release v0.6.0 or later, or a build from main) and a shell. Network access only for the FHIR servers, databases and DHIS2 instances the user names.
 metadata:
   repository: https://github.com/ohs-foundation/fhir-pipes-rs
 ---
@@ -21,9 +21,9 @@ Do not rely on memory for them.
 
 1. Check that the binary is there and which version it is:
    `fhir-pipes --version`. If it is missing, see Install below.
-2. `--server-kind`, `--token-auth` and `--scope` were added after v0.5.0.
+2. `--server-kind`, `--token-auth` and `--scope` need v0.6.0 or later.
    If `fhir-pipes export --help` does not list them, the binary is too old
-   for those flags. Build it from main or wait for the next release.
+   for those flags. Install the current release.
 3. Ask which server it is (HAPI, Medplum, Aidbox, Google Cloud Healthcare
    API, other), its FHIR base URL, and how it authenticates. Do not guess a
    base URL.
@@ -33,7 +33,7 @@ Do not rely on memory for them.
 ## Install
 
 Release binaries are on https://github.com/ohs-foundation/fhir-pipes-rs/releases
-(current release v0.5.0). There are five files: `fhir-pipes-aarch64-apple-darwin`,
+(current release v0.6.0). There are five files: `fhir-pipes-aarch64-apple-darwin`,
 `fhir-pipes-x86_64-apple-darwin`, `fhir-pipes-x86_64-unknown-linux-musl`,
 `fhir-pipes-aarch64-unknown-linux-musl`, `fhir-pipes-x86_64-pc-windows-msvc.exe`.
 Always check the download against `SHA256SUMS`:

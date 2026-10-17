@@ -29,7 +29,7 @@ what was decided against.
 
 Download the binary for your platform from the
 [releases](https://github.com/ohs-foundation/fhir-pipes-rs/releases). The
-current release is v0.5.0, with five binaries:
+current release is v0.6.0, with five binaries:
 
 | Platform | File |
 |---|---|
@@ -57,8 +57,7 @@ cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhi
 ```
 
 This README describes the main branch. `--server-kind`, `--token-auth` and
-`--scope` were added after v0.5.0; until the next release, build from main
-to use them.
+`--scope` need v0.6.0 or later.
 
 ## Building a SQL-on-FHIR warehouse
 
