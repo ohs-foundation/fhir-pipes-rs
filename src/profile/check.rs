@@ -866,7 +866,7 @@ fn not_read(profile: &Profile, ig: &Ig) -> Vec<(String, Vec<String>)> {
 /// Print the result. Errors make the command fail.
 pub fn run(args: &crate::cli::ProfileCheckArgs, spec: Option<&str>) -> Result<()> {
     let profile = Profile::load(spec)?;
-    if profile.source == "no profile" {
+    if profile.is_base() {
         return Err(PipesError::Usage(
             "profile check needs a profile: pass --profile FILE|URL".into(),
         ));

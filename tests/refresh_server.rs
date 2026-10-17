@@ -604,3 +604,56 @@ fn zero_threads_are_refused() {
         .failure()
         .stderr(has("--threads"));
 }
+
+/// `--server-kind` and FHIR_PIPES_SERVER_KIND win over `server.kind`, the
+/// flag over the environment.
+#[test]
+fn the_server_kind_flag_and_environment_override_the_config() {
+    let (_dir, config) = setup(NOWHERE, "");
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("name = \"test\"\n", "name = \"test\"\nkind = \"medplum\"\n");
+    fs::write(&config, text).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--check"])
+        .assert()
+        .success()
+        .stdout(has("kind:       medplum"));
+    cmd(&config)
+        .args(["--only", "views", "--check"])
+        .env("FHIR_PIPES_SERVER_KIND", "aidbox")
+        .assert()
+        .success()
+        .stdout(has("kind:       aidbox"));
+    cmd(&config)
+        .args(["--only", "views", "--check", "--server-kind", "generic"])
+        .env("FHIR_PIPES_SERVER_KIND", "aidbox")
+        .assert()
+        .success()
+        .stdout(has("kind:       generic"));
+    cmd(&config)
+        .args(["--only", "views", "--check", "--server-kind", "fhirbase"])
+        .assert()
+        .code(2);
+}
+
+/// `--check` names the partition lookups, or says there are none.
+#[test]
+fn check_describes_the_partition_lookups() {
+    let (_dir, config) = setup(NOWHERE, "");
+    cmd(&config)
+        .args(["--only", "views", "--check"])
+        .assert()
+        .success()
+        .stdout(has("partition:  country via location_id → locations\n"));
+    let text = fs::read_to_string(&config).unwrap();
+    let start = text.find("[[partition.lookup]]").unwrap();
+    fs::write(&config, &text[..start]).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--check"])
+        .assert()
+        .success()
+        .stdout(has(
+            "partition:  country, no [[partition.lookup]] rules: view rows go to the null partition\n",
+        ));
+}

@@ -55,6 +55,7 @@ use config::Settings;
 
 use crate::error::usage;
 use crate::extract::client::TokenAuth;
+use crate::extract::page::ServerKind;
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct RefreshArgs {
@@ -74,6 +75,11 @@ pub struct RefreshArgs {
     /// Name for the server's raw downloads: raw/<name>/.
     #[arg(long, env = "FHIR_PIPES_SERVER_NAME")]
     server_name: Option<String>,
+    /// The kind of FHIR server, for its search parameters (as `server.kind`):
+    /// medplum pages with `_sort=_lastUpdated`, aidbox with `_total=none`;
+    /// generic (the default) and hapi add nothing.
+    #[arg(long, env = "FHIR_PIPES_SERVER_KIND", value_enum)]
+    server_kind: Option<ServerKind>,
     /// Read the resources from files instead of a FHIR server: an NDJSON
     /// file, a Bundle, a JSON resource or array, a directory of such files
     /// (searched recursively), or a glob pattern. Repeat for more; replaces
@@ -213,6 +219,7 @@ fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSe
             input: args.input.clone(),
             server: args.server.clone(),
             server_name: args.server_name.clone(),
+            server_kind: args.server_kind,
             token: args.token.clone(),
             client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
             client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
@@ -370,6 +377,21 @@ fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Tools> {
     Ok(t)
 }
 
+/// The `partition:` line of `--check`: the column and the lookups that fill
+/// it. Without a lookup every view row goes to the null partition.
+fn partition_line(column: &str, lookups: &[config::Lookup]) -> String {
+    if lookups.is_empty() {
+        return format!(
+            "{column}, no [[partition.lookup]] rules: view rows go to the null partition"
+        );
+    }
+    let via: Vec<String> = lookups
+        .iter()
+        .map(|l| format!("{} → {}", l.key, l.table))
+        .collect();
+    format!("{column} via {}", via.join(", "))
+}
+
 fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
     let names = |it: Vec<String>| it.join(", ");
     println!(
@@ -424,14 +446,8 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
             .unwrap_or("none (the snapshot's, else base FHIR)")
     );
     println!(
-        "partition:  {} via {}",
-        s.partition_column,
-        names(
-            s.lookups
-                .iter()
-                .map(|l| format!("{} → {}", l.key, l.table))
-                .collect()
-        )
+        "partition:  {}",
+        partition_line(&s.partition_column, &s.lookups)
     );
     if let Some(d) = &s.database {
         println!(

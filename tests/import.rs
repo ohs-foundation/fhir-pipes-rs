@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::prelude::*;
+use predicates::prelude::*;
 use predicates::str::contains;
 use serde_json::{Value, json};
 
@@ -299,7 +300,10 @@ fn a_mapping_problem_exits_2_and_writes_nothing() {
 fn without_a_profile_the_shape_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (out, a) = boundaries(dir.path(), None, &[]);
-    a.code(2).stderr(contains("type_systems"));
+    a.code(2)
+        .stderr(contains("type_systems"))
+        .stderr(contains("no profile was given. Pass one with --profile"))
+        .stderr(contains("has none").not());
     assert!(!out.exists());
 }
 

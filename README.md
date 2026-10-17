@@ -420,8 +420,8 @@ on any vendor's extensions. `export --bulk` also needs the server's
 system-level `$export` (in HAPI, `hapi.fhir.bulk_export_enabled=true`).
 
 Medplum and Aidbox need other search parameters: pass `--server-kind medplum`
-or `--server-kind aidbox` (`server.kind` in `refresh`). `generic`, the
-default, and `hapi` add none. [docs/servers.md](docs/servers.md) says what
+or `--server-kind aidbox` (in `refresh`, also `FHIR_PIPES_SERVER_KIND` or
+`server.kind`). `generic`, the default, and `hapi` add none. [docs/servers.md](docs/servers.md) says what
 each kind changes and how to set up a client on each server.
 
 A server that needs authentication gets one of four kinds:

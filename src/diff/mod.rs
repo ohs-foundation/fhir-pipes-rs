@@ -104,12 +104,16 @@ impl Diff<'_> {
         }
         unknown.sort();
         unknown.dedup();
+        let profile = if self.profile.is_base() {
+            "no profile was given".to_string()
+        } else {
+            format!("the profile is {}", self.profile.source)
+        };
         Err(PipesError::Usage(format!(
             "the edited file has column(s) {} that are neither built-in columns nor in the \
-             profile ({}); pass the profile the dataset was made with (--profile), or remove \
-             the column(s)",
+             profile ({profile}); pass the profile the dataset was made with (--profile), or \
+             remove the column(s)",
             unknown.join(", "),
-            self.profile.source
         )))
     }
 
