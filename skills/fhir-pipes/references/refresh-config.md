@@ -24,7 +24,8 @@ found, and changes nothing.
 | `push` | `rclone sync`; only with `--push` | rclone |
 
 By default every step except `push` runs. `--only views` picks steps; the
-manifest, catalog and database are added when a data step is picked.
+manifest, catalog and database are added when a data step is picked, and
+every step not picked, including `hooks`, is left out.
 `--skip tiles` leaves one out. The tiles step expects ICR-shaped columns;
 with another profile, use `--skip tiles`.
 

@@ -203,9 +203,10 @@ store it, so `getReferenceKey()` and joins work on Bundle files.
 `views run --db URL` (or `FHIR_PIPES_DATABASE_URL`) runs against PostgreSQL
 holding FHIR resources as JSONB instead of files; it needs the `postgres`
 feature, which the release binaries have. `views lint --package
-hl7.fhir.r4.core` checks selectors against a FHIR package it downloads; it
-needs a build with the `fhir-packages` feature (see
-[Building and testing](#building-and-testing)). `views validate` and
+hl7.fhir.r4.core --version 4.0.1` checks selectors against a FHIR package,
+downloading it if it is not installed yet; without `--version` it uses only a
+package that is already installed. It needs a build with the `fhir-packages`
+feature (see [Building and testing](#building-and-testing)). `views validate` and
 `views lint` also write their findings as JSON (`--json`) or SARIF
 (`--sarif`), and `views lint --allow-fn NAME` exempts an engine-specific
 function from `--shareable`.
@@ -510,7 +511,10 @@ so it can run in the IG's CI:
 fhir-pipes profile check --profile examples/profiles/icr.toml --ig https://icr.healthcampaigns.org/package.tgz
 ```
 
-See [docs/profiles.md](docs/profiles.md#checking-a-profile-against-its-ig).
+Against the published ICR package this currently exits 1, because the package
+is missing four items the example profile uses: `dhis2-period`,
+`dhis2-indicator`, `report-source` and `icr-report-source-cs`. See
+[docs/profiles.md](docs/profiles.md#checking-a-profile-against-its-ig).
 
 ## Supported FHIR servers
 

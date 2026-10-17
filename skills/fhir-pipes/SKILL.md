@@ -136,7 +136,8 @@ fhir-pipes refresh --only views        # download, run views, write Parquet, loa
 ```
 
 `--only views` also adds the manifest, and the catalog and database steps
-when their sections exist. The output goes to `warehouse/parquet/<table>/<partition>=<value>/part-0.parquet`,
+when their sections exist. Every other step (locations, tiles, hooks, push)
+is left out. The output goes to `warehouse/parquet/<table>/<partition>=<value>/part-0.parquet`,
 `warehouse/manifest.json`, and the downloads to `warehouse/raw/<name>/`. To
 use local files instead of a server: `fhir-pipes refresh --input exports/`.
 Details: [references/refresh-config.md](references/refresh-config.md).
