@@ -4,6 +4,7 @@
 mod common;
 
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 
 use httptest::Server;
@@ -21,13 +22,20 @@ fn push_needs_a_push_section() {
         .stderr(has("[push]"));
 }
 
-/// Whether the duckdb command is installed; checks that need it are skipped
-/// without it.
-fn have_duckdb() -> bool {
-    std::process::Command::new("duckdb")
+/// Whether the duckdb command is installed. Without it the checks that need
+/// it are skipped, and `skipped` (the test, and the part of it when only a
+/// part needs duckdb) is named on stderr. The line is written to stderr
+/// directly, which the test harness does not capture, so a plain `cargo
+/// test` shows it.
+fn have_duckdb(skipped: &str) -> bool {
+    let found = std::process::Command::new("duckdb")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    if !found {
+        let _ = writeln!(std::io::stderr(), "skipped without duckdb: {skipped}");
+    }
+    found
 }
 
 /// One value from a duckdb query, run in `dir`.
@@ -83,7 +91,7 @@ fn the_catalog_has_a_view_per_table_and_the_extra_views() {
         );
     }
     assert!(sql.contains("CREATE OR REPLACE VIEW obs_sle"), "{sql}");
-    if have_duckdb() {
+    if have_duckdb("the_catalog_has_a_view_per_table_and_the_extra_views: the query of the views") {
         let n = duckdb_value(
             &data,
             None,
@@ -109,7 +117,7 @@ fn without_a_catalog_section_there_is_no_catalog() {
 
 #[test]
 fn a_local_catalog_duckdb_is_built_once_the_tables_are_in_place() {
-    if !have_duckdb() {
+    if !have_duckdb("a_local_catalog_duckdb_is_built_once_the_tables_are_in_place") {
         return;
     }
     let server = Server::run();
@@ -146,7 +154,8 @@ fn the_pushed_catalog_reads_the_uploaded_tables() {
     let dir = tempfile::tempdir().unwrap();
     let mirror = dir.path().join("mirror");
     let rclone = fake_rclone(dir.path());
-    let duckdb_file = have_duckdb();
+    let duckdb_file =
+        have_duckdb("the_pushed_catalog_reads_the_uploaded_tables: the pushed catalog.duckdb");
     let (root, config) = setup(
         &server.url_str("/fhir"),
         &format!(
@@ -203,7 +212,7 @@ fn the_pushed_catalog_reads_the_uploaded_tables() {
 /// A relative --data, and a table named after a SQL keyword.
 #[test]
 fn the_catalog_takes_a_relative_data_dir_and_keyword_table_names() {
-    if !have_duckdb() {
+    if !have_duckdb("the_catalog_takes_a_relative_data_dir_and_keyword_table_names") {
         return;
     }
     let (dir, config) = setup(NOWHERE, "\n[catalog]\nduckdb_file = true\n");
