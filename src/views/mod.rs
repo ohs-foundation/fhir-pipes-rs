@@ -13,6 +13,7 @@ mod diagnostic;
 pub(crate) mod ndjson;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_shareable, validate_structure};
 
 use crate::error::usage;
+use crate::fhir::ndjson::{Output, is_gz, read_text};
 use crate::warehouse::views::{ViewRows, discover, parse_view};
 
 #[derive(clap::Args, Debug)]
@@ -48,8 +50,9 @@ enum ViewsCommand {
         view: PathBuf,
         /// FHIR resources to run against, with no database: an NDJSON file, a
         /// Bundle, a JSON resource or array, a directory of such files
-        /// (subdirectories included), or `-` to read from stdin. `urn:uuid`
-        /// references within a Bundle are resolved to Type/id.
+        /// (subdirectories included), or `-` to read from stdin. A file ending
+        /// in `.gz` is read as gzip. `urn:uuid` references within a Bundle are
+        /// resolved to Type/id.
         #[arg(long, conflicts_with = "db")]
         input: Option<PathBuf>,
         /// PostgreSQL connection URL, for a database holding FHIR resources as
@@ -60,7 +63,8 @@ enum ViewsCommand {
         #[arg(long, default_value = "csv")]
         output: String,
         /// Write to this file (a directory for a directory of views) instead
-        /// of stdout.
+        /// of stdout. A file ending in `.gz` is written as gzip, except for
+        /// Parquet, which is refused.
         #[arg(long)]
         out: Option<PathBuf>,
         /// Parquet only: how date, dateTime, instant and time columns are
@@ -376,7 +380,7 @@ fn run_on_files(
 }
 
 /// Read `files` in order and hand their resources to `f` a chunk at a time:
-/// an NDJSON file (by its `.ndjson` extension) a chunk of lines at a time,
+/// an NDJSON file (`is_ndjson`) a chunk of lines at a time,
 /// parsed on `threads` threads, other files whole, several small ones
 /// together, up to a chunk's worth of resources. A Bundle or an array is
 /// handed on as its resources. Returns the number of resources.
@@ -389,7 +393,7 @@ fn for_each_chunk(
     // Resources of JSON files not yet handed on.
     let mut pending = Vec::new();
     for file in files {
-        if file.extension().is_some_and(|x| x == "ndjson") {
+        if is_ndjson(file) {
             if !pending.is_empty() {
                 f(std::mem::take(&mut pending))?;
             }
@@ -427,10 +431,56 @@ pub(crate) fn resource_files(path: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     collect_resource_files(path, &mut files)?;
     files.sort();
+    check_no_gz_copies(&files)?;
     Ok(files)
 }
 
-/// The `.json` and `.ndjson` files under `dir`, in subdirectories too.
+/// The extension that says what a resource file holds, past a `.gz`:
+/// `ndjson` for both `a.ndjson` and `a.ndjson.gz`.
+fn content_extension(path: &Path) -> Option<&OsStr> {
+    if is_gz(path) {
+        Path::new(path.file_stem()?).extension()
+    } else {
+        path.extension()
+    }
+}
+
+/// Whether `path` is read as NDJSON: `.ndjson` or `.ndjson.gz`. Any other
+/// file is read as one JSON value.
+pub(crate) fn is_ndjson(path: &Path) -> bool {
+    content_extension(path).is_some_and(|x| x == "ndjson")
+}
+
+/// Whether a directory's or a pattern's file is read as resources:
+/// `.json`, `.ndjson`, `.json.gz` or `.ndjson.gz`.
+pub(crate) fn is_resource_file(path: &Path) -> bool {
+    content_extension(path).is_some_and(|x| x == "json" || x == "ndjson")
+}
+
+/// An error when `files` holds both `X` and `X.gz`. Both would be read, and
+/// they most likely hold the same resources (`gzip -k` leaves the original),
+/// which would give every row twice.
+pub(crate) fn check_no_gz_copies(files: &[PathBuf]) -> Result<()> {
+    let plain: HashSet<&Path> = files
+        .iter()
+        .filter(|f| !is_gz(f))
+        .map(PathBuf::as_path)
+        .collect();
+    for gz in files.iter().filter(|f| is_gz(f)) {
+        let original = gz.with_extension("");
+        if plain.contains(original.as_path()) {
+            return Err(usage(anyhow::anyhow!(
+                "{} and {} are both inputs, and would both be read; remove one",
+                original.display(),
+                gz.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The `.json` and `.ndjson` files under `dir`, and the same compressed
+/// (`.json.gz`, `.ndjson.gz`), in subdirectories too.
 /// Hidden files and directories (`.export-state.json`) are skipped, and so
 /// are symlinked directories, which could lead back up the tree and read the
 /// same files again. Symlinked files are read.
@@ -453,9 +503,7 @@ fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         if kind.is_dir() {
             collect_resource_files(&path, out)?;
         } else if (kind.is_file() || (kind.is_symlink() && path.is_file()))
-            && path
-                .extension()
-                .is_some_and(|x| x == "json" || x == "ndjson")
+            && is_resource_file(&path)
         {
             out.push(path);
         }
@@ -464,9 +512,14 @@ fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// The resources in one JSON file, a resource, an array or a Bundle
-/// (`push_resource`), appended to `out`.
+/// (`push_resource`), appended to `out`. A `.gz` file is read decompressed.
 pub(crate) fn load_json_file(path: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let read = || -> io::Result<String> {
+        let mut text = String::new();
+        read_text(fs::File::open(path)?, is_gz(path)).read_to_string(&mut text)?;
+        Ok(text)
+    };
+    let text = read().map_err(|e| ndjson::read_error(e, format!("reading {}", path.display())))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("parsing {}", path.display()))
         .map_err(usage)?;
@@ -475,13 +528,17 @@ pub(crate) fn load_json_file(path: &Path, out: &mut Vec<serde_json::Value>) -> R
 }
 
 /// The next non-blank line of `reader` and its 1-based number, counting from
-/// `*line_no`.
-fn next_line(reader: &mut dyn io::BufRead, line_no: &mut usize) -> Result<Option<(usize, String)>> {
+/// `*line_no`. `name` is the input's name in messages.
+fn next_line(
+    reader: &mut dyn io::BufRead,
+    name: &str,
+    line_no: &mut usize,
+) -> Result<Option<(usize, String)>> {
     loop {
         let mut line = String::new();
         let n = reader
             .read_line(&mut line)
-            .with_context(|| format!("reading line {}", *line_no + 1))?;
+            .map_err(|e| ndjson::read_error(e, format!("reading {name} line {}", *line_no + 1)))?;
         if n == 0 {
             return Ok(None);
         }
@@ -499,6 +556,7 @@ async fn stream_ndjson(
     view: &ViewDefinition,
     first: Option<(usize, String)>,
     mut reader: Box<dyn io::BufRead>,
+    name: &str,
     mut line_no: usize,
     sink: &mut dyn Write,
 ) -> Result<usize> {
@@ -511,7 +569,7 @@ async fn stream_ndjson(
     let mut next = first;
     while let Some((number, line)) = next {
         let value: serde_json::Value = serde_json::from_str(&line)
-            .with_context(|| format!("parsing line {number}"))
+            .with_context(|| format!("parsing {name} line {number}"))
             .map_err(usage)?;
         // A Bundle or array on one line is expanded into its resources.
         let mut resources = Vec::new();
@@ -529,7 +587,7 @@ async fn stream_ndjson(
                 total += 1;
             }
         }
-        next = next_line(reader.as_mut(), &mut line_no)?;
+        next = next_line(reader.as_mut(), name, &mut line_no)?;
     }
     Ok(total)
 }
@@ -556,12 +614,27 @@ fn check_out_is_not_input(input: Option<&PathBuf>, out: Option<&PathBuf>) -> Res
     Ok(())
 }
 
-fn open_sink(out: Option<&PathBuf>) -> Result<Box<dyn Write>> {
+/// The file `out` names, written as gzip when its name ends in `.gz`, or
+/// stdout. `close_sink` finishes it.
+fn open_sink(out: Option<&PathBuf>) -> Result<Output<Box<dyn Write>>> {
     Ok(match out {
-        Some(path) => Box::new(
-            fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
+        Some(path) => Output::new(
+            Box::new(
+                fs::File::create(path).with_context(|| format!("creating {}", path.display()))?,
+            ),
+            is_gz(path),
         ),
-        None => Box::new(io::stdout().lock()),
+        None => Output::new(Box::new(io::stdout().lock()), false),
+    })
+}
+
+/// Finish writing what `open_sink` opened: the end of a gzip stream, then
+/// a flush. Both are buffered, so this is where most of a small output is
+/// written, and an error here (a full disk, a closed pipe) fails the run.
+fn close_sink(sink: Output<Box<dyn Write>>, out: Option<&PathBuf>) -> Result<()> {
+    sink.finish().map(drop).with_context(|| match out {
+        Some(path) => format!("writing {}", path.display()),
+        None => "writing to stdout".to_string(),
     })
 }
 
@@ -880,41 +953,55 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
 
             if !multi {
                 check_out_is_not_input(input.as_ref(), out.as_ref())?;
+                // A Parquet file inside gzip is not a Parquet file any reader
+                // opens, and Parquet compresses its own pages.
+                if output.eq_ignore_ascii_case("parquet") && out.as_ref().is_some_and(|o| is_gz(o))
+                {
+                    return Err(usage(anyhow::anyhow!(
+                        "--out ends in .gz, but Parquet is not written as gzip; \
+                         Parquet compresses its own pages, so name the file .parquet"
+                    )));
+                }
             }
 
             // One view, NDJSON in and NDJSON out: stream it resource by
-            // resource in bounded memory. A .ndjson file is taken at its word.
+            // resource in bounded memory. A .ndjson (or .ndjson.gz) file is
+            // taken at its word.
             // Stdin is streamed when its first line is one whole JSON value;
             // otherwise (formatted JSON, a Bundle or an array over several
             // lines) it is read whole, as for the other output formats.
             let mut stdin_resources: Option<Vec<serde_json::Value>> = None;
             let stdin_in = input.as_ref().is_some_and(|p| p.as_os_str() == "-");
-            let ndjson_in = stdin_in
-                || input
-                    .as_ref()
-                    .is_some_and(|p| p.extension().is_some_and(|x| x == "ndjson"));
+            let ndjson_in = stdin_in || input.as_ref().is_some_and(|p| is_ndjson(p));
             if !multi && output.eq_ignore_ascii_case("ndjson") && ndjson_in {
                 let (_, view_def) = read_view(view)?;
                 let path = input.as_ref().expect("checked above");
+                let name = if stdin_in {
+                    "stdin".to_string()
+                } else {
+                    path.display().to_string()
+                };
                 let mut reader: Box<dyn io::BufRead> = if stdin_in {
                     Box::new(io::BufReader::new(io::stdin()))
                 } else {
-                    Box::new(io::BufReader::new(
+                    read_text(
                         fs::File::open(path)
                             .with_context(|| format!("opening {}", path.display()))
                             .map_err(|e| if path.exists() { e } else { usage(e) })?,
-                    ))
+                        is_gz(path),
+                    )
                 };
                 let mut line_no = 0;
-                let first = next_line(reader.as_mut(), &mut line_no)?;
+                let first = next_line(reader.as_mut(), &name, &mut line_no)?;
                 let one_value_per_line = !stdin_in
                     || first.as_ref().is_none_or(|(_, l)| {
                         serde_json::from_str::<serde::de::IgnoredAny>(l).is_ok()
                     });
                 if one_value_per_line {
                     let mut sink = open_sink(out.as_ref())?;
-                    let n = stream_ndjson(&view_def, first, reader, line_no, &mut sink).await?;
-                    sink.flush().ok();
+                    let n =
+                        stream_ndjson(&view_def, first, reader, &name, line_no, &mut sink).await?;
+                    close_sink(sink, out.as_ref())?;
                     eprintln!("{n} rows");
                     return Ok(());
                 }
@@ -980,7 +1067,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 let summary = writer
                     .write_with_summary(&result, &mut sink)
                     .context("writing output")?;
-                sink.flush().ok();
+                close_sink(sink, out.as_ref())?;
                 report_mismatches(&[(name.as_str(), summary)]);
             }
         }

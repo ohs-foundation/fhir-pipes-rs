@@ -1,15 +1,19 @@
 //! Reading NDJSON a chunk of lines at a time, so a large file is never held
 //! whole: `refresh`'s views step, its file source and `views run --input`
 //! all read NDJSON through this. A chunk's lines are parsed on several
-//! threads and come back in line order.
+//! threads and come back in line order. A file whose name ends in `.gz` is
+//! read decompressed, every gzip member of it.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, ErrorKind};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+
+use crate::error::usage;
+use crate::fhir::ndjson::{is_gz, read_text};
 
 /// The most lines in one chunk. About 20 MB of text for ICR's MeasureReports,
 /// and ten times that once parsed.
@@ -53,13 +57,26 @@ pub struct Line {
     end: usize,
 }
 
-/// The file at `path`, to be read a chunk at a time.
-pub fn open(path: &Path) -> Result<Lines<BufReader<File>>> {
+/// The file at `path`, to be read a chunk at a time. Offsets into a gzip
+/// file are offsets into its decompressed text.
+pub fn open(path: &Path) -> Result<Lines<Box<dyn BufRead + Send>>> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(Lines::new(
-        BufReader::with_capacity(1 << 20, file),
+        read_text(file, is_gz(path)),
         &path.display().to_string(),
     ))
+}
+
+/// A failed read, with `what` as its context. When it failed on what the
+/// file holds (text that is not UTF-8, a gzip stream that is corrupt or cut
+/// short) rather than on the disk, it is the input's fault: a usage error.
+pub fn read_error(e: std::io::Error, what: String) -> anyhow::Error {
+    let bad = matches!(
+        e.kind(),
+        ErrorKind::InvalidData | ErrorKind::InvalidInput | ErrorKind::UnexpectedEof
+    );
+    let e = anyhow::Error::new(e).context(what);
+    if bad { usage(e) } else { e }
 }
 
 impl<R: BufRead> Lines<R> {
@@ -89,10 +106,12 @@ impl<R: BufRead> Lines<R> {
         let mut lines = Vec::new();
         while lines.len() < self.max_lines && text.len() < self.max_bytes {
             let start = text.len();
-            let n = self
-                .reader
-                .read_line(&mut text)
-                .with_context(|| format!("reading {} line {}", self.name, self.line_no + 1))?;
+            let n = self.reader.read_line(&mut text).map_err(|e| {
+                read_error(
+                    e,
+                    format!("reading {} line {}", self.name, self.line_no + 1),
+                )
+            })?;
             if n == 0 {
                 self.done = true;
                 break;

@@ -109,6 +109,75 @@ fn refresh_reads_ndjson_and_bundles_from_files_without_a_server() {
     assert_eq!(manifest["tables"]["obs"]["rows"], 3);
 }
 
+/// `text` as one gzip member.
+fn gzip(text: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(text.as_bytes()).unwrap();
+    e.finish().unwrap()
+}
+
+#[test]
+fn refresh_reads_gzip_inputs() {
+    let (dir, config) = setup(NOWHERE, "");
+    let root = dir.path();
+    let input = inputs(
+        root,
+        &[(
+            "b.ndjson",
+            // o1 again, older than in a.ndjson.gz: that copy is kept.
+            lines(&[obs("o1", 3, Some("2026-01-01T00:00:00Z"))]),
+        )],
+    );
+    // Two gzip members, as `cat` of two .gz files writes them.
+    let mut a = gzip(&lines(&[obs("o1", 30, Some("2026-03-01T00:00:00Z"))]));
+    a.extend(gzip(&lines(&[
+        obs("o2", 5, None),
+        json!({"resourceType": "Patient", "id": "p1", "birthDate": "2020-05-01"}),
+    ])));
+    fs::write(input.join("a.ndjson.gz"), a).unwrap();
+    fs::create_dir_all(input.join("sub")).unwrap();
+    fs::write(
+        input.join("sub/c.json.gz"),
+        gzip(&bundle(vec![obs("o4", 4, None)])),
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .assert()
+        .success()
+        .stdout(has("== files (3 files"))
+        .stdout(has("Observation: 3 resources (1 duplicates by id merged)"))
+        .stdout(has("parquet/patient (1 rows)"));
+    let raw = read_ndjson(&root.join("data/raw/test/Observation.ndjson"));
+    let got: Vec<(&str, i64)> = raw
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap(),
+                r["valueInteger"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, [("o1", 30), ("o2", 5), ("o4", 4)]);
+    // A line of a gzip input is copied as it is written there.
+    let text = fs::read_to_string(root.join("data/raw/test/Observation.ndjson")).unwrap();
+    assert!(text.starts_with(&format!(
+        "{}\n",
+        obs("o1", 30, Some("2026-03-01T00:00:00Z"))
+    )));
+
+    // A file beside its gzip copy is refused: both would be read.
+    fs::write(input.join("a.ndjson"), "{}\n").unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--input"])
+        .arg(&input)
+        .assert()
+        .code(2)
+        .stderr(has("a.ndjson.gz"));
+}
+
 #[test]
 fn locations_in_the_files_build_the_locations_table() {
     let (dir, config) = setup(NOWHERE, "");
