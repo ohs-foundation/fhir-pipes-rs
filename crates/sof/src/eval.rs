@@ -957,13 +957,24 @@ fn null_fill(select: &SelectColumn, row: &mut Vec<Value>) {
 /// The items of a `forEach` or `repeat` result as foci for nested evaluation:
 /// each a resource value over its node, as if built from its JSON, with
 /// null and empty items dropped. A node is shared with the root resource,
-/// not copied; other values (primitives, nested collections) go through JSON.
+/// not copied; primitives keep their value, and nested collections go
+/// through JSON.
 fn focus_values(coll: &Collection) -> Vec<FhirPathValue> {
     coll.iter()
         .filter_map(|v| match v {
             FhirPathValue::Resource(node, _, _) if !node.is_null() => {
                 Some(FhirPathValue::resource_from_node(node.clone()))
             }
+            // A primitive keeps its type, so `$this.toString()` works on a
+            // string or dateTime focus.
+            FhirPathValue::Boolean(..)
+            | FhirPathValue::Integer(..)
+            | FhirPathValue::Decimal(..)
+            | FhirPathValue::String(..)
+            | FhirPathValue::Date(..)
+            | FhirPathValue::DateTime(..)
+            | FhirPathValue::Time(..)
+            | FhirPathValue::Quantity { .. } => Some(v.clone()),
             other => {
                 let json = value_to_json(other);
                 (!json.is_null()).then(|| FhirPathValue::resource(json))
