@@ -114,6 +114,26 @@ with `cargo test -p fhir-pipes-sof`:
 `SOF_RESULT_JSON=<path>` makes the in-memory run write a result file in the
 format of the sql-on-fhir.org registry; see [CONFORMANCE.md](CONFORMANCE.md).
 
+### FHIRPath
+
+`tests/fhirpath_hl7.rs` runs the official HL7 FHIRPath test suite for R4
+(`tests/fhirpath/`, from FHIR/fhir-test-cases) through the in-memory evaluator,
+each expression as a ViewDefinition column. fhir-pipes passes 929 of the 1,001
+tests. The 72 it fails are listed, with the reason each fails, in
+`tests/fhirpath/known-failures.json`, and the test fails if that list goes out
+of date in either direction. Of the 72:
+
+- 27 pass in octofhir-fhirpath when it is given the FHIR R4 model, which
+  fhir-pipes does not load (it uses `EmptyModelProvider`);
+- 29 fail in octofhir-fhirpath even with the model, mostly tests expecting a
+  type error the engine does not raise;
+- 16 come from fhir-pipes' own layer: `lowBoundary()`/`highBoundary()` with an
+  out-of-range precision return a value instead of nothing; `ofType()` on an
+  element that is not a choice element (`name.ofType(HumanName)`) returns
+  nothing; and under `forEach` over primitive values, `$this.toString()` fails.
+
+`tests/fhirpath/SOURCE.md` says where the data comes from and how to refresh it.
+
 ## License
 
 MIT OR Apache-2.0.
