@@ -214,7 +214,7 @@
       ]
     },
     {
-      "title": "known limitation: ofType with a complex type on an element that is not a choice element finds nothing",
+      "title": "ofType with a complex type on an element that is not a choice element",
       "view": {
         "resource": "Patient",
         "select": [
@@ -237,11 +237,11 @@
       "expect": [
         {
           "id": "p1",
-          "v": 0
+          "v": 1
         },
         {
           "id": "p2",
-          "v": 0
+          "v": 1
         }
       ]
     },

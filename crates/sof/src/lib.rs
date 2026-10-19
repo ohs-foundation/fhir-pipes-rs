@@ -47,6 +47,7 @@
 //!
 //! See: <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/>
 
+mod choice_elements;
 mod column;
 mod eval;
 mod lexer;

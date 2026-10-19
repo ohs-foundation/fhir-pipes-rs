@@ -38,6 +38,7 @@ use octofhir_fhirpath::{
 };
 use serde_json::Value;
 
+use crate::choice_elements;
 use crate::column::{ColumnInfo, ColumnType};
 use crate::lexer::{Kind, Token, tokens, variable_name};
 use crate::runner::ViewResult;
@@ -209,12 +210,12 @@ impl CompiledView {
         let wheres = view
             .where_
             .iter()
-            .map(|w| ev.plan(&ev.prepare(&w.path)?))
+            .map(|w| ev.plan(&ev.prepare(&w.path, Some(&view.resource))?))
             .collect::<Result<Vec<_>>>()?;
         let selects = view
             .select
             .iter()
-            .map(|s| ev.compile_select(s))
+            .map(|s| ev.compile_select(s, Some(&view.resource)))
             .collect::<Result<Vec<_>>>()?;
 
         let columns = shape
@@ -486,12 +487,12 @@ impl Evaluator {
     /// `%` names that are not constants are left for the engine when they are
     /// FHIRPath environment variables or are bound by a `defineVariable()` in
     /// the same path; any other is an undefined constant.
-    fn prepare(&self, path: &str) -> Result<String> {
+    fn prepare(&self, path: &str, root: Option<&str>) -> Result<String> {
         let defined = defined_variables(path);
         let substituted = substitute_constants_keeping(path, &self.constants, |name| {
             is_environment_variable(name) || defined.iter().any(|d| d == name)
         })?;
-        let prepared = rewrite_of_type(&substituted);
+        let prepared = rewrite_of_type(&substituted, root);
         Ok(match rename_context(&prepared) {
             Some(renamed) => {
                 self.uses_context.store(true, Ordering::Relaxed);
@@ -516,13 +517,20 @@ impl Evaluator {
     /// to each of its values. The temporal flavour (`date`/`dateTime`/`time`)
     /// is taken from a leading `ofType(T)` on the base in the path as written,
     /// before the `ofType` rewrite.
-    fn compile_path(&self, path: &str) -> Result<PreparedPath> {
-        let plan = self.plan(&self.prepare(path)?)?;
+    fn compile_path(&self, path: &str, root: Option<&str>) -> Result<PreparedPath> {
+        let plan = self.plan(&self.prepare(path, root)?)?;
         let written = octofhir_fhirpath::parse_ast(path).ok();
         Ok(boundary_path(plan.ast(), written.as_ref()).unwrap_or(PreparedPath::Plain(plan)))
     }
 
-    fn compile_select(&self, select: &SelectColumn) -> Result<CompiledSelect> {
+    /// `root` is the view's resource type when the select is evaluated on
+    /// the resource itself (no `forEach`, `forEachOrNull` or `repeat` above
+    /// it), for the `ofType` rewrite.
+    fn compile_select(&self, select: &SelectColumn, root: Option<&str>) -> Result<CompiledSelect> {
+        let iterates = select.for_each.is_some()
+            || select.for_each_or_null.is_some()
+            || !select.repeat.is_empty();
+        let inner = if iterates { None } else { root };
         let columns = select
             .column
             .iter()
@@ -531,14 +539,14 @@ impl Evaluator {
                 Ok(CompiledColumn {
                     name: col.name.clone(),
                     collection: col.collection.unwrap_or(false),
-                    path: self.compile_path(&col.path)?,
+                    path: self.compile_path(&col.path, inner)?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         let repeat = select
             .repeat
             .iter()
-            .map(|p| self.plan(&self.prepare(p)?))
+            .map(|p| self.plan(&self.prepare(p, None)?))
             .collect::<Result<Vec<_>>>()?;
         // forEach wins when both are given; forEachOrNull's presence alone
         // decides whether an empty result keeps a row.
@@ -547,13 +555,13 @@ impl Evaluator {
             (true, Some(path)) => Some(path),
             (true, None) => select.for_each_or_null.as_deref(),
         }
-        .map(|path| self.compile_path(path))
+        .map(|path| self.compile_path(path, root))
         .transpose()?
         .map(|path| (path, select.for_each_or_null.is_some()));
         let nested = select
             .select
             .iter()
-            .map(|s| self.compile_select(s))
+            .map(|s| self.compile_select(s, inner))
             .collect::<Result<Vec<_>>>()?;
         let union_all = select
             .union_all
@@ -561,7 +569,7 @@ impl Evaluator {
             .map(|branches| {
                 branches
                     .iter()
-                    .map(|b| self.compile_select(b))
+                    .map(|b| self.compile_select(b, inner))
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()?;
@@ -1116,19 +1124,21 @@ fn visit(node: &ExpressionNode, f: &mut impl FnMut(&ExpressionNode)) {
 /// capitalized as the JSON name requires. The engine, on an
 /// `EmptyModelProvider`, cannot map choice elements itself.
 ///
-/// Without a FHIR model there is no telling whether an element is a choice
-/// element, so the rewrite is made for any element; on one that is not
-/// (`name.family.ofType(string)` → `name.familyString`) it finds nothing.
-/// The engine's own `ofType` is no better there: with no model it compares
-/// the type with the element's name (`code.ofType(code)` on a
-/// CodeableConcept matches) or fails on most complex types. See the crate
-/// README's known limitations.
+/// `ofType` with a complex type on an element that is not a choice element
+/// (`name.ofType(HumanName)`) is left to the engine. With no FHIR model the
+/// element's parent is known only from the path: a type name before it
+/// (`Patient.name`), or `root`, the view's resource type, for the first step
+/// of a path evaluated on the resource. There the element must be a choice
+/// element of that type ([`choice_elements::of_type`]). Deeper in a path, or
+/// under `forEach`, it must be a choice element of some type
+/// ([`choice_elements::anywhere`]), so `component.value.ofType(Quantity)`
+/// still works.
 ///
 /// The rewrite works on tokens, so string literals, backtick-quoted names and
 /// comments are left alone. `ofType` with a resource type
 /// (`contained.ofType(Practitioner)`), on a base that is not an element name
 /// (`first().ofType(string)`), or with a qualified type is left to the engine.
-fn rewrite_of_type(path: &str) -> String {
+fn rewrite_of_type(path: &str, root: Option<&str>) -> String {
     let toks = tokens(path);
     // The tokens that are not whitespace or comments.
     let sig: Vec<&Token> = toks
@@ -1147,6 +1157,12 @@ fn rewrite_of_type(path: &str) -> String {
             && ty.kind == Kind::Ident
             && text(close) == ")"
             && is_fhir_datatype(text(ty))
+            // A complex type on an element that is not a choice element is
+            // left to the engine, which finds it (`name.ofType(HumanName)`).
+            // With a primitive type the rewrite stays: the engine, with no
+            // model, takes the element's name for its type and would match
+            // `code.ofType(code)` on a CodeableConcept.
+            && (text(ty).starts_with(|c: char| c.is_ascii_lowercase()) || is_choice(path, &sig, k, root))
         {
             let (element, ty_name) = (text(element), text(ty));
             out.push_str(&path[copied..sig[k].span.start]);
@@ -1160,6 +1176,25 @@ fn rewrite_of_type(path: &str) -> String {
     }
     out.push_str(&path[copied..]);
     out
+}
+
+/// Whether the element at significant token `k` is a choice element, from
+/// what the path shows of its parent (see [`rewrite_of_type`]).
+fn is_choice(path: &str, sig: &[&Token], k: usize, root: Option<&str>) -> bool {
+    let text = |t: &Token| &path[t.span.clone()];
+    let element = text(sig[k]);
+    let parent = match k {
+        0 => root,
+        _ if k >= 2 && text(sig[k - 1]) == "." && sig[k - 2].kind == Kind::Ident => {
+            let p = text(sig[k - 2]);
+            p.starts_with(|c: char| c.is_ascii_uppercase()).then_some(p)
+        }
+        _ => None,
+    };
+    match parent {
+        Some(ty) => choice_elements::of_type(ty, element),
+        None => choice_elements::anywhere(element),
+    }
 }
 
 /// Whether `name` is a FHIR datatype a choice element can take (R4 and R5),
@@ -1861,7 +1896,60 @@ mod tests {
             ("'a.ofType(string)'", "'a.ofType(string)'"),
             ("id // value.ofType(string)", "id // value.ofType(string)"),
         ] {
-            assert_eq!(rewrite_of_type(path), want, "{path}");
+            assert_eq!(rewrite_of_type(path, None), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn of_type_with_a_complex_type_is_rewritten_only_on_choice_elements() {
+        for (path, root, want) in [
+            // The parent is named in the path, or is the view's resource.
+            (
+                "Observation.value.ofType(Quantity)",
+                None,
+                "Observation.valueQuantity",
+            ),
+            (
+                "value.ofType(Quantity)",
+                Some("Observation"),
+                "valueQuantity",
+            ),
+            (
+                "Patient.name.ofType(HumanName)",
+                None,
+                "Patient.name.ofType(HumanName)",
+            ),
+            (
+                "name.ofType(HumanName)",
+                Some("Patient"),
+                "name.ofType(HumanName)",
+            ),
+            // Deeper, any type's choice element name is enough.
+            (
+                "component.value.ofType(Quantity)",
+                None,
+                "component.valueQuantity",
+            ),
+            // Known limitation: with the parent unknown, `name` counts as a
+            // choice element (ImplementationGuide.definition.page.name[x]).
+            (
+                "contact.name.ofType(HumanName)",
+                None,
+                "contact.nameHumanName",
+            ),
+            (
+                "contact.telecom.ofType(ContactPoint)",
+                None,
+                "contact.telecom.ofType(ContactPoint)",
+            ),
+            // A primitive type is always rewritten (see rewrite_of_type).
+            (
+                "Observation.code.ofType(code)",
+                None,
+                "Observation.codeCode",
+            ),
+        ] {
+            assert_eq!(rewrite_of_type(path, root), want, "{path}");
         }
     }
 

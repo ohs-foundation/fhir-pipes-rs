@@ -39,7 +39,6 @@
   "testInheritance/testFHIRPathAsFunction17": "expected [\"code male\"], got []",
   "testInheritance/testFHIRPathAsFunction19": "expected [\"string 20150622\"], got []",
   "testInheritance/testFHIRPathAsFunction21": "expected a execution error, got [\"official\",\"usual\",\"maiden\"]",
-  "testInheritance/testFHIRPathAsFunction22": "expected [\"code official\", \"code usual\", \"code maiden\"], got []",
   "testInheritance/testFHIRPathIsFunction1": "expected [\"boolean true\"], got [false]",
   "testInheritance/testFHIRPathIsFunction2": "expected [\"boolean true\"], got [false]",
   "testInheritance/testFHIRPathIsFunction5": "expected [\"boolean false\"], got [true]",
