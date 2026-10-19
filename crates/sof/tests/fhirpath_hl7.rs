@@ -116,9 +116,32 @@ fn number(v: &Value) -> Option<f64> {
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
+/// The type of an `<output>` the suite leaves untyped, read from its literal:
+/// `@T10:30`, `@2014-01`, `1.5 'cm'`, `1.58`, `true`.
+fn literal_type(text: &str) -> &'static str {
+    if text.starts_with("@T") {
+        "time"
+    } else if text.starts_with('@') {
+        "dateTime"
+    } else if text.ends_with('\'') && text.contains(" '") {
+        "Quantity"
+    } else if text.parse::<f64>().is_ok() {
+        "decimal"
+    } else if text == "true" || text == "false" {
+        "boolean"
+    } else {
+        "string"
+    }
+}
+
 /// Whether a value matches one expected `<output type="...">text</output>`.
 fn matches(value: &Value, (ty, text): &(String, String)) -> bool {
-    match ty.as_str() {
+    let ty = if ty.is_empty() {
+        literal_type(text)
+    } else {
+        ty
+    };
+    match ty {
         "boolean" => value.as_bool() == Some(text == "true"),
         "integer" | "decimal" => number(value).is_some() && number(value) == text.parse().ok(),
         "date" | "dateTime" | "instant" => value.as_str() == Some(text.trim_start_matches('@')),

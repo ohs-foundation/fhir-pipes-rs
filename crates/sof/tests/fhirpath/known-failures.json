@@ -1,11 +1,5 @@
 {
-  "HighBoundary/HighBoundaryDecimal3": "expected [], got [1.5875]",
-  "HighBoundary/HighBoundaryDecimal7": "expected [], got [1.5875]",
-  "LowBoundary/LowBoundaryDecimal3": "expected [], got [1.5865]",
-  "LowBoundary/LowBoundaryDecimal5": "expected [], got [1.5865]",
-  "LowBoundary/LowBoundaryDecimal6": "expected [], got [1.5865]",
-  "LowBoundary/LowBoundaryNegDecimal3": "expected [], got [-1.5875]",
-  "LowBoundary/LowBoundaryNegDecimal5": "expected [], got [-1.5875]",
+  "LowBoundary/LowBoundaryDecimal7": "expected [\" 0.50000000\"], got [0.95]",
   "isSemanticChecks/isEffectOnLogic1Base": "FHIRPath error: FP0055: Cannot convert Resource to string",
   "isSemanticChecks/isEffectOnLogic2": "expected [\"boolean false\"], got [true]",
   "isSemanticChecks/isEffectOnLogic2Base": "FHIRPath error: FP0055: Cannot convert Resource to string",
