@@ -40,6 +40,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`ofType()` follows the path through the FHIR model** — whether an element
+  is a choice element (so `value.ofType(Quantity)` reads `valueQuantity`) is
+  now decided for the type or backbone element the path reaches it from,
+  including under `forEach`, so `contact.name.ofType(HumanName)` on a Patient
+  finds the name. `forEach` items keep their type for the paths under them.
+  The hand-made `choice_elements` table is gone; the generated type table
+  replaces it.
 - **octofhir-fhirpath 0.4.57** — with the `is`/`as` precedence, `hasValue()`,
   boundary and date-only dateTime fixes from octofhir/fhirpath-rs#176–#179;
   the HL7 FHIRPath suite goes from 962 to 970 of 1,001.

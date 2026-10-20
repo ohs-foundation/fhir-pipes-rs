@@ -107,11 +107,15 @@ DateTime the engine would write it back in its own form (`…05Z` as
 `ofType(T)` with a FHIR datatype `T` on a choice element reads the JSON name
 the element has for that type (`value.ofType(Quantity)` reads
 `valueQuantity`): the engine cannot map `value` to its JSON names itself.
-Whether an element is a choice element is decided from the path. A type name
-before it (`Observation.value`), or the view's resource for the first step,
-says exactly; deeper in a path any choice element of that name counts, so
-`contact.name.ofType(HumanName)` reads `contact.nameHumanName`, a name that
-does not exist, and finds nothing (`name[x]` is a choice element of
+Whether an element is a choice element comes from the FHIR model, for the
+type or backbone element the path reaches it from: `contact.name` on a Patient
+is `Patient.contact`'s `name`, which is not one. The path is followed from the
+view's resource, from a `forEach` focus, or from a type name it starts with,
+through element names, `ofType()` and calls that keep the type (`where()`,
+`first()`, ...). Where it cannot be followed (after `$this`, a variable or an
+operator, or under `repeat`), any choice element of that name counts, so
+`$this.contact.name.ofType(HumanName)` reads `contact.nameHumanName`, a name
+that does not exist, and finds nothing (`name[x]` is a choice element of
 `ImplementationGuide.definition.page`).
 
 `ofType` with a resource type (`contained.ofType(Practitioner)`) is left to

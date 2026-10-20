@@ -38,14 +38,14 @@ use octofhir_fhirpath::{
 };
 use serde_json::Value;
 
-use crate::choice_elements;
 use crate::column::{ColumnInfo, ColumnType};
-use crate::fhir_model::TableModelProvider;
+use crate::fhir_model::{self, TableModelProvider};
 use crate::lexer::{Kind, Token, tokens, variable_name};
 use crate::runner::ViewResult;
 use crate::sql_generator::{build_constants, substitute_constants_keeping};
 use crate::view_definition::{Column, SelectColumn, ViewDefinition};
 use crate::{Error, Result};
+use octofhir_fhirpath::core::model_provider::TypeInfo;
 
 /// Execute a ViewDefinition against in-memory FHIR resources.
 ///
@@ -524,14 +524,23 @@ impl Evaluator {
         Ok(boundary_path(plan.ast(), written.as_ref()).unwrap_or(PreparedPath::Plain(plan)))
     }
 
-    /// `root` is the view's resource type when the select is evaluated on
-    /// the resource itself (no `forEach`, `forEachOrNull` or `repeat` above
-    /// it), for the `ofType` rewrite.
+    /// `root` is where the select's paths start, for the `ofType` rewrite:
+    /// the view's resource type, or the type or backbone element of the
+    /// `forEach` items above it (`Patient.contact`); `None` when not known,
+    /// as under `repeat`.
     fn compile_select(&self, select: &SelectColumn, root: Option<&str>) -> Result<CompiledSelect> {
-        let iterates = select.for_each.is_some()
-            || select.for_each_or_null.is_some()
-            || !select.repeat.is_empty();
-        let inner = if iterates { None } else { root };
+        let inner = if !select.repeat.is_empty() {
+            None
+        } else if let Some(path) = select
+            .for_each
+            .as_ref()
+            .or(select.for_each_or_null.as_ref())
+        {
+            focus_owner(path, root)
+        } else {
+            root.map(str::to_string)
+        };
+        let inner = inner.as_deref();
         let columns = select
             .column
             .iter()
@@ -955,16 +964,26 @@ fn null_fill(select: &SelectColumn, row: &mut Vec<Value>) {
     }
 }
 
-/// The items of a `forEach` or `repeat` result as foci for nested evaluation:
-/// each a resource value over its node, as if built from its JSON, with
-/// null and empty items dropped. A node is shared with the root resource,
-/// not copied; primitives keep their value, and nested collections go
-/// through JSON.
+/// The items of a `forEach` or `repeat` result as foci for nested evaluation,
+/// with null and empty items dropped. A node is shared with the root
+/// resource, not copied, and keeps the type the engine gave it (a
+/// `Patient.contact`, a `HumanName`), so paths under it are typed; a
+/// contained resource is typed by its `resourceType`. Primitives keep their
+/// value, and nested collections go through JSON.
 fn focus_values(coll: &Collection) -> Vec<FhirPathValue> {
     coll.iter()
         .filter_map(|v| match v {
-            FhirPathValue::Resource(node, _, _) if !node.is_null() => {
+            FhirPathValue::Resource(node, _, _)
+                if !node.is_null() && node.get("resourceType").is_some() =>
+            {
                 Some(FhirPathValue::resource_from_node(node.clone()))
+            }
+            FhirPathValue::Resource(node, type_info, _) if !node.is_null() => {
+                let item = TypeInfo {
+                    singleton: Some(true),
+                    ..(**type_info).clone()
+                };
+                Some(FhirPathValue::Resource(node.clone(), Arc::new(item), None))
             }
             // A primitive keeps its type, so `$this.toString()` works on a
             // string or dateTime focus.
@@ -1145,13 +1164,13 @@ fn visit(node: &ExpressionNode, f: &mut impl FnMut(&ExpressionNode)) {
 /// `ofType` on an element that is not a choice element
 /// (`name.ofType(HumanName)`, `gender.ofType(code)`) is left to the engine,
 /// which knows the element's type from the model. Whether an element is a
-/// choice element is decided from what the path shows of its parent: a type
-/// name before it (`Patient.name`), or `root`, the view's resource type, for
-/// the first step of a path evaluated on the resource. There the element must
-/// be a choice element of that type ([`choice_elements::of_type`]). Deeper in
-/// a path, or under `forEach`, it must be a choice element of some type
-/// ([`choice_elements::anywhere`]), so `component.value.ofType(Quantity)`
-/// still works.
+/// choice element comes from the FHIR model, for the type or backbone element
+/// the path reaches it from ([`step_owner`]): `contact.name` on a Patient is
+/// `Patient.contact`'s `name`, not a choice element. `root` is where the
+/// path starts: the view's resource type, or a `forEach` focus
+/// ([`focus_owner`]). When the path does not show where the element is (it
+/// follows a variable or an operator), any choice element of that name
+/// counts.
 ///
 /// The rewrite works on tokens, so string literals, backtick-quoted names and
 /// comments are left alone. `ofType` with a resource type
@@ -1195,23 +1214,136 @@ fn rewrite_of_type(path: &str, root: Option<&str>) -> String {
     out
 }
 
-/// Whether the element at significant token `k` is a choice element, from
-/// what the path shows of its parent (see [`rewrite_of_type`]).
+/// Whether the element at significant token `k` is a choice element (see
+/// [`rewrite_of_type`]).
 fn is_choice(path: &str, sig: &[&Token], k: usize, root: Option<&str>) -> bool {
-    let text = |t: &Token| &path[t.span.clone()];
-    let element = text(sig[k]);
-    let parent = match k {
-        0 => root,
-        _ if k >= 2 && text(sig[k - 1]) == "." && sig[k - 2].kind == Kind::Ident => {
-            let p = text(sig[k - 2]);
-            p.starts_with(|c: char| c.is_ascii_uppercase()).then_some(p)
-        }
-        _ => None,
-    };
-    match parent {
-        Some(ty) => choice_elements::of_type(ty, element),
-        None => choice_elements::anywhere(element),
+    let element = &path[sig[k].span.clone()];
+    match step_owner(path, sig, k, root) {
+        Some(owner) => fhir_model::is_choice_element(&owner, element),
+        None => fhir_model::is_choice_anywhere(element),
     }
+}
+
+/// The type or backbone element whose element is at significant token `k`:
+/// followed through the chain of steps before it (`contact.name`,
+/// `name.where(use = 'official').family`, `value.ofType(Range).low`) from
+/// `root`, when the chain starts the path, or from a type name the chain
+/// starts with (`Patient.contact`). `None` when the chain starts elsewhere
+/// (`$this.value`, after an operator) or reaches an element the model has no
+/// type for.
+fn step_owner(path: &str, sig: &[&Token], k: usize, root: Option<&str>) -> Option<String> {
+    let text = |t: &Token| &path[t.span.clone()];
+    if k == 0 {
+        return root.map(str::to_string);
+    }
+    if text(sig[k - 1]) != "." || k < 2 {
+        return None;
+    }
+    let start = chain_start(path, sig, k - 2)?;
+    walk_chain(
+        path,
+        &sig[start..k - 1],
+        (start == 0).then_some(root).flatten(),
+    )
+}
+
+/// The type or backbone element that the items `path` selects have
+/// (`contact` on a Patient: `Patient.contact`), when the whole path is a
+/// chain of steps; else `None`.
+fn focus_owner(path: &str, root: Option<&str>) -> Option<String> {
+    let toks = tokens(path);
+    let sig: Vec<&Token> = toks
+        .iter()
+        .filter(|t| !matches!(t.kind, Kind::Space | Kind::Comment))
+        .collect();
+    if chain_start(path, &sig, sig.len().checked_sub(1)?)? != 0 {
+        return None;
+    }
+    walk_chain(path, &sig, root)
+}
+
+/// Index of the first token of the chain of steps (`a.b(...).c`) that ends
+/// at significant token `end`, an identifier or a call's `)`.
+fn chain_start(path: &str, sig: &[&Token], mut end: usize) -> Option<usize> {
+    let text = |t: &Token| &path[t.span.clone()];
+    loop {
+        let first = if text(sig[end]) == ")" {
+            // Back to the matching `(` and the function name before it.
+            let mut depth = 0;
+            let open = (0..=end).rev().find(|&i| {
+                match text(sig[i]) {
+                    ")" => depth += 1,
+                    "(" => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            })?;
+            (open > 0 && sig[open - 1].kind == Kind::Ident).then(|| open - 1)?
+        } else if sig[end].kind == Kind::Ident {
+            end
+        } else {
+            return None;
+        };
+        if first >= 2 && text(sig[first - 1]) == "." {
+            end = first - 2;
+        } else {
+            return Some(first);
+        }
+    }
+}
+
+/// The owner reached by the chain of steps `chain`, starting from `root`, or
+/// from the type name the chain starts with. Calls that keep the items' type
+/// (`where`, `first`, ...) are passed over, and `ofType(T)` gives `T`.
+fn walk_chain(path: &str, chain: &[&Token], root: Option<&str>) -> Option<String> {
+    let text = |t: &Token| &path[t.span.clone()];
+    let first = text(*chain.first()?);
+    let is_call = |i: usize| chain.get(i + 1).is_some_and(|t| text(t) == "(");
+    let (mut owner, mut i) = if first.starts_with(|c: char| c.is_ascii_uppercase())
+        && fhir_model::is_type(first)
+        && !is_call(0)
+    {
+        (first.to_string(), 1)
+    } else {
+        (root?.to_string(), 0)
+    };
+    while i < chain.len() {
+        let name = text(chain[i]);
+        if name == "." {
+            i += 1;
+        } else if is_call(i) {
+            let mut depth = 0;
+            let close = (i + 1..chain.len()).find(|&j| {
+                match text(chain[j]) {
+                    "(" => depth += 1,
+                    ")" => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            })?;
+            match name {
+                "where" | "first" | "last" | "tail" | "skip" | "take" | "distinct" | "single"
+                | "trace" => {}
+                "ofType" if close == i + 3 && fhir_model::is_type(text(chain[i + 2])) => {
+                    owner = text(chain[i + 2]).to_string();
+                }
+                _ => return None,
+            }
+            i = close + 1;
+        } else {
+            // A choice element by its own name (`value`) has no type until
+            // an `ofType(T)` after it gives one.
+            let of_type_next = chain.get(i + 1).is_some_and(|t| text(t) == ".")
+                && chain.get(i + 2).is_some_and(|t| text(t) == "ofType");
+            owner = match fhir_model::element_owner(&owner, name) {
+                Some(next) => next.to_string(),
+                None if of_type_next => String::new(),
+                None => return None,
+            };
+            i += 1;
+        }
+    }
+    (!owner.is_empty()).then_some(owner)
 }
 
 /// Whether `name` is a FHIR datatype a choice element can take (R4 and R5),
@@ -1920,7 +2052,7 @@ mod tests {
     #[test]
     fn of_type_is_rewritten_only_on_choice_elements() {
         for (path, root, want) in [
-            // The parent is named in the path, or is the view's resource.
+            // The parent is named in the path, or is where it starts.
             (
                 "Observation.value.ofType(Quantity)",
                 None,
@@ -1941,18 +2073,55 @@ mod tests {
                 Some("Patient"),
                 "name.ofType(HumanName)",
             ),
-            // Deeper, any type's choice element name is enough.
+            // Deeper, the model follows the path to the element's parent.
+            (
+                "component.value.ofType(Quantity)",
+                Some("Observation"),
+                "component.valueQuantity",
+            ),
+            (
+                "contact.name.ofType(HumanName)",
+                Some("Patient"),
+                "contact.name.ofType(HumanName)",
+            ),
+            (
+                "Patient.contact.name.ofType(HumanName)",
+                None,
+                "Patient.contact.name.ofType(HumanName)",
+            ),
+            (
+                "name.where(use = 'official').family.ofType(string)",
+                Some("Patient"),
+                "name.where(use = 'official').family.ofType(string)",
+            ),
+            (
+                "value.ofType(Range).low.ofType(Quantity)",
+                Some("Observation"),
+                "valueRange.low.ofType(Quantity)",
+            ),
+            // A forEach focus (`component` on an Observation).
+            (
+                "value.ofType(Quantity)",
+                Some("Observation.component"),
+                "valueQuantity",
+            ),
+            // Where the path does not show the parent, any choice element of
+            // that name counts: `name` is one in
+            // ImplementationGuide.definition.page.
             (
                 "component.value.ofType(Quantity)",
                 None,
                 "component.valueQuantity",
             ),
-            // Known limitation: with the parent unknown, `name` counts as a
-            // choice element (ImplementationGuide.definition.page.name[x]).
             (
                 "contact.name.ofType(HumanName)",
                 None,
                 "contact.nameHumanName",
+            ),
+            (
+                "$this.value.ofType(Quantity)",
+                Some("Observation"),
+                "$this.valueQuantity",
             ),
             (
                 "contact.telecom.ofType(ContactPoint)",
@@ -1973,6 +2142,38 @@ mod tests {
         ] {
             assert_eq!(rewrite_of_type(path, root), want, "{path}");
         }
+    }
+
+    #[test]
+    fn a_for_each_focus_has_its_owner() {
+        assert_eq!(
+            focus_owner("contact", Some("Patient")).as_deref(),
+            Some("Patient.contact")
+        );
+        assert_eq!(
+            focus_owner("name", Some("Patient")).as_deref(),
+            Some("HumanName")
+        );
+        assert_eq!(
+            focus_owner("name.where(use = 'official')", Some("Patient")).as_deref(),
+            Some("HumanName")
+        );
+        assert_eq!(
+            focus_owner("value.ofType(Quantity)", Some("Observation")).as_deref(),
+            Some("Quantity")
+        );
+        assert_eq!(
+            focus_owner("item", Some("Questionnaire.item")).as_deref(),
+            Some("Questionnaire.item")
+        );
+        // Not a chain of steps, a primitive, or nothing to start from.
+        assert_eq!(focus_owner("name | contact.name", Some("Patient")), None);
+        assert_eq!(focus_owner("name.given", Some("Patient")), None);
+        assert_eq!(focus_owner("contact", None), None);
+        assert_eq!(
+            focus_owner("Patient.contact", None).as_deref(),
+            Some("Patient.contact")
+        );
     }
 
     #[test]
