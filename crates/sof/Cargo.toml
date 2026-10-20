@@ -12,7 +12,7 @@ keywords = ["fhir", "sql-on-fhir", "healthcare", "viewdefinition", "fhirpath"]
 categories = ["database", "parser-implementations"]
 # The vendored conformance suite and fixtures are large and test-only; keep them
 # out of the published package.
-exclude = ["tests/spec/**", "tests/extra/**"]
+exclude = ["tests/spec/**", "tests/extra/**", "tests/fhirpath/**"]
 
 [dependencies]
 # FHIR
@@ -51,5 +51,7 @@ postgres = ["dep:sqlx-core", "dep:sqlx-postgres"]
 
 [dev-dependencies]
 bytes = { workspace = true }
+# Reads the HL7 FHIRPath test suite (tests/fhirpath_hl7.rs).
+roxmltree = "0.20"
 tokio = { workspace = true }
 serde_json = { workspace = true }
