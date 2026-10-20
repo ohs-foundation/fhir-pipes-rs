@@ -96,6 +96,10 @@ pub enum Command {
     /// Admin boundaries (GeoJSON) and sites (CSV) as Location NDJSON for `fhir-pipes load` (offline)
     #[command(subcommand)]
     Import(crate::import::ImportCommand),
+    /// A value set or concept map from FHIR packages as a table SQL can join
+    /// to, as SQL on FHIR's Terminology in SQL page defines it (offline)
+    #[command(subcommand)]
+    Terminology(crate::terminology::TerminologyCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -107,8 +111,9 @@ pub enum ProfileCommand {
 
 #[derive(clap::Args, Debug)]
 pub struct ProfileCheckArgs {
-    /// The IG: a FHIR package (package.tgz, a path or an https URL) or a
-    /// directory of JSON resources such as SUSHI's fsh-generated/resources
+    /// The IG: a FHIR package (package.tgz, a path or an https URL), a
+    /// directory of JSON resources such as SUSHI's fsh-generated/resources,
+    /// or name#version in the local FHIR package cache (~/.fhir/packages)
     #[arg(long)]
     pub ig: String,
 }

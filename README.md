@@ -153,6 +153,7 @@ data to show what each part does.
 | `population` | in | Population Groups for admin units from a raster such as WorldPop | [locations.md](docs/locations.md#population) |
 | `dhis2 locations`, `measures`, `reports` | in | DHIS2 org units, indicators and data → FHIR NDJSON | [dhis2.md](docs/dhis2.md) |
 | `profile check` | | Compare a profile with its IG's extensions, code systems and profiles | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
+| `terminology valueset`, `conceptmap` | out | A value set or concept map from FHIR packages as a table SQL can join to (offline) | [terminology.md](docs/terminology.md) |
 
 Run `fhir-pipes <command> --help` for every option. NDJSON paths ending in
 `.gz` are read and written compressed.
@@ -773,7 +774,7 @@ src/
   snapshot/       state.json, merge by id
   load/           parents-first ordering, transaction bundles with ifMatch
   sync/           sync: copy an export directory to a second FHIR server
-  fhir/           resource parsing, NDJSON reading and writing
+  fhir/           resource parsing, NDJSON reading and writing, FHIR packages
   transform.rs, index/, geometry/, write/, inspect.rs, run.rs
                   the locations transform: hierarchy, geometry, GeoParquet
   diff/           edits back to FHIR resources
@@ -783,6 +784,7 @@ src/
   dhis2/          DHIS2 import
   import/         import location-boundaries and location-sites: GeoJSON and CSV to Locations
   profile/        profiles: loading, and `profile check` against an IG
+  terminology/    terminology: value sets and concept maps from FHIR packages as tables
 crates/
   sof/            fhir-pipes-sof: the ViewDefinition engine (from octofhir/sof)
   sof-lint/       fhir-pipes-sof-lint: ViewDefinition checks
@@ -790,7 +792,8 @@ tests/            integration tests per command; fixtures under tests/fixtures
 skills/fhir-pipes/
                   the Agent Skill for AI coding agents
 docs/
-  refresh.md, servers.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md
+  refresh.md, servers.md, locations.md, sync.md, dhis2.md, qgis.md, profiles.md, icr-profile.md,
+  terminology.md
   notes/          the consolidation notes
   superpowers/    kiln's design specs, plans and spikes
 ```

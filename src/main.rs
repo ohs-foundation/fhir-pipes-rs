@@ -19,6 +19,7 @@ mod report;
 mod run;
 mod snapshot;
 mod sync;
+mod terminology;
 mod transform;
 mod views;
 mod warehouse;
@@ -55,6 +56,13 @@ fn main() {
         }
         return;
     }
+    if let cli::Command::Terminology(command) = &cli.command {
+        if let Err(err) = terminology::run(command) {
+            eprintln!("fhir-pipes: {err:#}");
+            std::process::exit(error::anyhow_exit_code(&err));
+        }
+        return;
+    }
     let result: error::Result<()> = match cli.command {
         cli::Command::Transform(cli::TransformCommand::Locations(args)) => {
             transform::run_transform(&args, profile)
@@ -74,7 +82,9 @@ fn main() {
             profile::check::run(&args, profile)
         }
         cli::Command::Import(cmd) => import::run(&cmd, profile),
-        cli::Command::Refresh(_) | cli::Command::Views(_) => unreachable!("handled above"),
+        cli::Command::Refresh(_) | cli::Command::Views(_) | cli::Command::Terminology(_) => {
+            unreachable!("handled above")
+        }
     };
     if let Err(err) = result {
         eprintln!("fhir-pipes: {err}");

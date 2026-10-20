@@ -304,9 +304,10 @@ fhir-pipes profile check --profile ig/fhir-pipes-profile.toml --ig ig/fsh-genera
 fhir-pipes profile check --profile examples/profiles/icr.toml --ig https://icr.healthcampaigns.org/package.tgz
 ```
 
-`--ig` is a FHIR package (`package.tgz`, as a path or an https URL) or a
-directory of the IG's JSON resources: SUSHI's `fsh-generated/resources`, the
-IG publisher's `output`, or an unpacked package. A published package is only
+`--ig` is a FHIR package (`package.tgz`, as a path or an https URL), a
+directory of the IG's JSON resources (SUSHI's `fsh-generated/resources`, the
+IG publisher's `output`, or an unpacked package), or `name#version` for a
+package in the local FHIR package cache (`~/.fhir/packages`). A published package is only
 as current as the last IG build; SUSHI's output follows the FSH you have.
 
 For each URL under the IG's canonical, the check reports:
