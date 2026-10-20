@@ -102,6 +102,13 @@ FHIR model to see whether it reaches a choice element. See
 [Known limitations](README.md#known-limitations) for where the path cannot be
 followed.
 
+On an element that is not a choice element, `ofType()` with a resource type
+keeps the items of that `resourceType` (`contained.ofType(Practitioner)`), and
+with a datatype keeps the items unchanged (`name.ofType(HumanName)`). The SQL
+paths follow the element's owner type from the view's resource. Below a
+`forEach`, where they do not know the items' type, they treat an element as a
+choice element when any FHIR type has a choice element of that name.
+
 ## FHIRPath functions that need a type checker
 
 The FHIRPath spec wants some expressions rejected before evaluation because of

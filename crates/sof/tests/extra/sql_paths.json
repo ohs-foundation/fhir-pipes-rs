@@ -1,0 +1,166 @@
+{
+  "title": "sql_paths",
+  "description": "Decimal columns, ofType() on elements that are not choice elements, and comparisons on paths with several values (issue #103).",
+  "resources": [
+    {
+      "resourceType": "Patient",
+      "id": "p1",
+      "contained": [
+        {
+          "resourceType": "Practitioner",
+          "id": "c1"
+        },
+        {
+          "resourceType": "Organization",
+          "id": "c2"
+        }
+      ],
+      "name": [
+        {
+          "family": "Smith"
+        },
+        {
+          "family": "Jones"
+        }
+      ]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "p2",
+      "name": [
+        {
+          "family": "Smith"
+        }
+      ]
+    },
+    {
+      "resourceType": "Observation",
+      "id": "o1",
+      "status": "final",
+      "code": {
+        "text": "weight"
+      },
+      "valueQuantity": {
+        "value": 2.5,
+        "unit": "kg"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "title": "a decimal column",
+      "view": {
+        "resource": "Observation",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "value",
+                "path": "value.ofType(Quantity).value",
+                "type": "decimal"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "o1",
+          "value": 2.5
+        }
+      ]
+    },
+    {
+      "title": "ofType with a resource type filters contained resources",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              }
+            ]
+          },
+          {
+            "forEach": "contained.ofType(Practitioner)",
+            "column": [
+              {
+                "name": "contained_id",
+                "path": "id",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "contained_id": "c1"
+        }
+      ]
+    },
+    {
+      "title": "ofType with the element's own datatype",
+      "view": {
+        "resource": "Patient",
+        "where": [
+          {
+            "path": "id = 'p2'"
+          }
+        ],
+        "select": [
+          {
+            "column": [
+              {
+                "name": "family",
+                "path": "name.ofType(HumanName).family",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "family": "Smith"
+        }
+      ]
+    },
+    {
+      "title": "a comparison on a path with several values does not match",
+      "view": {
+        "resource": "Patient",
+        "where": [
+          {
+            "path": "name.family = 'Smith'"
+          }
+        ],
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p2"
+        }
+      ]
+    }
+  ]
+}
