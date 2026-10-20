@@ -118,19 +118,29 @@ format of the sql-on-fhir.org registry; see [CONFORMANCE.md](CONFORMANCE.md).
 
 `tests/fhirpath_hl7.rs` runs the official HL7 FHIRPath test suite for R4
 (`tests/fhirpath/`, from FHIR/fhir-test-cases) through the in-memory evaluator,
-each expression as a ViewDefinition column. fhir-pipes passes 929 of the 1,001
-tests. The 72 it fails are listed, with the reason each fails, in
+each expression as a ViewDefinition column. fhir-pipes passes 936 of the 1,001
+tests. The 65 it fails are listed, with the reason each fails, in
 `tests/fhirpath/known-failures.json`, and the test fails if that list goes out
-of date in either direction. Of the 72:
+of date in either direction. Of the 65:
 
-- 27 pass in octofhir-fhirpath when it is given the FHIR R4 model, which
-  fhir-pipes does not load (it uses `EmptyModelProvider`);
-- 29 fail in octofhir-fhirpath even with the model, mostly tests expecting a
-  type error the engine does not raise;
-- 16 come from fhir-pipes' own layer: `lowBoundary()`/`highBoundary()` with an
-  out-of-range precision return a value instead of nothing; `ofType()` on an
-  element that is not a choice element (`name.ofType(HumanName)`) returns
-  nothing; and under `forEach` over primitive values, `$this.toString()` fails.
+- 27 need a FHIR model: type tests on FHIR types (`Patient.active.is(boolean)`,
+  `Observation.value is Quantity`) and unit comparisons on choice elements.
+  They pass in octofhir-fhirpath with its R4 model, which fhir-pipes does not
+  load (it uses `EmptyModelProvider`, so views run on any FHIR version);
+- 21 expect a type error before evaluation, which needs a model and a type
+  checker;
+- 16 are octofhir-fhirpath bugs or gaps. Fixes for 9 of them are open upstream
+  (octofhir/fhirpath-rs#176, #177, #178, #179): `is`/`as` precedence, `hasValue()`
+  on complex types, date and time boundaries, and type tests on a date-only
+  dateTime. With them, one test that passes today only because of the
+  precedence bug (`isGuardAndBad`, which expects a type error) fails, so the
+  total goes to 944. The other 7 are Quantity unit arithmetic (1), `conformsTo()`
+  (3), `as()` with a date or time type (1), `as()` over several items, which
+  octofhir allows on purpose for FHIR's own invariants (1), and
+  `@1973-12-25T00:00:00.000+10:00 + 0.1 's'`, which other engines fail too (1);
+- 1 is fhir-pipes' own, by choice: `1.toDecimal().lowBoundary()`. A decimal's
+  boundary uses the digits of its JSON form, because a resource's `1.0` reaches
+  the engine as `1`; the engine also holds `1.toDecimal()` as `1.0`.
 
 `tests/fhirpath/SOURCE.md` says where the data comes from and how to refresh it.
 
