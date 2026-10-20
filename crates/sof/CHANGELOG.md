@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`SPEC_INTERPRETATIONS.md`** — what the crate does where the SQL on FHIR
+  and FHIRPath specs leave a choice to the implementation or can be read more
+  than one way: resource and reference keys, `%rowIndex`, `%context`,
+  `join()`, and how dates, times, decimals and Quantities are written.
 - **`fhir_model` is public** — the FHIR R4 and R5 type table's lookups
   (`elements`, `element`, `element_owner`, `choice_by_json_name`,
   `is_choice_element`, `type_kind`), for tools that need element types
