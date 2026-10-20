@@ -181,6 +181,9 @@ fn run_phases(
         cache: cache.clone(),
         refresh: args.refresh,
         max_consecutive_failures: args.max_consecutive_failures,
+        // With a trailing slash, so `Binary/1` joins under the base rather
+        // than replacing its last segment.
+        base: url::Url::parse(&format!("{}/", args.server.trim_end_matches('/'))).ok(),
     };
     let summary = fetch_boundaries(&client, &urls, &opts, &mut report)?;
 
