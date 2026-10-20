@@ -1223,10 +1223,9 @@ mod tests {
     use clap::Parser;
 
     fn steps_of(args: &[&str]) -> BTreeSet<Step> {
-        let cli = crate::cli::Cli::try_parse_from(
-            ["fhir-pipes", "refresh"].iter().chain(args).copied(),
-        )
-        .unwrap();
+        let cli =
+            crate::cli::Cli::try_parse_from(["fhir-pipes", "refresh"].iter().chain(args).copied())
+                .unwrap();
         let crate::cli::Command::Refresh(r) = cli.command else {
             unreachable!()
         };
