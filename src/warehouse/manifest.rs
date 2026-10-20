@@ -75,7 +75,7 @@ pub fn write(s: &Settings, stage: &Stage, server: Option<&str>) -> Result<String
         manifest["files"] = json!(s.inputs());
     }
     let path = stage.file("manifest.json");
-    fs::write(&path, serde_json::to_string_pretty(&manifest)?)
+    crate::fs::atomic_write(&path, serde_json::to_string_pretty(&manifest)?)
         .with_context(|| format!("writing {}", path.display()))?;
     println!("   {}", serde_json::to_string(&manifest["tables"])?);
     Ok(refreshed_at)

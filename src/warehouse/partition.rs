@@ -2,6 +2,7 @@
 //! with the partition value looked up through another warehouse table.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -147,6 +148,7 @@ fn partition_value_in_path(file: &Path, table_dir: &Path, column: &str) -> Optio
                 .map(str::to_string)
         })
         .filter(|v| v != NULL_PARTITION)
+        .map(|v| unescape(&v))
 }
 
 fn strings(col: &dyn Array) -> Result<Vec<Option<String>>> {
@@ -201,11 +203,13 @@ pub fn write(
     let mut columns = result.columns;
     columns.push(ColumnInfo::new(column, ColumnType::String));
     let mut summary = WriteSummary::default();
+    let mut segments = Segments::default();
     for (value, rows) in groups {
-        let dir = staging.join(format!(
-            "{column}={}",
-            value.as_deref().map_or(NULL_PARTITION.to_string(), escape)
-        ));
+        let segment = match value.as_deref() {
+            None => NULL_PARTITION.to_string(),
+            Some(v) => segments.claim(v)?,
+        };
+        let dir = staging.join(format!("{column}={segment}"));
         fs::create_dir_all(&dir)?;
         let data: Vec<Vec<Value>> = rows
             .into_iter()
@@ -226,6 +230,10 @@ pub fn write(
                 .write_with_summary(&part, &mut file)
                 .with_context(|| format!("writing {}", path.display()))?,
         );
+        // On disk before the rename that publishes it, so a crash after the
+        // rename cannot leave an empty or cut-short file in the table.
+        file.sync_all()
+            .with_context(|| format!("writing {}", path.display()))?;
     }
     fs::create_dir_all(&staging)?;
     replace(&staging, table_dir)?;
@@ -254,18 +262,82 @@ pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A partition value made safe as one path segment, as hive escapes it.
-fn escape(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    for c in v.chars() {
-        match c {
-            '/' | '\\' | '=' | '%' | ':' | '\n' | '\r' => {
-                out.push_str(&format!("%{:02X}", c as u32))
+/// The directory names given to one table's partition values. A
+/// case-insensitive disk (default macOS, Windows) holds `SLE` and `sle` in
+/// one directory, where one file would replace the other; the second value
+/// gets every letter escaped (`%73%6C%65`), which DuckDB reads back as `sle`.
+#[derive(Default)]
+struct Segments(HashMap<String, String>);
+
+impl Segments {
+    fn claim(&mut self, value: &str) -> Result<String> {
+        for segment in [escape(value, false), escape(value, true)] {
+            match self.0.get(&segment.to_lowercase()) {
+                Some(owner) if owner != value => continue,
+                _ => {
+                    self.0.insert(segment.to_lowercase(), value.to_string());
+                    return Ok(segment);
+                }
             }
-            c => out.push(c),
+        }
+        anyhow::bail!("partition value {value:?} has no directory name of its own")
+    }
+}
+
+/// A partition value as one path segment, in the `%XX` escapes hive uses and
+/// DuckDB decodes when it reads the value from the directory name. Escaped:
+/// what a path or a Windows file name cannot hold, control characters, `%`
+/// itself, a trailing dot or space (Windows drops them), the first letter of
+/// a Windows device name (`CON`), and with `letters` every ASCII letter.
+fn escape(v: &str, letters: bool) -> String {
+    let base = v.split('.').next().unwrap_or(v);
+    let device = crate::index::partition::RESERVED_WINDOWS_NAMES
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(base));
+    let trailing = v.len() - v.trim_end_matches(['.', ' ']).len();
+    let mut out = String::with_capacity(v.len());
+    for (i, c) in v.char_indices() {
+        let escaped = matches!(
+            c,
+            '/' | '\\' | '=' | '%' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+        ) || c.is_control()
+            || i >= v.len() - trailing
+            || (device && i == 0)
+            || (letters && c.is_ascii_alphabetic());
+        if escaped {
+            let mut buf = [0; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                let _ = write!(out, "%{b:02X}");
+            }
+        } else {
+            out.push(c);
         }
     }
     out
+}
+
+/// A directory name's partition value: `escape` undone.
+fn unescape(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -357,6 +429,28 @@ mod tests {
     }
 
     #[test]
+    fn values_that_differ_only_in_case_keep_all_their_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = dir.path().join("t");
+        let r = result(
+            &["id", "where"],
+            vec![
+                vec![json!("a"), json!("Kano")],
+                vec![json!("b"), json!("KANO")],
+            ],
+        );
+        write(r, &table, "region", |row| {
+            row[1].as_str().map(str::to_string)
+        })
+        .unwrap();
+        // Each value is in a file of its own, on any disk.
+        assert_eq!(table_files(&table, "region").len(), 2);
+        let lookup = read_lookup(&table, "id", "region").unwrap();
+        assert_eq!(lookup.get("a").map(String::as_str), Some("Kano"));
+        assert_eq!(lookup.get("b").map(String::as_str), Some("KANO"));
+    }
+
+    #[test]
     fn rewriting_replaces_old_partitions() {
         let dir = tempfile::tempdir().unwrap();
         let table = dir.path().join("t");
@@ -396,7 +490,29 @@ mod tests {
 
     #[test]
     fn values_are_escaped_as_path_segments() {
-        assert_eq!(escape("SLE"), "SLE");
-        assert_eq!(escape("a/b=c"), "a%2Fb%3Dc");
+        assert_eq!(escape("SLE", false), "SLE");
+        assert_eq!(escape("a/b=c", false), "a%2Fb%3Dc");
+        assert_eq!(escape("a*b?", false), "a%2Ab%3F");
+        assert_eq!(escape("x. ", false), "x%2E%20");
+        assert_eq!(escape("con.txt", false), "%63on.txt");
+        assert_eq!(escape("é\n", false), "é%0A");
+        assert_eq!(escape("Ab1", true), "%41%621");
+        for v in ["SLE", "a/b=c", "a*b?", "x. ", "con.txt", "é\n", "50%"] {
+            assert_eq!(unescape(&escape(v, false)), v);
+            assert_eq!(unescape(&escape(v, true)), v);
+        }
+    }
+
+    #[test]
+    fn values_that_differ_only_in_case_get_directories_of_their_own() {
+        let mut s = Segments::default();
+        let got: Vec<String> = ["SLE", "Sle", "sle", "SLE"]
+            .iter()
+            .map(|v| s.claim(v).unwrap())
+            .collect();
+        assert_eq!(got, ["SLE", "%53%6C%65", "%73%6C%65", "SLE"]);
+        let lower: std::collections::HashSet<String> =
+            got.iter().map(|g| g.to_lowercase()).collect();
+        assert_eq!(lower.len(), 3);
     }
 }

@@ -67,7 +67,7 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str, stage: &Stage) -> Re
         refreshed_at,
     );
     let path = stage.file(SQL_FILE);
-    fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
+    crate::fs::atomic_write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
     let listed = tables.iter().filter(|t| !t.files.is_empty()).count();
     println!("   {SQL_FILE}: {listed} table view(s)");
     if let Some(spark) = &c.spark {
@@ -101,7 +101,8 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str, stage: &Stage) -> Re
             refreshed_at,
         );
         let path = stage.file(SPARK_FILE);
-        fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
+        crate::fs::atomic_write(&path, &sql)
+            .with_context(|| format!("writing {}", path.display()))?;
         println!(
             "   {SPARK_FILE}: {listed} table(s) in database {}",
             spark.database
