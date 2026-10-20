@@ -5,7 +5,7 @@
 //!   run       run views over FHIR files (or PostgreSQL) and write the rows
 //!   sql       generate the SQL for a view, or a CREATE TABLE for its columns
 //!   validate  check a view's structure against the spec, offline
-//!   lint      check a view's FHIRPath against a FHIR package, or the
+//!   lint      check a view's FHIRPath against the FHIR core types, a FHIR package, or the
 //!             shareable subset
 //!   test      run SQL-on-FHIR test-case files
 
@@ -23,7 +23,7 @@ use fhir_pipes_sof::output::{
     OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
 };
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
-use fhir_pipes_sof_lint::{Finding, Severity, lint_shareable, validate_structure};
+use fhir_pipes_sof_lint::{Finding, Severity, lint_core, lint_shareable, validate_structure};
 
 use crate::error::usage;
 use crate::fhir::ndjson::{Output, is_gz, read_text};
@@ -112,13 +112,15 @@ enum ViewsCommand {
         #[arg(long, conflicts_with = "json")]
         sarif: bool,
     },
-    /// Check a ViewDefinition's FHIRPath selectors against a FHIR package
-    /// (FH01–FH10), and/or against the ShareableViewDefinition subset (FH11).
-    /// Exits non-zero on an error.
+    /// Check a ViewDefinition's FHIRPath selectors against the FHIR R4 and R5
+    /// core types built in (FH01–FH05), or against a FHIR package with
+    /// --package (FH01–FH10); with --shareable, also against the
+    /// ShareableViewDefinition subset (FH11). Exits non-zero on an error.
     Lint {
         /// The ViewDefinition JSON file.
         view: PathBuf,
-        /// FHIR package name (e.g. hl7.fhir.r4.core). Optional with --shareable.
+        /// FHIR package name (e.g. hl7.fhir.r4.core), to check against in
+        /// place of the built-in core types.
         #[arg(long)]
         package: Option<String>,
         /// Package version. When given, the package is installed if missing;
@@ -1113,18 +1115,12 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             json,
             sarif,
         } => {
-            if package.is_none() && !shareable {
-                return Err(usage(anyhow::anyhow!(
-                    "nothing to lint: pass --package <name> to check selectors against \
-                     a FHIR package, and/or --shareable for the portable subset"
-                )));
-            }
             let origin = view.display().to_string();
             let (source, view) = read_view(view)?;
-            let mut findings = Vec::new();
-            if let Some(package) = package {
-                findings.extend(package_findings(&view, package, version.as_deref()).await?);
-            }
+            let mut findings = match package {
+                Some(package) => package_findings(&view, package, version.as_deref()).await?,
+                None => lint_core(&view),
+            };
             if *shareable {
                 findings.extend(lint_shareable(&view, allow_fn));
             }

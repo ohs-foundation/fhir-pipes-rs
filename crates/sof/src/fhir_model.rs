@@ -1,6 +1,8 @@
 //! A FHIR model for the FHIRPath engine, from a table generated from the
 //! FHIR core StructureDefinitions (`fhir_types.rs`, written by
-//! `examples/generate_fhir_types.rs`).
+//! `examples/generate_fhir_types.rs`). The lookup functions are public for
+//! other tools that need FHIR element types without a package, such as
+//! `fhir-pipes-sof-lint`.
 //!
 //! The engine asks its `ModelProvider` for the type of each element it
 //! navigates; with types it can answer `is`/`as`/`ofType()` on FHIR types
@@ -59,15 +61,20 @@ const SYSTEM_TYPES: &[&str] = &[
     "Boolean", "String", "Integer", "Decimal", "Date", "DateTime", "Time", "Quantity",
 ];
 
-#[derive(Debug, PartialEq)]
-enum Kind {
+/// What a FHIR type is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A resource (`Patient`), including abstract ones (`DomainResource`).
     Resource,
+    /// A complex datatype (`HumanName`, `Quantity`, `BackboneElement`).
     Complex,
+    /// A primitive datatype (`string`, `dateTime`).
     Primitive,
 }
 
-#[derive(Debug)]
-enum ElementType {
+/// The type of an element in the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementType {
     /// A FHIR type, or `System.<Type>` for a FHIRPath system type.
     Named(&'static str),
     /// A choice element (`value[x]`) and the types it allows.
@@ -92,15 +99,18 @@ fn owned(owner: &str) -> &'static [(&'static str, &'static str, bool, ElementTyp
     &ELEMENTS[start..start + len]
 }
 
-/// The elements of a type or backbone element: `(name, repeats, type)`.
-fn elements(owner: &str) -> impl Iterator<Item = (&'static str, bool, &'static ElementType)> {
+/// The elements of a type (`Patient`) or backbone element
+/// (`Patient.contact`): `(name, repeats, type)`, sorted by name. A choice
+/// element is listed with its `[x]` (`value[x]`). Empty for an unknown owner.
+pub fn elements(owner: &str) -> impl Iterator<Item = (&'static str, bool, &'static ElementType)> {
     owned(owner)
         .iter()
         .map(|(_, name, repeats, ty)| (*name, *repeats, ty))
 }
 
-/// One element of a type or backbone element: `(repeats, type)`.
-fn element(owner: &str, name: &str) -> Option<(bool, &'static ElementType)> {
+/// One element of a type or backbone element, by its name in the table
+/// (`value[x]` for a choice element): `(repeats, type)`.
+pub fn element(owner: &str, name: &str) -> Option<(bool, &'static ElementType)> {
     let owned = owned(owner);
     let i = owned.binary_search_by(|(_, n, ..)| (*n).cmp(name)).ok()?;
     let (_, _, repeats, ty) = &owned[i];
@@ -109,7 +119,7 @@ fn element(owner: &str, name: &str) -> Option<(bool, &'static ElementType)> {
 
 /// A choice element by its JSON name: `valueQuantity` is `value[x]` as a
 /// Quantity, `valueString` as a string. `(repeats, type)`.
-fn choice_by_json_name(owner: &str, name: &str) -> Option<(bool, &'static str)> {
+pub fn choice_by_json_name(owner: &str, name: &str) -> Option<(bool, &'static str)> {
     // The type starts at an upper-case letter.
     name.char_indices()
         .skip(1)
@@ -131,8 +141,13 @@ fn choice_by_json_name(owner: &str, name: &str) -> Option<(bool, &'static str)> 
 }
 
 /// Whether `name` is a FHIR type (resource, datatype or primitive).
-pub(crate) fn is_type(name: &str) -> bool {
+pub fn is_type(name: &str) -> bool {
     type_entry(name).is_some()
+}
+
+/// What the FHIR type `name` is, if the table has it.
+pub fn type_kind(name: &str) -> Option<Kind> {
+    type_entry(name).map(|(kind, _)| *kind)
 }
 
 /// Where the elements of `owner`'s element `name` are listed: its complex
@@ -140,7 +155,7 @@ pub(crate) fn is_type(name: &str) -> bool {
 /// A choice element by its JSON name (`valueQuantity`) has the type it names.
 /// `None` for a primitive, an unknown element, a choice element by its own
 /// name, or an element the FHIR versions give different types.
-pub(crate) fn element_owner(owner: &str, name: &str) -> Option<&'static str> {
+pub fn element_owner(owner: &str, name: &str) -> Option<&'static str> {
     let complex = |ty: &'static str| {
         type_entry(ty)
             .is_some_and(|(kind, _)| *kind != Kind::Primitive)
@@ -155,12 +170,12 @@ pub(crate) fn element_owner(owner: &str, name: &str) -> Option<&'static str> {
 }
 
 /// Whether `owner` has a choice element `name` (`value[x]` for `value`).
-pub(crate) fn is_choice_element(owner: &str, name: &str) -> bool {
+pub fn is_choice_element(owner: &str, name: &str) -> bool {
     element(owner, &format!("{name}[x]")).is_some()
 }
 
 /// Whether any type or backbone element has a choice element `name`.
-pub(crate) fn is_choice_anywhere(name: &str) -> bool {
+pub fn is_choice_anywhere(name: &str) -> bool {
     static NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         ELEMENTS
             .iter()

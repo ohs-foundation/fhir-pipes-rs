@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`fhir_model` is public** — the FHIR R4 and R5 type table's lookups
+  (`elements`, `element`, `element_owner`, `choice_by_json_name`,
+  `is_choice_element`, `type_kind`), for tools that need element types
+  without a FHIR package; `fhir-pipes-sof-lint` checks views with them.
 - **A FHIR model for the in-memory engine** — the FHIRPath engine now knows
   each element's type, from a table of the R4 and R5 core types generated into
   the crate (`src/fhir_types.rs`, by `examples/generate_fhir_types.rs`), in

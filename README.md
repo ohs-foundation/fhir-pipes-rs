@@ -175,7 +175,8 @@ fhir-pipes views sql patient_flat.json --dialect duckdb                     # th
 fhir-pipes views sql patient_flat.json --ddl --dialect postgres             # a CREATE TABLE for its columns
 fhir-pipes views validate patient_flat.json                                 # structure checks
 fhir-pipes views validate patient_flat.json --sarif > validate.sarif        # findings for CI code scanning
-fhir-pipes views lint patient_flat.json --shareable                         # the portable FHIRPath subset
+fhir-pipes views lint patient_flat.json                                     # paths against the FHIR R4/R5 types
+fhir-pipes views lint patient_flat.json --shareable                         # also the portable FHIRPath subset
 fhir-pipes views test crates/sof/tests/spec                                 # the official test cases
 ```
 
@@ -212,11 +213,17 @@ store it, so `getReferenceKey()` and joins work on Bundle files.
 
 `views run --db URL` (or `FHIR_PIPES_DATABASE_URL`) runs against PostgreSQL
 holding FHIR resources as JSONB instead of files; it needs the `postgres`
-feature, which the release binaries have. `views lint --package
-hl7.fhir.r4.core --version 4.0.1` checks selectors against a FHIR package,
-downloading it if it is not installed yet; without `--version` it uses only a
-package that is already installed. It needs a build with the `fhir-packages`
-feature (see [Building and testing](#building-and-testing)). `views validate` and
+feature, which the release binaries have. `views lint` checks each selector
+against the FHIR R4 and R5 core types built into fhir-pipes: unknown elements
+(FH01, with a suggestion), a choice element without `ofType()` (FH02), a
+complex element, an array or a Reference in a scalar column (FH03–FH05).
+Columns under a `forEach` are checked from its items. An element whose type
+differs between R4 and R5 is accepted, but not checked further. `views lint
+--package hl7.fhir.r4.core --version 4.0.1` checks against a FHIR package
+instead, such as an IG's, downloading it if it is not installed yet; without
+`--version` it uses only a package that is already installed. That needs a
+build with the `fhir-packages` feature (see
+[Building and testing](#building-and-testing)). `views validate` and
 `views lint` also write their findings as JSON (`--json`) or SARIF
 (`--sarif`), and `views lint --allow-fn NAME` exempts an engine-specific
 function from `--shareable`.
