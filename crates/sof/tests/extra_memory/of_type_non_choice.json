@@ -1,6 +1,6 @@
 {
   "title": "of_type_non_choice",
-  "description": "ofType() with a resource type is left to the FHIRPath engine rather than joined onto the element name, and ofType() with a FHIR datatype on an element that is not a choice element gives no false matches (issue #57, PR #74 review). Without a FHIR model the engine cannot tell whether an element is a choice element, so ofType with a datatype on any other element finds nothing, even when the type is right (a known limitation, see the crate README). The SQL generator still joins resource types onto the element name.",
+  "description": "ofType() with a resource type is left to the FHIRPath engine rather than joined onto the element name, and ofType() with a FHIR datatype on an element that is not a choice element gives no false matches (issue #57, PR #74 review). On such an element the engine answers ofType() from the element's type in the FHIR model, so the right type finds the value. The SQL generator still joins resource types onto the element name.",
   "resources": [
     {
       "resourceType": "Patient",
@@ -182,7 +182,7 @@
       "expect": []
     },
     {
-      "title": "known limitation: ofType(string) on an element that is not a choice element finds nothing",
+      "title": "ofType(string) on a string element that is not a choice element finds the value",
       "view": {
         "resource": "Patient",
         "select": [
@@ -205,11 +205,11 @@
       "expect": [
         {
           "id": "p1",
-          "v": null
+          "v": "50%off"
         },
         {
           "id": "p2",
-          "v": null
+          "v": "Doe"
         }
       ]
     },

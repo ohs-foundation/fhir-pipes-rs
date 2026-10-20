@@ -33,13 +33,14 @@ use octofhir_fhirpath::evaluator::function_registry::{
 };
 use octofhir_fhirpath::evaluator::plan::CompiledPlan;
 use octofhir_fhirpath::{
-    Collection, EmptyModelProvider, EvaluationContext, ExpressionNode, FhirPathEngine,
-    FhirPathError, FhirPathValue, ModelProvider, create_function_registry,
+    Collection, EvaluationContext, ExpressionNode, FhirPathEngine, FhirPathError, FhirPathValue,
+    ModelProvider, create_function_registry,
 };
 use serde_json::Value;
 
 use crate::choice_elements;
 use crate::column::{ColumnInfo, ColumnType};
+use crate::fhir_model::TableModelProvider;
 use crate::lexer::{Kind, Token, tokens, variable_name};
 use crate::runner::ViewResult;
 use crate::sql_generator::{build_constants, substitute_constants_keeping};
@@ -155,10 +156,10 @@ impl CompiledView {
         }
         let constants = build_constants(view)?;
 
-        // Build the engine once with the SoF custom functions registered. No
-        // network, no FHIR package: EmptyModelProvider keeps the library
-        // self-contained (ofType choice resolution is handled by a rewrite of
-        // the path, see `rewrite_of_type`, not by the model provider).
+        // Build the engine once with the SoF custom functions registered. The
+        // model is the FHIR type table built into the crate (R4 and R5; no
+        // network, no FHIR package). ofType() over a choice element is still
+        // rewritten to the element's JSON name, see `rewrite_of_type`.
         let mut registry = create_function_registry();
         registry.register_lazy_function(Arc::new(GetResourceKey));
         registry.register_lazy_function(Arc::new(GetReferenceKey));
@@ -166,7 +167,7 @@ impl CompiledView {
         // match the SQL-on-FHIR conformance suite (join() with no separator,
         // and the spec's precision-boundary rules for low/highBoundary).
         registry.register_pure_function(Arc::new(JoinFn));
-        let model: Arc<dyn ModelProvider + Send + Sync> = Arc::new(EmptyModelProvider);
+        let model: Arc<dyn ModelProvider + Send + Sync> = Arc::new(TableModelProvider);
         let engine = FhirPathEngine::new(Arc::new(registry), model.clone())
             .await
             .map_err(|e| Error::FhirPath(format!("building FHIRPath engine: {e}")))?;
@@ -481,8 +482,8 @@ struct CompiledColumn {
 impl Evaluator {
     /// Normalize a FHIRPath path string for the engine: substitute view
     /// constants (`%name`) into the string, then rewrite `ofType()` over FHIR
-    /// choice elements (the engine, on an `EmptyModelProvider`, cannot map
-    /// `value.ofType(Quantity)` → `valueQuantity` itself).
+    /// choice elements (the engine cannot map `value.ofType(Quantity)` →
+    /// `valueQuantity` itself, see `rewrite_of_type`).
     ///
     /// `%` names that are not constants are left for the engine when they are
     /// FHIRPath environment variables or are bound by a `defineVariable()` in
@@ -1010,6 +1011,11 @@ fn value_to_json(v: &FhirPathValue) -> Value {
             }
         }
         FhirPathValue::Empty => Value::Null,
+        // The decimal's own digits: the engine writes every decimal through
+        // f64, so a decimal 5 (`2 + 3` over decimal elements) became `5.0`.
+        FhirPathValue::Decimal(d, ..) => {
+            serde_json::from_str(&d.to_string()).unwrap_or_else(|_| v.to_json_value())
+        }
         other => other.to_json_value(),
     }
 }
@@ -1132,16 +1138,18 @@ fn visit(node: &ExpressionNode, f: &mut impl FnMut(&ExpressionNode)) {
 /// Rewrite `element.ofType(T)`, where `T` is a FHIR datatype, to the JSON
 /// name a choice element has for that type: `value.ofType(Quantity)` →
 /// `valueQuantity`, `value.ofType(string)` → `valueString`. The type name is
-/// capitalized as the JSON name requires. The engine, on an
-/// `EmptyModelProvider`, cannot map choice elements itself.
+/// capitalized as the JSON name requires. The engine cannot map choice
+/// elements itself: the model types a choice element by its JSON name
+/// (`valueQuantity`), and `value` alone has no type (see `fhir_model`).
 ///
-/// `ofType` with a complex type on an element that is not a choice element
-/// (`name.ofType(HumanName)`) is left to the engine. With no FHIR model the
-/// element's parent is known only from the path: a type name before it
-/// (`Patient.name`), or `root`, the view's resource type, for the first step
-/// of a path evaluated on the resource. There the element must be a choice
-/// element of that type ([`choice_elements::of_type`]). Deeper in a path, or
-/// under `forEach`, it must be a choice element of some type
+/// `ofType` on an element that is not a choice element
+/// (`name.ofType(HumanName)`, `gender.ofType(code)`) is left to the engine,
+/// which knows the element's type from the model. Whether an element is a
+/// choice element is decided from what the path shows of its parent: a type
+/// name before it (`Patient.name`), or `root`, the view's resource type, for
+/// the first step of a path evaluated on the resource. There the element must
+/// be a choice element of that type ([`choice_elements::of_type`]). Deeper in
+/// a path, or under `forEach`, it must be a choice element of some type
 /// ([`choice_elements::anywhere`]), so `component.value.ofType(Quantity)`
 /// still works.
 ///
@@ -1168,12 +1176,10 @@ fn rewrite_of_type(path: &str, root: Option<&str>) -> String {
             && ty.kind == Kind::Ident
             && text(close) == ")"
             && is_fhir_datatype(text(ty))
-            // A complex type on an element that is not a choice element is
-            // left to the engine, which finds it (`name.ofType(HumanName)`).
-            // With a primitive type the rewrite stays: the engine, with no
-            // model, takes the element's name for its type and would match
-            // `code.ofType(code)` on a CodeableConcept.
-            && (text(ty).starts_with(|c: char| c.is_ascii_lowercase()) || is_choice(path, &sig, k, root))
+            // On an element that is not a choice element the engine, which
+            // knows the element's type from the model, answers it
+            // (`name.ofType(HumanName)`, `gender.ofType(code)`).
+            && is_choice(path, &sig, k, root)
         {
             let (element, ty_name) = (text(element), text(ty));
             out.push_str(&path[copied..sig[k].span.start]);
@@ -1912,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn of_type_with_a_complex_type_is_rewritten_only_on_choice_elements() {
+    fn of_type_is_rewritten_only_on_choice_elements() {
         for (path, root, want) in [
             // The parent is named in the path, or is the view's resource.
             (
@@ -1953,11 +1959,16 @@ mod tests {
                 None,
                 "contact.telecom.ofType(ContactPoint)",
             ),
-            // A primitive type is always rewritten (see rewrite_of_type).
+            // So is a primitive type: the engine answers from the model.
             (
                 "Observation.code.ofType(code)",
                 None,
-                "Observation.codeCode",
+                "Observation.code.ofType(code)",
+            ),
+            (
+                "Patient.gender.ofType(code)",
+                None,
+                "Patient.gender.ofType(code)",
             ),
         ] {
             assert_eq!(rewrite_of_type(path, root), want, "{path}");

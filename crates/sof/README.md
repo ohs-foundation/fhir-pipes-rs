@@ -72,29 +72,56 @@ for resource in &resources {
 `create_table` gives the `CREATE TABLE` for a view's generated columns in the
 ANSI, PostgreSQL or DuckDB dialect.
 
+## FHIR model
+
+The in-memory engine knows the type of each FHIR element from a table built
+into the crate (`src/fhir_types.rs`), generated from the R4 and R5 core
+StructureDefinitions by `examples/generate_fhir_types.rs`; the example's
+header says how to regenerate it. No FHIR package is loaded and nothing is
+fetched at run time. With the types, `is`, `as` and `ofType()` work on FHIR
+types: `Patient.active.is(boolean)`, `Patient.gender.ofType(code)`,
+`name.ofType(HumanName)`.
+
+The table is the union of R4 and R5, so a view runs unchanged on either:
+
+- an element in one version only is in the table;
+- an element whose type differs between the versions (`Account.description`
+  is a `string` in R4 and `markdown` in R5; 310 such elements) has no type,
+  and the engine navigates it as it would without a model;
+- elements the table does not have, such as those R6 adds, are navigated
+  the same way.
+
+Quantity elements (`Quantity`, `Age`, `Duration` and the rest) also have no
+type. The engine turns a typed Quantity into a value that keeps only its
+value, unit, code and system, and octofhir-fhirpath 0.4.56 also loses the code
+and system there (octofhir/fhirpath-rs#183). Untyped, a Quantity stays the
+resource's JSON, so `comparator`, `id` and extensions can still be read.
+
+A date, dateTime, instant or time element keeps its FHIR type name, so
+`issued.is(instant)` is true, but the engine holds it as a string. As a
+DateTime the engine would write it back in its own form (`…05Z` as
+`…05+00:00`); comparisons and boundaries read the string as a date.
+
 ## Known limitations
 
-The in-memory engine has no FHIR model, so it does not know an element's
-declared type or whether it is a choice element. `ofType(T)` with a FHIR
-datatype `T` reads the JSON name a choice element has for that type
-(`value.ofType(Quantity)` reads `valueQuantity`). On an element that is not a
-choice element that name does not exist, so the result is empty even when the
-type is right: `name.family.ofType(string)` and `name.ofType(HumanName)` find
-nothing. It never returns a value of another type, so a `where` filter using
-it does not let wrong rows through. (The FHIRPath engine's own `ofType` is
-not used there: without a model it compares the type with the element's name,
-so `code.ofType(code)` on a CodeableConcept matches, and it fails on most
-complex types.)
+`ofType(T)` with a FHIR datatype `T` on a choice element reads the JSON name
+the element has for that type (`value.ofType(Quantity)` reads
+`valueQuantity`): the engine cannot map `value` to its JSON names itself.
+Whether an element is a choice element is decided from the path. A type name
+before it (`Observation.value`), or the view's resource for the first step,
+says exactly; deeper in a path any choice element of that name counts, so
+`contact.name.ofType(HumanName)` reads `contact.nameHumanName`, a name that
+does not exist, and finds nothing (`name[x]` is a choice element of
+`ImplementationGuide.definition.page`).
 
 `ofType` with a resource type (`contained.ofType(Practitioner)`) is left to
 the engine and filters by `resourceType`.
 
 ## FHIR versions
 
-Execution does not depend on the FHIR version: the engine navigates the
-resource JSON and uses no StructureDefinition, so the same view runs
-unchanged over R4, R4B, R5 or R6 resources (the suite includes an R5
-`CodeableReference` case).
+The engine navigates the resource JSON, and its FHIR model is the union of R4
+and R5 (see above), so the same view runs unchanged over R4, R4B, R5 or R6
+resources (the suite includes an R5 `CodeableReference` case).
 
 ## Conformance
 
@@ -118,29 +145,29 @@ format of the sql-on-fhir.org registry; see [CONFORMANCE.md](CONFORMANCE.md).
 
 `tests/fhirpath_hl7.rs` runs the official HL7 FHIRPath test suite for R4
 (`tests/fhirpath/`, from FHIR/fhir-test-cases) through the in-memory evaluator,
-each expression as a ViewDefinition column. fhir-pipes passes 936 of the 1,001
-tests. The 65 it fails are listed, with the reason each fails, in
+each expression as a ViewDefinition column. fhir-pipes passes 962 of the 1,001
+tests. The 39 it fails are listed, with the reason each fails, in
 `tests/fhirpath/known-failures.json`, and the test fails if that list goes out
-of date in either direction. Of the 65:
+of date in either direction. Of the 39:
 
-- 27 need a FHIR model: type tests on FHIR types (`Patient.active.is(boolean)`,
-  `Observation.value is Quantity`) and unit comparisons on choice elements.
-  They pass in octofhir-fhirpath with its R4 model, which fhir-pipes does not
-  load (it uses `EmptyModelProvider`, so views run on any FHIR version);
-- 21 expect a type error before evaluation, which needs a model and a type
-  checker;
-- 16 are octofhir-fhirpath bugs or gaps. Fixes for 9 of them are open upstream
-  (octofhir/fhirpath-rs#176, #177, #178, #179): `is`/`as` precedence, `hasValue()`
-  on complex types, date and time boundaries, and type tests on a date-only
-  dateTime. With them, one test that passes today only because of the
-  precedence bug (`isGuardAndBad`, which expects a type error) fails, so the
-  total goes to 944. The other 7 are Quantity unit arithmetic (1), `conformsTo()`
-  (3), `as()` with a date or time type (1), `as()` over several items, which
+- 22 expect a type error before evaluation, which needs a type checker. One of
+  them, `testPolymorphismAsB`, passed without the FHIR model only because the
+  expression failed; kotlin-fhirpath records it as a test the specification
+  does not support;
+- 16 are octofhir-fhirpath bugs or gaps. Fixes for 9 of them are open or
+  unreleased upstream (octofhir/fhirpath-rs#176, #177, #179): `is`/`as`
+  precedence, `hasValue()` on complex types, and a date-only dateTime. With
+  them, one test that passes today only because of the precedence bug
+  (`isGuardAndBad`, which expects a type error) fails, so the total goes to
+  970. The other 7 are Quantity unit arithmetic (1), `conformsTo()` (3),
+  `as()` with a date or time type (1), `as()` over several items, which
   octofhir allows on purpose for FHIR's own invariants (1), and
   `@1973-12-25T00:00:00.000+10:00 + 0.1 's'`, which other engines fail too (1);
-- 1 is fhir-pipes' own, by choice: `1.toDecimal().lowBoundary()`. A decimal's
-  boundary uses the digits of its JSON form, because a resource's `1.0` reaches
-  the engine as `1`; the engine also holds `1.toDecimal()` as `1.0`.
+- 1 is fhir-pipes' own: `1.toDecimal().lowBoundary()`. A decimal's boundary
+  uses the digits of its JSON form, because a resource's `1.0` reaches the
+  engine as `1`; the engine also holds `1.toDecimal()` as `1.0`. With
+  octofhir/fhirpath-rs#182 the engine keeps a decimal's digits and this can
+  go.
 
 `tests/fhirpath/SOURCE.md` says where the data comes from and how to refresh it.
 
