@@ -346,20 +346,19 @@ fn upsert_loads(
     Ok((loads, last))
 }
 
-/// After an upsert's commit: the change log now starts from this load. With
+/// After an upsert's commit: the change log now starts from this load, and
+/// is no longer running. With
 /// the views step in this run, what it listed is in the database, and each
 /// table is recorded with what it was built from. Without it the Parquet may
 /// be older than the log, so the ids are kept and no table is recorded, and
 /// the next load is in full.
 fn record_load(s: &Settings, mark: &str, plans: &[Plan], built: Option<&Built>) -> Result<()> {
     let raw = s.raw_dir();
-    let mut c = match Changes::read(&raw) {
-        Ok(Some(c)) => c,
-        _ => Changes {
-            running: true,
-            ..Changes::default()
-        },
-    };
+    let mut c = Changes::read(&raw).ok().flatten().unwrap_or_default();
+    // The log now matches the database. What is left of the run (publish,
+    // hooks, push) writes neither, so a failure there need not make the
+    // next load a full one.
+    c.running = false;
     c.load = Some(mark.to_string());
     match built {
         Some(built) => {
@@ -475,11 +474,18 @@ async fn write(
         .execute(&mut *tx)
         .await
         .context("waiting for another load into this schema")?;
-    exec(
-        &mut tx,
-        &format!("CREATE SCHEMA IF NOT EXISTS {}", ident(schema)),
-    )
-    .await?;
+    // Made only when missing: PostgreSQL checks the database's CREATE
+    // privilege before IF NOT EXISTS, so a role with only table privileges
+    // could not run it even for an existing schema.
+    let exists: Option<i32> =
+        sqlx_core::query_scalar::query_scalar("SELECT 1 FROM pg_namespace WHERE nspname = $1")
+            .bind(schema)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("looking the schema up")?;
+    if exists.is_none() {
+        exec(&mut tx, &format!("CREATE SCHEMA {}", ident(schema))).await?;
+    }
     let name = |p: &Plan| format!("{}.{}", ident(schema), ident(&p.table));
     let loads_table = format!("{}.{}", ident(schema), ident(LOADS));
     // Upsert's records table; a relation of its name that is not it is
