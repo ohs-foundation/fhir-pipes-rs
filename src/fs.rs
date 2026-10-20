@@ -5,7 +5,7 @@
 //! the rename survives a crash right after it. A temporary file that is not
 //! renamed into place is removed when the `AtomicFile` is dropped.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -73,6 +73,22 @@ pub fn read_state<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Opening options for a file only its owner can read, on Unix (0600 when
+/// the file is created). Elsewhere, the defaults.
+fn private() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+}
+
+/// Creates or truncates `path` as `File::create` does, readable only by its
+/// owner on Unix when it is created: for exported FHIR resources, which can
+/// be patient data.
+pub fn create_private(path: &Path) -> std::io::Result<File> {
+    private().write(true).create(true).truncate(true).open(path)
+}
+
 /// A file being written to a temporary path and renamed to its target by
 /// `commit`. It writes unbuffered; wrap it in a `BufWriter` for many small
 /// writes.
@@ -94,9 +110,32 @@ impl AtomicFile {
     }
 
     /// Creates the temporary file at `tmp`, which must be on the same
-    /// filesystem as `path` (in practice: in the same directory).
+    /// filesystem as `path` (in practice: in the same directory). One left
+    /// by an earlier run is removed first and a new file made, so a symlink
+    /// at `tmp` is removed rather than written through.
     pub fn create_at(path: &Path, tmp: PathBuf) -> Result<Self> {
-        let file = File::create(&tmp).map_err(|e| PipesError::io(&tmp, e))?;
+        Self::create_with(path, tmp, OpenOptions::new())
+    }
+
+    /// `create_at`, readable only by its owner on Unix: for exported FHIR
+    /// resources, which can be patient data.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    pub fn create_private_at(path: &Path, tmp: PathBuf) -> Result<Self> {
+        Self::create_with(path, tmp, private())
+    }
+
+    fn create_with(path: &Path, tmp: PathBuf, mut options: OpenOptions) -> Result<Self> {
+        match std::fs::remove_file(&tmp) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(PipesError::io(&tmp, e));
+            }
+            _ => {}
+        }
+        let file = options
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| PipesError::io(&tmp, e))?;
         Ok(Self::with_file(path, tmp, file))
     }
 
@@ -249,6 +288,37 @@ impl Drop for AtomicFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_temporary_path_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("other.txt");
+        std::fs::write(&target, "keep").unwrap();
+        let out = dir.path().join("out.txt");
+        std::os::unix::fs::symlink(&target, dir.path().join("out.txt.tmp")).unwrap();
+        atomic_write(&out, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_readable_by_their_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.ndjson");
+        create_private(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let out = dir.path().join("q.ndjson");
+        AtomicFile::create_private_at(&out, dir.path().join("q.tmp"))
+            .unwrap()
+            .commit()
+            .unwrap();
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     #[test]
     fn atomic_write_replaces_the_file_and_leaves_no_tmp() {

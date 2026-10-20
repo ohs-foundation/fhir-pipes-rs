@@ -2342,3 +2342,14 @@ fn a_breakdown_with_items_and_shared_output_files_are_usage_errors() {
     let e = run(&["--report", "./r.ndjson"]);
     assert!(e.contains("is the same file as --out"), "{e}");
 }
+
+#[test]
+fn a_uid_flag_that_is_not_a_uid_is_refused_before_any_request() {
+    let a = fhir_pipes()
+        .args(["dhis2", "measures", "--dhis2", "https://dhis2.invalid"])
+        .args(["--instance", "sl-demo", "--indicator", "a],b"])
+        .args(["--out", "m.ndjson"])
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("is not a DHIS2 UID"), "{}", stderr(&a));
+}

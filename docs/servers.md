@@ -32,6 +32,10 @@ plain `http://` to another machine gets a warning. URLs of Bulk Data output
 files are printed and reported without their query, which for signed storage
 URLs is the signature.
 
+The files `export` and `extract` write the resources into are readable only
+by their owner on Unix (mode 0600), since they can hold patient data. Copy
+or share them on purpose.
+
 The window limits are targets, not guarantees. The windows' counts
 must add up to the type's before any halving, and past the usual number of
 windows (eight per `--concurrency`), halving stops at a window whose halves

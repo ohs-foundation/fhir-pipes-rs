@@ -87,7 +87,7 @@ impl SyncState {
     /// The synced copy of `resource_type` at `url`, empty when there is none.
     pub fn synced(&self, root: &Path, url: &str, resource_type: &str) -> Result<Synced> {
         match self.sink(url) {
-            Some(sink) => read_synced(&synced_path(root, &sink.dir, resource_type)),
+            Some(sink) => read_synced(&synced_path(root, &sink.dir, resource_type)?),
             None => Ok(Synced::new()),
         }
     }
@@ -121,14 +121,26 @@ impl SyncState {
             .find(|(u, _)| same_server(u, &key))
             .map(|(_, s)| s)
             .expect("added above");
-        write_synced(&synced_path(root, &sink.dir, resource_type), synced)?;
+        write_synced(&synced_path(root, &sink.dir, resource_type)?, synced)?;
         sink.types.insert(resource_type.to_string(), summary);
         self.write(root)
     }
 }
 
-fn synced_path(root: &Path, dir: &str, resource_type: &str) -> PathBuf {
-    root.join(dir).join(format!("{resource_type}.tsv"))
+/// Where a sink's copy of a type is kept. `dir` comes from the state file,
+/// so only a name `save` gives (`.sync/<n>`) is used: any other could put
+/// the file outside the sync directory.
+fn synced_path(root: &Path, dir: &str, resource_type: &str) -> Result<PathBuf> {
+    let ours = dir
+        .strip_prefix(&format!("{SYNC_DIR}/"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if !ours {
+        return Err(PipesError::Usage(format!(
+            "{}: the state names {dir:?} for a server's copy; expected {SYNC_DIR}/<n>",
+            root.join(STATE_FILE).display()
+        )));
+    }
+    Ok(root.join(dir).join(format!("{resource_type}.tsv")))
 }
 
 fn read_synced(path: &Path) -> Result<Synced> {
@@ -143,9 +155,13 @@ fn read_synced(path: &Path) -> Result<Synced> {
         if line.is_empty() {
             continue;
         }
-        let Some((id, updated)) = line.split_once('\t') else {
+        // The id goes into DELETE and PUT URLs: only a FHIR id.
+        let Some((id, updated)) = line
+            .split_once('\t')
+            .filter(|(id, _)| crate::fhir::group::is_valid_id(id))
+        else {
             return Err(PipesError::Usage(format!(
-                "{}: line {}: not <id><tab><lastUpdated>",
+                "{}: line {}: not <id><tab><lastUpdated> with a FHIR id",
                 path.display(),
                 n + 1
             )));
@@ -210,6 +226,27 @@ mod tests {
         );
         assert!(root.join(".sync/1/Patient.tsv").is_file());
         assert!(root.join(".sync/2/Patient.tsv").is_file());
+    }
+
+    #[test]
+    fn a_state_file_naming_another_directory_or_bad_ids_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = SyncState::read(root).unwrap();
+        let a: Synced = [("p1".to_string(), String::new())].into();
+        state
+            .save(root, "http://a/fhir", "Patient", &a, summary(1))
+            .unwrap();
+        std::fs::write(root.join(".sync/1/Patient.tsv"), "x?identifier=y\t\n").unwrap();
+        let state = SyncState::read(root).unwrap();
+        let err = state.synced(root, "http://a/fhir", "Patient").unwrap_err();
+        assert!(err.to_string().contains("FHIR id"), "{err}");
+
+        let text = std::fs::read_to_string(root.join(STATE_FILE)).unwrap();
+        std::fs::write(root.join(STATE_FILE), text.replace(".sync/1", "../..")).unwrap();
+        let state = SyncState::read(root).unwrap();
+        let err = state.synced(root, "http://a/fhir", "Patient").unwrap_err();
+        assert!(err.to_string().contains("expected .sync/<n>"), "{err}");
     }
 
     #[test]

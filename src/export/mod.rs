@@ -1061,7 +1061,7 @@ fn download_part(
     timeout: Duration,
     part: &Path,
 ) -> Result<(Vec<PageNote>, Report)> {
-    let file = std::fs::File::create(part).map_err(|e| PipesError::io(part, e))?;
+    let file = crate::fs::create_private(part).map_err(|e| PipesError::io(part, e))?;
     let mut out = std::io::BufWriter::new(file);
     let mut notes = Vec::new();
     let mut report = Report::default();

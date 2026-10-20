@@ -84,13 +84,10 @@ struct Outcome {
     error: Option<String>,
 }
 
-/// A FHIR id: 1 to 64 letters, digits, `-` and `.`. It goes into a URL and
-/// the state file, so nothing else is accepted.
+/// A FHIR id. It goes into a URL and the state file, so nothing else is
+/// accepted.
 fn valid_id(id: &str) -> bool {
-    (1..=64).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    crate::fhir::group::is_valid_id(id)
 }
 
 /// Drop `meta.versionId` and `meta.lastUpdated`, and `meta` when nothing

@@ -204,6 +204,21 @@ pub struct Dhis2Conn {
     pub timeout: u64,
 }
 
+/// A DHIS2 UID (11 letters and digits, the first a letter), for the flags
+/// that name one: it goes into URL paths and `id:in:[…]` filters, where
+/// `,`, `]` or `/` would change the request.
+fn parse_uid(s: &str) -> std::result::Result<String, String> {
+    let uid = s.trim();
+    let shaped = uid.len() == 11
+        && uid.starts_with(|c: char| c.is_ascii_alphabetic())
+        && uid.bytes().all(|b| b.is_ascii_alphanumeric());
+    if shaped {
+        Ok(uid.to_string())
+    } else {
+        Err(format!("{s:?} is not a DHIS2 UID (11 letters and digits)"))
+    }
+}
+
 #[derive(clap::Args, Debug, Clone)]
 pub struct Dhis2LocationsArgs {
     #[command(flatten)]
@@ -218,13 +233,13 @@ pub struct Dhis2LocationsArgs {
     #[arg(long)]
     pub facility_level: Option<u32>,
     /// Only this org unit and everything below it
-    #[arg(long)]
+    #[arg(long, value_parser = parse_uid)]
     pub root: Option<String>,
     /// Org unit group set UID, repeatable (e.g. Facility Type): each org unit's group in the set is added to its Location's type (and its Organization's, for facilities), coded like a --breakdown on the same set
-    #[arg(long = "group-set")]
+    #[arg(long = "group-set", value_parser = parse_uid)]
     pub group_sets: Vec<String>,
     /// Org unit group UID, repeatable (e.g. the group of all districts): each member's Location (and Organization) gets the group in its type. A group in a group set is coded as --group-set codes it; a group in no set under …/CodeSystem/dhis2/INSTANCE/org-unit-group
-    #[arg(long = "org-unit-group")]
+    #[arg(long = "org-unit-group", value_parser = parse_uid)]
     pub org_unit_groups: Vec<String>,
     /// Every org unit group, as --org-unit-group
     #[arg(long, conflicts_with = "org_unit_groups")]
@@ -242,22 +257,22 @@ pub struct Dhis2LocationsArgs {
 #[group(required = true, multiple = true)]
 pub struct IndicatorSelection {
     /// Indicator group UID, repeatable
-    #[arg(long = "indicator-group")]
+    #[arg(long = "indicator-group", value_parser = parse_uid)]
     pub groups: Vec<String>,
     /// Indicator UID, repeatable
-    #[arg(long = "indicator")]
+    #[arg(long = "indicator", value_parser = parse_uid)]
     pub indicators: Vec<String>,
     /// Data element group UID, repeatable: each aggregate data element's total becomes a count
-    #[arg(long = "data-element-group")]
+    #[arg(long = "data-element-group", value_parser = parse_uid)]
     pub data_element_groups: Vec<String>,
     /// Data element UID, repeatable
-    #[arg(long = "data-element")]
+    #[arg(long = "data-element", value_parser = parse_uid)]
     pub data_elements: Vec<String>,
     /// Data element group set UID, repeatable: every data element in every group of the set
-    #[arg(long = "data-element-group-set")]
+    #[arg(long = "data-element-group-set", value_parser = parse_uid)]
     pub data_element_group_sets: Vec<String>,
     /// Data set UID, repeatable: its reporting rate (actual ÷ expected reports)
-    #[arg(long = "data-set")]
+    #[arg(long = "data-set", value_parser = parse_uid)]
     pub data_sets: Vec<String>,
 }
 
@@ -298,7 +313,7 @@ pub struct Dhis2ReportsArgs {
     pub levels: Vec<u32>,
     /// Only org units at or below this one: each level is asked for as LEVEL-n;ROOT. Needed when
     /// the user can see top-level org units outside the tree being reported on
-    #[arg(long)]
+    #[arg(long, value_parser = parse_uid)]
     pub root: Option<String>,
     /// Also break every value down by this DHIS2 dimension, repeatable: a category (e.g. Fixed/Outreach), an org unit group set (e.g. Facility Type) or a data element group set. Each becomes a stratifier on the report; DHIS2 leaves out items the dimension does not apply to
     #[arg(long = "breakdown")]
