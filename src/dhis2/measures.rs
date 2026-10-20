@@ -396,6 +396,12 @@ const DATA_ELEMENTS: Source = Source {
     parse: Indicator::from_data_element,
 };
 
+/// For data elements, the filter that keeps aggregate ones: a tracker data
+/// element has no aggregate value to report.
+fn aggregate_only(src: &Source) -> Option<(&'static str, String)> {
+    (src.key == "dataElements").then(|| ("filter", "domainType:eq:AGGREGATE".to_string()))
+}
+
 fn fetch_source(
     api: &Dhis2,
     src: &Source,
@@ -448,30 +454,30 @@ fn fetch_source(
             ("fields", src.fields.to_string()),
             ("filter", in_filter(src.group_field, groups)),
         ];
-        if src.key == "dataElements" {
-            // Tracker data elements have no aggregate value to report.
-            query.push(("filter", "domainType:eq:AGGREGATE".into()));
-        }
+        query.extend(aggregate_only(src));
         add(&api.get(src.endpoint, &query)?);
     }
     if !ids.is_empty() {
-        add(&api.get(
-            src.endpoint,
-            &[
-                ("paging", "false".into()),
-                ("fields", src.fields.into()),
-                ("filter", in_filter("id", ids)),
-            ],
-        )?);
+        let mut query = vec![
+            ("paging", "false".to_string()),
+            ("fields", src.fields.to_string()),
+            ("filter", in_filter("id", ids)),
+        ];
+        query.extend(aggregate_only(src));
+        add(&api.get(src.endpoint, &query)?);
         let missing: Vec<&str> = ids
             .iter()
             .map(String::as_str)
             .filter(|i| !found.contains_key(*i))
             .collect();
         if !missing.is_empty() {
+            let what = if aggregate_only(src).is_some() {
+                format!("aggregate {}", src.what)
+            } else {
+                src.what.to_string()
+            };
             return Err(PipesError::Usage(format!(
-                "DHIS2 has no {} {}",
-                src.what,
+                "DHIS2 has no {what} {}",
                 missing.join(", ")
             )));
         }

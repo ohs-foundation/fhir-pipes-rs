@@ -39,6 +39,10 @@ use super::measures::{Indicator, Kind};
 use super::reports::{Analytics, AnalyticsRow, DateRange};
 use crate::error::{PipesError, Result};
 use crate::extract::client::FetchError;
+
+/// Root org units in one `dataValueSets` request: 100 `orgUnit=` parameters
+/// are about 2 KB of URL.
+const ROOTS_PER_REQUEST: usize = 100;
 use crate::fhir::ndjson::NdjsonReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,43 @@ impl Span {
 /// A batch computed: the totals table, one table per breakdown, and the
 /// issues met as (kind, key, detail).
 pub type Computed = (Analytics, Vec<Analytics>, Vec<(String, String, String)>);
+
+#[derive(serde::Deserialize)]
+struct DataValueSet {
+    #[serde(default, rename = "dataValues")]
+    data_values: Vec<DataValue>,
+}
+
+/// One data value, as `dataValueSets` gives it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataValue {
+    #[serde(default)]
+    data_element: String,
+    #[serde(default)]
+    period: String,
+    #[serde(default)]
+    org_unit: String,
+    #[serde(default)]
+    category_option_combo: String,
+    #[serde(default)]
+    attribute_option_combo: String,
+    /// Text in DHIS2's JSON; a number is taken as well.
+    #[serde(default)]
+    value: Value,
+    #[serde(default)]
+    deleted: bool,
+}
+
+impl DataValue {
+    fn value_text(&self) -> String {
+        match &self.value {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    }
+}
 
 /// Everything the computation needs, read once before the batches.
 #[derive(Debug, Default)]
@@ -369,8 +410,10 @@ impl RawSource {
         for ou in parents.keys() {
             let mut chain = Vec::new();
             let mut cur = Some(ou.clone());
-            // A partOf cycle cannot be deeper than the file.
-            while let Some(c) = cur.filter(|_| chain.len() <= parents.len()) {
+            // A partOf cycle ends the walk where it comes back round, so no
+            // org unit is counted twice and the walk ends.
+            let mut seen = HashSet::new();
+            while let Some(c) = cur.filter(|c| seen.insert(c.clone())) {
                 if let Some(&l) = at.get(c.as_str()) {
                     chain.push((l, c.clone()));
                 }
@@ -404,13 +447,37 @@ impl RawSource {
         set.into_iter().collect()
     }
 
-    fn query(&self, des: &[String], start: i64, end: i64) -> Vec<(&'static str, String)> {
-        let mut q: Vec<(&str, String)> = des.iter().map(|d| ("dataElement", d.clone())).collect();
-        q.extend(self.roots.iter().map(|r| ("orgUnit", r.clone())));
-        q.push(("children", "true".into()));
-        q.push(("startDate", iso(start)));
-        q.push(("endDate", iso(end)));
-        q
+    /// One `dataValueSets` query per chunk of root org units: without
+    /// `--root` the roots are every org unit at the top requested level,
+    /// which in one URL can pass a server's 8 KB limit. The roots are at one
+    /// level, so their subtrees do not overlap and no value comes twice.
+    fn queries(&self, des: &[String], start: i64, end: i64) -> Vec<Vec<(&'static str, String)>> {
+        self.roots
+            .chunks(ROOTS_PER_REQUEST)
+            .map(|roots| {
+                let mut q: Vec<(&str, String)> =
+                    des.iter().map(|d| ("dataElement", d.clone())).collect();
+                q.extend(roots.iter().map(|r| ("orgUnit", r.clone())));
+                q.push(("children", "true".into()));
+                q.push(("startDate", iso(start)));
+                q.push(("endDate", iso(end)));
+                q
+            })
+            .collect()
+    }
+
+    /// The `dataValues` of every query's response, each read straight into
+    /// the fields used: a national response holds millions.
+    fn data_values(
+        api: &Dhis2,
+        queries: Vec<Vec<(&'static str, String)>>,
+    ) -> Result<Vec<DataValue>> {
+        let mut out = Vec::new();
+        for q in queries {
+            let set: DataValueSet = api.get_as("dataValueSets.json", &q)?;
+            out.extend(set.data_values);
+        }
+        Ok(out)
     }
 
     /// The targets (periods or ranges) any value of `des` changed in since
@@ -428,22 +495,14 @@ impl RawSource {
         ) else {
             return Ok(HashSet::new());
         };
-        let mut q = self.query(des, start, end);
-        q.push(("lastUpdated", since.to_string()));
-        q.push(("includeDeleted", "true".into()));
-        let v = api.get("dataValueSets.json", &q)?;
+        let mut queries = self.queries(des, start, end);
+        for q in &mut queries {
+            q.push(("lastUpdated", since.to_string()));
+            q.push(("includeDeleted", "true".into()));
+        }
         let mut out = HashSet::new();
-        for dv in v
-            .get("dataValues")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some((s, e)) = dv
-                .get("period")
-                .and_then(Value::as_str)
-                .and_then(period_days)
-            else {
+        for dv in &Self::data_values(api, queries)? {
+            let Some((s, e)) = period_days(&dv.period) else {
                 continue;
             };
             for t in targets {
@@ -464,7 +523,7 @@ impl RawSource {
         let mut issues = Vec::new();
         let start = targets.iter().map(|t| t.start).min().unwrap_or(0);
         let end = targets.iter().map(|t| t.end).max().unwrap_or(0);
-        let v = api.get("dataValueSets.json", &self.query(&des, start, end))?;
+        let values = Self::data_values(api, self.queries(&des, start, end))?;
 
         // (target, org unit, de, coc, aoc) → (sum, count)
         type Key = (usize, String, String, String, String);
@@ -475,22 +534,15 @@ impl RawSource {
                 issues.push((kind.to_string(), key.to_string(), detail));
             }
         };
-        for dv in v
-            .get("dataValues")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let s = |k: &str| dv.get(k).and_then(Value::as_str).unwrap_or_default();
-            if dv.get("deleted").and_then(Value::as_bool) == Some(true)
-                || !self.elements.contains_key(s("dataElement"))
-            {
+        for dv in &values {
+            let value = dv.value_text();
+            if dv.deleted || !self.elements.contains_key(&dv.data_element) {
                 continue;
             }
-            let Some((ps, pe)) = period_days(s("period")) else {
+            let Some((ps, pe)) = period_days(&dv.period) else {
                 note(
                     "unsupported_period",
-                    s("period"),
+                    &dv.period,
                     "a data value's period type has no dates here; value left out".into(),
                 );
                 continue;
@@ -499,35 +551,35 @@ impl RawSource {
                 if targets.iter().any(|t| ps <= t.end && t.start <= pe) {
                     note(
                         "straddling_period",
-                        s("period"),
+                        &dv.period,
                         "a data value's period runs across the edge of a reported period; left out of both".into(),
                     );
                 }
                 continue;
             };
-            if !self.up.contains_key(s("orgUnit")) {
+            if !self.up.contains_key(&dv.org_unit) {
                 note(
                     "unmapped_org_unit",
-                    s("orgUnit"),
+                    &dv.org_unit,
                     "no Location carries this org unit (or it is not under a reported level); its values are skipped".into(),
                 );
                 continue;
             }
-            let Ok(x) = s("value").trim().parse::<f64>() else {
+            let Ok(x) = value.trim().parse::<f64>() else {
                 note(
                     "non_numeric_value",
-                    &format!("{}/{}/{}", s("dataElement"), s("orgUnit"), s("period")),
-                    format!("value {:?} is not a number; left out", s("value")),
+                    &format!("{}/{}/{}", dv.data_element, dv.org_unit, dv.period),
+                    format!("value {:?} is not a number; left out", value),
                 );
                 continue;
             };
             let e = raw
                 .entry((
                     t,
-                    s("orgUnit").to_string(),
-                    s("dataElement").to_string(),
-                    s("categoryOptionCombo").to_string(),
-                    s("attributeOptionCombo").to_string(),
+                    dv.org_unit.clone(),
+                    dv.data_element.clone(),
+                    dv.category_option_combo.clone(),
+                    dv.attribute_option_combo.clone(),
                 ))
                 .or_insert((0.0, 0));
             e.0 += x;
@@ -692,6 +744,45 @@ fn number(x: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_part_of_cycle_ends_the_walk_and_counts_each_unit_once() {
+        let parents: HashMap<String, Option<String>> = [
+            ("a", Some("b")),
+            ("b", Some("a")),
+            ("c", Some("d")),
+            ("d", Some("c")),
+        ]
+        .into_iter()
+        .map(|(o, p)| (o.to_string(), p.map(str::to_string)))
+        .collect();
+        let mut src = RawSource::default();
+        // c is at the requested level; a and b's cycle has none.
+        src.place(&parents, &[(2, vec!["c".into()])], None);
+        assert_eq!(src.up.get("d"), Some(&vec![(2, "c".to_string())]));
+        assert_eq!(src.up.get("c"), Some(&vec![(2, "c".to_string())]));
+        assert!(!src.up.contains_key("a"));
+    }
+
+    #[test]
+    fn many_roots_are_asked_for_in_chunks() {
+        let src = RawSource {
+            roots: (0..250).map(|i| format!("ou{i}")).collect(),
+            ..Default::default()
+        };
+        let queries = src.queries(&["de".into()], 0, 30);
+        assert_eq!(queries.len(), 3);
+        let roots = |q: &Vec<(&str, String)>| q.iter().filter(|(k, _)| *k == "orgUnit").count();
+        assert_eq!(
+            queries.iter().map(roots).collect::<Vec<_>>(),
+            [100, 100, 50]
+        );
+        assert!(
+            queries
+                .iter()
+                .all(|q| q.contains(&("dataElement", "de".into())))
+        );
+    }
 
     #[test]
     fn numbers_read_like_analytics() {
