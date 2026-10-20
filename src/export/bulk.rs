@@ -447,7 +447,9 @@ pub fn read_lines(
     if let Some(e) = failed {
         return Err(e);
     }
-    got.map_err(|e| PipesError::Environment(format!("downloading {url}: {e}")))
+    got.map_err(|e| {
+        PipesError::Environment(format!("downloading {}: {e}", crate::redact::url(url)))
+    })
 }
 
 /// The type and id a `deleted` Bundle entry removes: its `request.url`,

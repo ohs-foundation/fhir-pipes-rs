@@ -422,7 +422,11 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
             println!("input:      {}: {found}", input.display());
         }
     } else {
-        println!("server:     {} (raw/{})", s.server, s.server_name);
+        println!(
+            "server:     {} (raw/{})",
+            crate::redact::url(&s.server),
+            s.server_name
+        );
         println!("kind:       {}", s.server_kind.name());
         println!("auth:       {}", s.auth_description());
         match s.fetch {

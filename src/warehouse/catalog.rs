@@ -152,7 +152,12 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
     // so its error output is the failure signal.
     let err = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() || !err.trim().is_empty() {
-        bail!("building {DUCKDB_FILE} with duckdb: {}", err.trim());
+        // The setup SQL can hold keys (CREATE SECRET), which duckdb's
+        // errors can quote.
+        bail!(
+            "building {DUCKDB_FILE} with duckdb: {}",
+            crate::redact::sql_strings(err.trim(), &setup)
+        );
     }
     if wal(&tmp).exists() {
         bail!("duckdb left {} behind", wal(&tmp).display());

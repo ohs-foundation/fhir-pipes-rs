@@ -64,8 +64,18 @@ pub fn server_url(server: &str) -> String {
     }
 }
 
-/// `server_url` as a clap value parser, for `--server`.
+/// `server_url` as a clap value parser, for `--server`. A user name or
+/// password in the URL is refused: request URLs are built from it, and
+/// errors and reports print them.
 pub fn parse_server(server: &str) -> std::result::Result<String, String> {
+    if url::Url::parse(server).is_ok_and(|u| !u.username().is_empty() || u.password().is_some()) {
+        return Err(
+            "the URL has a user name or password, which would be printed wherever the URL \
+             is; give them with --username and --password (FHIR_PIPES_USERNAME and \
+             FHIR_PIPES_PASSWORD) instead"
+                .into(),
+        );
+    }
     Ok(server_url(server))
 }
 
@@ -387,6 +397,15 @@ pub(crate) mod tests {
         assert_eq!(
             server_url("projects/example.com:p1/locations/l/datasets/d/fhirStores/s/"),
             "https://healthcare.googleapis.com/v1/projects/example.com:p1/locations/l/datasets/d/fhirStores/s/fhir"
+        );
+        assert!(
+            parse_server("https://u:p@h.org/fhir")
+                .unwrap_err()
+                .contains("--username")
+        );
+        assert_eq!(
+            parse_server("https://h.org/fhir").unwrap(),
+            "https://h.org/fhir"
         );
         for unchanged in [
             "http://localhost:8080/fhir",

@@ -25,6 +25,13 @@ them. A Bulk Data output file gets them wherever it is when the manifest says
 usually means the server does not know its public URL; behind a proxy, HAPI
 needs `X-Forwarded-Host` and `X-Forwarded-Proto`.
 
+`--server` (and `server.base` in `refresh`) cannot carry a user name or
+password: request URLs are built from it, and errors and reports print them.
+Use `--username` and `--password` instead. With credentials, a `--server` on
+plain `http://` to another machine gets a warning. URLs of Bulk Data output
+files are printed and reported without their query, which for signed storage
+URLs is the signature.
+
 The window limits are targets, not guarantees. The windows' counts
 must add up to the type's before any halving, and past the usual number of
 windows (eight per `--concurrency`), halving stops at a window whose halves

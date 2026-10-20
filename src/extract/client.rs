@@ -253,6 +253,15 @@ impl std::fmt::Debug for Exchange {
 /// the first loses the rest without an error. Any other encoding is passed
 /// through as it came; the client only asks for gzip. An empty body is
 /// empty whatever its `Content-Encoding` says (a 202 from a server that
+/// Whether `host` is this machine, where plain http does not cross a network.
+fn is_this_machine(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// marks every response gzip), as reqwest's decoder treated it.
 fn decoded(resp: Response) -> Box<dyn Read> {
     use std::io::BufRead as _;
@@ -746,7 +755,15 @@ impl FhirClient {
     /// (a next link, a status URL) can name another host, which must not get
     /// the server's token. Without this, no request gets the credentials.
     pub fn for_server(mut self, server: &str) -> Self {
-        self.origin = url::Url::parse(server).ok().map(|u| u.origin());
+        let url = url::Url::parse(server).ok();
+        if let Some(u) = &url
+            && u.scheme() == "http"
+            && !matches!(self.auth, Authorizer::None)
+            && !u.host_str().is_some_and(is_this_machine)
+        {
+            eprintln!("warning: {server} is plain http; the credentials go to it unencrypted");
+        }
+        self.origin = url.map(|u| u.origin());
         self
     }
 
