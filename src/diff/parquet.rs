@@ -15,7 +15,7 @@ use parquet::file::metadata::KeyValue;
 use serde_json::Value;
 use wkb::reader::read_wkb;
 
-use crate::diff::input::{ID_COLUMN, InputRow, column_from_json, is_writable};
+use crate::diff::input::{ID_COLUMN, InputRow, column_from_json, is_writable, other_crs};
 use crate::error::{PipesError, Result};
 use crate::report::Report;
 use crate::write::schema::GEOMETRY_COLUMN;
@@ -31,10 +31,20 @@ where
     let file = File::open(path).map_err(|e| PipesError::io(path, e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| PipesError::parquet_at(path, e))?;
-    let geometry_column = geometry_column_name(
-        builder.metadata().file_metadata().key_value_metadata(),
-        builder.schema(),
-    );
+    let kv = builder.metadata().file_metadata().key_value_metadata();
+    let geometry_column = geometry_column_name(kv, builder.schema());
+    if let Some(column) = &geometry_column
+        && let Some(crs) = geo_metadata(kv)
+            .and_then(|g| g["columns"][column.as_str()].get("crs").cloned())
+            .as_ref()
+            .and_then(other_crs)
+    {
+        return Err(PipesError::Usage(format!(
+            "{}: the geometry is in {crs}, not WGS 84 longitude/latitude (OGC:CRS84 or \
+             EPSG:4326); reproject it first, for example with `ogr2ogr -t_srs EPSG:4326`",
+            path.display()
+        )));
+    }
     let reader = builder
         .with_batch_size(BATCH_ROWS)
         .build()
@@ -55,13 +65,17 @@ where
 /// without it may still have a column called `geometry`. `None` means an
 /// attribute-only edit.
 pub fn geometry_column_name(kv: Option<&Vec<KeyValue>>, schema: &Schema) -> Option<String> {
-    let from_meta = kv
-        .and_then(|kv| kv.iter().find(|k| k.key == "geo"))
-        .and_then(|k| k.value.as_deref())
-        .and_then(|v| serde_json::from_str::<Value>(v).ok())
-        .and_then(|g| g.get("primary_column")?.as_str().map(str::to_string));
+    let from_meta =
+        geo_metadata(kv).and_then(|g| g.get("primary_column")?.as_str().map(str::to_string));
     let name = from_meta.unwrap_or_else(|| GEOMETRY_COLUMN.to_string());
     schema.column_with_name(&name).map(|_| name)
+}
+
+/// The GeoParquet `geo` file metadata, parsed.
+fn geo_metadata(kv: Option<&Vec<KeyValue>>) -> Option<Value> {
+    kv.and_then(|kv| kv.iter().find(|k| k.key == "geo"))
+        .and_then(|k| k.value.as_deref())
+        .and_then(|v| serde_json::from_str::<Value>(v).ok())
 }
 
 fn row_from_batch(
@@ -144,10 +158,13 @@ fn wkb_cell(col: &ArrayRef, r: usize) -> Option<&[u8]> {
     }
 }
 
+/// A float cell as JSON. NaN and the infinities have no JSON number; they
+/// become text, which a number column refuses, rather than null, which
+/// would clear the field.
 fn json_f64(v: f64) -> Value {
     serde_json::Number::from_f64(v)
         .map(Value::Number)
-        .unwrap_or(Value::Null)
+        .unwrap_or_else(|| Value::String(v.to_string()))
 }
 
 fn list_to_json(items: &ArrayRef) -> Value {
@@ -192,6 +209,7 @@ pub fn cell_to_json(col: &ArrayRef, r: usize) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
 
     use arrow_array::builder::{ListBuilder, StringBuilder};
@@ -205,6 +223,13 @@ mod tests {
     use crate::geometry::to_wkb;
 
     fn write_fixture(path: &Path) {
+        write_fixture_with(
+            path,
+            r#"{"version":"1.1.0","primary_column":"shape","columns":{"shape":{"encoding":"WKB"}}}"#,
+        );
+    }
+
+    fn write_fixture_with(path: &Path, geo: &str) {
         let mut alias = ListBuilder::new(StringBuilder::new());
         alias.values().append_value("GC");
         alias.append(true);
@@ -242,7 +267,6 @@ mod tests {
             ],
         )
         .unwrap();
-        let geo = r#"{"version":"1.1.0","primary_column":"shape","columns":{"shape":{"encoding":"WKB"}}}"#;
         let props = WriterProperties::builder()
             .set_key_value_metadata(Some(vec![KeyValue::new("geo".into(), geo.to_string())]))
             .build();
@@ -250,6 +274,41 @@ mod tests {
         let mut w = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
         w.write(&batch).unwrap();
         w.close().unwrap();
+    }
+
+    #[test]
+    fn a_geometry_in_another_crs_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edits.parquet");
+        write_fixture_with(
+            &path,
+            r#"{"version":"1.1.0","primary_column":"shape","columns":{"shape":{"encoding":"WKB",
+                "crs":{"type":"ProjectedCRS","name":"WGS 84 / Pseudo-Mercator","id":{"authority":"EPSG","code":3857}}}}}"#,
+        );
+        let err = read_geoparquet(&path, &mut Report::default(), |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(&err, PipesError::Usage(m) if m.contains("EPSG:3857")),
+            "{err}"
+        );
+        // WGS 84 named either way reads.
+        for crs in [
+            r#"{"id":{"authority":"OGC","code":"CRS84"}}"#,
+            r#"{"id":{"authority":"EPSG","code":4326}}"#,
+        ] {
+            write_fixture_with(
+                &path,
+                &format!(
+                    r#"{{"version":"1.1.0","primary_column":"shape","columns":{{"shape":{{"encoding":"WKB","crs":{crs}}}}}}}"#
+                ),
+            );
+            read_geoparquet(&path, &mut Report::default(), |_, _| Ok(())).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_nan_cell_is_not_a_cleared_field() {
+        assert_eq!(json_f64(f64::NAN), json!("NaN"));
+        assert!(column_from_json("position_longitude", &json_f64(f64::NAN)).is_err());
     }
 
     #[test]

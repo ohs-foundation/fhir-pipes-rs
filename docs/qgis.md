@@ -78,7 +78,8 @@ Things that behave differently from a spreadsheet:
   the same row still apply.
 - **Moving a point wins over the position columns.** The stale
   `position_longitude`/`position_latitude` values that came along in the
-  export are not treated as an edit.
+  export are not treated as an edit. Editing only those columns, without
+  moving the point, changes the position.
 - **Float noise is not an edit.** Coordinates compare after rounding to seven
   decimals, so re-exporting an untouched layer produces no changes.
 
