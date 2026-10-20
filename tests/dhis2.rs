@@ -128,6 +128,7 @@ fn locations_pages_through_org_units_and_pairs_facilities() {
         Expectation::matching(all_of![
             request::method_path("GET", "/dhis/api/organisationUnits.json"),
             request::query(url_decoded(contains(("page", "1")))),
+            request::query(url_decoded(contains(("order", "id:asc")))),
         ])
         .respond_with(ok(json!({
             "pager": {"page": 1, "pageCount": 2},
@@ -142,10 +143,13 @@ fn locations_pages_through_org_units_and_pairs_facilities() {
         Expectation::matching(all_of![
             request::method_path("GET", "/dhis/api/organisationUnits.json"),
             request::query(url_decoded(contains(("page", "2")))),
+            request::query(url_decoded(contains(("order", "id:asc")))),
         ])
         .respond_with(ok(json!({
             "pager": {"page": 2, "pageCount": 2},
+            // Bo again, as a page boundary that moved would give it: kept once.
             "organisationUnits": [
+                {"id": "O6uvpzGd5pu", "name": "Bo", "level": 2, "parent": {"id": "ImspTQPwCqd"}},
                 {"id": "DiszpKrYNg8", "name": "Ngelehun CHC", "level": 3, "parent": {"id": "O6uvpzGd5pu"},
                  "geometry": {"type": "Point", "coordinates": [-11.4197, 8.1039]}}
             ]
@@ -2310,4 +2314,31 @@ fn what_data_values_cannot_compute_is_refused() {
         &["--updated-since", "2026-10-01", "--previous", "x"],
     );
     assert!(e.contains("needs --source data-values"), "{e}");
+}
+
+#[test]
+fn a_breakdown_with_items_and_shared_output_files_are_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |extra: &[&str]| {
+        let a = fhir_pipes()
+            .args(["dhis2", "reports", "--dhis2", "https://dhis2.invalid"])
+            .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
+            .args(["--period", "2025", "--level", "2", "--locations"])
+            .arg(dir.path().join("locations.ndjson"))
+            .arg("--out")
+            .arg(dir.path().join("r.ndjson"))
+            .args(extra)
+            .current_dir(dir.path())
+            .assert()
+            .code(2);
+        stderr(&a)
+    };
+    let e = run(&["--breakdown", "cX5k9anHEHd:opt1;opt2"]);
+    assert!(
+        e.contains("choosing some of its items is not supported"),
+        "{e}"
+    );
+    // ./r.ndjson is --out under another name.
+    let e = run(&["--report", "./r.ndjson"]);
+    assert!(e.contains("is the same file as --out"), "{e}");
 }

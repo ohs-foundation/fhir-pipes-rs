@@ -39,7 +39,10 @@ impl ServerInfo {
     /// FHIR dateTime. FHIR needs a zone whenever there is a time, so on a
     /// server not known to run on UTC only the date is kept.
     pub fn timestamp(&self, ts: &str) -> Option<String> {
-        let date_ok = ts.len() >= 10
+        // Sliced by byte below: a timestamp is ASCII, and anything else is
+        // not one.
+        let date_ok = ts.is_ascii()
+            && ts.len() >= 10
             && ts.as_bytes()[4] == b'-'
             && ts.as_bytes()[7] == b'-'
             && ts[..4].bytes().all(|b| b.is_ascii_digit());
@@ -96,7 +99,7 @@ pub fn epoch_seconds(ts: &str) -> Option<i64> {
 /// `--max-analytics-age`: `7d`, `36h`, `2w`.
 pub fn parse_age(s: &str) -> std::result::Result<Duration, String> {
     let s = s.trim();
-    let (n, unit) = s.split_at(s.len().saturating_sub(1));
+    let (n, unit) = s.split_at(s.char_indices().last().map_or(0, |(i, _)| i));
     let secs = match unit {
         "h" => 3600,
         "d" => 86_400,
@@ -220,6 +223,16 @@ impl Dhis2 {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<std::result::Result<Value, FetchError>> {
+        self.try_get_as(path, query)
+    }
+
+    /// `try_get`, read into `T`: a large response (data values) need not
+    /// become a `Value` tree first.
+    pub fn try_get_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<std::result::Result<T, FetchError>> {
         let url = self.url(path, query)?;
         match self.client.get_json(&url) {
             Ok(f) => Ok(Ok(serde_json::from_slice(&f.body).map_err(|e| {
@@ -230,7 +243,16 @@ impl Dhis2 {
     }
 
     pub fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        match self.try_get(path, query)? {
+        self.get_as(path, query)
+    }
+
+    /// `get`, read into `T`.
+    pub fn get_as<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
+        match self.try_get_as(path, query)? {
             Ok(v) => Ok(v),
             Err(e) => Err(self.error(path, e)),
         }
@@ -251,14 +273,28 @@ impl Dhis2 {
     /// Every object under `key` across all pages of a metadata list.
     pub fn paged(&self, path: &str, key: &str, query: &[(&str, String)]) -> Result<Vec<Value>> {
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let mut page = 1usize;
         loop {
             let mut q: Vec<(&str, String)> = query.to_vec();
+            // A stable order, so no object moves between pages while they
+            // are read; and objects are kept once each, by id, below.
+            if !q.iter().any(|(k, _)| *k == "order") {
+                q.push(("order", "id:asc".into()));
+            }
             q.push(("page", page.to_string()));
             q.push(("pageSize", PAGE_SIZE.to_string()));
             let v = self.get(path, &q)?;
             match v.get(key).and_then(Value::as_array) {
-                Some(items) => out.extend(items.iter().cloned()),
+                Some(items) => out.extend(
+                    items
+                        .iter()
+                        .filter(|o| match o["id"].as_str() {
+                            Some(id) => seen.insert(id.to_string()),
+                            None => true,
+                        })
+                        .cloned(),
+                ),
                 None => {
                     return Err(PipesError::Environment(format!(
                         "{}/{path}: response has no {key:?} list",
@@ -309,6 +345,9 @@ mod tests {
         );
         assert_eq!(utc.timestamp("2026-10-12").as_deref(), Some("2026-10-12"));
         assert_eq!(utc.timestamp("nonsense"), None);
+        // Not ASCII: not a timestamp, and no panic slicing it.
+        assert_eq!(utc.timestamp("2026-10-1é"), None);
+        assert_eq!(utc.timestamp("2026-10-12T02:07:00é"), None);
         let local = ServerInfo::parse(&json!({"serverTimeZoneId": "Africa/Freetown"}));
         assert_eq!(
             local.timestamp("2026-10-12T02:07:00.052").as_deref(),
@@ -333,7 +372,7 @@ mod tests {
         assert_eq!(parse_age("36h"), Ok(Duration::from_secs(36 * 3600)));
         assert_eq!(parse_age("7d"), Ok(Duration::from_secs(7 * 86_400)));
         assert_eq!(parse_age("2w"), Ok(Duration::from_secs(14 * 86_400)));
-        for bad in ["7", "d", "0d", "7m", "-1d", "1.5d"] {
+        for bad in ["7", "d", "0d", "7m", "-1d", "1.5d", "7д", "д"] {
             assert!(parse_age(bad).is_err(), "{bad}");
         }
     }

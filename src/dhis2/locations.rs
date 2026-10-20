@@ -570,11 +570,18 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
                 .flatten()
             {
                 if let Some(ou) = ou.get("id").and_then(Value::as_str) {
-                    groups.entry(ou.to_string()).or_default().push(GroupType {
-                        group: gid.to_string(),
-                        name: gname.to_string(),
-                        sets: vec![set.clone()],
-                    });
+                    // One type per group: a group in two sets (or a set
+                    // given twice) adds the set to the group's codings.
+                    let types = groups.entry(ou.to_string()).or_default();
+                    match types.iter_mut().find(|t| t.group == gid) {
+                        Some(t) if t.sets.contains(set) => {}
+                        Some(t) => t.sets.push(set.clone()),
+                        None => types.push(GroupType {
+                            group: gid.to_string(),
+                            name: gname.to_string(),
+                            sets: vec![set.clone()],
+                        }),
+                    }
                 }
             }
         }

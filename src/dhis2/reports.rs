@@ -183,8 +183,8 @@ pub fn parse_analytics(v: &Value, breakdown: Option<&str>) -> Result<Analytics> 
             let date = |k: &str| {
                 item.get(k)
                     .and_then(Value::as_str)
-                    .filter(|s| s.len() >= 10)
-                    .map(|s| s[..10].to_string())
+                    .and_then(|s| s.get(..10))
+                    .map(str::to_string)
             };
             if let (Some(start), Some(end)) = (date("startDate"), date("endDate")) {
                 periods.insert(code.clone(), (start, end));
@@ -916,6 +916,9 @@ fn fetch(api: &Dhis2, ask: Ask, requests: &mut usize, out: &mut Vec<Analytics>) 
 #[derive(Debug, Default)]
 struct Tally {
     written: usize,
+    /// The ids written. Overlapping `--period`s (`LAST_3_MONTHS` and
+    /// `LAST_12_MONTHS`) give some reports twice; each is written once.
+    ids: HashSet<String>,
     locations: HashSet<String>,
     periods: HashSet<String>,
     stratified: usize,
@@ -927,6 +930,8 @@ struct Tally {
 impl Tally {
     /// Counts one written report, comparing it with the previous run's.
     fn add(&mut self, r: &Value, previous: Option<&mut Previous>) -> Option<Change> {
+        self.ids
+            .insert(r["id"].as_str().unwrap_or_default().to_string());
         self.written += 1;
         if let Some(s) = r.pointer("/subject/reference").and_then(Value::as_str)
             && !self.locations.contains(s)
@@ -1132,6 +1137,13 @@ impl<'a> Writer<'a> {
         }
 
         for r in out.values() {
+            if self
+                .tally
+                .ids
+                .contains(r["id"].as_str().unwrap_or_default())
+            {
+                continue;
+            }
             let change = self.tally.add(r, self.previous.as_mut());
             self.out.write(r)?;
             if let (Some(w), Some(Change::New | Change::Changed)) = (self.changed.as_mut(), change)
@@ -1281,7 +1293,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
     }
     let indicators = fetch_indicators(&api, &args.select)?;
     let ids: Vec<String> = indicators.keys().cloned().collect();
-    check_range_ids(&instance, &ranges, &ids)?;
+    check_report_ids(&instance, &ranges, &unique(&args.periods), &ids)?;
 
     let plan = plan_run(args, &api, &indicators, &ids, &system, ranges)?;
     let total = plan.units.len();
@@ -1366,6 +1378,16 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
 /// The checks of the flags alone, before anything is read or requested.
 fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
     check_out(&args.out)?;
+    // A dimension with items (`UID:a;b`) names its analytics column by the
+    // UID alone, and goes into report ids and codes: only a bare UID.
+    for b in &args.breakdowns {
+        if b.len() != UID_LEN || !b.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(PipesError::Usage(format!(
+                "--breakdown {b:?}: expected the UID of a category or group set (11 letters \
+                 and digits); choosing some of its items is not supported"
+            )));
+        }
+    }
     if args.chunk == 0 {
         return Err(PipesError::Usage("--chunk must be at least 1".into()));
     }
@@ -1380,12 +1402,28 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
             "--level counts from 1, the top of the DHIS2 tree".into(),
         ));
     }
-    for (flag, path) in [("--changed", &args.changed), ("--removed", &args.removed)] {
-        if let Some(p) = path {
-            check_out(p)?;
-            if p == &args.out || Some(p) == args.previous.as_ref() {
+    for p in [&args.changed, &args.removed].into_iter().flatten() {
+        check_out(p)?;
+    }
+    // Every file the run writes is a file of its own, and only --out may be
+    // --previous (the last run's output, replaced at the end); `./a.ndjson`
+    // and `a.ndjson` are one file.
+    let files: Vec<(&str, &Path)> = [
+        ("--out", Some(&args.out)),
+        ("--changed", args.changed.as_ref()),
+        ("--removed", args.removed.as_ref()),
+        ("--report", args.report.as_ref()),
+        ("--previous", args.previous.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, p)| Some((flag, p?.as_path())))
+    .collect();
+    for (i, (flag, p)) in files.iter().enumerate() {
+        for (other, q) in &files[..i] {
+            let allowed = (*other, *flag) == ("--out", "--previous");
+            if !allowed && same_file(p, q) {
                 return Err(PipesError::Usage(format!(
-                    "{flag} {}: must be a file of its own, not --out or --previous",
+                    "{flag} {}: is the same file as {other}; each needs a file of its own",
                     p.display()
                 )));
             }
@@ -1417,22 +1455,53 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Whether `a` and `b` name one file: the same name in the same directory,
+/// once the directory is resolved (`./x`, `x` and `dir/../x` are one).
+fn same_file(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| {
+        let dir = p
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        match (dir.canonicalize(), p.file_name()) {
+            (Ok(d), Some(n)) => d.join(n),
+            _ => p.to_path_buf(),
+        }
+    };
+    key(a) == key(b)
+}
+
 /// A range's code is longer than a period's: check now that every report
 /// id still fits, rather than skip every row as invalid_id.
-fn check_range_ids(instance: &Instance, ranges: &[DateRange], ids: &[String]) -> Result<()> {
-    for range in ranges {
+fn check_report_ids(
+    instance: &Instance,
+    ranges: &[DateRange],
+    periods: &[String],
+    ids: &[String],
+) -> Result<()> {
+    // A relative period (`LAST_12_MONTHS`) becomes codes DHIS2 picks; the
+    // others are the codes the ids will hold.
+    let codes = ranges
+        .iter()
+        .map(|r| ("--range", r.label(), r.code()))
+        .chain(
+            periods
+                .iter()
+                .filter(|p| period_kind(p).is_some())
+                .map(|p| ("--period", p.clone(), p.clone())),
+        );
+    for (flag, label, code) in codes {
         for dx in ids {
             let id = format!(
                 "{}-{}-{}-{}",
                 instance.name,
                 fhir_key(dx),
                 "x".repeat(UID_LEN),
-                range.code()
+                code
             );
             if !is_valid_id(&id) {
                 return Err(PipesError::Usage(format!(
-                    "--range {}: report ids for {dx} would be {} characters, over FHIR's 64; use a shorter --instance",
-                    range.label(),
+                    "{flag} {label}: report ids for {dx} would be {} characters, over FHIR's 64; use a shorter --instance",
                     id.len()
                 )));
             }
@@ -1897,6 +1966,29 @@ mod tests {
         Indicator::parse(&json!({"id":"tUIlpyeeX9N","name":"Penta 3 Coverage <1y",
             "indicatorType":{"factor":100},"numerator":"#{a}","denominator":"#{b}"}))
         .unwrap()
+    }
+
+    #[test]
+    fn one_file_named_two_ways_is_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.ndjson");
+        let dotted = dir.path().join(".").join("a.ndjson");
+        let up = dir.path().join("sub/../a.ndjson");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        assert!(same_file(&a, &dotted));
+        assert!(same_file(&a, &up));
+        assert!(!same_file(&a, &dir.path().join("b.ndjson")));
+    }
+
+    #[test]
+    fn a_long_period_code_is_checked_against_the_id_limit() {
+        let instance = Instance::new("a-sixteen-chars1", &crate::profile::icr_example()).unwrap();
+        let rate = ["x".repeat(UID_LEN) + ".REPORTING_RATE"];
+        assert!(check_report_ids(&instance, &[], &["202610".into()], &rate).is_ok());
+        // Relative periods become codes DHIS2 picks; not checked here.
+        assert!(check_report_ids(&instance, &[], &["LAST_12_MONTHS".into()], &rate).is_ok());
+        let err = check_report_ids(&instance, &[], &["2025AprilS1".into()], &rate).unwrap_err();
+        assert!(err.to_string().contains("--period 2025AprilS1"), "{err}");
     }
 
     #[test]
