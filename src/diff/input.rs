@@ -144,11 +144,14 @@ pub fn column_from_json(name: &str, v: &Value) -> Result<ColumnValue, String> {
                 .map(ColumnValue::Number)
                 .ok_or_else(|| "expected a number".into()),
             Value::String(s) if s.trim().is_empty() => Ok(ColumnValue::Null),
+            // "NaN" and "inf" parse as f64, but are not coordinates.
             Value::String(s) => s
                 .trim()
                 .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite())
                 .map(ColumnValue::Number)
-                .map_err(|_| "expected a number".into()),
+                .ok_or_else(|| "expected a number".into()),
             _ => Err("expected a number".into()),
         };
     }
@@ -161,10 +164,94 @@ pub fn column_from_json(name: &str, v: &Value) -> Result<ColumnValue, String> {
     Err(format!("{name} is not a writable column"))
 }
 
+/// The CRS a GeoParquet `crs` or a GeoJSON `crs` member names, when it is
+/// not longitude/latitude on WGS 84 (OGC:CRS84 or EPSG:4326). `None` for
+/// WGS 84, and for an unknown CRS (null, or no name to go by), which the
+/// coordinate range check then covers.
+pub fn other_crs(crs: &Value) -> Option<String> {
+    let wgs84 = |s: &str| {
+        let s = s.to_ascii_uppercase();
+        s.ends_with("CRS84") || (s.contains("EPSG") && s.trim_end_matches(':').ends_with("4326"))
+    };
+    let name = match crs {
+        Value::String(s) => s.clone(),
+        Value::Object(o) => match (o.get("id"), o.get("properties")) {
+            // PROJJSON: {"id": {"authority": "EPSG", "code": 4326}}.
+            (Some(id), _) => {
+                let code = match &id["code"] {
+                    Value::Number(n) => n.to_string(),
+                    other => other.as_str().unwrap_or_default().to_string(),
+                };
+                format!("{}:{code}", id["authority"].as_str().unwrap_or_default())
+            }
+            // GeoJSON 2008: {"type": "name", "properties": {"name": "urn:…"}}.
+            (None, Some(p)) => p["name"].as_str()?.to_string(),
+            (None, None) => {
+                let name = o.get("name")?.as_str()?;
+                return (!name.contains("WGS 84")).then(|| name.to_string());
+            }
+        },
+        _ => return None,
+    };
+    (!wgs84(&name)).then_some(name)
+}
+
+/// Why a coordinate cannot be a WGS 84 longitude/latitude, if it cannot.
+pub fn out_of_range(lon: f64, lat: f64) -> Option<String> {
+    if !lon.is_finite() || !lat.is_finite() {
+        return Some(format!("({lon}, {lat}) is not a finite coordinate"));
+    }
+    if !(-180.0..=180.0).contains(&lon) || !(-90.0..=90.0).contains(&lat) {
+        return Some(format!(
+            "({lon}, {lat}) is outside longitude -180..180 and latitude -90..90; \
+             is the file in another CRS?"
+        ));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn crs_names_that_are_not_wgs84() {
+        for wgs84 in [
+            json!("EPSG:4326"),
+            json!("OGC:CRS84"),
+            json!({"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}),
+            json!({"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}}),
+            json!({"id": {"authority": "EPSG", "code": 4326}}),
+            json!({"name": "WGS 84 (CRS84)"}),
+            Value::Null,
+        ] {
+            assert_eq!(other_crs(&wgs84), None, "{wgs84}");
+        }
+        assert_eq!(
+            other_crs(
+                &json!({"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::3857"}})
+            ),
+            Some("urn:ogc:def:crs:EPSG::3857".into())
+        );
+        assert_eq!(
+            other_crs(&json!({"id": {"authority": "EPSG", "code": 32631}})),
+            Some("EPSG:32631".into())
+        );
+    }
+
+    #[test]
+    fn coordinates_out_of_range() {
+        assert_eq!(out_of_range(3.0, 6.0), None);
+        assert!(out_of_range(f64::NAN, 6.0).is_some());
+        assert!(
+            out_of_range(334_111.0, 6.0)
+                .unwrap()
+                .contains("another CRS")
+        );
+        assert!(column_from_json("position_latitude", &json!("NaN")).is_err());
+        assert!(column_from_json("position_latitude", &json!("inf")).is_err());
+    }
 
     #[test]
     fn writable_columns_are_the_readme_second_group() {

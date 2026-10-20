@@ -2,11 +2,11 @@
 //! touch the JSON; everything else on the resource is left exactly as the
 //! snapshot had it, which is what makes the round trip lossless.
 
-use geo::Geometry;
+use geo::{CoordsIter, Geometry};
 use serde_json::{Map, Value, json};
 
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
-use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow};
+use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow, out_of_range};
 use crate::fhir::location::{
     self, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension,
 };
@@ -478,7 +478,14 @@ fn apply_position(obj: &mut Object, row: &InputRow, id: &str, report: &mut Repor
         pick(lon, current.map(|p| p.0)),
         pick(lat, current.map(|p| p.1)),
     ) {
-        (Some(x), Some(y)) => set_position(obj, x, y),
+        (Some(x), Some(y)) => match out_of_range(x, y) {
+            Some(why) => report.add(
+                "input_column_type",
+                id,
+                &format!("position_longitude/position_latitude {why}; position not changed"),
+            ),
+            None => set_position(obj, x, y),
+        },
         (None, None) => {
             obj.remove("position");
         }
@@ -538,6 +545,14 @@ fn apply_geometry(
     profile: &Profile,
     report: &mut Report,
 ) {
+    if let Some(why) = geom.coords_iter().find_map(|c| out_of_range(c.x, c.y)) {
+        report.add(
+            "geometry_out_of_range",
+            id,
+            &format!("{why}; geometry edit skipped"),
+        );
+        return;
+    }
     let is_point = matches!(geom, Geometry::Point(_));
     let is_polygon = matches!(geom, Geometry::Polygon(_) | Geometry::MultiPolygon(_));
     if !is_point && !is_polygon {
@@ -577,30 +592,25 @@ fn apply_geometry(
         unreachable!("is_point checked above")
     };
     let (x, y) = (round_coord(p.x()), round_coord(p.y()));
-    // `apply_position` has already run: if the position columns moved the
-    // point somewhere other than where the geometry puts it, both were
-    // edited and they disagree. Stale-but-unchanged columns (every GIS
-    // export carries them) are not an edit and never report.
+    // `apply_position` has already run. An edit is a change from the
+    // snapshot: the geometry is applied only when it moved, so columns
+    // edited next to an untouched point keep their edit. Stale but
+    // unchanged columns (every GIS export carries them) are not an edit
+    // and never report.
     let original = snapshot.and_then(|l| l.position);
-    let after_columns = position_of(obj);
     let rounded = |p: Option<(f64, f64)>| p.map(|(a, b)| (round_coord(a), round_coord(b)));
-    if rounded(after_columns) != rounded(original)
-        && let Some((cx, cy)) = after_columns
-        && (round_coord(cx) != x || round_coord(cy) != y)
-    {
+    if rounded(original) == Some((x, y)) {
+        return;
+    }
+    let after_columns = position_of(obj);
+    if rounded(after_columns) != rounded(original) && rounded(after_columns) != Some((x, y)) {
         report.add(
             "position_geometry_disagree",
             id,
             "position columns and the geometry both changed and differ; the geometry was used",
         );
     }
-    match original {
-        // Equal to the snapshot after rounding: restore its exact numbers.
-        Some((ox, oy)) if round_coord(ox) == x && round_coord(oy) == y => {
-            write_position(obj, ox, oy)
-        }
-        _ => write_position(obj, x, y),
-    }
+    write_position(obj, x, y);
 }
 
 /// True when the row carries `column` with a value different from what
@@ -625,6 +635,11 @@ fn set_concept_text(
     column: &str,
     report: &mut Report,
 ) {
+    let resource = obj
+        .get("resourceType")
+        .and_then(Value::as_str)
+        .unwrap_or("resource")
+        .to_string();
     let concept = obj
         .get_mut("type")
         .and_then(Value::as_array_mut)
@@ -645,7 +660,7 @@ fn set_concept_text(
         (None, Some(_)) => report.add(
             "input_column_type",
             id,
-            &format!("{column}: the Organization has no coding under {system} to label; ignored"),
+            &format!("{column}: the {resource} has no coding under {system} to label; ignored"),
         ),
         (None, None) => {}
     }
@@ -1403,30 +1418,48 @@ mod tests {
     }
 
     #[test]
-    fn when_position_columns_and_the_geometry_disagree_the_geometry_wins() {
+    fn the_geometry_wins_only_when_it_was_edited_too() {
         let base = json!({"resourceType":"Location","id":"a","position":{"longitude":3.25,"latitude":6.25}});
         let mut report = Report::default();
         let cols = [
             ("position_longitude", ColumnValue::Number(9.0)),
             ("position_latitude", ColumnValue::Number(9.0)),
         ];
+        // Only the columns were edited: the untouched point does not undo it.
         let out = apply_geom(
             base.clone(),
             &geom_row(geo::Geometry::Point(geo::Point::new(3.25, 6.25)), &cols),
             &mut report,
         );
-        assert_eq!(
-            out, base,
-            "geometry equal to the snapshot restores the original numbers"
-        );
-        assert_eq!(report.count("position_geometry_disagree"), 1);
+        assert_eq!(out["position"], json!({"longitude":9.0,"latitude":9.0}));
+        assert_eq!(report.count("position_geometry_disagree"), 0);
+        // Both edited, to different places: the geometry wins.
         let out = apply_geom(
             base.clone(),
             &geom_row(geo::Geometry::Point(geo::Point::new(4.0, 5.0)), &cols),
             &mut report,
         );
         assert_eq!(out["position"], json!({"longitude":4.0,"latitude":5.0}));
-        assert_eq!(report.count("position_geometry_disagree"), 2);
+        assert_eq!(report.count("position_geometry_disagree"), 1);
+        // Both edited, to the same place: no report.
+        let same = [
+            ("position_longitude", ColumnValue::Number(4.0)),
+            ("position_latitude", ColumnValue::Number(5.0)),
+        ];
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(geo::Geometry::Point(geo::Point::new(4.0, 5.0)), &same),
+            &mut report,
+        );
+        assert_eq!(out["position"], json!({"longitude":4.0,"latitude":5.0}));
+        assert_eq!(report.count("position_geometry_disagree"), 1);
+        // Nothing edited: the snapshot's exact numbers stay.
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(geo::Geometry::Point(geo::Point::new(3.25, 6.25)), &[]),
+            &mut report,
+        );
+        assert_eq!(out, base);
 
         // Stale but unchanged columns next to a moved geometry: a plain move, no report.
         let stale = [
@@ -1439,7 +1472,32 @@ mod tests {
             &mut report,
         );
         assert_eq!(out["position"], json!({"longitude":4.0,"latitude":5.0}));
-        assert_eq!(report.count("position_geometry_disagree"), 2);
+        assert_eq!(report.count("position_geometry_disagree"), 1);
+    }
+
+    #[test]
+    fn coordinates_that_are_not_degrees_are_reported_and_skipped() {
+        let base = json!({"resourceType":"Location","id":"a","position":{"longitude":3.25,"latitude":6.25}});
+        let mut report = Report::default();
+        // Web Mercator metres in the geometry.
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(
+                geo::Geometry::Point(geo::Point::new(361_793.0, 699_440.0)),
+                &[],
+            ),
+            &mut report,
+        );
+        assert_eq!(out, base);
+        assert_eq!(report.count("geometry_out_of_range"), 1);
+        // And in the position columns.
+        let cols = [
+            ("position_longitude", ColumnValue::Number(361_793.0)),
+            ("position_latitude", ColumnValue::Number(699_440.0)),
+        ];
+        let out = rebuild(&base, None, &row(&cols), &icr(), &mut report);
+        assert_eq!(out["position"], base["position"]);
+        assert_eq!(report.count("input_column_type"), 1);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use geojson::feature::Id;
 use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-use crate::diff::input::{ID_COLUMN, InputRow, column_from_json, is_writable};
+use crate::diff::input::{ID_COLUMN, InputRow, column_from_json, is_writable, other_crs};
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::NdjsonReader;
 use crate::geometry::convert;
@@ -127,6 +127,15 @@ where
             if key == "features" {
                 self.0.seen_features = true;
                 map.next_value_seed(Features(&mut *self.0))?;
+            } else if key == "crs" {
+                // GeoJSON is WGS 84 since RFC 7946; an older file can say
+                // otherwise, and its coordinates are then not degrees.
+                if let Some(crs) = other_crs(&map.next_value::<Value>()?) {
+                    return Err(de::Error::custom(format!(
+                        "the geometry is in {crs}, not WGS 84 longitude/latitude; \
+                         reproject it first, for example with `ogr2ogr -t_srs EPSG:4326`"
+                    )));
+                }
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
@@ -317,6 +326,22 @@ mod tests {
         .unwrap_err();
         assert!(matches!(&err, PipesError::Usage(m) if m == "stop"));
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_collection_in_another_crs_is_a_usage_error() {
+        let f = tmp(
+            r#"{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:EPSG::3857"}},"features":[]}"#,
+        );
+        let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(&err, PipesError::Usage(m) if m.contains("EPSG::3857")),
+            "{err}"
+        );
+        let f = tmp(
+            r#"{"type":"FeatureCollection","crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:OGC:1.3:CRS84"}},"features":[]}"#,
+        );
+        read_feature_collection(f.path(), |_, _| Ok(())).unwrap();
     }
 
     #[test]
