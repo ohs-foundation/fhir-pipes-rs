@@ -63,6 +63,7 @@ From source (needs Rust): `cargo install --git https://github.com/ohs-foundation
 | Copy an export to a second FHIR server | `sync` |
 | DHIS2 org units, indicators or values as FHIR | `dhis2 locations`, `dhis2 measures`, `dhis2 reports` |
 | Check a fhir-pipes profile against its IG | `profile check` |
+| A value set or concept map as a table to join views to | `terminology valueset`, `terminology conceptmap` |
 
 ## Choosing `--server-kind`
 

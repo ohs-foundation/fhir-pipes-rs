@@ -283,7 +283,7 @@ fn output_extension(format: &str) -> &'static str {
 
 /// The writer for `format`. --parquet-temporal is accepted for every format
 /// so scripts can pass it unconditionally, but only affects Parquet.
-fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputWriter>> {
+pub(crate) fn select_writer(format: &str, parquet_temporal: &str) -> Result<Box<dyn OutputWriter>> {
     if format.eq_ignore_ascii_case("parquet") {
         let temporal = TemporalEncoding::parse(parquet_temporal)
             .context("parsing --parquet-temporal")
@@ -618,7 +618,7 @@ fn check_out_is_not_input(input: Option<&PathBuf>, out: Option<&PathBuf>) -> Res
 
 /// The file `out` names, written as gzip when its name ends in `.gz`, or
 /// stdout. `close_sink` finishes it.
-fn open_sink(out: Option<&PathBuf>) -> Result<Output<Box<dyn Write>>> {
+pub(crate) fn open_sink(out: Option<&PathBuf>) -> Result<Output<Box<dyn Write>>> {
     Ok(match out {
         Some(path) => Output::new(
             Box::new(
@@ -633,7 +633,7 @@ fn open_sink(out: Option<&PathBuf>) -> Result<Output<Box<dyn Write>>> {
 /// Finish writing what `open_sink` opened: the end of a gzip stream, then
 /// a flush. Both are buffered, so this is where most of a small output is
 /// written, and an error here (a full disk, a closed pipe) fails the run.
-fn close_sink(sink: Output<Box<dyn Write>>, out: Option<&PathBuf>) -> Result<()> {
+pub(crate) fn close_sink(sink: Output<Box<dyn Write>>, out: Option<&PathBuf>) -> Result<()> {
     sink.finish().map(drop).with_context(|| match out {
         Some(path) => format!("writing {}", path.display()),
         None => "writing to stdout".to_string(),

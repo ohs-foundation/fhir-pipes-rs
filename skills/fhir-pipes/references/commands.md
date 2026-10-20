@@ -150,5 +150,17 @@ Auth: `--dhis2-token` (`FHIR_PIPES_DHIS2_TOKEN`) or `--dhis2-user` and
 ## profile check
 
 `profile check --profile FILE|URL --ig PACKAGE_OR_DIR`: compare a profile
-with its IG (a `package.tgz` path or https URL, or a directory of JSON
-resources). Exit 1 on errors.
+with its IG (a `package.tgz` path or https URL, a directory of JSON
+resources, or `name#version` in `~/.fhir/packages`). Exit 1 on errors.
+
+## terminology
+
+`terminology valueset URL[|VERSION] --package PKG [--package PKG ...]` and
+`terminology conceptmap ...`: write a value set's members (`system`,
+`version`, `code`, `display`, `inactive`) or a concept map's mappings as a
+table, in SQL on FHIR's Terminology in SQL shape, from FHIR packages only.
+`--package` takes the same forms as `--ig`; give one per package the content
+needs (for example the IG and `hl7.fhir.r4.core#4.0.1`). `--output` and
+`--out` as for `views run`. Exits 2 when the packages cannot give every member
+(SNOMED CT, LOINC, unsupported filters): it never writes a partial table. See
+docs/terminology.md.

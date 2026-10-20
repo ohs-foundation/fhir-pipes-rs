@@ -3,6 +3,7 @@ pub mod head;
 pub mod location;
 pub mod ndjson;
 pub mod organization;
+pub mod package;
 pub mod spatial;
 
 pub use location::{Boundary, Location};

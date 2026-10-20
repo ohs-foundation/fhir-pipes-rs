@@ -21,9 +21,6 @@
 //! profiles declare but the profile does not read are listed too.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Read;
-use std::path::Path;
-use std::time::Duration;
 
 use clap::ValueEnum;
 use serde_json::Value;
@@ -45,73 +42,21 @@ pub struct Ig {
 }
 
 impl Ig {
-    /// Read the IG `spec` names: an https URL or path to a package `.tgz`, or
-    /// a directory of JSON resources.
+    /// Read the IG `spec` names: an https URL or path to a package `.tgz`, a
+    /// directory of JSON resources, or `name#version` in the FHIR package
+    /// cache.
     pub fn load(spec: &str) -> Result<Self> {
         let mut ig = Ig {
             label: spec.to_string(),
             ..Ig::default()
         };
-        if spec.starts_with("http://") {
-            return Err(PipesError::Usage(format!(
-                "--ig {spec}: packages are fetched over https only"
-            )));
-        }
-        if spec.starts_with("https://") {
-            ig.read_package(&fetch(spec)?, spec)?;
-        } else {
-            let path = Path::new(spec);
-            if path.is_dir() {
-                ig.read_dir(path)?;
-            } else if path.is_file() {
-                let bytes = std::fs::read(path).map_err(|e| PipesError::io(path, e))?;
-                ig.read_package(&bytes, spec)?;
-            } else {
-                return Err(PipesError::Usage(format!(
-                    "--ig {spec}: not a file, directory or https URL"
-                )));
-            }
-        }
+        crate::fhir::package::read_json_files(spec, "--ig", |name, text| ig.add(name, text))?;
         if ig.structure_definitions.is_empty() && ig.code_systems.is_empty() {
             return Err(PipesError::Usage(format!(
                 "--ig {spec}: no StructureDefinitions or CodeSystems found"
             )));
         }
         Ok(ig)
-    }
-
-    /// A gzipped tar of JSON files, as the IG publisher writes `package.tgz`.
-    fn read_package(&mut self, bytes: &[u8], spec: &str) -> Result<()> {
-        let bad =
-            |e: std::io::Error| PipesError::Usage(format!("--ig {spec}: not a FHIR package: {e}"));
-        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
-        for entry in archive.entries().map_err(bad)? {
-            let mut entry = entry.map_err(bad)?;
-            let name = entry.path().map_err(bad)?.to_string_lossy().into_owned();
-            if !name.ends_with(".json") {
-                continue;
-            }
-            let mut text = String::new();
-            if entry.read_to_string(&mut text).is_ok() {
-                self.add(&name, &text);
-            }
-        }
-        Ok(())
-    }
-
-    fn read_dir(&mut self, dir: &Path) -> Result<()> {
-        let entries = std::fs::read_dir(dir).map_err(|e| PipesError::io(dir, e))?;
-        for entry in entries {
-            let path = entry.map_err(|e| PipesError::io(dir, e))?.path();
-            if path.is_dir() {
-                self.read_dir(&path)?;
-            } else if path.extension().is_some_and(|e| e == "json")
-                && let Ok(text) = std::fs::read_to_string(&path)
-            {
-                self.add(&path.to_string_lossy(), &text);
-            }
-        }
-        Ok(())
     }
 
     fn add(&mut self, name: &str, text: &str) {
@@ -250,10 +195,6 @@ fn elements(sd: &Value) -> impl Iterator<Item = &Value> {
         .or_else(|| list("differential"))
         .into_iter()
         .flatten()
-}
-
-fn fetch(url: &str) -> Result<Vec<u8>> {
-    super::fetch_bytes(url, "--ig", Duration::from_secs(120))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -914,24 +855,9 @@ pub fn run(args: &crate::cli::ProfileCheckArgs, spec: Option<&str>) -> Result<()
 mod tests {
     use super::*;
 
-    /// A package.tgz holding `files` under `package/`.
-    fn package(files: &[(&str, &str)]) -> Vec<u8> {
-        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        let mut tar = tar::Builder::new(gz);
-        for (name, text) in files {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(text.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append_data(&mut header, format!("package/{name}"), text.as_bytes())
-                .unwrap();
-        }
-        tar.into_inner().unwrap().finish().unwrap()
-    }
-
     #[test]
     fn a_package_gives_its_canonical_name_and_resources() {
-        let bytes = package(&[
+        let bytes = crate::fhir::package::tgz(&[
             (
                 "package.json",
                 r#"{"name":"example.ig","version":"1.2.0","canonical":"https://example.org/"}"#,
@@ -942,8 +868,10 @@ mod tests {
             ),
             ("other.txt", "ignored"),
         ]);
-        let mut ig = Ig::default();
-        ig.read_package(&bytes, "p.tgz").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.tgz");
+        std::fs::write(&path, bytes).unwrap();
+        let ig = Ig::load(path.to_str().unwrap()).unwrap();
         assert_eq!(ig.label, "example.ig 1.2.0");
         assert_eq!(ig.canonical.as_deref(), Some("https://example.org"));
         let cs = &ig.code_systems["https://example.org/CodeSystem/kinds"];
@@ -1123,12 +1051,5 @@ mod tests {
                 "https://example.org/ids/pcode"
             ]
         );
-    }
-
-    #[test]
-    fn not_a_package_is_a_usage_error() {
-        let mut ig = Ig::default();
-        let err = ig.read_package(b"not gzip", "p.tgz").unwrap_err();
-        assert!(err.to_string().contains("not a FHIR package"), "{err}");
     }
 }
