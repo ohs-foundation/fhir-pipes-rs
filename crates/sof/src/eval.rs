@@ -38,6 +38,7 @@ use octofhir_fhirpath::{
 };
 use serde_json::Value;
 
+use crate::boundary_type::{BoundaryType, boundary_hint, capitalize_first};
 use crate::column::{ColumnInfo, ColumnType};
 use crate::fhir_model::{self, TableModelProvider};
 use crate::lexer::{Kind, Token, tokens, variable_name};
@@ -1386,14 +1387,6 @@ fn is_fhir_datatype(name: &str) -> bool {
     )
 }
 
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
 fn column_type(col: &Column) -> ColumnType {
     if col.collection.unwrap_or(false) {
         return ColumnType::Json;
@@ -1669,16 +1662,6 @@ impl PureFunctionEvaluator for JoinFn {
     }
 }
 
-/// The FHIR temporal type a boundary operates on, inferred from a leading
-/// `ofType(T)` on the base.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BoundaryType {
-    Date,
-    DateTime,
-    Time,
-    Unknown,
-}
-
 /// If `node` is a `lowBoundary()`/`highBoundary()` call, the path that
 /// evaluates its base (a node, or another boundary call) and applies the
 /// boundary. `written` is the same call in the path as written, before the
@@ -1701,27 +1684,6 @@ fn boundary_path(node: &ExpressionNode, written: Option<&ExpressionNode>) -> Opt
         .unwrap_or_else(|| PreparedPath::Node(m.object.as_ref().clone()));
     let precision = m.arguments.first().cloned();
     Some(PreparedPath::Boundary(Box::new(base), low, hint, precision))
-}
-
-fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
-    match object {
-        ExpressionNode::MethodCall(m) if m.method == "ofType" => {
-            let name = match m.arguments.first() {
-                Some(ExpressionNode::Identifier(n)) => n.name.to_lowercase(),
-                Some(ExpressionNode::TypeInfo(t)) => t.name.to_lowercase(),
-                _ => return BoundaryType::Unknown,
-            };
-            match name.as_str() {
-                "datetime" | "instant" => BoundaryType::DateTime,
-                "date" => BoundaryType::Date,
-                "time" => BoundaryType::Time,
-                _ => BoundaryType::Unknown,
-            }
-        }
-        ExpressionNode::PropertyAccess(p) => boundary_hint(&p.object),
-        ExpressionNode::Parenthesized(e) => boundary_hint(e),
-        _ => BoundaryType::Unknown,
-    }
 }
 
 impl BoundaryType {

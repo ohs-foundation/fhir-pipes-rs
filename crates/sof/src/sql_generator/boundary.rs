@@ -1,6 +1,4 @@
-//! Temporal boundary helpers (lowBoundary/highBoundary) and type inference.
-
-use octofhir_fhirpath::ExpressionNode;
+//! Temporal boundary helpers (lowBoundary/highBoundary) in SQL.
 
 use super::ddl::Dialect;
 
@@ -13,36 +11,6 @@ fn end_of_month(dialect: Dialect, t: &str) -> String {
         format!(
             "to_char(to_date({t}, 'YYYY-MM') + interval '1 month' - interval '1 day', 'YYYY-MM-DD')"
         )
-    }
-}
-
-/// The FHIR temporal type a boundary function operates on, inferred from a
-/// leading `ofType(T)` where present.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum BoundaryType {
-    Date,
-    DateTime,
-    Time,
-    Unknown,
-}
-
-pub(super) fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
-    match object {
-        ExpressionNode::MethodCall(m) if m.method == "ofType" => {
-            let name = match m.arguments.first() {
-                Some(ExpressionNode::Identifier(n)) => n.name.to_lowercase(),
-                Some(ExpressionNode::TypeInfo(t)) => t.name.to_lowercase(),
-                _ => return BoundaryType::Unknown,
-            };
-            match name.as_str() {
-                "datetime" | "instant" => BoundaryType::DateTime,
-                "date" => BoundaryType::Date,
-                "time" => BoundaryType::Time,
-                _ => BoundaryType::Unknown,
-            }
-        }
-        ExpressionNode::Parenthesized(e) => boundary_hint(e),
-        _ => BoundaryType::Unknown,
     }
 }
 
@@ -96,13 +64,5 @@ pub(super) fn time_bound(_dialect: Dialect, t: &str, low: bool) -> String {
         format!(
             "CASE length({t}) WHEN 2 THEN {t} || ':59:59.999' WHEN 5 THEN {t} || ':59.999' WHEN 8 THEN {t} || '.999' ELSE {t} END"
         )
-    }
-}
-
-pub(super) fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
     }
 }

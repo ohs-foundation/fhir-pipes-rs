@@ -8,14 +8,14 @@ use octofhir_fhirpath::{BinaryOperator, ExpressionNode, LiteralValue, UnaryOpera
 
 use crate::Error;
 use crate::column::ColumnType;
+use crate::fhir_model;
 use crate::view_definition::{Column, SelectColumn};
 
-use super::boundary::{
-    BoundaryType, boundary_hint, capitalize_first, date_bound, datetime_bound, time_bound,
-};
+use super::boundary::{date_bound, datetime_bound, time_bound};
 use super::constants::substitute_constants;
 use super::ddl::Dialect;
 use super::{Plan, PlanColumn};
+use crate::boundary_type::{BoundaryType, boundary_hint, capitalize_first};
 
 /// The AST→SQL lowering context for a single `generate` call.
 pub(super) struct Lower {
@@ -671,7 +671,11 @@ impl Lower {
         )
     }
 
-    /// `object.ofType(T)` — FHIR choice elements are stored as `<base><Type>`.
+    /// `object.ofType(T)`. A choice element is stored as `<element><Type>`
+    /// (`valueQuantity`). On any other element the items are filtered: by
+    /// `resourceType` for a resource type (`contained.ofType(Practitioner)`),
+    /// and not at all for a datatype, whose type the element already fixes
+    /// (`name.ofType(HumanName)`).
     fn of_type(
         &self,
         object: &ExpressionNode,
@@ -680,19 +684,68 @@ impl Lower {
     ) -> Result<String, Error> {
         let arg = type_arg
             .ok_or_else(|| Error::InvalidPath("ofType() requires a type argument".into()))?;
-        let tname = capitalize_first(&self.type_name(arg)?);
+        let ty = self.type_name(arg)?;
+        let tname = capitalize_first(&ty);
+        let is_choice = |owner: Option<String>, name: &str| match owner {
+            Some(owner) => fhir_model::is_choice_element(&owner, name),
+            // Below a forEach the items' type is not tracked.
+            None => fhir_model::is_choice_anywhere(name),
+        };
         match object {
-            ExpressionNode::PropertyAccess(p) => {
+            ExpressionNode::PropertyAccess(p)
+                if is_choice(self.owner_of(&p.object, ctx), &p.property) =>
+            {
                 let base = self.coll(&p.object, ctx)?;
                 Ok(self.nav(&base, &format!("{}{}", p.property, tname)))
             }
-            ExpressionNode::Identifier(idn) if idn.name != self.resource_type => Ok(self.nav(
-                &self.dialect.build_array1(ctx),
-                &format!("{}{}", idn.name, tname),
-            )),
+            ExpressionNode::Identifier(idn)
+                if idn.name != self.resource_type
+                    && is_choice(self.owner_of_context(ctx), &idn.name) =>
+            {
+                Ok(self.nav(
+                    &self.dialect.build_array1(ctx),
+                    &format!("{}{}", idn.name, tname),
+                ))
+            }
             ExpressionNode::Parenthesized(e) => self.of_type(e, type_arg, ctx),
+            _ if fhir_model::type_kind(&ty) == Some(fhir_model::Kind::Resource) => {
+                let coll = self.coll(object, ctx)?;
+                let n = self.fresh();
+                let src = self.dialect.elements_table(&coll, &format!("_ot{n}"), "_e");
+                Ok(format!(
+                    "(SELECT {agg} FROM {src} WHERE _ot{n}._e ->> 'resourceType' = {t})",
+                    agg = self.dialect.agg(&format!("_ot{n}._e")),
+                    t = sql_str(&ty),
+                ))
+            }
             _ => self.coll(object, ctx),
         }
+    }
+
+    /// The type whose elements `node` yields, when the type table can tell:
+    /// the resource, then each element name down from it. `None` for
+    /// anything else, such as a function's result.
+    fn owner_of(&self, node: &ExpressionNode, ctx: &str) -> Option<String> {
+        match node {
+            ExpressionNode::Identifier(n) if n.name == self.resource_type => {
+                Some(self.resource_type.clone())
+            }
+            ExpressionNode::Identifier(n) => {
+                fhir_model::element_owner(&self.owner_of_context(ctx)?, &n.name).map(str::to_string)
+            }
+            ExpressionNode::PropertyAccess(p) => {
+                fhir_model::element_owner(&self.owner_of(&p.object, ctx)?, &p.property)
+                    .map(str::to_string)
+            }
+            ExpressionNode::Parenthesized(e) => self.owner_of(e, ctx),
+            _ => None,
+        }
+    }
+
+    /// The type of the context item: the resource at the top level. Below a
+    /// `forEach` it is not tracked.
+    fn owner_of_context(&self, ctx: &str) -> Option<String> {
+        (ctx == self.root).then(|| self.resource_type.clone())
     }
 
     // --- Boolean lowering for `where` filters and comparisons. ---
@@ -782,7 +835,9 @@ impl Lower {
         ))
     }
 
-    /// A single JSONB value (the FHIRPath singleton) for use in comparisons.
+    /// A single JSONB value (the FHIRPath singleton) for use in comparisons:
+    /// NULL, so the comparison is empty, unless the collection has exactly
+    /// one item. A scalar subquery over several rows would fail the query.
     fn scalar_jsonb(&self, node: &ExpressionNode, item: &str) -> Result<String, Error> {
         if let ExpressionNode::Literal(l) = node {
             return self.literal_jsonb(&l.value);
@@ -790,7 +845,9 @@ impl Lower {
         let coll = self.coll(node, item)?;
         let n = self.fresh();
         let src = self.dialect.elements_table(&coll, &format!("_sq{n}"), "_s");
-        Ok(format!("(SELECT _s FROM {src})"))
+        Ok(format!(
+            "(SELECT CASE WHEN count(*) = 1 THEN (array_agg(_s))[1] END FROM {src})"
+        ))
     }
 
     /// A JSONB value for a binary/unary expression used as a column value.
