@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A FHIR model for the in-memory engine** — the FHIRPath engine now knows
+  each element's type, from a table of the R4 and R5 core types generated into
+  the crate (`src/fhir_types.rs`, by `examples/generate_fhir_types.rs`), in
+  place of `EmptyModelProvider`. `is`, `as` and `ofType()` work on FHIR types
+  (`Patient.active.is(boolean)`, `Patient.gender.ofType(code)`), and the HL7
+  FHIRPath suite goes from 936 to 962 of 1,001. Elements whose type differs
+  between R4 and R5, and Quantity elements, stay untyped; dates keep the form
+  they were written in. Output of the 22 views tried on Synthea data is
+  unchanged; they run about 15% slower.
 - **Native temporal types in Parquet output** — `ParquetWriter::with_temporal(
   TemporalEncoding::Native)` (CLI: `run --output parquet --parquet-temporal
   native`) writes `date` columns as Arrow `Date32`, `dateTime`/`instant` as

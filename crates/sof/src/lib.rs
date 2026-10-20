@@ -50,6 +50,7 @@
 mod choice_elements;
 mod column;
 mod eval;
+mod fhir_model;
 mod lexer;
 pub mod output;
 mod runner;

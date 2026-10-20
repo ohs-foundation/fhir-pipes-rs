@@ -1,0 +1,123 @@
+{
+  "title": "model_keeps_values",
+  "description": "With the FHIR model, values still come back as the resource wrote them: a date or instant keeps its own form (Z, not +00:00), and a Quantity keeps its code, system and comparator (see the crate README, FHIR model). Type tests use the model.",
+  "resources": [
+    {
+      "resourceType": "Observation",
+      "id": "o1",
+      "status": "final",
+      "code": {
+        "text": "BP"
+      },
+      "issued": "2026-01-02T03:04:05Z",
+      "effectiveDateTime": "2016-03-28",
+      "valueQuantity": {
+        "value": 120,
+        "comparator": "<",
+        "unit": "mmHg",
+        "system": "http://unitsofmeasure.org",
+        "code": "mm[Hg]"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "title": "dates and instants keep their form",
+      "view": {
+        "resource": "Observation",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "issued",
+                "path": "issued"
+              },
+              {
+                "name": "effective",
+                "path": "effective.ofType(dateTime)"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "issued": "2026-01-02T03:04:05Z",
+          "effective": "2016-03-28"
+        }
+      ]
+    },
+    {
+      "title": "a Quantity keeps its code, system and comparator",
+      "view": {
+        "resource": "Observation",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "unit",
+                "path": "value.ofType(Quantity).unit"
+              },
+              {
+                "name": "code",
+                "path": "value.ofType(Quantity).code"
+              },
+              {
+                "name": "system",
+                "path": "value.ofType(Quantity).system"
+              },
+              {
+                "name": "comparator",
+                "path": "value.ofType(Quantity).comparator"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "unit": "mmHg",
+          "code": "mm[Hg]",
+          "system": "http://unitsofmeasure.org",
+          "comparator": "<"
+        }
+      ]
+    },
+    {
+      "title": "type tests use the FHIR model",
+      "view": {
+        "resource": "Observation",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "issued_is_instant",
+                "path": "issued.is(instant)"
+              },
+              {
+                "name": "status_is_code",
+                "path": "status.is(code)"
+              },
+              {
+                "name": "code_is_code",
+                "path": "code.is(code)"
+              },
+              {
+                "name": "later",
+                "path": "issued > @2026-01-01"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "issued_is_instant": true,
+          "status_is_code": true,
+          "code_is_code": false,
+          "later": true
+        }
+      ]
+    }
+  ]
+}
