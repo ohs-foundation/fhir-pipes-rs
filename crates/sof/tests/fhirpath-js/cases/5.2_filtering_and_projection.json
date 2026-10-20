@@ -1,0 +1,357 @@
+{
+  "tests": [
+    {
+      "desc": "5. Functions"
+    },
+    {
+      "desc": "5.2. Filtering and projection"
+    },
+    {
+      "desc": "5.2.1. where(criteria : expression) : collection"
+    },
+    {
+      "desc": "** filter coll of numbers",
+      "expression": "Functions.coll1.coll2.attr.where($this > 2)",
+      "result": [
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "desc": "** filter coll with empty coll result",
+      "expression": "Functions.coll1.coll2.attr.where($this = 0)",
+      "result": []
+    },
+    {
+      "desc": "** the ability to use $index in the expression",
+      "expression": "Functions.coll1.coll2.attr.where($index > 2)",
+      "result": [
+        4,
+        5
+      ]
+    },
+    {
+      "desc": "** filter empty coll",
+      "expression": "Functions.attrempty.where($this > 0)",
+      "result": []
+    },
+    {
+      "desc": "** filter non-exists coll",
+      "expression": "Functions.nothing.where($this < 0)",
+      "result": []
+    },
+    {
+      "desc": "** where for a collection with a null value that has an id",
+      "inputfile": "patient-example-2.json",
+      "expression": "Patient.name.given.where(id = 'Jacomus1Id').count()",
+      "result": [
+        1
+      ]
+    },
+    {
+      "desc": "5.2.2. select(projection: expression) : collection"
+    },
+    {
+      "desc": "** simple select",
+      "expression": "Functions.coll1.coll2.select(attr)",
+      "result": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "desc": "** select 2",
+      "expression": "Functions.coll1.select(colltrue | collfalse).attr",
+      "result": [
+        true,
+        false
+      ]
+    },
+    {
+      "desc": "** select 3",
+      "expression": "Functions.coll1.select(colltrue.attr | collfalse.attr)",
+      "result": [
+        true,
+        false
+      ]
+    },
+    {
+      "desc": "** select on empty coll is empty",
+      "expression": "Functions.attrempty.select(nothing)",
+      "result": []
+    },
+    {
+      "desc": "** the ability to use $index in the expression",
+      "expression": "Functions.coll1.coll2.select(attr + $index)",
+      "result": [
+        1,
+        3,
+        5,
+        7,
+        9
+      ]
+    },
+    {
+      "desc": "** select() function for collection with null elements",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "Patient.name.given.select($this & $this.id)",
+      "result": [
+        "Jacomus1Id",
+        "Peter",
+        "James",
+        "Jacomus2Id"
+      ]
+    },
+    {
+      "desc": "5.2.3. repeat(projection: expression) : collection"
+    },
+    {
+      "desc": "* traverse tree"
+    },
+    {
+      "desc": "** should not result in an infinite loop 1",
+      "expression": "Functions.coll1.colltrue.repeat(true)",
+      "result": [
+        true
+      ]
+    },
+    {
+      "desc": "** should not result in an infinite loop 2",
+      "expression": "(1 | 2).repeat('item')",
+      "result": [
+        "item"
+      ]
+    },
+    {
+      "desc": "** should use year-to-month conversion factor (https://hl7.org/fhirpath/#equals)",
+      "expression": "(1 year).combine(12 months).repeat($this)",
+      "result": [
+        "1 year"
+      ]
+    },
+    {
+      "desc": "** should compare quantities for equality (https://hl7.org/fhirpath/#equals)",
+      "preciseMath": [
+        false,
+        true
+      ],
+      "expression": "(3 'min').combine(180 seconds).repeat($this)",
+      "result": [
+        "3 'min'"
+      ]
+    },
+    {
+      "desc": "** find all attrs",
+      "expression": "Functions.repeat(repeatingAttr).count()",
+      "result": [
+        2
+      ]
+    },
+    {
+      "desc": "** find all repeatingAttr.a values",
+      "expression": "Functions.repeat(repeatingAttr).a",
+      "result": [
+        2,
+        1
+      ]
+    },
+    {
+      "desc": "** find all true values in nested coll",
+      "expression": "Functions.coll1.colltrue.repeat(attr)",
+      "result": [
+        true
+      ]
+    },
+    {
+      "desc": "** find non-exists value",
+      "expression": "Functions.coll1.repeat(nothing)",
+      "result": []
+    },
+    {
+      "desc": "** repeat() function for collection with null elements",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "Patient.name.given.repeat(id)",
+      "result": [
+        "Jacomus1Id",
+        "Jacomus2Id"
+      ]
+    },
+    {
+      "desc": "5.2.4. ofType(type : identifier) : collection"
+    },
+    {
+      "desc": "** empty input coll",
+      "expression": "Functions.attrempty.ofType(String)",
+      "result": []
+    },
+    {
+      "desc": "** string",
+      "expression": "heteroattr.ofType(String)",
+      "result": [
+        "string"
+      ]
+    },
+    {
+      "desc": "** integer",
+      "expression": "heteroattr.ofType(Integer)",
+      "result": [
+        1
+      ]
+    },
+    {
+      "desc": "** decimal",
+      "expression": "heteroattr.ofType(Decimal)",
+      "result": [
+        1.01
+      ]
+    },
+    {
+      "desc": "** boolean",
+      "expression": "heteroattr.ofType(Boolean)",
+      "result": [
+        true,
+        false
+      ]
+    },
+    {
+      "desc": "** object (not fhir)",
+      "expression": "heteroattr.ofType(Object)",
+      "error": true
+    },
+    {
+      "desc": "ofType() function with automatic data type conversion",
+      "inputfile": "patient-example.json",
+      "model": "r4",
+      "expression": "Patient.name.given.ofType(FHIR.string) = Patient.name.given.ofType(System.String)",
+      "result": [
+        true
+      ]
+    }
+  ],
+  "subject": {
+    "resourceType": "Functions",
+    "attrempty": [],
+    "attrtrue": true,
+    "attrfalse": false,
+    "heteroattr": [
+      "string",
+      1,
+      1.01,
+      {
+        "a": 1
+      },
+      true,
+      false
+    ],
+    "attrsingle": [
+      1
+    ],
+    "attrdouble": [
+      1,
+      2
+    ],
+    "attrobject": {
+      "a": 1,
+      "b": 2,
+      "repeatingAttr": 5
+    },
+    "repeatingAttr": {
+      "repeatingAttr": {
+        "a": 1
+      },
+      "a": 2
+    },
+    "coll1": [
+      {
+        "coll2": [
+          {
+            "attr": 1
+          },
+          {
+            "attr": 2
+          },
+          {
+            "attr": 3
+          }
+        ]
+      },
+      {
+        "coll2": [
+          {
+            "attr": 4
+          },
+          {
+            "attr": 5
+          }
+        ]
+      },
+      {
+        "colltrue": [
+          {
+            "attr": true
+          },
+          {
+            "attr": true
+          },
+          {
+            "attr": true
+          }
+        ]
+      },
+      {
+        "collwithfalse": [
+          {
+            "attr": false
+          },
+          {
+            "attr": true
+          }
+        ]
+      },
+      {
+        "collfalse": [
+          {
+            "attr": false
+          },
+          {
+            "attr": false
+          }
+        ]
+      },
+      {
+        "mixed": [
+          {
+            "attr": true
+          },
+          {
+            "attr": false
+          },
+          {
+            "attr": "test string"
+          },
+          {
+            "attr": 999
+          },
+          {
+            "attr": 3.14159
+          },
+          {
+            "attr": "@2015-02-04T14:34:28Z"
+          },
+          {
+            "attr": "@T14:34:28+09:00"
+          },
+          {
+            "attr": "4 days"
+          }
+        ]
+      }
+    ]
+  }
+}

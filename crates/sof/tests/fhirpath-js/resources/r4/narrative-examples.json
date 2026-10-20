@@ -1,0 +1,67 @@
+{
+  "resourceType": "Bundle",
+  "id": "narrative-examples",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "valid",
+        "text": {
+          "status": "generated",
+          "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>Peter James <b>Chalmers</b></p></div>"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "no-content",
+        "text": {
+          "status": "generated",
+          "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">   </div>"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "script",
+        "text": {
+          "status": "generated",
+          "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>hi</p><script>alert(1)</script></div>"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "not-a-div",
+        "text": {
+          "status": "generated",
+          "div": "<p>hi</p>"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "unclosed-br",
+        "text": {
+          "status": "generated",
+          "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"><p>a<br>b</p></div>"
+        }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "bad-namespace",
+        "text": {
+          "status": "generated",
+          "div": "<div xmlns=\"urn:example:not-xhtml\"><p>Peter James</p></div>"
+        }
+      }
+    }
+  ]
+}

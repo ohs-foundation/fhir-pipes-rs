@@ -1,0 +1,165 @@
+{
+  "tests": [
+    {
+      "desc": "5. Functions"
+    },
+    {
+      "desc": "5.7. Tree navigation"
+    },
+    {
+      "desc": "5.7.1. children() : collection"
+    },
+    {
+      "desc": "** children",
+      "expression": "ch.children()",
+      "result": [
+        {
+          "d": 1
+        },
+        {
+          "e": 1
+        },
+        {
+          "d": 2
+        },
+        {
+          "e": 2
+        }
+      ]
+    },
+    {
+      "desc": "** children() on a collection with null elements does not throw an error",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "name.given.children()",
+      "result": [
+        "Jacomus1Id",
+        {
+          "url": "http://hl7.org/fhir/StructureDefinition/display",
+          "valueString": "Jacomus1"
+        },
+        "Jacomus2Id",
+        {
+          "url": "http://hl7.org/fhir/StructureDefinition/display",
+          "valueString": "Jacomus2"
+        }
+      ]
+    },
+    {
+      "desc": "** children() processes a child node that has only a property starting with _",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "communication.children()[1] = communication.preferred",
+      "result": [
+        true
+      ]
+    },
+    {
+      "desc": "** children() on a resource should not treat the resourceType property as a child",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "Patient.children() = (Patient.birthDate | Patient.address | Patient.name | Patient.communication)",
+      "result": [
+        true
+      ]
+    },
+    {
+      "desc": "5.7.2. descendants() : collection"
+    },
+    {
+      "desc": "** descendants",
+      "expression": "ch.descendants()",
+      "result": [
+        {
+          "d": 1
+        },
+        {
+          "e": 1
+        },
+        {
+          "d": 2
+        },
+        {
+          "e": 2
+        },
+        1,
+        1,
+        2,
+        2
+      ]
+    },
+    {
+      "desc": "** descendants",
+      "expression": "desc.descendants()",
+      "result": [
+        {
+          "b": {
+            "c": {
+              "d": 1
+            }
+          }
+        },
+        {
+          "c": {
+            "d": 1
+          }
+        },
+        {
+          "d": 1
+        },
+        1
+      ]
+    },
+    {
+      "desc": "** descendants() on a collection with null elements does not throw an error",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "name.given.descendants()",
+      "result": [
+        "Jacomus1Id",
+        {
+          "url": "http://hl7.org/fhir/StructureDefinition/display",
+          "valueString": "Jacomus1"
+        },
+        "Jacomus2Id",
+        {
+          "url": "http://hl7.org/fhir/StructureDefinition/display",
+          "valueString": "Jacomus2"
+        },
+        "http://hl7.org/fhir/StructureDefinition/display",
+        "Jacomus1",
+        "http://hl7.org/fhir/StructureDefinition/display",
+        "Jacomus2"
+      ]
+    }
+  ],
+  "subject": {
+    "desc": {
+      "a": {
+        "b": {
+          "c": {
+            "d": 1
+          }
+        }
+      }
+    },
+    "ch": [
+      {
+        "a": {
+          "d": 1
+        },
+        "b": {
+          "e": 1
+        }
+      },
+      {
+        "a": {
+          "d": 2
+        },
+        "b": {
+          "e": 2
+        }
+      }
+    ]
+  }
+}

@@ -190,9 +190,19 @@ pub fn is_choice_anywhere(name: &str) -> bool {
 }
 
 fn is_derived_from(derived: &str, base: &str) -> bool {
-    derived == base
-        || type_entry(derived)
-            .is_some_and(|(_, bases)| bases.iter().any(|b| is_derived_from(b, base)))
+    if derived == base {
+        return true;
+    }
+    // A backbone element (`Patient.contact`) is a BackboneElement in a
+    // resource and an Element in a datatype (`Timing.repeat`).
+    if let Some((root, _)) = derived.split_once('.') {
+        let parent = match type_kind(root) {
+            Some(Kind::Resource) => "BackboneElement",
+            _ => "Element",
+        };
+        return is_derived_from(parent, base);
+    }
+    type_entry(derived).is_some_and(|(_, bases)| bases.iter().any(|b| is_derived_from(b, base)))
 }
 
 /// The FHIRPath type a FHIR type evaluates to, if it is a primitive or a
@@ -508,5 +518,9 @@ mod tests {
         assert!(p.is_type_derived_from("Patient", "Resource"));
         assert!(p.is_type_derived_from("Age", "Quantity"));
         assert!(!p.is_type_derived_from("Patient", "Observation"));
+        assert!(p.is_type_derived_from("Patient.contact", "BackboneElement"));
+        assert!(p.is_type_derived_from("Patient.contact", "Element"));
+        assert!(p.is_type_derived_from("Timing.repeat", "Element"));
+        assert!(!p.is_type_derived_from("Timing.repeat", "BackboneElement"));
     }
 }
