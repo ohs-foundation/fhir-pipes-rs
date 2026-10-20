@@ -40,6 +40,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **octofhir-fhirpath 0.4.57** — with the `is`/`as` precedence, `hasValue()`,
+  boundary and date-only dateTime fixes from octofhir/fhirpath-rs#176–#179;
+  the HL7 FHIRPath suite goes from 962 to 970 of 1,001.
 - **Parquet: values that do not match their column's type.** An integral
   number (`5.0`) in an `integer` or `integer64` column is written as the
   integer instead of null; `5.5` is still null. With
