@@ -30,6 +30,13 @@
         {
           "reference": "Practitioner/x"
         }
+      ],
+      "contact": [
+        {
+          "name": {
+            "family": "Kin"
+          }
+        }
       ]
     },
     {
@@ -270,6 +277,61 @@
         {
           "id": "o1",
           "v": 0
+        }
+      ]
+    },
+    {
+      "title": "ofType with a complex type on a backbone element's element that is not a choice element",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              },
+              {
+                "name": "v",
+                "path": "contact.name.ofType(HumanName).family",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "id": "p1",
+          "v": "Kin"
+        },
+        {
+          "id": "p2",
+          "v": null
+        }
+      ]
+    },
+    {
+      "title": "ofType under forEach on an element that is not a choice element",
+      "view": {
+        "resource": "Patient",
+        "select": [
+          {
+            "forEach": "contact",
+            "column": [
+              {
+                "name": "v",
+                "path": "name.ofType(HumanName).family",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "v": "Kin"
         }
       ]
     }

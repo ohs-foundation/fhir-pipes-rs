@@ -11,6 +11,9 @@
 //! octofhir-fhirschema's provider, without its schema files or package
 //! manager.
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use async_trait::async_trait;
 use octofhir_fhirpath::ModelProvider;
 use octofhir_fhirpath::core::model_provider::{ElementInfo, ModelError, TypeInfo};
@@ -104,6 +107,69 @@ fn element(owner: &str, name: &str) -> Option<(bool, &'static ElementType)> {
     Some((*repeats, ty))
 }
 
+/// A choice element by its JSON name: `valueQuantity` is `value[x]` as a
+/// Quantity, `valueString` as a string. `(repeats, type)`.
+fn choice_by_json_name(owner: &str, name: &str) -> Option<(bool, &'static str)> {
+    // The type starts at an upper-case letter.
+    name.char_indices()
+        .skip(1)
+        .filter(|(_, c)| c.is_ascii_uppercase())
+        .find_map(|(at, _)| {
+            let (base, suffix) = name.split_at(at);
+            let (repeats, ElementType::Choice(types)) = element(owner, &format!("{base}[x]"))?
+            else {
+                return None;
+            };
+            // `Quantity` for `Quantity`, `DateTime` for `dateTime`.
+            let ty = types.iter().find(|t| {
+                let (mut ty, mut written) = (t.chars(), suffix.chars());
+                ty.next().map(|c| c.to_ascii_uppercase()) == written.next()
+                    && ty.as_str() == written.as_str()
+            })?;
+            Some((repeats, *ty))
+        })
+}
+
+/// Whether `name` is a FHIR type (resource, datatype or primitive).
+pub(crate) fn is_type(name: &str) -> bool {
+    type_entry(name).is_some()
+}
+
+/// Where the elements of `owner`'s element `name` are listed: its complex
+/// type (`HumanName`) or, for a backbone element, its path (`Patient.contact`).
+/// A choice element by its JSON name (`valueQuantity`) has the type it names.
+/// `None` for a primitive, an unknown element, a choice element by its own
+/// name, or an element the FHIR versions give different types.
+pub(crate) fn element_owner(owner: &str, name: &str) -> Option<&'static str> {
+    let complex = |ty: &'static str| {
+        type_entry(ty)
+            .is_some_and(|(kind, _)| *kind != Kind::Primitive)
+            .then_some(ty)
+    };
+    match element(owner, name) {
+        Some((_, ElementType::Named(ty))) => complex(ty),
+        Some((_, ElementType::Backbone(path))) => Some(path),
+        Some(_) => None,
+        None => choice_by_json_name(owner, name).and_then(|(_, ty)| complex(ty)),
+    }
+}
+
+/// Whether `owner` has a choice element `name` (`value[x]` for `value`).
+pub(crate) fn is_choice_element(owner: &str, name: &str) -> bool {
+    element(owner, &format!("{name}[x]")).is_some()
+}
+
+/// Whether any type or backbone element has a choice element `name`.
+pub(crate) fn is_choice_anywhere(name: &str) -> bool {
+    static NAMES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+        ELEMENTS
+            .iter()
+            .filter_map(|(_, name, ..)| name.strip_suffix("[x]"))
+            .collect()
+    });
+    NAMES.contains(name)
+}
+
 fn is_derived_from(derived: &str, base: &str) -> bool {
     derived == base
         || type_entry(derived)
@@ -189,31 +255,9 @@ impl ModelProvider for TableModelProvider {
                 ElementType::Choice(_) | ElementType::Unknown => None,
             });
         }
-        // A choice element by its JSON name: `valueQuantity` is `value[x]`
-        // as a Quantity, `valueString` as a string. `value` alone has no
-        // type: it depends on the JSON name used. The type starts at an
-        // upper-case letter.
-        for (at, _) in property_name
-            .char_indices()
-            .skip(1)
-            .filter(|(_, c)| c.is_ascii_uppercase())
-        {
-            let (base, suffix) = property_name.split_at(at);
-            let Some((repeats, ElementType::Choice(types))) = element(owner, &format!("{base}[x]"))
-            else {
-                continue;
-            };
-            // `Quantity` for `Quantity`, `DateTime` for `dateTime`.
-            let found = types.iter().find(|t| {
-                let (mut ty, mut written) = (t.chars(), suffix.chars());
-                ty.next().map(|c| c.to_ascii_uppercase()) == written.next()
-                    && ty.as_str() == written.as_str()
-            });
-            if let Some(ty) = found {
-                return Ok(named_type(ty, !repeats));
-            }
-        }
-        Ok(None)
+        // `value` alone has no type: it depends on the JSON name used.
+        Ok(choice_by_json_name(owner, property_name)
+            .and_then(|(repeats, ty)| named_type(ty, !repeats)))
     }
 
     fn of_type(&self, type_info: &TypeInfo, target_type: &str) -> Option<TypeInfo> {
@@ -347,6 +391,38 @@ mod tests {
         assert!(element("Observation", "bodyStructure").await.is_some());
         // string in R4, markdown in R5: no type.
         assert!(element("Account", "description").await.is_none());
+    }
+
+    #[test]
+    fn elements_lead_to_their_owners() {
+        assert_eq!(element_owner("Patient", "name"), Some("HumanName"));
+        assert_eq!(element_owner("Patient", "contact"), Some("Patient.contact"));
+        assert_eq!(element_owner("Patient.contact", "name"), Some("HumanName"));
+        assert_eq!(
+            element_owner("Observation", "valueQuantity"),
+            Some("Quantity")
+        );
+        assert_eq!(
+            element_owner("Questionnaire.item", "item"),
+            Some("Questionnaire.item")
+        );
+        // A primitive, a choice element by its own name, an unknown element.
+        assert_eq!(element_owner("Patient", "gender"), None);
+        assert_eq!(element_owner("Observation", "value"), None);
+        assert_eq!(element_owner("Patient", "nmae"), None);
+    }
+
+    #[test]
+    fn choice_elements_are_found_by_owner_or_anywhere() {
+        assert!(is_choice_element("Observation", "value"));
+        assert!(is_choice_element("Observation.component", "value"));
+        assert!(is_choice_element("Patient", "deceased"));
+        assert!(!is_choice_element("Patient", "name"));
+        assert!(!is_choice_element("Patient.contact", "name"));
+        assert!(is_choice_anywhere("value"));
+        // ImplementationGuide.definition.page.name[x] (R4).
+        assert!(is_choice_anywhere("name"));
+        assert!(!is_choice_anywhere("family"));
     }
 
     #[test]
