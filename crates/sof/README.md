@@ -145,6 +145,11 @@ with `cargo test -p fhir-pipes-sof`:
 `SOF_RESULT_JSON=<path>` makes the in-memory run write a result file in the
 format of the sql-on-fhir.org registry; see [CONFORMANCE.md](CONFORMANCE.md).
 
+Where the specs leave a choice to the implementation (the form of resource
+keys, `%rowIndex` in a `forEachOrNull` row with nothing to iterate, how dates
+and decimals are written), [SPEC_INTERPRETATIONS.md](SPEC_INTERPRETATIONS.md)
+says what fhir-pipes does and why.
+
 ### FHIRPath
 
 Two FHIRPath test suites run through the in-memory evaluator, each expression
