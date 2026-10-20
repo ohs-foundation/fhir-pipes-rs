@@ -190,7 +190,8 @@ impl Dhis2 {
     /// fail here, before any other request.
     pub fn connect(conn: &Dhis2Conn) -> Result<Self> {
         let base = api_base(&conn.url)?;
-        let client = FhirClient::new(auth(conn), conn.retries, Duration::from_secs(conn.timeout))?;
+        let client = FhirClient::new(auth(conn), conn.retries, Duration::from_secs(conn.timeout))?
+            .for_server(&base);
         let mut d = Dhis2 {
             base,
             client,

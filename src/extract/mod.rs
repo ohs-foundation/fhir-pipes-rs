@@ -140,7 +140,8 @@ fn run_phases(
         args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
-    )?;
+    )?
+    .for_server(&args.server);
     let mut report = Report::default();
 
     let paged = page_locations(

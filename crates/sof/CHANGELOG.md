@@ -97,6 +97,11 @@ changes.
 
 ### Fixed
 
+- **Strings from a view are quoted in the generated SQL.** The separator of
+  `join()` was put into `string_agg` unquoted. Every string that reaches the
+  SQL now goes through one function that quotes it. A `resource` that is not
+  a resource type name (a capital letter, then letters and digits) is an
+  error, since it names the table.
 - **Four FHIRPath cases found by fhirpath.js's tests**, which now run in the
   crate's tests next to the HL7 suite (2,068 of 2,681 pass; each failure is
   listed with its cause):
