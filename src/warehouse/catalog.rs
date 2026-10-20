@@ -67,7 +67,7 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str, stage: &Stage) -> Re
         refreshed_at,
     );
     let path = stage.file(SQL_FILE);
-    fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
+    crate::fs::atomic_write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
     let listed = tables.iter().filter(|t| !t.files.is_empty()).count();
     println!("   {SQL_FILE}: {listed} table view(s)");
     if let Some(spark) = &c.spark {
@@ -101,7 +101,8 @@ pub fn write(s: &Settings, c: &Catalog, refreshed_at: &str, stage: &Stage) -> Re
             refreshed_at,
         );
         let path = stage.file(SPARK_FILE);
-        fs::write(&path, &sql).with_context(|| format!("writing {}", path.display()))?;
+        crate::fs::atomic_write(&path, &sql)
+            .with_context(|| format!("writing {}", path.display()))?;
         println!(
             "   {SPARK_FILE}: {listed} table(s) in database {}",
             spark.database
@@ -152,7 +153,12 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
     // so its error output is the failure signal.
     let err = String::from_utf8_lossy(&out.stderr);
     if !out.status.success() || !err.trim().is_empty() {
-        bail!("building {DUCKDB_FILE} with duckdb: {}", err.trim());
+        // The setup SQL can hold keys (CREATE SECRET), which duckdb's
+        // errors can quote.
+        bail!(
+            "building {DUCKDB_FILE} with duckdb: {}",
+            crate::redact::sql_strings(err.trim(), &setup)
+        );
     }
     if wal(&tmp).exists() {
         bail!("duckdb left {} behind", wal(&tmp).display());

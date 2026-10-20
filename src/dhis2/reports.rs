@@ -1617,7 +1617,7 @@ fn fingerprint(
 ) -> Value {
     let from_values = args.source == ReportSource::DataValues;
     json!({
-        "dhis2": args.conn.url,
+        "dhis2": crate::redact::url(&args.conn.url),
         "instance": instance.name,
         "source": args.source.code(),
         "updated_since": args.updated_since,

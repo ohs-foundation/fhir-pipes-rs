@@ -8,14 +8,14 @@ use octofhir_fhirpath::{BinaryOperator, ExpressionNode, LiteralValue, UnaryOpera
 
 use crate::Error;
 use crate::column::ColumnType;
+use crate::fhir_model;
 use crate::view_definition::{Column, SelectColumn};
 
-use super::boundary::{
-    BoundaryType, boundary_hint, capitalize_first, date_bound, datetime_bound, time_bound,
-};
+use super::boundary::{date_bound, datetime_bound, time_bound};
 use super::constants::substitute_constants;
 use super::ddl::Dialect;
 use super::{Plan, PlanColumn};
+use crate::boundary_type::{BoundaryType, boundary_hint, capitalize_first};
 
 /// The AST→SQL lowering context for a single `generate` call.
 pub(super) struct Lower {
@@ -181,9 +181,11 @@ impl Lower {
             .iter()
             .map(|p| {
                 let s = self.substitute(p)?;
-                parse_ast(&s).map_err(|e| Error::FhirPath(e.to_string()))
+                let ast = parse_ast(&s).map_err(|e| Error::FhirPath(e.to_string()))?;
+                crate::repeat_path::check(p, &ast, &self.resource_type)?;
+                Ok(ast)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
         let n = self.fresh();
         let cte = format!("_rep{n}");
@@ -385,7 +387,8 @@ impl Lower {
     /// JSONB navigation that flattens collections: for every item in `coll`,
     /// take `item->prop`, unwrapping arrays into the result.
     fn nav(&self, coll: &str, prop: &str) -> String {
-        let p = prop.replace('\'', "''");
+        let p = sql_str(prop);
+        let raw = prop.replace('\'', "''");
         let n = self.fresh();
         if matches!(self.dialect, Dialect::DuckDb) {
             // A 3-branch CASE with an empty `[]::JSON[]` middle branch fails to
@@ -394,13 +397,13 @@ impl Lower {
             let item = format!("_item{n}");
             let v = format!("_v{n}");
             let outer = self.dialect.elements_table(coll, &format!("_i{n}"), &item);
-            let is_arr = self.dialect.is_array(&format!("{item} -> '{p}'"));
+            let is_arr = self.dialect.is_array(&format!("{item} -> {p}"));
             let not_null = self.dialect.is_json_null(&v);
             format!(
                 "(SELECT {agg} FROM (\
                    SELECT unnest(CASE \
-                     WHEN {is_arr} THEN json_extract({item}, '$.{p}[*]') \
-                     ELSE [{item} -> '{p}'] \
+                     WHEN {is_arr} THEN json_extract({item}, '$.{raw}[*]') \
+                     ELSE [{item} -> {p}] \
                    END) AS {v} \
                    FROM {outer} \
                  ) AS _nav{n} WHERE {v} IS NOT NULL AND NOT ({not_null}))",
@@ -410,15 +413,15 @@ impl Lower {
             let item = "_item";
             let inner = format!(
                 "CASE \
-                   WHEN {is_arr} THEN {item} -> '{p}' \
-                   WHEN {item} -> '{p}' IS NULL THEN {empty} \
+                   WHEN {is_arr} THEN {item} -> {p} \
+                   WHEN {item} -> {p} IS NULL THEN {empty} \
                    WHEN {is_null} THEN {empty} \
                    ELSE {one} \
                  END",
-                is_arr = self.dialect.is_array(&format!("{item} -> '{p}'")),
-                is_null = self.dialect.is_json_null(&format!("{item} -> '{p}'")),
+                is_arr = self.dialect.is_array(&format!("{item} -> {p}")),
+                is_null = self.dialect.is_json_null(&format!("{item} -> {p}")),
                 empty = self.dialect.empty_array(),
-                one = self.dialect.build_array1(&format!("{item} -> '{p}'")),
+                one = self.dialect.build_array1(&format!("{item} -> {p}")),
             );
             let outer = self.dialect.elements_table(coll, "_i", item);
             format!(
@@ -550,8 +553,9 @@ impl Lower {
         let joined = self
             .dialect
             .build_array1(&self.dialect.to_json_scalar(&format!(
-                "string_agg({}, '{sep}')",
-                self.dialect.scalar_text("_e")
+                "string_agg({}, {})",
+                self.dialect.scalar_text("_e"),
+                sql_str(&sep)
             )));
         // join() over an empty collection yields the empty collection (null),
         // not an empty string. (FHIR/sql-on-fhir.js fn_join)
@@ -564,12 +568,12 @@ impl Lower {
     fn extension_fn(&self, coll: &str, url: &str) -> Result<String, Error> {
         let nav_ext = self.nav(coll, "extension");
         let n = self.fresh();
-        let url = url.replace('\'', "''");
+        let url = sql_str(url);
         let src = self
             .dialect
             .elements_table(&nav_ext, &format!("_x{n}"), "_e");
         Ok(format!(
-            "(SELECT {agg} FROM {src} WHERE _x{n}._e ->> 'url' = '{url}')",
+            "(SELECT {agg} FROM {src} WHERE _x{n}._e ->> 'url' = {url})",
             agg = self.dialect.agg(&format!("_x{n}._e")),
         ))
     }
@@ -591,7 +595,7 @@ impl Lower {
         );
         let guard = match type_arg {
             Some(t) => {
-                let ty = self.type_name(t)?.replace('\'', "''");
+                let ty = sql_str(&self.type_name(t)?);
                 // A contained resource's type is its declared `resourceType`,
                 // falling back to the Reference.type element; a normal
                 // reference's type is its leading path segment.
@@ -611,8 +615,8 @@ impl Lower {
                 );
                 format!(
                     " AND (CASE WHEN {is_frag} \
-                       THEN coalesce({contained_ty}, _r{n}._e ->> 'type') = '{ty}' \
-                       ELSE split_part({refexpr}, '/', 1) = '{ty}' END)"
+                       THEN coalesce({contained_ty}, _r{n}._e ->> 'type') = {ty} \
+                       ELSE split_part({refexpr}, '/', 1) = {ty} END)"
                 )
             }
             None => String::new(),
@@ -669,7 +673,11 @@ impl Lower {
         )
     }
 
-    /// `object.ofType(T)` — FHIR choice elements are stored as `<base><Type>`.
+    /// `object.ofType(T)`. A choice element is stored as `<element><Type>`
+    /// (`valueQuantity`). On any other element the items are filtered: by
+    /// `resourceType` for a resource type (`contained.ofType(Practitioner)`),
+    /// and not at all for a datatype, whose type the element already fixes
+    /// (`name.ofType(HumanName)`).
     fn of_type(
         &self,
         object: &ExpressionNode,
@@ -678,19 +686,68 @@ impl Lower {
     ) -> Result<String, Error> {
         let arg = type_arg
             .ok_or_else(|| Error::InvalidPath("ofType() requires a type argument".into()))?;
-        let tname = capitalize_first(&self.type_name(arg)?);
+        let ty = self.type_name(arg)?;
+        let tname = capitalize_first(&ty);
+        let is_choice = |owner: Option<String>, name: &str| match owner {
+            Some(owner) => fhir_model::is_choice_element(&owner, name),
+            // Below a forEach the items' type is not tracked.
+            None => fhir_model::is_choice_anywhere(name),
+        };
         match object {
-            ExpressionNode::PropertyAccess(p) => {
+            ExpressionNode::PropertyAccess(p)
+                if is_choice(self.owner_of(&p.object, ctx), &p.property) =>
+            {
                 let base = self.coll(&p.object, ctx)?;
                 Ok(self.nav(&base, &format!("{}{}", p.property, tname)))
             }
-            ExpressionNode::Identifier(idn) if idn.name != self.resource_type => Ok(self.nav(
-                &self.dialect.build_array1(ctx),
-                &format!("{}{}", idn.name, tname),
-            )),
+            ExpressionNode::Identifier(idn)
+                if idn.name != self.resource_type
+                    && is_choice(self.owner_of_context(ctx), &idn.name) =>
+            {
+                Ok(self.nav(
+                    &self.dialect.build_array1(ctx),
+                    &format!("{}{}", idn.name, tname),
+                ))
+            }
             ExpressionNode::Parenthesized(e) => self.of_type(e, type_arg, ctx),
+            _ if fhir_model::type_kind(&ty) == Some(fhir_model::Kind::Resource) => {
+                let coll = self.coll(object, ctx)?;
+                let n = self.fresh();
+                let src = self.dialect.elements_table(&coll, &format!("_ot{n}"), "_e");
+                Ok(format!(
+                    "(SELECT {agg} FROM {src} WHERE _ot{n}._e ->> 'resourceType' = {t})",
+                    agg = self.dialect.agg(&format!("_ot{n}._e")),
+                    t = sql_str(&ty),
+                ))
+            }
             _ => self.coll(object, ctx),
         }
+    }
+
+    /// The type whose elements `node` yields, when the type table can tell:
+    /// the resource, then each element name down from it. `None` for
+    /// anything else, such as a function's result.
+    fn owner_of(&self, node: &ExpressionNode, ctx: &str) -> Option<String> {
+        match node {
+            ExpressionNode::Identifier(n) if n.name == self.resource_type => {
+                Some(self.resource_type.clone())
+            }
+            ExpressionNode::Identifier(n) => {
+                fhir_model::element_owner(&self.owner_of_context(ctx)?, &n.name).map(str::to_string)
+            }
+            ExpressionNode::PropertyAccess(p) => {
+                fhir_model::element_owner(&self.owner_of(&p.object, ctx)?, &p.property)
+                    .map(str::to_string)
+            }
+            ExpressionNode::Parenthesized(e) => self.owner_of(e, ctx),
+            _ => None,
+        }
+    }
+
+    /// The type of the context item: the resource at the top level. Below a
+    /// `forEach` it is not tracked.
+    fn owner_of_context(&self, ctx: &str) -> Option<String> {
+        (ctx == self.root).then(|| self.resource_type.clone())
     }
 
     // --- Boolean lowering for `where` filters and comparisons. ---
@@ -780,7 +837,9 @@ impl Lower {
         ))
     }
 
-    /// A single JSONB value (the FHIRPath singleton) for use in comparisons.
+    /// A single JSONB value (the FHIRPath singleton) for use in comparisons:
+    /// NULL, so the comparison is empty, unless the collection has exactly
+    /// one item. A scalar subquery over several rows would fail the query.
     fn scalar_jsonb(&self, node: &ExpressionNode, item: &str) -> Result<String, Error> {
         if let ExpressionNode::Literal(l) = node {
             return self.literal_jsonb(&l.value);
@@ -788,7 +847,9 @@ impl Lower {
         let coll = self.coll(node, item)?;
         let n = self.fresh();
         let src = self.dialect.elements_table(&coll, &format!("_sq{n}"), "_s");
-        Ok(format!("(SELECT _s FROM {src})"))
+        Ok(format!(
+            "(SELECT CASE WHEN count(*) = 1 THEN (array_agg(_s))[1] END FROM {src})"
+        ))
     }
 
     /// A JSONB value for a binary/unary expression used as a column value.
@@ -858,14 +919,21 @@ impl Lower {
         let int = self.dialect.int_cast();
         let j = |x: &str| self.dialect.to_json_scalar(x);
         Ok(match v {
-            LiteralValue::String(s) => j(&format!("'{}'::{txt}", s.replace('\'', "''"))),
+            LiteralValue::String(s) => j(&format!("{}::{txt}", sql_str(s))),
             LiteralValue::Integer(i) | LiteralValue::Long(i) => j(&format!("{i}::{int}")),
             LiteralValue::Decimal(d) => j(&format!("{d}::{num}")),
             LiteralValue::Boolean(b) => j(&b.to_string()),
             LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
                 let s = v.to_string();
+                // `@2020-01-01` and `@T10:00` as FHIR stores them: no `@`,
+                // and a time without its `T`.
                 let s = s.trim_start_matches('@');
-                j(&format!("'{}'::{txt}", s.replace('\'', "''")))
+                let s = if matches!(v, LiteralValue::Time(_)) {
+                    s.trim_start_matches('T')
+                } else {
+                    s
+                };
+                j(&format!("{}::{txt}", sql_str(s)))
             }
             LiteralValue::Quantity { value, .. } => j(&format!("{value}::{num}")),
         })
@@ -917,4 +985,10 @@ impl Lower {
     pub(super) fn substitute(&self, path: &str) -> Result<String, Error> {
         substitute_constants(path, &self.constants)
     }
+}
+
+/// `s` as a SQL string literal. Every string that reaches the generated SQL
+/// from a view goes through this.
+pub(super) fn sql_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }

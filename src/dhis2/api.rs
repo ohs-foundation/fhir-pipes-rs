@@ -168,8 +168,17 @@ pub fn api_base(url: &str) -> Result<String> {
     let trimmed = trimmed.strip_suffix("/api").unwrap_or(trimmed);
     if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
         return Err(PipesError::Usage(format!(
-            "--dhis2 must be an http(s) URL, got {url:?}"
+            "--dhis2 must be an http(s) URL, got {:?}",
+            crate::redact::url(url)
         )));
+    }
+    // Credentials in the URL would be printed wherever the URL is.
+    if url::Url::parse(trimmed).is_ok_and(|u| !u.username().is_empty() || u.password().is_some()) {
+        return Err(PipesError::Usage(
+            "--dhis2: give the user name and password with --dhis2-user and \
+             --dhis2-password (or FHIR_PIPES_DHIS2_USER/PASSWORD), not in the URL"
+                .into(),
+        ));
     }
     Ok(format!("{trimmed}/api"))
 }
@@ -193,7 +202,8 @@ impl Dhis2 {
     /// fail here, before any other request.
     pub fn connect(conn: &Dhis2Conn) -> Result<Self> {
         let base = api_base(&conn.url)?;
-        let client = FhirClient::new(auth(conn), conn.retries, Duration::from_secs(conn.timeout))?;
+        let client = FhirClient::new(auth(conn), conn.retries, Duration::from_secs(conn.timeout))?
+            .for_server(&base);
         let mut d = Dhis2 {
             base,
             client,
@@ -334,6 +344,9 @@ mod tests {
             "https://x.org/dhis/api"
         );
         assert!(api_base("x.org").is_err());
+        let err = api_base("https://admin:district@x.org/dhis").unwrap_err();
+        assert!(err.to_string().contains("--dhis2-user"), "{err}");
+        assert!(!err.to_string().contains("district"), "{err}");
     }
 
     #[test]

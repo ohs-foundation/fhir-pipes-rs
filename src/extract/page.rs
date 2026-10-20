@@ -93,7 +93,8 @@ pub struct PageNote {
 pub struct PageResult {
     pub notes: Vec<PageNote>,
     pub pages: usize,
-    /// The last page held a full `PAGE_SIZE` of entries and the server gave
+    /// The last page was as full as the first (or held `PAGE_SIZE`, when it
+    /// was the only one) and the server gave
     /// no next link. A result set that ends on a full page is possible but
     /// rare; a server that stops paging early looks exactly like this, so
     /// the caller cross-checks the count when it sees it.
@@ -231,7 +232,14 @@ pub fn page_search(
     let mut notes = Vec::new();
     let mut pages = 0usize;
     let mut last_page_len;
+    // The size of a full page: the first page's, which shows what the
+    // server gives (many cap `_count` below PAGE_SIZE).
+    let mut page_size = PAGE_SIZE;
+    // At most this many pages: MAX_PAGES, or twice what the first page's
+    // `total` needs, whichever is more.
+    let mut page_limit = MAX_PAGES;
     let mut started: Option<String> = None;
+    let origin = url.origin();
 
     loop {
         let current = url.to_string();
@@ -240,9 +248,9 @@ pub fn page_search(
                 "cyclic pagination: the server repeated the next link {current}"
             )));
         }
-        if pages >= MAX_PAGES {
+        if pages >= page_limit {
             return Err(PipesError::Environment(format!(
-                "more than {MAX_PAGES} pages ({} resources so far); the server's pagination looks broken or _count is being ignored",
+                "more than {page_limit} pages ({} resources so far); the server's pagination looks broken or _count is being ignored",
                 notes.len()
             )));
         }
@@ -265,6 +273,12 @@ pub fn page_search(
         }
         let entries = bundle.get("entry").and_then(Value::as_array);
         last_page_len = entries.map_or(0, Vec::len);
+        if pages == 1 && last_page_len > 0 {
+            page_size = last_page_len.min(PAGE_SIZE);
+            if let Some(total) = bundle.get("total").and_then(Value::as_u64) {
+                page_limit = page_limit.max((total as usize).div_ceil(page_size) * 2);
+            }
+        }
         for (i, entry) in entries.into_iter().flatten().enumerate() {
             let Some(resource) = entry.get("resource").filter(|r| r.is_object()) else {
                 report.add(
@@ -312,6 +326,17 @@ pub fn page_search(
                     ))
                 })?;
                 keep_params(&mut url, kind.page_params());
+                // The credentials go only to the server's origin, so a link
+                // elsewhere would fail without them, or be followed with
+                // nothing to stop it from leaving the server.
+                if url.origin() != origin {
+                    return Err(PipesError::Environment(format!(
+                        "the server's next link {url} is not on {}; check the base URL the \
+                         server is configured with (behind a proxy, HAPI needs \
+                         X-Forwarded-Host and X-Forwarded-Proto)",
+                        origin.ascii_serialization()
+                    )));
+                }
             }
             None => break,
         }
@@ -320,7 +345,13 @@ pub fn page_search(
     Ok(Some(PageResult {
         notes,
         pages,
-        last_page_full: last_page_len >= PAGE_SIZE,
+        // One page is full only at PAGE_SIZE: there is no other page to
+        // tell the server's size by.
+        last_page_full: if pages > 1 {
+            last_page_len >= page_size
+        } else {
+            last_page_len >= PAGE_SIZE
+        },
         started,
     }))
 }
@@ -479,6 +510,74 @@ mod tests {
     }
     fn client() -> FhirClient {
         FhirClient::new(Auth::None, 1, std::time::Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn a_next_link_to_another_origin_is_refused() {
+        let server = Server::run();
+        let elsewhere = Server::run();
+        let next = elsewhere.url("/fhir/Organization?page=2").to_string();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Organization")).respond_with(
+                status_code(200).body(bundle(
+                    &[serde_json::json!({"resourceType":"Organization","id":"org-1"})],
+                    Some(&next),
+                )),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let err = page_resources(
+            &client(),
+            &server.url("/fhir").to_string(),
+            ServerKind::Generic,
+            "Organization",
+            None,
+            &dir.path().join("inc.ndjson"),
+            &mut Report::default(),
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not on"), "{err}");
+    }
+
+    #[test]
+    fn a_last_page_as_full_as_the_first_is_suspicious() {
+        // A server that caps pages at 2: [2, 2] ends on a full page, [2, 1]
+        // does not.
+        for (second, full) in [(2, true), (1, false)] {
+            let server = Server::run();
+            let p2 = server.url("/fhir/Organization?page=2").to_string();
+            let org = |id: &str| serde_json::json!({"resourceType":"Organization","id":id});
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/fhir/Organization"),
+                    request::query(url_decoded(not(contains(("page", "2"))))),
+                ])
+                .respond_with(status_code(200).body(bundle(&[org("a"), org("b")], Some(&p2)))),
+            );
+            let rest: Vec<_> = ["c", "d"][..second].iter().map(|i| org(i)).collect();
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method_path("GET", "/fhir/Organization"),
+                    request::query(url_decoded(contains(("page", "2")))),
+                ])
+                .respond_with(status_code(200).body(bundle(&rest, None))),
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let got = page_resources(
+                &client(),
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Organization",
+                None,
+                &dir.path().join("inc.ndjson"),
+                &mut Report::default(),
+                &[],
+            )
+            .unwrap();
+            assert_eq!(got.pages, 2);
+            assert_eq!(got.last_page_full, full, "{second}");
+        }
     }
 
     #[test]

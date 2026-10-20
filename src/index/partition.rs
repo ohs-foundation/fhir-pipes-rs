@@ -75,7 +75,7 @@ pub fn parse_keys(spec: &str) -> Result<Vec<PartitionKey>> {
     Ok(keys)
 }
 
-const RESERVED_WINDOWS_NAMES: [&str; 22] = [
+pub(crate) const RESERVED_WINDOWS_NAMES: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
@@ -119,9 +119,31 @@ fn sanitize(value: &str) -> (String, bool) {
         result = "empty".to_string();
     }
 
+    // A file name is at most 255 bytes on most filesystems, and `key=` and
+    // a collision suffix come on top: a longer value is cut, and a hash of
+    // the whole value keeps two values that start the same apart.
+    if result.len() > MAX_SEGMENT {
+        let mut cut = MAX_SEGMENT - 9;
+        while !result.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let digest = Sha256::digest(value.as_bytes());
+        result = format!(
+            "{}~{:02x}{:02x}{:02x}{:02x}",
+            &result[..cut],
+            digest[0],
+            digest[1],
+            digest[2],
+            digest[3]
+        );
+    }
+
     let sanitized = result != value;
     (result, sanitized)
 }
+
+/// The longest partition value written as it is, in bytes.
+const MAX_SEGMENT: usize = 200;
 
 /// Segment claims within one parent directory, keyed case-insensitively:
 /// lowercased segment -> (original-case segment, owning value). A
@@ -153,7 +175,7 @@ pub fn segment(key: &str, value: &str, claims: &mut Claims, report: &mut Report)
                     "partition_value_sanitized",
                     &format!("{key}={value}"),
                     &format!(
-                        "contained a path separator or control character; written to the directory {key}={candidate:?} instead"
+                        "cannot be a directory name as it is (a path separator, a control character, a reserved name or more than {MAX_SEGMENT} bytes); written to the directory {key}={candidate:?} instead"
                     ),
                 );
             }
@@ -228,6 +250,20 @@ mod tests {
                 .to_string()
                 .contains("country repeated")
         );
+    }
+
+    #[test]
+    fn a_long_value_is_cut_with_a_hash_of_the_whole() {
+        let a = "x".repeat(300) + "a";
+        let b = "x".repeat(300) + "b";
+        let (sa, changed) = sanitize(&a);
+        let (sb, _) = sanitize(&b);
+        assert!(changed);
+        assert!(sa.len() <= MAX_SEGMENT, "{}", sa.len());
+        assert_ne!(sa, sb);
+        // Cut on a character boundary.
+        let (s, _) = sanitize(&"é".repeat(150));
+        assert!(s.len() <= MAX_SEGMENT);
     }
 
     #[test]

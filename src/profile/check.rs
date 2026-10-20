@@ -59,10 +59,7 @@ impl Ig {
         Ok(ig)
     }
 
-    fn add(&mut self, name: &str, text: &str) {
-        let Ok(v) = serde_json::from_str::<Value>(text) else {
-            return;
-        };
+    fn add(&mut self, name: &str, v: Value) {
         if name.ends_with("package.json") && v.get("resourceType").is_none() {
             if let Some(c) = v.get("canonical").and_then(Value::as_str) {
                 self.canonical = Some(c.trim_end_matches('/').to_string());
@@ -892,7 +889,7 @@ mod tests {
             ..Ig::default()
         };
         for r in resources {
-            ig.add("r.json", &r.to_string());
+            ig.add("r.json", r.clone());
         }
         ig
     }

@@ -58,8 +58,10 @@ pub fn discover(dir: &Path, strip_prefix: &[String]) -> Result<Vec<View>> {
             .clone()
             .filter(|n| !n.is_empty())
             .with_context(|| format!("{} has no name", path.display()))?;
+        let table = table_name(&name, strip_prefix);
+        check_table(&name, &table)?;
         views.push(View {
-            table: table_name(&name, strip_prefix),
+            table,
             resource: definition.resource.clone(),
             name,
             json,
@@ -109,6 +111,28 @@ pub fn table_name(view_name: &str, strip_prefix: &[String]) -> String {
         .iter()
         .find_map(|p| snake.strip_prefix(p.as_str()).map(str::to_string))
         .unwrap_or(snake)
+}
+
+/// A view's table must be a SQL name, which also keeps it one directory
+/// under parquet/, and must not be the table the Location transform writes.
+fn check_table(view: &str, table: &str) -> Result<()> {
+    let sql_name = table.starts_with(|c: char| c.is_ascii_lowercase())
+        && table
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !sql_name {
+        bail!(
+            "view {view} would write table {table:?}, which is not a SQL name; rename the \
+             view or change strip_prefix"
+        );
+    }
+    if table == "locations" {
+        bail!(
+            "view {view} would write table locations, which the Location transform writes; \
+             rename the view"
+        );
+    }
+    Ok(())
 }
 
 /// Write each view, as plain ViewDefinition JSON, to `dir/<name>.json`.
@@ -280,6 +304,23 @@ mod tests {
             .collect();
         assert_eq!(names, [("IcrA", "a"), ("IcrB", "b")]);
         assert_eq!(views[1].json["resourceType"], "ViewDefinition");
+    }
+
+    #[test]
+    fn rejects_a_table_name_that_is_empty_or_the_locations_table() {
+        for (name, why) in [
+            ("IcrLocations", "Location transform"),
+            ("Icr", "not a SQL name"),
+            ("Icr2x", "not a SQL name"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let view = serde_json::json!({"resourceType": "ViewDefinition", "name": name,
+                "resource": "Patient", "status": "active",
+                "select": [{"column": [{"name": "id", "path": "getResourceKey()"}]}]});
+            fs::write(dir.path().join("v.json"), view.to_string()).unwrap();
+            let err = discover(dir.path(), &["icr_".into(), "icr".into()]).unwrap_err();
+            assert!(err.to_string().contains(why), "{name}: {err}");
+        }
     }
 
     #[test]

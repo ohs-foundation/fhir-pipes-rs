@@ -155,6 +155,7 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
         args.retries,
         Duration::from_secs(args.timeout),
     )?
+    .for_server(&args.server)
     .with_concurrency(args.concurrency);
     let mut state = ExportState::read(&args.out);
     if !same_server(&state.server, &args.server) {
@@ -771,7 +772,10 @@ fn run_job(
         report.add(
             "bulk_output_unrequested",
             &f.resource_type,
-            &format!("{}: not a type this export asked for; skipped", f.url),
+            &format!(
+                "{}: not a type this export asked for; skipped",
+                crate::redact::url(&f.url)
+            ),
         );
     }
     let deleted = deleted_ids(client, &manifest, &job.types, timeout, report)?;
@@ -863,7 +867,11 @@ fn manifest_errors(
                     if issue.is_error() {
                         errors.push(issue);
                     } else {
-                        report.add("bulk_export_issue", &f.url, &issue.to_string());
+                        report.add(
+                            "bulk_export_issue",
+                            &crate::redact::url(&f.url),
+                            &issue.to_string(),
+                        );
                     }
                 }
                 Ok(())
@@ -1063,7 +1071,7 @@ fn download_part(
         let Some((id, last_updated)) = id_and_updated(line) else {
             report.add(
                 "bulk_line_skipped",
-                &format!("{url} line {n}"),
+                &format!("{} line {n}", crate::redact::url(url)),
                 "not a JSON resource with an id",
             );
             return Ok(());

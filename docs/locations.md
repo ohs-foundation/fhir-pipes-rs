@@ -892,7 +892,8 @@ resource *should* now be:
 4. Ignore every **derived** column. A stale `admin1_name` in the input never
    causes a change. If the position columns and a point geometry were both
    edited and disagree, the geometry wins and `position_geometry_disagree`
-   is reported.
+   is reported. Position columns edited next to a point that was not moved
+   keep their edit.
 5. Compare the rebuilt resource to the original. If nothing changed, skip it.
 
 What comes out is plain FHIR NDJSON containing only the resources that
@@ -904,8 +905,18 @@ the summary is always printed. The kinds are `duplicate_id`,
 `new_location`, `new_location_generated_id`, `input_column_type` (a
 writable column holding a value of the wrong type, ignored for that row),
 `geometry_unparseable`, `geometry_kind_changed`, `geometry_invalid`,
-`position_geometry_disagree`, `boundary_z_dropped`,
+`geometry_out_of_range` (a coordinate that is not a finite longitude and
+latitude, so the geometry edit is skipped), `position_geometry_disagree`,
+`boundary_z_dropped`,
 `organization_missing` and `snapshot_line_unparsed`.
+
+The input must be in WGS 84 longitude and latitude. A GeoParquet whose `geo`
+metadata names another CRS, or a GeoJSON with a `crs` member that names one,
+is refused before any row is read; reproject it first, for example with
+`ogr2ogr -t_srs EPSG:4326`. A file that names no CRS is checked row by row:
+a coordinate outside -180..180 and -90..90 is reported, in the geometry as
+`geometry_out_of_range` and in the position columns as `input_column_type`,
+and that row's position or geometry is left as it was.
 
 ### index
 
@@ -936,6 +947,8 @@ Re-running after a load and a fresh extract writes nothing.
 Location's position, every quadkey and geohash cell already on it is
 recomputed for the new point (an H3 cell, which fhir-pipes cannot compute, is
 dropped rather than left wrong), and clearing the position removes them all.
+A cell of a scheme fhir-pipes does not know (S2, say) belongs to someone
+else: it is left as it is and reported as `spatial_cell_not_recomputed`.
 A cell whose level is outside its scheme's range (quadkey 1–23, geohash
 1–12, H3 0–15) is reported as `malformed_field` and skipped: `transform`
 leaves it out of the `quadkey` columns and `diff` does not recompute it.

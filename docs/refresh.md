@@ -53,8 +53,9 @@ below), and the hooks and the push run last, on the swapped-in warehouse.
 
 By default every step except `push` runs, `catalog` only when the config has a
 `[catalog]` section, and `database` only with `[database]`. `--only
-views,tiles` picks steps (the manifest, the catalog and the database are added
-when a data step is picked), `--skip tiles` leaves some out,
+views,tiles` picks steps (the manifest and the catalog are added when a data
+step is picked, and the database when `views` is, since it loads the view
+tables), `--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
 
@@ -112,10 +113,14 @@ catalog build reads the new tables and can write beside them. A hook that
 fails stops the run before the push, with the new tables, manifest and
 catalog in place. The push uploads the swapped-in warehouse.
 
-A run that is killed leaves its staging behind; the next run removes it
-before it starts. A run killed between the two renames of a table's swap
-leaves the old table as `parquet/.<table>.old` (or `.views.old`, `.tiles.old`
-in the warehouse directory); the next run renames it back. While it runs, a refresh holds a lock on `.refresh.lock` in the
+A run that is killed before the swap leaves its staging behind; the next run
+removes it before it starts. A swap that fails or is killed part way, after
+some tables are in place and before the others are, is finished by the next
+run before it does anything else: the database already holds that run's rows,
+and the warehouse would otherwise have tables from two runs. A run killed
+between the two renames of a table's swap leaves the old table as
+`parquet/.<table>.old` (or `.views.old`, `.tiles.old` in the warehouse
+directory); the next run renames it back. While it runs, a refresh holds a lock on `.refresh.lock` in the
 warehouse directory, so a second refresh of the same warehouse waits for the
 first to finish.
 
@@ -125,8 +130,18 @@ Disk use doubles for the tables, views and tiles a run writes, until the swap.
 
 Each ViewDefinition writes `parquet/<table>/<column>=<value>/part-0.parquet`.
 The table is the view's name in snake case minus a configured prefix
-(`IcrIndicatorValue` → `indicator_value`). Dates, dateTimes, instants and times
-are parquet date and timestamp types, not text.
+(`IcrIndicatorValue` → `indicator_value`). It must be a SQL name (a letter, then
+letters, digits and `_`), and must not be `locations`, which the Location
+transform writes; a view that would give another name stops the run. Dates,
+dateTimes, instants and times are parquet date and timestamp types, not text.
+
+The value in the directory name is escaped the way hive escapes it, `%2F` for
+`/`, and DuckDB's `hive_partitioning` reads it back unescaped. Escaped are the
+characters a path or a Windows file name cannot hold, control characters,
+`%`, a trailing dot or space, and the first letter of a Windows device name
+such as `CON`. Two values that differ only in case, `Kano` and `KANO`, would
+share one directory on macOS or Windows, so the second gets every letter
+escaped (`%4B%41%4E%4F`).
 
 A value that does not match its column's type is written as follows:
 
@@ -624,7 +639,10 @@ And for one table when:
 The step says which tables it loads in full and why. Only those tables are
 analyzed after the commit.
 
-**Privileges.** Neither mode needs to own the view tables once they exist:
+**Privileges.** The schema is created only when it does not exist, which
+needs `CREATE` on the database; loading into an existing schema needs
+`USAGE` on it and no privilege on the database. Neither mode needs to own
+the view tables once they exist:
 `SELECT`, `INSERT` and `DELETE` on them are enough (creating or recreating
 one needs `CREATE` on the schema, and dropping one its owner, as before).
 Upsert also needs `fhir_pipes_loads`: `CREATE` on the schema the first time,

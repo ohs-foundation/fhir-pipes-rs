@@ -296,6 +296,10 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
         {
             only.insert(Step::Manifest);
             only.insert(Step::Catalog);
+        }
+        // The database holds the view tables only: without the views step
+        // there is nothing new to load, and a load would be in full.
+        if only.contains(&Step::Views) {
             only.insert(Step::Database);
         }
         only
@@ -422,7 +426,11 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
             println!("input:      {}: {found}", input.display());
         }
     } else {
-        println!("server:     {} (raw/{})", s.server, s.server_name);
+        println!(
+            "server:     {} (raw/{})",
+            crate::redact::url(&s.server),
+            s.server_name
+        );
         println!("kind:       {}", s.server_kind.name());
         println!("auth:       {}", s.auth_description());
         match s.fetch {
@@ -1206,5 +1214,34 @@ impl TableWriter<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn steps_of(args: &[&str]) -> BTreeSet<Step> {
+        let cli = crate::cli::Cli::try_parse_from(
+            ["fhir-pipes", "refresh"].iter().chain(args).copied(),
+        )
+        .unwrap();
+        let crate::cli::Command::Refresh(r) = cli.command else {
+            unreachable!()
+        };
+        steps(&r)
+    }
+
+    #[test]
+    fn the_database_step_follows_the_views_step() {
+        assert!(steps_of(&[]).contains(&Step::Database));
+        assert!(steps_of(&["--only", "views"]).contains(&Step::Database));
+        for only in ["locations", "tiles"] {
+            let s = steps_of(&["--only", only]);
+            assert!(!s.contains(&Step::Database), "{only}");
+            assert!(s.contains(&Step::Catalog), "{only}");
+        }
+        assert!(steps_of(&["--only", "database"]).contains(&Step::Database));
     }
 }

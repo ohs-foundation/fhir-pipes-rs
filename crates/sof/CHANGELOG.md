@@ -49,6 +49,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The PostgreSQL conformance suite runs in CI** and goes through
+  `run_view`, so it covers how rows are read back, not only the generated SQL.
 - **`ofType()` follows the path through the FHIR model** — whether an element
   is a choice element (so `value.ofType(Quantity)` reads `valueQuantity`) is
   now decided for the type or backbone element the path reaches it from,
@@ -97,6 +99,31 @@ changes.
 
 ### Fixed
 
+- **A `repeat` path that does not read child elements is refused.**
+  `repeat: ["$this"]` grew the in-memory worklist until memory ran out, and
+  the SQL engines' recursive CTE never ended. Both engines now refuse a path
+  that starts from `$this`, `%resource`, the resource type or a literal, and
+  the in-memory engine stops past 128 levels.
+- **`views run --db` returned every decimal column as null.** The SQL casts
+  decimals to `numeric`, and the runner read them as `f64`, which sqlx cannot
+  decode from `numeric`; the error was dropped. Each row is now read as one
+  JSON object (`to_jsonb`), so no column is decoded on its own. The runner
+  is also exposed as `run_view`, which takes a pool or one connection.
+- **SQL `ofType()` on an element that is not a choice element** read
+  `<element><Type>`, so `contained.ofType(Practitioner)` and
+  `name.ofType(HumanName)` gave nothing. It now filters by `resourceType`, or
+  keeps the items, as the in-memory engine does.
+- **A SQL comparison on a path with several values** (`name.family = 'Smith'`
+  on a Patient with two names) failed the whole query with "more than one row
+  returned by a subquery". It is now empty, so the row does not match.
+- **`lowBoundary()`/`highBoundary()` in SQL** did not look through property
+  access for the `ofType()` that gives the type. Both engines now share one
+  `boundary_hint`.
+- **Strings from a view are quoted in the generated SQL.** The separator of
+  `join()` was put into `string_agg` unquoted. Every string that reaches the
+  SQL now goes through one function that quotes it. A `resource` that is not
+  a resource type name (a capital letter, then letters and digits) is an
+  error, since it names the table.
 - **Four FHIRPath cases found by fhirpath.js's tests**, which now run in the
   crate's tests next to the HL7 suite (2,068 of 2,681 pass; each failure is
   listed with its cause):

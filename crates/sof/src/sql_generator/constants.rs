@@ -71,7 +71,12 @@ fn constant_literal(c: &Constant) -> Result<String, Error> {
         return Ok(b.to_string());
     }
     if let Some(d) = c.value_decimal {
-        return Ok(d.to_string());
+        // `1` would be an integer, and f64 prints 1.0 as `1`.
+        return Ok(if d.is_finite() && d.fract() == 0.0 {
+            format!("{d:.1}")
+        } else {
+            d.to_string()
+        });
     }
     // Polymorphic value[x] captured via flatten.
     for (k, v) in &c.values {
@@ -79,6 +84,9 @@ fn constant_literal(c: &Constant) -> Result<String, Error> {
             continue;
         }
         return match v {
+            // A date, dateTime, instant or time is a FHIRPath temporal
+            // literal, so it compares as one, not as text.
+            Value::String(s) if TEMPORAL.contains(&k.as_str()) => temporal_literal(k, s, &c.name),
             Value::String(s) => Ok(fhirpath_string(s)),
             Value::Bool(b) => Ok(b.to_string()),
             Value::Number(n) => Ok(n.to_string()),
@@ -92,6 +100,27 @@ fn constant_literal(c: &Constant) -> Result<String, Error> {
         "constant {} has no value",
         c.name
     )))
+}
+
+const TEMPORAL: [&str; 4] = ["valueDate", "valueDateTime", "valueInstant", "valueTime"];
+
+/// `@2020-01-01`, `@2020-01-01T10:00:00Z`, `@T10:00`. The literal is not
+/// quoted, so only the characters these forms use are accepted.
+fn temporal_literal(key: &str, s: &str, name: &str) -> Result<String, Error> {
+    let shaped = s.starts_with(|c: char| c.is_ascii_digit())
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || b"-:.+TZ".contains(&b));
+    if !shaped {
+        return Err(Error::InvalidViewDefinition(format!(
+            "constant {name}: {key} {s:?} is not a FHIR {}",
+            &key["value".len()..]
+        )));
+    }
+    Ok(if key == "valueTime" {
+        format!("@T{s}")
+    } else {
+        format!("@{s}")
+    })
 }
 
 /// A FHIRPath single-quoted string literal (backslash-escaped).
@@ -118,6 +147,37 @@ mod tests {
             substitute_constants("\"%off\" | %`off` | %rowIndex", &constants()).unwrap(),
             "\"%off\" | 'x' | %rowIndex"
         );
+    }
+
+    #[test]
+    fn constants_keep_their_type() {
+        let view = ViewDefinition::from_json(&serde_json::json!({
+            "resource": "Patient",
+            "constant": [
+                {"name": "d", "valueDecimal": 1.0},
+                {"name": "half", "valueDecimal": 0.5},
+                {"name": "day", "valueDate": "2020-01-01"},
+                {"name": "at", "valueDateTime": "2020-01-01T10:00:00Z"},
+                {"name": "t", "valueTime": "10:00"},
+                {"name": "code", "valueCode": "male"}
+            ],
+            "select": [{"column": [{"name": "id", "path": "id"}]}]
+        }))
+        .unwrap();
+        let c = build_constants(&view).unwrap();
+        assert_eq!(c["d"], "1.0");
+        assert_eq!(c["half"], "0.5");
+        assert_eq!(c["day"], "@2020-01-01");
+        assert_eq!(c["at"], "@2020-01-01T10:00:00Z");
+        assert_eq!(c["t"], "@T10:00");
+        assert_eq!(c["code"], "'male'");
+        let bad = ViewDefinition::from_json(&serde_json::json!({
+            "resource": "Patient",
+            "constant": [{"name": "day", "valueDate": "2020') or true or ('"}],
+            "select": [{"column": [{"name": "id", "path": "id"}]}]
+        }))
+        .unwrap();
+        assert!(build_constants(&bad).is_err());
     }
 
     #[test]

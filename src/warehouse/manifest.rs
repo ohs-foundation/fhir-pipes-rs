@@ -75,7 +75,7 @@ pub fn write(s: &Settings, stage: &Stage, server: Option<&str>) -> Result<String
         manifest["files"] = json!(s.inputs());
     }
     let path = stage.file("manifest.json");
-    fs::write(&path, serde_json::to_string_pretty(&manifest)?)
+    crate::fs::atomic_write(&path, serde_json::to_string_pretty(&manifest)?)
         .with_context(|| format!("writing {}", path.display()))?;
     println!("   {}", serde_json::to_string(&manifest["tables"])?);
     Ok(refreshed_at)
@@ -84,8 +84,13 @@ pub fn write(s: &Settings, stage: &Stage, server: Option<&str>) -> Result<String
 /// The server to record in the manifest and last-refresh.json: the configured
 /// one if the run `contacted` it; else, as when `--reuse-raw` downloads
 /// nothing, the server named in raw/'s export state, else in the Location
-/// snapshot's state; else none. None with a file source.
+/// snapshot's state; else none. None with a file source. Without a user
+/// name, password or query, since the manifest is published.
 pub fn recorded_server(s: &Settings, contacted: bool) -> Option<String> {
+    configured_server(s, contacted).map(|u| crate::redact::url(&u))
+}
+
+fn configured_server(s: &Settings, contacted: bool) -> Option<String> {
     if s.reads_files() {
         return None;
     }

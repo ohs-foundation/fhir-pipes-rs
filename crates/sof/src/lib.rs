@@ -47,11 +47,13 @@
 //!
 //! See: <https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/>
 
+mod boundary_type;
 mod column;
 mod eval;
 pub mod fhir_model;
 mod lexer;
 pub mod output;
+mod repeat_path;
 mod runner;
 mod sql_generator;
 mod view_definition;
@@ -60,7 +62,7 @@ pub use column::{ColumnInfo, ColumnType};
 pub use eval::{CompiledView, calls_any, execute, execute_blocking, execute_parallel};
 pub use runner::ViewResult;
 #[cfg(feature = "postgres")]
-pub use runner::ViewRunner;
+pub use runner::{ViewRunner, run_view};
 pub use sql_generator::{Dialect, GeneratedColumn, GeneratedSql, SqlGenerator, create_table};
 pub use view_definition::{Column, Constant, SelectColumn, ViewDefinition, WhereClause};
 

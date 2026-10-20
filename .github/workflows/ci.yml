@@ -66,7 +66,8 @@ jobs:
       # A PostgreSQL with TLS for the database step's tests (tests/refresh_database.rs,
       # module database), which run only with this URL: every load goes over
       # an encrypted connection (sslmode=require), with the image's
-      # self-signed certificate.
+      # self-signed certificate. The SQL-on-FHIR conformance suite for
+      # `views run --db` (crates/sof/tests/conformance.rs) uses it too.
       - if: matrix.os == 'ubuntu-latest'
         run: |
           docker run -d --name pg -e POSTGRES_PASSWORD=test -p 5432:5432 postgres:17 \
@@ -76,6 +77,7 @@ jobs:
       - run: cargo test --workspace --locked
         env:
           FHIR_PIPES_TEST_DATABASE_URL: ${{ matrix.os == 'ubuntu-latest' && 'postgres://postgres:test@localhost:5432/postgres?sslmode=require' || '' }}
+          SOF_CONFORMANCE_DB: ${{ matrix.os == 'ubuntu-latest' && 'postgres://postgres:test@localhost:5432/postgres?sslmode=require' || '' }}
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --all-features
         env:

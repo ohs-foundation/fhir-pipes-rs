@@ -108,11 +108,7 @@ impl Content {
     pub fn load(packages: &[String]) -> Result<Self> {
         let mut content = Content::default();
         for spec in packages {
-            crate::fhir::package::read_json_files(spec, "--package", |_, text| {
-                if let Ok(v) = serde_json::from_str::<Value>(text) {
-                    content.add(v);
-                }
-            })?;
+            crate::fhir::package::read_json_files(spec, "--package", |_, v| content.add(v))?;
         }
         Ok(content)
     }

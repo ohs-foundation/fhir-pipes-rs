@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use fhir_pipes_sof::{SqlGenerator, ViewDefinition};
+use fhir_pipes_sof::ViewDefinition;
 use serde_json::Value;
 use sqlx_core::connection::Connection;
 use sqlx_core::error::Error as SqlxError;
@@ -60,7 +60,7 @@ static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn sql_on_fhir_conformance() {
-    let Ok(db_url) = std::env::var("SOF_CONFORMANCE_DB") else {
+    let Some(db_url) = conformance_db() else {
         eprintln!("SOF_CONFORMANCE_DB not set — skipping SQL-on-FHIR conformance suite");
         return;
     };
@@ -104,7 +104,7 @@ async fn sql_on_fhir_conformance() {
 /// `SOF_CONFORMANCE_DB` exactly like the main suite.
 #[tokio::test]
 async fn extra_cases() {
-    let Ok(db_url) = std::env::var("SOF_CONFORMANCE_DB") else {
+    let Some(db_url) = conformance_db() else {
         eprintln!("SOF_CONFORMANCE_DB not set — skipping extra SQL cases");
         return;
     };
@@ -136,6 +136,14 @@ async fn extra_cases() {
 
     let failed = outcomes.iter().filter(|o| !o.passed).count();
     assert_eq!(failed, 0, "{failed} extra PostgreSQL cases failed");
+}
+
+/// The database URL, when `SOF_CONFORMANCE_DB` is set and not empty (CI
+/// sets it empty where there is no database).
+fn conformance_db() -> Option<String> {
+    std::env::var("SOF_CONFORMANCE_DB")
+        .ok()
+        .filter(|u| !u.is_empty())
 }
 
 fn test_cases_dir() -> PathBuf {
@@ -244,22 +252,12 @@ async fn run_test(conn: &mut PgConnection, file: &str, title: &str, test: &Value
         }
     };
 
-    let sql = match SqlGenerator::new().generate(&view) {
-        Ok(g) => g.sql,
+    // Through `run_view`, as `views run --db` runs a view, so the suite
+    // covers how rows are read back as well as the generated SQL.
+    let actual = match fhir_pipes_sof::run_view(&mut *conn, &view).await {
+        Ok(result) => Value::Array(result.to_json_array()),
         Err(e) => {
-            return mk(expect_error, format!("generate error: {e}"));
-        }
-    };
-
-    let wrapped = format!("SELECT coalesce(jsonb_agg(t), '[]'::jsonb) FROM ({sql}) t");
-    let rows: Result<(Value,), SqlxError> = sqlx_core::query_as::query_as(AssertSqlSafe(wrapped))
-        .fetch_one(&mut *conn)
-        .await;
-
-    let actual = match rows {
-        Ok((v,)) => v,
-        Err(e) => {
-            return mk(expect_error, format!("exec error: {e}"));
+            return mk(expect_error, format!("error: {e}"));
         }
     };
 

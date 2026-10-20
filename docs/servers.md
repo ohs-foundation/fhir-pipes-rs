@@ -18,6 +18,20 @@ The kind's parameters are added to the first page of each search and kept on
 the server's next links. The kind does not change authentication or
 `--hapi-db`.
 
+The token or other credentials go only to the `--server` origin: the same
+scheme, host and port. A boundary file on another host is fetched without
+them. A Bulk Data output file gets them wherever it is when the manifest says
+`requiresAccessToken`. A next link to another origin stops the run. That
+usually means the server does not know its public URL; behind a proxy, HAPI
+needs `X-Forwarded-Host` and `X-Forwarded-Proto`.
+
+`--server` (and `server.base` in `refresh`) cannot carry a user name or
+password: request URLs are built from it, and errors and reports print them.
+Use `--username` and `--password` instead. With credentials, a `--server` on
+plain `http://` to another machine gets a warning. URLs of Bulk Data output
+files are printed and reported without their query, which for signed storage
+URLs is the signature.
+
 The files `export` and `extract` write the resources into are readable only
 by their owner on Unix (mode 0600), since they can hold patient data. Copy
 or share them on purpose.

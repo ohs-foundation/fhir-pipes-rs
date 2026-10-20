@@ -38,6 +38,7 @@ use octofhir_fhirpath::{
 };
 use serde_json::Value;
 
+use crate::boundary_type::{BoundaryType, boundary_hint, capitalize_first};
 use crate::column::{ColumnInfo, ColumnType};
 use crate::fhir_model::{self, TableModelProvider};
 use crate::lexer::{Kind, Token, tokens, variable_name};
@@ -132,6 +133,9 @@ fn thread_runtime() -> Result<tokio::runtime::Runtime> {
 fn thread_panicked() -> Error {
     Error::FhirPath("evaluation thread panicked".to_string())
 }
+
+/// Deeper than any resource's JSON can be (serde_json stops at 128).
+const MAX_REPEAT_DEPTH: usize = 128;
 
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
@@ -559,7 +563,12 @@ impl Evaluator {
         let repeat = select
             .repeat
             .iter()
-            .map(|p| self.plan(&self.prepare(p, None)?))
+            .map(|p| {
+                let ast =
+                    octofhir_fhirpath::parse_ast(p).map_err(|e| Error::FhirPath(e.to_string()))?;
+                crate::repeat_path::check(p, &ast, &self.resource_type)?;
+                self.plan(&self.prepare(p, None)?)
+            })
             .collect::<Result<Vec<_>>>()?;
         // forEach wins when both are given; forEachOrNull's presence alone
         // decides whether an empty result keeps a row.
@@ -889,13 +898,22 @@ impl Evaluator {
         // Iterative worklist (preorder) to avoid recursive async lifetimes.
         // Pushed in reverse so that, popped LIFO, children come out in source
         // order.
-        let mut stack: Vec<FhirPathValue> = Vec::new();
+        // Each node is paired with its depth. The paths only go down the
+        // resource (`repeat_path::check`), so the depth is the JSON's at most;
+        // the limit is there in case a path still finds its way back.
+        let mut stack: Vec<(FhirPathValue, usize)> = Vec::new();
         let seed = self.repeat_children(plans, root, node).await?;
-        stack.extend(seed.into_iter().rev());
-        while let Some(current) = stack.pop() {
+        stack.extend(seed.into_iter().rev().map(|v| (v, 1)));
+        while let Some((current, depth)) = stack.pop() {
+            if depth > MAX_REPEAT_DEPTH {
+                return Err(Error::InvalidPath(format!(
+                    "repeat went more than {MAX_REPEAT_DEPTH} levels deep; its path keeps \
+                     finding nodes it has already been through"
+                )));
+            }
             let children = self.repeat_children(plans, root, &current).await?;
             out.push(current);
-            stack.extend(children.into_iter().rev());
+            stack.extend(children.into_iter().rev().map(|v| (v, depth + 1)));
         }
         Ok(())
     }
@@ -1386,14 +1404,6 @@ fn is_fhir_datatype(name: &str) -> bool {
     )
 }
 
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
 fn column_type(col: &Column) -> ColumnType {
     if col.collection.unwrap_or(false) {
         return ColumnType::Json;
@@ -1669,16 +1679,6 @@ impl PureFunctionEvaluator for JoinFn {
     }
 }
 
-/// The FHIR temporal type a boundary operates on, inferred from a leading
-/// `ofType(T)` on the base.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BoundaryType {
-    Date,
-    DateTime,
-    Time,
-    Unknown,
-}
-
 /// If `node` is a `lowBoundary()`/`highBoundary()` call, the path that
 /// evaluates its base (a node, or another boundary call) and applies the
 /// boundary. `written` is the same call in the path as written, before the
@@ -1701,27 +1701,6 @@ fn boundary_path(node: &ExpressionNode, written: Option<&ExpressionNode>) -> Opt
         .unwrap_or_else(|| PreparedPath::Node(m.object.as_ref().clone()));
     let precision = m.arguments.first().cloned();
     Some(PreparedPath::Boundary(Box::new(base), low, hint, precision))
-}
-
-fn boundary_hint(object: &ExpressionNode) -> BoundaryType {
-    match object {
-        ExpressionNode::MethodCall(m) if m.method == "ofType" => {
-            let name = match m.arguments.first() {
-                Some(ExpressionNode::Identifier(n)) => n.name.to_lowercase(),
-                Some(ExpressionNode::TypeInfo(t)) => t.name.to_lowercase(),
-                _ => return BoundaryType::Unknown,
-            };
-            match name.as_str() {
-                "datetime" | "instant" => BoundaryType::DateTime,
-                "date" => BoundaryType::Date,
-                "time" => BoundaryType::Time,
-                _ => BoundaryType::Unknown,
-            }
-        }
-        ExpressionNode::PropertyAccess(p) => boundary_hint(&p.object),
-        ExpressionNode::Parenthesized(e) => boundary_hint(e),
-        _ => BoundaryType::Unknown,
-    }
 }
 
 impl BoundaryType {

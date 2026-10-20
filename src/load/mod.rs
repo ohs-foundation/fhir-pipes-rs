@@ -581,7 +581,8 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
         args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
-    )?;
+    )?
+    .for_server(&args.server);
 
     preflight(&client, &base, &creates)?;
 

@@ -809,3 +809,53 @@ fn a_closed_stdout_fails_the_run() {
         assert!(!stderr.contains("3 rows"), "{format}: {stderr}");
     }
 }
+
+/// A view over Bundles gets the Bundles; their entries are still there for
+/// views over the entries' types.
+#[test]
+fn a_view_over_bundles_reads_the_bundles() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = dir.path().join("doc.json");
+    std::fs::write(
+        &bundle,
+        r#"{"resourceType":"Bundle","id":"b1","type":"document",
+            "entry":[{"resource":{"resourceType":"Patient","id":"p1"}}]}"#,
+    )
+    .unwrap();
+    let views_dir = dir.path().join("views");
+    std::fs::create_dir(&views_dir).unwrap();
+    std::fs::write(
+        views_dir.join("bundles.json"),
+        r#"{"resourceType":"ViewDefinition","name":"bundles","resource":"Bundle","status":"active",
+          "select":[{"column":[{"name":"id","path":"id"},{"name":"type","path":"type"},
+            {"name":"entries","path":"entry.count()","type":"integer"}]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        views_dir.join("patients.json"),
+        r#"{"resourceType":"ViewDefinition","name":"patients","resource":"Patient","status":"active",
+          "select":[{"column":[{"name":"id","path":"id"}]}]}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("out");
+    views()
+        .args(["run", "--output", "ndjson", "--out"])
+        .arg(&out)
+        .arg(&views_dir)
+        .arg("--input")
+        .arg(&bundle)
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(out.join("bundles.ndjson"))
+            .unwrap()
+            .trim(),
+        r#"{"id":"b1","type":"document","entries":1}"#
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("patients.ndjson"))
+            .unwrap()
+            .trim(),
+        r#"{"id":"p1"}"#
+    );
+}

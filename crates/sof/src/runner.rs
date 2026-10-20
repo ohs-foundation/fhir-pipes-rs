@@ -6,17 +6,17 @@
 
 use serde_json::Value;
 #[cfg(feature = "postgres")]
-use sqlx_core::row::Row;
+use sqlx_core::executor::Executor;
 #[cfg(feature = "postgres")]
 use sqlx_core::sql_str::AssertSqlSafe;
 #[cfg(feature = "postgres")]
-use sqlx_postgres::{PgPool, PgRow};
+use sqlx_postgres::{PgPool, Postgres};
 
 use crate::column::ColumnInfo;
-#[cfg(any(feature = "postgres", test))]
+#[cfg(test)]
 use crate::column::ColumnType;
 #[cfg(feature = "postgres")]
-use crate::sql_generator::{GeneratedColumn, SqlGenerator};
+use crate::sql_generator::SqlGenerator;
 #[cfg(feature = "postgres")]
 use crate::view_definition::ViewDefinition;
 #[cfg(feature = "postgres")]
@@ -41,84 +41,52 @@ impl ViewRunner {
     ///
     /// Returns an error if SQL generation fails or the query fails to execute.
     pub async fn run(&self, view: &ViewDefinition) -> Result<ViewResult> {
-        let generated = SqlGenerator::new().generate(view)?;
-
-        tracing::debug!(sql = %generated.sql, "Executing view");
-
-        let rows = sqlx_core::query::query(AssertSqlSafe(generated.sql.clone()))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(Error::Sql)?;
-
-        let columns: Vec<ColumnInfo> = generated
-            .columns
-            .iter()
-            .map(|c| ColumnInfo::new(c.alias.clone(), c.col_type))
-            .collect();
-
-        let data: Vec<Vec<Value>> = rows
-            .iter()
-            .map(|row| extract_row_values(row, &generated.columns))
-            .collect();
-
-        Ok(ViewResult { columns, data })
+        run_view(&self.pool, view).await
     }
 }
 
-/// Extract values from a row based on column definitions.
+/// Execute a ViewDefinition on `executor`: a pool, or one connection.
+///
+/// Each row comes back as one JSON object (`to_jsonb`), so every column
+/// keeps the value PostgreSQL computed: a `numeric` decimal, a `bigint`, a
+/// JSON collection. Decoding each column into a Rust type instead would
+/// need a type for each SQL type the generator can produce.
+///
+/// # Errors
+///
+/// Returns an error if SQL generation fails or the query fails to execute.
 #[cfg(feature = "postgres")]
-fn extract_row_values(row: &PgRow, columns: &[GeneratedColumn]) -> Vec<Value> {
-    columns
+pub async fn run_view<'e, E>(executor: E, view: &ViewDefinition) -> Result<ViewResult>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let generated = SqlGenerator::new().generate(view)?;
+
+    tracing::debug!(sql = %generated.sql, "Executing view");
+
+    let wrapped = format!("SELECT to_jsonb(t) FROM ({}) t", generated.sql);
+    let rows: Vec<(Value,)> = sqlx_core::query_as::query_as(AssertSqlSafe(wrapped))
+        .fetch_all(executor)
+        .await
+        .map_err(Error::Sql)?;
+
+    let columns: Vec<ColumnInfo> = generated
+        .columns
         .iter()
-        .enumerate()
-        .map(|(i, col)| extract_column_value(row, i, &col.col_type))
-        .collect()
-}
+        .map(|c| ColumnInfo::new(c.alias.clone(), c.col_type))
+        .collect();
 
-/// Extract a single column value from a row.
-#[cfg(feature = "postgres")]
-fn extract_column_value(row: &PgRow, index: usize, col_type: &ColumnType) -> Value {
-    match col_type {
-        ColumnType::Integer | ColumnType::Integer64 => row
-            .try_get::<Option<i64>, _>(index)
-            .ok()
-            .flatten()
-            .map(|v| Value::Number(v.into()))
-            .unwrap_or(Value::Null),
+    let data: Vec<Vec<Value>> = rows
+        .into_iter()
+        .map(|(mut row,)| {
+            columns
+                .iter()
+                .map(|c| row.get_mut(&c.name).map(Value::take).unwrap_or(Value::Null))
+                .collect()
+        })
+        .collect();
 
-        ColumnType::Decimal => row
-            .try_get::<Option<f64>, _>(index)
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::Number::from_f64(v).map(Value::Number))
-            .unwrap_or(Value::Null),
-
-        ColumnType::Boolean => row
-            .try_get::<Option<bool>, _>(index)
-            .ok()
-            .flatten()
-            .map(Value::Bool)
-            .unwrap_or(Value::Null),
-
-        ColumnType::Json => row
-            .try_get::<Option<Value>, _>(index)
-            .ok()
-            .flatten()
-            .unwrap_or(Value::Null),
-
-        // String-like types
-        ColumnType::String
-        | ColumnType::Date
-        | ColumnType::DateTime
-        | ColumnType::Instant
-        | ColumnType::Time
-        | ColumnType::Base64Binary => row
-            .try_get::<Option<String>, _>(index)
-            .ok()
-            .flatten()
-            .map(Value::String)
-            .unwrap_or(Value::Null),
-    }
+    Ok(ViewResult { columns, data })
 }
 
 /// Results from executing a ViewDefinition.
