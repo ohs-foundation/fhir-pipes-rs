@@ -517,6 +517,27 @@ mod database {
             .stdout(has("every table in full: the last refresh did not finish"))
             .stdout(has(format!("patient → {s}.patient (3 rows)")));
 
+        // A refresh that stopped after the load, in a hook: the database
+        // and the log agree, so the next load is not in full.
+        let text = fs::read_to_string(&config).unwrap();
+        fs::write(
+            &config,
+            format!("{text}\n[[hooks]]\nname = \"fails\"\nrun = [\"sh\", \"-c\", \"exit 3\"]\n"),
+        )
+        .unwrap();
+        cmd(&config)
+            .arg("--input")
+            .arg(&input)
+            .args(["--only", "views,hooks"])
+            .assert()
+            .failure()
+            .stderr(has("hook fails"));
+        fs::write(&config, text).unwrap();
+        run(&config)
+            .assert()
+            .success()
+            .stdout(has(format!("patient → {s}.patient (unchanged)")));
+
         // The same Patients from a gzip input, p1 changed: only p1 differs
         // from the last split.
         let text = patients(&[
@@ -1021,16 +1042,14 @@ mod database {
         writer_url.set_username(&role).unwrap();
         writer_url.set_password(Some("writer")).unwrap();
         const WRITER: &str = "FHIR_PIPES_UPSERT_WRITER_URL";
-        let database = one("SELECT current_database()");
         let _cleanup = Cleanup(vec![
             format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE"),
             format!("DROP OWNED BY {role}"),
             format!("DROP ROLE {role}"),
         ]);
-        sql(&[
-            &format!("CREATE ROLE {role} LOGIN PASSWORD 'writer'"),
-            &format!("GRANT CREATE ON DATABASE \"{database}\" TO {role}"),
-        ]);
+        // No CREATE on the database: the schema exists by the time the
+        // writer loads, and a load needs only table privileges then.
+        sql(&[&format!("CREATE ROLE {role} LOGIN PASSWORD 'writer'")]);
 
         let (owner_dir, owner_config) = setup(NOWHERE, &upsert(&s));
         let views = people_view(

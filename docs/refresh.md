@@ -53,8 +53,9 @@ below), and the hooks and the push run last, on the swapped-in warehouse.
 
 By default every step except `push` runs, `catalog` only when the config has a
 `[catalog]` section, and `database` only with `[database]`. `--only
-views,tiles` picks steps (the manifest, the catalog and the database are added
-when a data step is picked), `--skip tiles` leaves some out,
+views,tiles` picks steps (the manifest and the catalog are added when a data
+step is picked, and the database when `views` is, since it loads the view
+tables), `--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
 
@@ -624,7 +625,10 @@ And for one table when:
 The step says which tables it loads in full and why. Only those tables are
 analyzed after the commit.
 
-**Privileges.** Neither mode needs to own the view tables once they exist:
+**Privileges.** The schema is created only when it does not exist, which
+needs `CREATE` on the database; loading into an existing schema needs
+`USAGE` on it and no privilege on the database. Neither mode needs to own
+the view tables once they exist:
 `SELECT`, `INSERT` and `DELETE` on them are enough (creating or recreating
 one needs `CREATE` on the schema, and dropping one its owner, as before).
 Upsert also needs `fhir_pipes_loads`: `CREATE` on the schema the first time,
