@@ -9,12 +9,42 @@ use std::time::Duration;
 
 use crate::error::{PipesError, Result};
 
-/// Call `visit` with the name and text of every JSON file `spec` names: an
-/// https URL or path to a package `.tgz`, a directory (read with its
-/// subdirectories), or `name#version` for a package in the local FHIR
+/// Call `visit` with the name and parsed JSON of every JSON file `spec`
+/// names: an https URL or path to a package `.tgz`, a directory (read with
+/// its subdirectories), or `name#version` for a package in the local FHIR
 /// package cache (`~/.fhir/packages`). `flag` names the option `spec` came
-/// from, for messages.
-pub fn read_json_files(spec: &str, flag: &str, mut visit: impl FnMut(&str, &str)) -> Result<()> {
+/// from, for messages. A file that is not UTF-8 JSON (a byte order mark is
+/// allowed) is skipped, and the files skipped are counted in one warning: a
+/// resource missing that way would otherwise surface as "not in the
+/// packages".
+pub fn read_json_files(
+    spec: &str,
+    flag: &str,
+    mut visit: impl FnMut(&str, serde_json::Value),
+) -> Result<()> {
+    let mut skipped: Vec<String> = Vec::new();
+    let mut each = |name: &str, text: std::result::Result<&str, String>| {
+        let parsed = text.and_then(|t| {
+            serde_json::from_str(t.strip_prefix('\u{feff}').unwrap_or(t)).map_err(|e| e.to_string())
+        });
+        match parsed {
+            Ok(v) => visit(name, v),
+            Err(why) => skipped.push(format!("{name}: {why}")),
+        }
+    };
+    let read = read_any(spec, flag, &mut each);
+    if let Some(first) = skipped.first() {
+        eprintln!(
+            "warning: {flag} {spec}: {} JSON file(s) could not be read and were skipped, the first {first}",
+            skipped.len()
+        );
+    }
+    read
+}
+
+type Visit<'a> = dyn FnMut(&str, std::result::Result<&str, String>) + 'a;
+
+fn read_any(spec: &str, flag: &str, visit: &mut Visit) -> Result<()> {
     if spec.starts_with("http://") {
         return Err(PipesError::Usage(format!(
             "{flag} {spec}: packages are fetched over https only"
@@ -22,16 +52,16 @@ pub fn read_json_files(spec: &str, flag: &str, mut visit: impl FnMut(&str, &str)
     }
     if spec.starts_with("https://") {
         let bytes = crate::profile::fetch_bytes(spec, flag, Duration::from_secs(120))?;
-        return read_tgz(&bytes, spec, flag, &mut visit);
+        return read_tgz(&bytes, spec, flag, visit);
     }
     let path = Path::new(spec);
     if path.is_dir() {
-        read_dir(path, &mut visit)
+        read_dir(path, visit)
     } else if path.is_file() {
         let bytes = std::fs::read(path).map_err(|e| PipesError::io(path, e))?;
-        read_tgz(&bytes, spec, flag, &mut visit)
+        read_tgz(&bytes, spec, flag, visit)
     } else if let Some(dir) = cached(spec) {
-        read_dir(&dir, &mut visit)
+        read_dir(&dir, visit)
     } else {
         Err(PipesError::Usage(format!(
             "{flag} {spec}: not a file, directory, https URL or name#version in the \
@@ -60,12 +90,7 @@ const MAX_ENTRY: u64 = 512 << 20;
 const MAX_TOTAL: u64 = 4 << 30;
 
 /// A gzipped tar of JSON files, as the IG publisher writes `package.tgz`.
-fn read_tgz(
-    bytes: &[u8],
-    spec: &str,
-    flag: &str,
-    visit: &mut impl FnMut(&str, &str),
-) -> Result<()> {
+fn read_tgz(bytes: &[u8], spec: &str, flag: &str, visit: &mut Visit) -> Result<()> {
     read_tgz_up_to(bytes, spec, flag, visit, (MAX_ENTRY, MAX_TOTAL))
 }
 
@@ -73,7 +98,7 @@ fn read_tgz_up_to(
     bytes: &[u8],
     spec: &str,
     flag: &str,
-    visit: &mut impl FnMut(&str, &str),
+    visit: &mut Visit,
     (max_entry, max_total): (u64, u64),
 ) -> Result<()> {
     let bad =
@@ -101,14 +126,15 @@ fn read_tgz_up_to(
             )));
         }
         let mut text = String::new();
-        if entry.read_to_string(&mut text).is_ok() {
-            visit(&name, &text);
+        match entry.read_to_string(&mut text) {
+            Ok(_) => visit(&name, Ok(&text)),
+            Err(e) => visit(&name, Err(e.to_string())),
         }
     }
     Ok(())
 }
 
-fn read_dir(dir: &Path, visit: &mut impl FnMut(&str, &str)) -> Result<()> {
+fn read_dir(dir: &Path, visit: &mut Visit) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|e| PipesError::io(dir, e))?;
     for entry in entries {
         let entry = entry.map_err(|e| PipesError::io(dir, e))?;
@@ -117,10 +143,11 @@ fn read_dir(dir: &Path, visit: &mut impl FnMut(&str, &str)) -> Result<()> {
         // the stack ran out.
         if entry.file_type().is_ok_and(|t| t.is_dir()) {
             read_dir(&path, visit)?;
-        } else if path.extension().is_some_and(|e| e == "json")
-            && let Ok(text) = std::fs::read_to_string(&path)
-        {
-            visit(&path.to_string_lossy(), &text);
+        } else if path.extension().is_some_and(|e| e == "json") {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => visit(&path.to_string_lossy(), Ok(&text)),
+                Err(e) => visit(&path.to_string_lossy(), Err(e.to_string())),
+            }
         }
     }
     Ok(())
@@ -169,6 +196,26 @@ mod tests {
         let mut seen = 0;
         read_dir(dir.path(), &mut |_, _| seen += 1).unwrap();
         assert_eq!(seen, 1);
+    }
+
+    #[test]
+    fn a_bom_is_allowed_and_a_broken_file_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.tgz");
+        std::fs::write(
+            &path,
+            tgz(&[
+                ("a.json", "\u{feff}{\"id\":\"a\"}"),
+                ("b.json", "{not json"),
+            ]),
+        )
+        .unwrap();
+        let mut ids = Vec::new();
+        read_json_files(path.to_str().unwrap(), "--package", |_, v| {
+            ids.push(v["id"].as_str().unwrap().to_string())
+        })
+        .unwrap();
+        assert_eq!(ids, ["a"]);
     }
 
     #[test]

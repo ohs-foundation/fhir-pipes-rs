@@ -936,6 +936,8 @@ Re-running after a load and a fresh extract writes nothing.
 Location's position, every quadkey and geohash cell already on it is
 recomputed for the new point (an H3 cell, which fhir-pipes cannot compute, is
 dropped rather than left wrong), and clearing the position removes them all.
+A cell of a scheme fhir-pipes does not know (S2, say) belongs to someone
+else: it is left as it is and reported as `spatial_cell_not_recomputed`.
 A cell whose level is outside its scheme's range (quadkey 1–23, geohash
 1–12, H3 0–15) is reported as `malformed_field` and skipped: `transform`
 leaves it out of the `quadkey` columns and `diff` does not recompute it.

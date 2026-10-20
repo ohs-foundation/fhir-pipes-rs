@@ -332,6 +332,7 @@ fn run_on_files(
     threads: usize,
 ) -> Result<Vec<Option<ViewResult>>> {
     let wanted: HashSet<&str> = views.iter().map(|(_, v)| v.resource.as_str()).collect();
+    let keep_bundles = wanted.contains("Bundle");
     let mut rows = ViewRows::new(views.iter().map(|(n, v)| (n.as_str(), v)).collect());
     let mut add = |resources: Vec<serde_json::Value>| -> Result<()> {
         let mut by_type: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
@@ -356,7 +357,7 @@ fn run_on_files(
         io::Read::read_to_string(&mut io::stdin(), &mut text)
             .context("reading FHIR resources from stdin")?;
         let mut resources = Vec::new();
-        parse_resource_text(&text, &mut resources)
+        parse_resource_text(&text, &mut resources, keep_bundles)
             .context("parsing stdin")
             .map_err(usage)?;
         if resources.is_empty() {
@@ -369,7 +370,7 @@ fn run_on_files(
         // An --input that is not there is a usage error; its message is the
         // read's.
         resource_files(path)
-            .and_then(|files| for_each_chunk(&files, threads, &mut add))
+            .and_then(|files| for_each_chunk(&files, threads, keep_bundles, &mut add))
             .map_err(|e| if path.exists() { e } else { usage(e) })?
     };
     if count == 0 {
@@ -389,6 +390,7 @@ fn run_on_files(
 fn for_each_chunk(
     files: &[PathBuf],
     threads: usize,
+    keep_bundles: bool,
     mut f: impl FnMut(Vec<serde_json::Value>) -> Result<()>,
 ) -> Result<usize> {
     let mut count = 0;
@@ -403,14 +405,14 @@ fn for_each_chunk(
                 let mut resources = Vec::new();
                 // A line that is not JSON is the input's fault.
                 for value in chunk?.values(threads).map_err(usage)? {
-                    push_resource(value, &mut resources);
+                    push_resource(value, &mut resources, keep_bundles);
                 }
                 count += resources.len();
                 f(resources)?;
             }
         } else {
             let before = pending.len();
-            load_json_file(file, &mut pending)?;
+            load_json_file(file, &mut pending, keep_bundles)?;
             count += pending.len() - before;
             if pending.len() >= ndjson::CHUNK_LINES {
                 f(std::mem::take(&mut pending))?;
@@ -515,7 +517,11 @@ fn collect_resource_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 
 /// The resources in one JSON file, a resource, an array or a Bundle
 /// (`push_resource`), appended to `out`. A `.gz` file is read decompressed.
-pub(crate) fn load_json_file(path: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
+pub(crate) fn load_json_file(
+    path: &Path,
+    out: &mut Vec<serde_json::Value>,
+    keep_bundles: bool,
+) -> Result<()> {
     let read = || -> io::Result<String> {
         let mut text = String::new();
         read_text(fs::File::open(path)?, is_gz(path)).read_to_string(&mut text)?;
@@ -525,7 +531,7 @@ pub(crate) fn load_json_file(path: &Path, out: &mut Vec<serde_json::Value>) -> R
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("parsing {}", path.display()))
         .map_err(usage)?;
-    push_resource(value, out);
+    push_resource(value, out, keep_bundles);
     Ok(())
 }
 
@@ -545,6 +551,9 @@ fn next_line(
             return Ok(None);
         }
         *line_no += 1;
+        if *line_no == 1 && line.starts_with('\u{feff}') {
+            line.drain(..'\u{feff}'.len_utf8());
+        }
         if !line.trim().is_empty() {
             return Ok(Some((*line_no, line)));
         }
@@ -575,7 +584,7 @@ async fn stream_ndjson(
             .map_err(usage)?;
         // A Bundle or array on one line is expanded into its resources.
         let mut resources = Vec::new();
-        push_resource(value, &mut resources);
+        push_resource(value, &mut resources, view.resource == "Bundle");
         for resource in &resources {
             for row in compiled.execute_resource(resource).await? {
                 let obj: serde_json::Map<String, serde_json::Value> = names
@@ -642,9 +651,13 @@ pub(crate) fn close_sink(sink: Output<Box<dyn Write>>, out: Option<&PathBuf>) ->
 
 /// Resource text of unknown shape (stdin has no extension to go by): one JSON
 /// value if it parses whole, otherwise NDJSON.
-fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<()> {
+fn parse_resource_text(
+    text: &str,
+    out: &mut Vec<serde_json::Value>,
+    keep_bundles: bool,
+) -> Result<()> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        push_resource(value, out);
+        push_resource(value, out, keep_bundles);
         return Ok(());
     }
     for (i, line) in text.lines().enumerate() {
@@ -653,7 +666,7 @@ fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<(
         }
         let value: serde_json::Value =
             serde_json::from_str(line).with_context(|| format!("parsing line {}", i + 1))?;
-        push_resource(value, out);
+        push_resource(value, out, keep_bundles);
     }
     Ok(())
 }
@@ -665,16 +678,26 @@ fn parse_resource_text(text: &str, out: &mut Vec<serde_json::Value>) -> Result<(
 /// (`urn:uuid:…`, as in a transaction Bundle) is rewritten to that entry's
 /// `Type/id`, as a server would store it, so `getReferenceKey()` and joins
 /// work on Bundle files. An entry without an id is left as is.
-pub(crate) fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::Value>) {
+///
+/// With `keep_bundles` (a view reads Bundles) the Bundle itself is kept as
+/// well, entries and all.
+pub(crate) fn push_resource(
+    value: serde_json::Value,
+    out: &mut Vec<serde_json::Value>,
+    keep_bundles: bool,
+) {
     match value {
         serde_json::Value::Array(items) => {
             for item in items {
-                push_resource(item, out);
+                push_resource(item, out, keep_bundles);
             }
         }
         serde_json::Value::Object(mut map)
             if map.get("resourceType").and_then(|v| v.as_str()) == Some("Bundle") =>
         {
+            if keep_bundles {
+                out.push(serde_json::Value::Object(map.clone()));
+            }
             let Some(serde_json::Value::Array(entries)) = map.remove("entry") else {
                 return;
             };
@@ -686,7 +709,7 @@ pub(crate) fn push_resource(value: serde_json::Value, out: &mut Vec<serde_json::
                     if !urns.is_empty() {
                         resolve_urns(&mut resource, &urns);
                     }
-                    push_resource(resource, out);
+                    push_resource(resource, out, keep_bundles);
                 }
             }
         }
@@ -1012,7 +1035,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                     .read_to_string(&mut text)
                     .context("reading FHIR resources from stdin")?;
                 let mut resources = Vec::new();
-                parse_resource_text(&text, &mut resources)
+                parse_resource_text(&text, &mut resources, view_def.resource == "Bundle")
                     .context("parsing stdin")
                     .map_err(usage)?;
                 if resources.is_empty() {

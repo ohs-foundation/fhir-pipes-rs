@@ -925,7 +925,14 @@ impl Lower {
             LiteralValue::Boolean(b) => j(&b.to_string()),
             LiteralValue::Date(_) | LiteralValue::DateTime(_) | LiteralValue::Time(_) => {
                 let s = v.to_string();
+                // `@2020-01-01` and `@T10:00` as FHIR stores them: no `@`,
+                // and a time without its `T`.
                 let s = s.trim_start_matches('@');
+                let s = if matches!(v, LiteralValue::Time(_)) {
+                    s.trim_start_matches('T')
+                } else {
+                    s
+                };
                 j(&format!("{}::{txt}", sql_str(s)))
             }
             LiteralValue::Quantity { value, .. } => j(&format!("{value}::{num}")),
