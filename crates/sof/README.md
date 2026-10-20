@@ -145,23 +145,20 @@ format of the sql-on-fhir.org registry; see [CONFORMANCE.md](CONFORMANCE.md).
 
 `tests/fhirpath_hl7.rs` runs the official HL7 FHIRPath test suite for R4
 (`tests/fhirpath/`, from FHIR/fhir-test-cases) through the in-memory evaluator,
-each expression as a ViewDefinition column. fhir-pipes passes 962 of the 1,001
-tests. The 39 it fails are listed, with the reason each fails, in
+each expression as a ViewDefinition column. fhir-pipes passes 970 of the 1,001
+tests. The 31 it fails are listed, with the reason each fails, in
 `tests/fhirpath/known-failures.json`, and the test fails if that list goes out
-of date in either direction. Of the 39:
+of date in either direction. Of the 31:
 
-- 22 expect a type error before evaluation, which needs a type checker. One of
-  them, `testPolymorphismAsB`, passed without the FHIR model only because the
-  expression failed; kotlin-fhirpath records it as a test the specification
+- 23 expect a type error before evaluation, which needs a type checker
+  (kotlin-fhirpath fails these too). `testPolymorphismAsB` passed without the
+  FHIR model only because the expression failed, and `isGuardAndBad` only
+  because of an `is` precedence bug fixed in octofhir-fhirpath 0.4.57;
+  kotlin-fhirpath records `testPolymorphismAsB` as a test the specification
   does not support;
-- 16 are octofhir-fhirpath bugs or gaps. Fixes for 9 of them are open or
-  unreleased upstream (octofhir/fhirpath-rs#176, #177, #179): `is`/`as`
-  precedence, `hasValue()` on complex types, and a date-only dateTime. With
-  them, one test that passes today only because of the precedence bug
-  (`isGuardAndBad`, which expects a type error) fails, so the total goes to
-  970. The other 7 are Quantity unit arithmetic (1), `conformsTo()` (3),
-  `as()` with a date or time type (1), `as()` over several items, which
-  octofhir allows on purpose for FHIR's own invariants (1), and
+- 7 are octofhir-fhirpath bugs or gaps: Quantity unit arithmetic (1),
+  `conformsTo()` (3), `as()` with a date or time type (1), `as()` over several
+  items, which octofhir allows on purpose for FHIR's own invariants (1), and
   `@1973-12-25T00:00:00.000+10:00 + 0.1 's'`, which other engines fail too (1);
 - 1 is fhir-pipes' own: `1.toDecimal().lowBoundary()`. A decimal's boundary
   uses the digits of its JSON form, because a resource's `1.0` reaches the
