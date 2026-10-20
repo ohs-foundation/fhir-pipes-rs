@@ -8,6 +8,7 @@ use octofhir_canonical_manager::CanonicalManager;
 use octofhir_fhirschema::{FhirSchema, FhirSchemaElement, StructureDefinition, translate};
 
 use crate::LintError;
+use crate::model::{ElementKind, ElementModel};
 
 /// A [`SchemaProvider`] backed by FHIR schemas.
 ///
@@ -163,6 +164,24 @@ impl FhirSchemaProvider {
     }
 }
 
+impl ElementModel for FhirSchemaProvider {
+    fn element_names(&self, root: &str, path: &[&str]) -> Option<Vec<String>> {
+        self.lookup_jsonb_fields(None, &root.to_lowercase(), "resource", path)
+    }
+
+    fn is_array(&self, root: &str, path: &[&str]) -> Option<bool> {
+        self.jsonb_field_is_array(None, &root.to_lowercase(), "resource", path)
+    }
+
+    fn is_choice(&self, root: &str, path: &[&str]) -> bool {
+        self.is_choice_at(root, path)
+    }
+
+    fn kind(&self, root: &str, path: &[&str]) -> Option<ElementKind> {
+        self.element_kind_at(root, path)
+    }
+}
+
 impl SchemaProvider for FhirSchemaProvider {
     fn lookup_table(&self, _schema: Option<&str>, name: &str) -> Option<TableInfo> {
         self.tables.get(&name.to_lowercase()).map(|_| TableInfo {
@@ -216,17 +235,6 @@ impl SchemaProvider for FhirSchemaProvider {
         let root = self.tables.get(&table.to_lowercase())?;
         self.element_at(root, path)?.array
     }
-}
-
-/// The shape of a resolved FHIR element, for column-selector validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ElementKind {
-    /// A FHIR primitive (string, code, dateTime, …) — a tabular-friendly value.
-    Primitive,
-    /// A `Reference` — needs `getReferenceKey()` to yield a usable key.
-    Reference,
-    /// Any other complex type or inline backbone element.
-    Complex,
 }
 
 /// FHIR primitive data types (spec "Primitive Types"), the values a flat column

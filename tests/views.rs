@@ -160,6 +160,33 @@ fn lint_shareable_runs_offline() {
 }
 
 #[test]
+fn lint_checks_paths_against_the_core_types_offline() {
+    views()
+        .arg("lint")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .assert()
+        .success();
+
+    let dir = tempfile::tempdir().unwrap();
+    let view = dir.path().join("patient.json");
+    std::fs::write(
+        &view,
+        r#"{"resourceType": "ViewDefinition", "name": "Patients", "status": "active",
+            "resource": "Patient", "select": [{"column": [
+                {"name": "id", "path": "getResourceKey()"},
+                {"name": "family", "path": "nmae.first().family"}]}]}"#,
+    )
+    .unwrap();
+    views()
+        .args(["--no-color", "lint"])
+        .arg(&view)
+        .assert()
+        .failure()
+        .stdout(contains("FH01"))
+        .stdout(contains("did you mean `name`"));
+}
+
+#[test]
 fn test_runs_the_official_suite() {
     let spec = Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/sof/tests/spec");
     views()
