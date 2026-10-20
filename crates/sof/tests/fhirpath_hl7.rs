@@ -7,16 +7,20 @@
 //! results are compared by value: the suite's output types are not checked.
 //!
 //! fhir-pipes does not pass every case. `tests/fhirpath/known-failures.json`
-//! lists the ones it fails today, and this test enforces that list both ways:
-//! a failure not on the list fails the test, and so does a listed case that
-//! now passes. After a change that moves either way, rewrite the list with
-//! `FHIRPATH_UPDATE_KNOWN_FAILURES=1 cargo test -p fhir-pipes-sof --test fhirpath_hl7`
-//! and review the diff. Data and provenance: `tests/fhirpath/SOURCE.md`.
+//! lists the ones it fails today, each with its cause, and this test enforces
+//! that list both ways: a failure not on the list fails the test, and so does
+//! a listed case that now passes. After a change that moves either way,
+//! rewrite the list with
+//! `FHIRPATH_UPDATE_KNOWN_FAILURES=1 cargo test -p fhir-pipes-sof --test fhirpath_hl7`,
+//! give any new failure its cause (see `common::Cause`) and review the diff.
+//! Data and provenance: `tests/fhirpath/SOURCE.md`.
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use fhir_pipes_sof::{ViewDefinition, execute};
+use common::{check_known_failures, number};
 use serde_json::{Value, json};
 
 struct Case {
@@ -83,37 +87,6 @@ fn load(path: &Path) -> Vec<Case> {
         }
     }
     cases
-}
-
-/// The expression's values, as fhir-pipes returns them for a collection column.
-async fn evaluate(case: &Case, input: &Value) -> Result<Vec<Value>, String> {
-    let resource = input["resourceType"].as_str().unwrap();
-    let column = json!([{ "name": "r", "path": case.expression, "collection": true }]);
-    let select = match &case.context {
-        None => json!([{ "column": column }]),
-        Some(context) => json!([{ "forEach": context, "column": column }]),
-    };
-    let view: ViewDefinition = serde_json::from_value(json!({
-        "resourceType": "ViewDefinition", "status": "active", "resource": resource, "select": select
-    }))
-    .map_err(|e| e.to_string())?;
-    let result = execute(&view, std::slice::from_ref(input))
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(result
-        .data
-        .into_iter()
-        .flat_map(|row| match row.into_iter().next() {
-            Some(Value::Array(values)) => values,
-            Some(Value::Null) | None => vec![],
-            Some(value) => vec![value],
-        })
-        .collect())
-}
-
-fn number(v: &Value) -> Option<f64> {
-    v.as_f64()
-        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
 /// The type of an `<output>` the suite leaves untyped, read from its literal:
@@ -239,36 +212,18 @@ async fn hl7_fhirpath_r4() {
             .unwrap(),
             None => no_input.clone(),
         };
-        if let Err(reason) = judge(case, evaluate(case, &input).await) {
+        if let Err(reason) = judge(
+            case,
+            common::evaluate(&case.expression, case.context.as_deref(), json!([]), &input).await,
+        ) {
             let reason: String = reason.chars().take(200).collect();
             failures.insert(case.key.clone(), reason);
         }
     }
-    let passed = cases.len() - failures.len();
-    eprintln!("HL7 FHIRPath R4: {passed}/{} pass", cases.len());
-
-    let list = dir.join("known-failures.json");
-    if std::env::var_os("FHIRPATH_UPDATE_KNOWN_FAILURES").is_some() {
-        std::fs::write(
-            &list,
-            serde_json::to_string_pretty(&failures).unwrap() + "\n",
-        )
-        .unwrap();
-        return;
-    }
-    let known: BTreeMap<String, String> =
-        serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
-    let new: Vec<_> = failures
-        .iter()
-        .filter(|(k, _)| !known.contains_key(*k))
-        .collect();
-    let fixed: Vec<_> = known
-        .keys()
-        .filter(|k| !failures.contains_key(*k))
-        .collect();
-    assert!(
-        new.is_empty() && fixed.is_empty(),
-        "known-failures.json is out of date (see this file's header to rewrite it).\n\
-         New failures: {new:#?}\nListed but now passing: {fixed:#?}"
+    check_known_failures(
+        "HL7 FHIRPath R4",
+        &dir.join("known-failures.json"),
+        cases.len(),
+        failures,
     );
 }

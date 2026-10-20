@@ -1,0 +1,1824 @@
+{
+  "tests": [
+    {
+      "desc": "6.1 Equality"
+    },
+    {
+      "group: 6.1.1. = (Equals)": [
+        {
+          "desc": "* string: comparison is based on Unicode values"
+        },
+        {
+          "desc": "** strings equals",
+          "expression": "'abc' = 'abc'",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** strings equals",
+          "expression": "Ops.str1 = Ops.str1",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** strings not equals",
+          "expression": "'abc' = 'abcd'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** strings not equals",
+          "expression": "Ops.str1 = Ops.str2",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** utf8 strings",
+          "expression": "'ɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ ə ɚ ɛ ɜ ɝ ɞ ɟ ɠ' = 'ɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ ə ɚ ɛ ɜ ɝ ɞ ɟ ɠ'",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** utf8 strings",
+          "expression": "'ɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ ə ɚ ɛ ɜ ɝ ɞ ɟ ɠ' = 'ə ɚ ɛ ɜ ɝ ɞ ɟ ɠɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ '",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "* integer: values must be exactly equal"
+        },
+        {
+          "desc": "** equal",
+          "expression": "1 = 1",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** equal",
+          "expression": "Ops.int1 = Ops.int1",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** not equal",
+          "expression": "1 = 2",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** not equal",
+          "expression": "Ops.int1 = Ops.int2",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** equal, different types, but same values",
+          "expression": "2 = 2L",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** equal, different types, but same values (opposite order of operands)",
+          "expression": "2L = 2",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** equal, long integers",
+          "expression": "2L = 2L",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** not equal, long integers",
+          "expression": "2L = 3L",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "* decimal: values must be equal, trailing zeroes are ignored"
+        },
+        {
+          "desc": "** decimals equal",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "1.01 = 1.01",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** decimals equal, trailing zeroes are ignored",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "0.01 = 00.01",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "decimal not equal",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "1.01 = 1.02",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "decimal values should not be compared beyond the maximum precision",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "0.1 + 0.1 + 0.1 = 0.3",
+          "result": [
+            true
+          ]
+        },
+        {
+          "- group: should take into account extensions for numeric values": [
+            {
+              "model": "r4",
+              "expression": "(%factory.decimal(0.3, %factory.Extension('someExt', 'someString')) =\n %factory.decimal(0.30000000000000004, %factory.Extension('someExt', 'someString')))",
+              "result": [
+                true
+              ]
+            },
+            {
+              "model": "r4",
+              "expression": "(%factory.decimal(0.3, %factory.Extension('someExt', 'someString1')) =\n %factory.decimal(0.30000000000000004, %factory.Extension('someExt', 'someString2')))",
+              "result": [
+                false
+              ]
+            },
+            {
+              "model": "r4",
+              "expression": "(%factory.integer64(123, %factory.Extension('someExt', 'someString')) =\n %factory.integer64(123, %factory.Extension('someExt', 'someString')))",
+              "result": [
+                true
+              ]
+            },
+            {
+              "model": "r4",
+              "expression": "(%factory.integer64(123, %factory.Extension('someExt', 'someString')) =\n %factory.integer64(123, %factory.Extension('someExt', 'someString2')))",
+              "result": [
+                false
+              ]
+            },
+            {
+              "model": "r4",
+              "expression": "(%factory.integer64(456, %factory.Extension('someExt', 'someString')) =\n %factory.integer(456, %factory.Extension('someExt', 'someString')))",
+              "result": [
+                true
+              ]
+            },
+            {
+              "model": "r4",
+              "expression": "(%factory.integer64(456, %factory.Extension('someExt', 'someString')) =\n %factory.integer(456, %factory.Extension('someExt', 'someString2')))",
+              "result": [
+                false
+              ]
+            }
+          ]
+        },
+        {
+          "desc": "* boolean: values must be the same"
+        },
+        {
+          "desc": "** equal",
+          "expression": "true = true",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** not equal",
+          "expression": "true = false",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** propagate empty coll",
+          "expression": "true = Ops.unexists",
+          "result": []
+        },
+        {
+          "desc": "** equality for null values",
+          "inputfile": "patient-example-2.json",
+          "model": "r4",
+          "expression": "Patient.name.given[0] = Patient.name.given[3]",
+          "result": [
+            false
+          ]
+        },
+        {
+          "group: Quantity Equality": [
+            {
+              "expression": "1 year != 1 'a'",
+              "result": []
+            },
+            {
+              "expression": "12 months = 1 year",
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "12 'mo' = 1 'a'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 year = 1 year",
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 month != 1 'mo'",
+              "result": []
+            },
+            {
+              "expression": "1 month = 30 'd'",
+              "result": []
+            },
+            {
+              "expression": "1 'mo' = 30 days",
+              "result": []
+            },
+            {
+              "expression": "1 month = 30 days",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 week = 1 'wk'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 week = 7 days",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 day = 1 'd'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 day = 24 hours",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 day = 24 'h'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 second = 1 's'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "10 'kg.m/s2' = 5 'kg' * 4 'm' / (2 's' * 1000 'ms')",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "9 = 9 '1'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "9 = 9 'kg.kg-1'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "9 = 8 '1'",
+              "result": [
+                false
+              ]
+            },
+            {
+              "expression": "2 '1' = 2",
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "2 's.s-1' = 2",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "3 '1' = 2",
+              "result": [
+                false
+              ]
+            }
+          ]
+        },
+        {
+          "desc": "* For complex types, equality requires all child properties to be equal, recursively."
+        },
+        {
+          "desc": "** two objects",
+          "expression": "Ops.complex = Ops.complexsame",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** two objects not",
+          "expression": "Ops.complex = Ops.complexother",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** two colls",
+          "expression": "Ops.coll = Ops.collsame",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** two colls not",
+          "expression": "Ops.coll = Ops.collother",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** two colls + empty",
+          "expression": "Ops.coll = Ops.ups",
+          "result": []
+        },
+        {
+          "desc": "** length mismatch",
+          "expression": "Ops.coll.a = 1",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** length match",
+          "expression": "Ops.coll.a.first() = 1",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** empty right",
+          "expression": "Ops.coll.a.first() = Ops.unexists",
+          "result": []
+        },
+        {
+          "desc": "** empty left",
+          "expression": "Ops.unexists = Ops.coll.a.first()",
+          "result": []
+        },
+        {
+          "group: Dates & Times": [
+            {
+              "desc": "DateTime literal compared with DateTime",
+              "expression": "@2018 = @2018",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime",
+              "expression": "@2018 = @2017",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (1)",
+              "expression": "@2018 = @2018-02",
+              "result": []
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (2)",
+              "expression": "@2018 = @2019-02",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (month)",
+              "expression": "@2018-02 = @2018-02",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (month)",
+              "expression": "@2018-02 = @2018-03",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (day)",
+              "expression": "@2018-02-02 = @2018-02-02",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (day)",
+              "expression": "@2018-02-02 = @2018-02-03",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (hour)",
+              "expression": "@2018-02-02T11 = @2018-02-02T11",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (hour)",
+              "expression": "@2018-02-02T11 = @2018-02-02T12",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same time, diff. precision (hour)",
+              "expression": "@2018-02-02T11 = @2018-02-02T11:00",
+              "result": []
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (hour, tz)",
+              "expression": "@2018-02-02T11+04:00 = @2018-02-02T11+04:00",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same DateTime (hour, tz different)",
+              "expression": "@2018-02-02T22-04:00 = @2018-02-03T06+04:00",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (hour, tz diff)",
+              "expression": "@2018-02-02T22-04:00 = @2018-02-03T06:03+04:00",
+              "result": []
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (hour, tz diff)",
+              "expression": "@2018-02-02T22-04:00 = @2018-02-03T05:03+04:00",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (hour,tz)",
+              "expression": "@2018-02-02T11+04:00 = @2018-02-02T12+04:00",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (minute)",
+              "expression": "@2018-02-02T11:01 = @2018-02-02T11:01",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (minute)",
+              "expression": "@2018-02-02T11:01 = @2018-02-02T11:02",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (minute, tz)",
+              "expression": "@2018-02-02T11:01+04:00 = @2018-02-02T11:01+04:00",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (minute, tz)",
+              "expression": "@2018-02-02T11:01+04:00 = @2018-02-02T11:02+04:00",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (second)",
+              "expression": "@2018-02-02T11:01:03 = @2018-02-02T11:01:03",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (second)",
+              "expression": "@2018-02-02T11:01:03 = @2018-02-02T11:01:04",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with DateTime (millisecond)",
+              "expression": "@2018-02-02T11:01:03.123 = @2018-02-02T11:01:03.123",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (millisecond)",
+              "expression": "@2018-02-02T11:01:03.123 = @2018-02-02T11:01:03.124",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime (timezone)",
+              "expression": "@2018-02-02T11:01:03.123+02:00 = @2018-02-02T11:01:03.123+04:00",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same DateTime in resource (1)",
+              "expression": "@2018-02 = date1.toDate()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same DateTime in resource (2)",
+              "expression": "date1.toDate() = @2018-02",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime in resource",
+              "expression": "@2018-01 = date1.toDate()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime in resource",
+              "expression": "@2018-02-02 = date1.toDate()",
+              "result": []
+            },
+            {
+              "desc": "DateTime literal compared with a number",
+              "expression": "@2018 = int1",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with a string literal",
+              "expression": "@2018 = 'zzz'",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time",
+              "expression": "@T16:04:23 = @T18:04:24",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal (same time)",
+              "expression": "@T14:04:23 = @T14:04:23",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Same time, different precision",
+              "expression": "@T14:04:23 = @T14:04",
+              "result": []
+            },
+            {
+              "desc": "Different time and different precision",
+              "expression": "@T14:05:23 = @T14:04",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with same time in resource",
+              "expression": "@T12:34:45 = time1.toTime()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time in resource",
+              "expression": "@T12:34:46 = time1.toTime()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different precision time in resource",
+              "expression": "@T12 = time1.toTime()",
+              "result": []
+            },
+            {
+              "desc": "should take into account extensions for date values",
+              "model": "r4",
+              "expression": "(%factory.date('2024-01-01', %factory.Extension('someExt', 'someString')) =\n %factory.date('2024-01-01', %factory.Extension('someExt', 'someString'))) |\n(%factory.date('2024-01-01', %factory.Extension('someExt', 'someString1')) =\n %factory.date('2024-01-01', %factory.Extension('someExt', 'someString2')))",
+              "result": [
+                true,
+                false
+              ]
+            }
+          ]
+        },
+        {
+          "desc": "** should not ignore null properties in arrays",
+          "inputfile": "patient-bundle.json",
+          "model": "r4",
+          "expression": "Bundle.entry[1] != Bundle.entry[2]",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** should take into account extension for primitives",
+          "inputfile": "patient-bundle.json",
+          "model": "r4",
+          "expression": "Bundle.entry[1].resource.name.given[0] = Bundle.entry[2].resource.name.given[0]",
+          "result": [
+            false
+          ]
+        }
+      ]
+    },
+    {
+      "group: 6.1.2. ~ (Equivalent)": [
+        {
+          "desc": "* collections for equivalence { } ~ { } will result in true.",
+          "expression": "Ops.unexists ~ Ops.unexists",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "* string: the strings must be the same while ignoring case and normalizing whitespace.",
+          "expression": "'ab\tc\t\nd' ~ 'Ab C\n D'",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** should normalize Unicode whitespace characters during equivalence",
+          "expression": "'ab c' ~ 'Ab C'",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** should not collapse repeated whitespace",
+          "expression": "'a   b' ~ 'a b'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not trim leading spaces during equivalence",
+          "expression": "'  ab c' ~ 'ab c'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not trim trailing spaces during equivalence",
+          "expression": "'ab c  ' ~ 'ab c'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not trim leading tab during equivalence",
+          "expression": "'\tab c' ~ 'ab c'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not trim trailing tab during equivalence",
+          "expression": "'ab c\t' ~ 'ab c'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not trim leading newline during equivalence",
+          "expression": "'\nab c' ~ 'ab c'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not trim trailing newline during equivalence",
+          "expression": "'ab c\n' ~ 'ab c'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should still fail after whitespace normalization when text differs",
+          "expression": "'ab\tc\t\nd' ~ 'Ab C\n X'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "decimal: values must be equal, comparison is done on values rounded\nto the precision of the least precise operand.\nTrailing zeroes are ignored in  determining precision.\n",
+          "expression": "1.001 ~ 01.0012",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** equivalence of integer and long",
+          "expression": "2 ~ 2L",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** non-equivalence of integer and long",
+          "expression": "1 ~ 2L",
+          "result": [
+            false
+          ]
+        },
+        {
+          "group: trailing zeros after decimal": [
+            {
+              "expression": "1.100 ~ 1.1",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1.100 ~ 1.101",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1.1 ~ 1.0",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1.1 ~ 1.00",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1.10 ~ 1.00",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "11 ~ 10",
+              "result": [
+                false
+              ]
+            },
+            {
+              "expression": "12 ~ 11",
+              "result": [
+                false
+              ]
+            }
+          ]
+        },
+        {
+          "expression": "1.1 ~ 1.2",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            false
+          ]
+        },
+        {
+          "expression": "0.00000011 ~ 0.00000012",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            false
+          ]
+        },
+        {
+          "expression": "0.00000011 ~ 0.00000010",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            true
+          ]
+        },
+        {
+          "expression": "0 ~ 0.00000010",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            true
+          ]
+        },
+        {
+          "expression": "1 ~ 0.00000010",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            false
+          ]
+        },
+        {
+          "expression": "0.010 ~ 0.00000010",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            false
+          ]
+        },
+        {
+          "group: Quantity Equivalence": [
+            {
+              "expression": "1 year ~ 1 'a'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "12 months ~ 1 'a'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "1 month ~ 1 'mo'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "30 days ~ 1 'mo'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "23 'Cel' ~ 73.4 '[degF]'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "73.4 '[degF]' ~ 23 'Cel'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "0 'Cel' ~ 273.15 'K'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "23 'Cel' !~ 74 '[degF]'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4 'g' !~ 4040 'mg'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4040 'mg' !~ 4 'g'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "3.04 'g' ~ 3040 'mg'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4040 'mg' ~ 4.0403 'g'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4040 'mg' !~ 4.0409 'g'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4040 'mg' !~ 4.041 'g'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4040.01 'g' ~ 4040.009 'g'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            },
+            {
+              "expression": "4040.01 'g' !~ 4040.1 'g'",
+              "preciseMath": [
+                false,
+                true
+              ],
+              "result": [
+                true
+              ]
+            }
+          ]
+        },
+        {
+          "group: Dates & Times": [
+            {
+              "desc": "DateTime literal compared with DateTime",
+              "expression": "@2018 ~ @2018",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime",
+              "expression": "@2018 ~ @2017",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime",
+              "expression": "@2018 ~ @2018-02",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same DateTime in resource",
+              "expression": "@2018-02 ~ date1.toDate()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime in resource",
+              "expression": "@2018-01 ~ date1.toDate()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime in resource",
+              "expression": "@2018-02-02 ~ date1.toDate()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with same time",
+              "expression": "@T18:04:23 ~ @T18:04:23",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time",
+              "expression": "@T18:04:23 ~ @T18:04:24",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with same time in resource",
+              "expression": "@T12:34:45 ~ time1.toTime()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time in resource",
+              "expression": "@T12:35:46 ~ time1.toTime()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different precision time in resource",
+              "expression": "@T12:34:46.123 ~ time1.toTime()",
+              "result": [
+                false
+              ]
+            }
+          ]
+        },
+        {
+          "desc": "* For complex types, equivalence requires all child properties to be equivalent, recursively.",
+          "expression": "Ops.complex ~ Ops.complexsimilar",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "* For complex types, equivalence requires all child properties to be equivalent, recursively.",
+          "expression": "Ops.complex ~ Ops.complexother",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** equivalence for null values",
+          "inputfile": "patient-example-2.json",
+          "model": "r4",
+          "expression": "Patient.name.given[0] ~ Patient.name.given[3]",
+          "result": [
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "group: 6.1.3. != (Not Equals)": [
+        {
+          "desc": "* string: comparison is based on Unicode values"
+        },
+        {
+          "desc": "** strings equals",
+          "expression": "'abc' != 'abc'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** strings equals",
+          "expression": "Ops.str1 != Ops.str1",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** strings not equals",
+          "expression": "'abc' != 'abcd'",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** strings not equals",
+          "expression": "Ops.str1 != Ops.str2",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** utf8 strings",
+          "expression": "'ɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ ə ɚ ɛ ɜ ɝ ɞ ɟ ɠ' != 'ɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ ə ɚ ɛ ɜ ɝ ɞ ɟ ɠ'",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** utf8 strings",
+          "expression": "'ɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ ə ɚ ɛ ɜ ɝ ɞ ɟ ɠ' != 'ə ɚ ɛ ɜ ɝ ɞ ɟ ɠɐ ɑ ɒ ɓ ɔ ɕ ɖ ɗ ɘ '",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "* integer: values must be exactly equal"
+        },
+        {
+          "desc": "** equal",
+          "expression": "1 != 1",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** equal",
+          "expression": "Ops.int1 != Ops.int1",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** not equal",
+          "expression": "1 != 2",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** not equal",
+          "expression": "Ops.int1 != Ops.int2",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** equal, different types, but same values",
+          "expression": "2 != 2L",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** equal, different types, but same values (opposite order of operands)",
+          "expression": "2L != 2",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** equal, long integers",
+          "expression": "2L != 2L",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** not equal, long integers",
+          "expression": "1L != 2L",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "* decimal: values must be equal, trailing zeroes are ignored"
+        },
+        {
+          "desc": "** decimals equal",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "1.01 != 1.01",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** decimals equal, trailing zeroes are ignored",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "0.01 != 00.01",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "decimal not equal",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "expression": "1.01 != 1.02",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "* boolean: values must be the same"
+        },
+        {
+          "desc": "** equal",
+          "expression": "true != true",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** not equal",
+          "expression": "true != false",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "** propagate empty coll",
+          "expression": "true != Ops.unexists",
+          "result": []
+        },
+        {
+          "desc": "** inequality for null values",
+          "inputfile": "patient-example-2.json",
+          "model": "r4",
+          "expression": "Patient.name.given[0] != Patient.name.given[3]",
+          "result": [
+            true
+          ]
+        },
+        {
+          "group: Dates & Times": [
+            {
+              "desc": "DateTime literal compared with DateTime",
+              "expression": "@2018 != @2018",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime",
+              "expression": "@2018 != @2017",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (1)",
+              "expression": "@2018 != @2018-02",
+              "result": []
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (2)",
+              "expression": "@2018 != @2018-01",
+              "result": []
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (3)",
+              "expression": "@2018-02-03 != @2018-01",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same DateTime in resource",
+              "expression": "@2018-02 != date1.toDate()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime in resource",
+              "expression": "@2018-01 != date1.toDate()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime in resource",
+              "expression": "@2018-02-02 != date1.toDate()",
+              "result": []
+            },
+            {
+              "desc": "Time literal compared with same time",
+              "expression": "@T18:04:23 != @T18:04:23",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time",
+              "expression": "@T18:04:23 != @T18:04:24",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with same time in resource",
+              "expression": "@T12:34:45 != time1.toTime()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time in resource",
+              "expression": "@T12:35:46 != time1.toTime()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with different precision time in resource (1)",
+              "expression": "@T12:34 != time1.toTime()",
+              "result": []
+            },
+            {
+              "desc": "Time literal compared with different precision time in resource (2)",
+              "expression": "@T12:35 != time1.toTime()",
+              "result": [
+                true
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "group: 6.1.4. !~ (Not Equivalent)": [
+        {
+          "desc": "** equivalence of integer and long",
+          "expression": "2 !~ 2L",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** non-equivalence of integer and long",
+          "expression": "1 !~ 2L",
+          "result": [
+            true
+          ]
+        },
+        {
+          "group: Dates & Times": [
+            {
+              "desc": "DateTime literal compared with DateTime",
+              "expression": "@2018 !~ @2018",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime",
+              "expression": "@2018 !~ @2017",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (1)",
+              "expression": "@2018 !~ @2018-02",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime (2)",
+              "expression": "@2019 !~ @2018-02",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with same DateTime in resource",
+              "expression": "@2018-02 !~ date1.toDate()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different DateTime in resource",
+              "expression": "@2018-01 !~ date1.toDate()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "DateTime literal compared with different precision DateTime in resource",
+              "expression": "@2018-02-02 !~ date1.toDate()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with same time",
+              "expression": "@T18:04:23 !~ @T18:04:23",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time",
+              "expression": "@T18:04:23 !~ @T18:04:24",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with same time in resource",
+              "expression": "@T12:34:45 !~ time1.toTime()",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "Time literal compared with different time in resource",
+              "expression": "@T12:35:46 !~ time1.toTime()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with different precision time in resource (1)",
+              "expression": "@T12:34 !~ time1.toTime()",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "Time literal compared with different precision time in resource (2)",
+              "expression": "@T12:35 !~ time1.toTime()",
+              "result": [
+                true
+              ]
+            }
+          ]
+        },
+        {
+          "desc": "* collections for equivalence { } !~ { } will result in true.",
+          "expression": "Ops.unexists !~ Ops.unexists",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** non-equivalence for null values",
+          "inputfile": "patient-example-2.json",
+          "model": "r4",
+          "expression": "Patient.name.given[0] !~ Patient.name.given[3]",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "** should not take into account extension for primitives",
+          "inputfile": "patient-bundle.json",
+          "model": "r4",
+          "expression": "Bundle.entry[1].resource.name.given[0] ~ Bundle.entry[2].resource.name.given[0]",
+          "result": [
+            true
+          ]
+        },
+        {
+          "group: strings": [
+            {
+              "desc": "* should be the same while ignoring case and normalizing whitespace.",
+              "expression": "'ab\tc\t\nd' !~ 'Ab C\n D'",
+              "result": [
+                false
+              ]
+            },
+            {
+              "desc": "** should invert repeated-space non-equivalence explicitly",
+              "expression": "'a   b' !~ 'a b'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should still succeed after whitespace normalization when text differs",
+              "expression": "'ab\tc\t\nd' !~ 'Ab C\n X'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should not trim leading spaces during not-equivalence",
+              "expression": "'  ab c' !~ 'ab c'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should not trim trailing spaces during not-equivalence",
+              "expression": "'ab c  ' !~ 'ab c'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should not trim leading tab during not-equivalence",
+              "expression": "'\tab c' !~ 'ab c'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should not trim trailing tab during not-equivalence",
+              "expression": "'ab c\t' !~ 'ab c'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should not trim leading newline during not-equivalence",
+              "expression": "'\nab c' !~ 'ab c'",
+              "result": [
+                true
+              ]
+            },
+            {
+              "desc": "** should not trim trailing newline during not-equivalence",
+              "expression": "'ab c\n' !~ 'ab c'",
+              "result": [
+                true
+              ]
+            }
+          ]
+        },
+        {
+          "desc": "decimal: values must be equal, comparison is done on values rounded\nto the precision of the least precise operand.\nTrailing zeroes are ignored in  determining precision.\n",
+          "expression": "1.001 !~ 01.0012",
+          "preciseMath": [
+            false,
+            true
+          ],
+          "result": [
+            false
+          ]
+        }
+      ]
+    }
+  ],
+  "subject": {
+    "resourceType": "Ops",
+    "date1": "2018-02",
+    "time1": "12:34:45",
+    "str1": "string1",
+    "str2": "string2",
+    "int1": 1,
+    "int2": 2,
+    "coll": [
+      {
+        "a": 1
+      },
+      {
+        "a": 2
+      },
+      {
+        "a": 3
+      }
+    ],
+    "collsame": [
+      {
+        "a": 1
+      },
+      {
+        "a": 2
+      },
+      {
+        "a": 3
+      }
+    ],
+    "collother": [
+      {
+        "a": 1
+      },
+      {
+        "a": 2
+      },
+      {
+        "a": 3
+      },
+      {
+        "a": 4
+      }
+    ],
+    "complex": {
+      "a": 1,
+      "b": {
+        "c": "str"
+      },
+      "d": [
+        {
+          "e": 1
+        }
+      ]
+    },
+    "complexsame": {
+      "a": 1,
+      "b": {
+        "c": "str"
+      },
+      "d": [
+        {
+          "e": 1
+        }
+      ]
+    },
+    "complexsimilar": {
+      "a": 1,
+      "b": {
+        "c": "Str"
+      },
+      "d": [
+        {
+          "e": 1.1
+        }
+      ]
+    },
+    "complexother": {
+      "a": 1,
+      "b": {
+        "c": "str"
+      },
+      "d": [
+        {
+          "e": 2
+        }
+      ]
+    }
+  }
+}

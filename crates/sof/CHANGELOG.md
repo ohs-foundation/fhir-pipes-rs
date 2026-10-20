@@ -93,6 +93,16 @@ changes.
 
 ### Fixed
 
+- **Four FHIRPath cases found by fhirpath.js's tests**, which now run in the
+  crate's tests next to the HL7 suite (2,068 of 2,681 pass; each failure is
+  listed with its cause):
+  - `%factory` was rejected as an undefined constant.
+  - A `%name` bound by a `defineVariable()` whose name is computed
+    (`defineVariable(%param, …)`) was rejected as an undefined constant.
+  - A time the engine made (`@T14:30`, `toTime()`, time arithmetic) was
+    written `T14:30`; it is now `14:30`, as FHIR writes a time.
+  - `is BackboneElement` and `is Element` were false for a backbone element
+    (`Patient.contact`).
 - **In-memory FHIRPath cases the view engine got wrong** (found by probes
   outside the official suite):
   - Constant substitution tokenizes the path, so a `%` inside a string

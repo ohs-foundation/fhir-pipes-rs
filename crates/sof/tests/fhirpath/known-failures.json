@@ -1,33 +1,158 @@
 {
-  "LowBoundary/LowBoundaryDecimal7": "expected [\" 0.50000000\"], got [0.95]",
-  "isSemanticChecks/isEffectOnLogic3Base": "expected a semantic error, got [false]",
-  "isSemanticChecks/isGuardAndBad": "expected a semantic error, got [false]",
-  "isSemanticChecks/isGuardAs": "expected [\"boolean true\"], got []",
-  "isSemanticChecks/isGuardFnImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardIifBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardNotImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOrBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOrFnTypesImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOrInnerImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOrOtherImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOrOtherImpliesNoParensBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOrTypesImpliesBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardOtherExpressionBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardSupertypeBad": "expected a semantic error, got [true]",
-  "isSemanticChecks/isGuardXorBad": "expected a semantic error, got [false]",
-  "polymorphics/testPolymorphicsB": "expected a semantic error, got [true]",
-  "testBasics/testSimpleFail": "expected a semantic error, got []",
-  "testBasics/testSimpleWithWrongContext": "expected a semantic error, got []",
-  "testCollectionBoolean/testCollectionBoolean1": "expected a semantic error, got [true]",
-  "testConformsTo/testConformsTo1": "expected [\"boolean true\"], got []",
-  "testConformsTo/testConformsTo2": "expected [\"boolean false\"], got []",
-  "testConformsTo/testConformsTo3": "expected a execution error, got []",
-  "testDollar/testDollarOrderNotAllowed": "expected a semantic error, got [{\"city\":\"PleasantVille\",\"district\":\"Rainbow\",\"line\":[\"534 Erewhon St\"],\"period\":{\"start\":\"1974-12-25\"},\"postalCode\":\"3999\",\"state\":\"Vic\",\"text\":\"534 Erewhon St PeasantV",
-  "testInheritance/testFHIRPathAsFunction21": "expected a execution error, got [\"official\",\"usual\",\"maiden\"]",
-  "testObservations/testPolymorphismAsB": "expected a semantic error, got []",
-  "testObservations/testPolymorphismB": "expected a semantic error, got [\"lbs\"]",
-  "testPlus/testPlus6": "expected a semantic error, got []",
-  "testPlus/testPlusDate19": "expected [\"dateTime @1973-12-25T00:00:00.000+10:00\"], got [\"1973-12-25T00:00:00.100+10:00\"]",
-  "testQuantity/testQuantity11": "expected [\"boolean true\"], got [false]"
+  "LowBoundary/LowBoundaryDecimal7": {
+    "cause": "fhir-pipes",
+    "issue": "octofhir/fhirpath-rs#182",
+    "note": "The decimal reaches fhir-pipes' lowBoundary() as 1.0, one digit more precise than written. octofhir/fhirpath-rs#182 keeps the digits.",
+    "got": "expected [\" 0.50000000\"], got [0.95]"
+  },
+  "isSemanticChecks/isEffectOnLogic3Base": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [false]"
+  },
+  "isSemanticChecks/isGuardAndBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [false]"
+  },
+  "isSemanticChecks/isGuardAs": {
+    "cause": "engine",
+    "note": "`$this as dateTime` gives nothing for a dateTime.",
+    "got": "expected [\"boolean true\"], got []"
+  },
+  "isSemanticChecks/isGuardFnImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardIifBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardNotImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOrBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOrFnTypesImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOrInnerImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOrOtherImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOrOtherImpliesNoParensBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOrTypesImpliesBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardOtherExpressionBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardSupertypeBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "isSemanticChecks/isGuardXorBad": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [false]"
+  },
+  "polymorphics/testPolymorphicsB": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "testBasics/testSimpleFail": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got []"
+  },
+  "testBasics/testSimpleWithWrongContext": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got []"
+  },
+  "testCollectionBoolean/testCollectionBoolean1": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [true]"
+  },
+  "testConformsTo/testConformsTo1": {
+    "cause": "not-supported",
+    "note": "conformsTo() needs profiles and a validator.",
+    "got": "expected [\"boolean true\"], got []"
+  },
+  "testConformsTo/testConformsTo2": {
+    "cause": "not-supported",
+    "note": "conformsTo() needs profiles and a validator.",
+    "got": "expected [\"boolean false\"], got []"
+  },
+  "testConformsTo/testConformsTo3": {
+    "cause": "not-supported",
+    "note": "conformsTo() needs profiles and a validator.",
+    "got": "expected a execution error, got []"
+  },
+  "testDollar/testDollarOrderNotAllowed": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [{\"status\":\"generated\",\"div\":\"<div xmlns=\\\"http://www.w3.org/1999/xhtml\\\">\\n\\t\\t\\t<table>\\n\\t\\t\\t\\t<tbody>\\n\\t\\t\\t\\t\\t<tr>\\n\\t\\t\\t\\t\\t\\t<td>Name</td>\\n\\t\\t\\t\\t\\t\\t<td>Pe"
+  },
+  "testInheritance/testFHIRPathAsFunction21": {
+    "cause": "engine",
+    "note": "as() on more than one item should be an error. octofhir allows it on purpose, for FHIR's own invariants.",
+    "got": "expected a execution error, got [\"official\",\"usual\",\"maiden\"]"
+  },
+  "testObservations/testPolymorphismAsB": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got []"
+  },
+  "testObservations/testPolymorphismB": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got [\"lbs\"]"
+  },
+  "testPlus/testPlus6": {
+    "cause": "type-checker",
+    "note": "The spec wants this reported before evaluation, from the types. octofhir evaluates it.",
+    "got": "expected a semantic error, got []"
+  },
+  "testPlus/testPlusDate19": {
+    "cause": "engine",
+    "note": "Adding 0.1 s to a dateTime with milliseconds: the suite expects the value unchanged. Other engines fail this too.",
+    "got": "expected [\"dateTime @1973-12-25T00:00:00.000+10:00\"], got [\"1973-12-25T00:00:00.100+10:00\"]"
+  },
+  "testQuantity/testQuantity11": {
+    "cause": "engine",
+    "note": "UCUM: 1.0 'm' / 1.0 'm' should equal 1 '1'.",
+    "got": "expected [\"boolean true\"], got [false]"
+  }
 }

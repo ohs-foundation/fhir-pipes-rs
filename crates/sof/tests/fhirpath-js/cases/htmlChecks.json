@@ -1,0 +1,187 @@
+{
+  "subject": {
+    "resourceType": "Patient",
+    "id": "html-checks-subject"
+  },
+  "tests": [
+    {
+      "group: htmlChecks() on xhtml elements": [
+        {
+          "desc": "valid narrative from the R4 patient example",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.text.`div`.htmlChecks()",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "generated narrative of the R4 observation example, whose anchors have neither name nor href",
+          "inputfile": "observation-example.json",
+          "model": "r4",
+          "expression": "Observation.text.`div`.htmlChecks()",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "narrative with formatting elements only",
+          "inputfile": "narrative-examples.json",
+          "model": "r4",
+          "expression": "Bundle.entry.resource.where(id='valid').text.`div`.htmlChecks()",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "the div must have some non-whitespace content",
+          "inputfile": "narrative-examples.json",
+          "model": "r4",
+          "expression": "Bundle.entry.resource.where(id='no-content').text.`div`.htmlChecks()",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "scripts are not allowed",
+          "inputfile": "narrative-examples.json",
+          "model": "r4",
+          "expression": "Bundle.entry.resource.where(id='script').text.`div`.htmlChecks()",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "the root element of an xhtml value must be a div; the narrative is valid as div content, so this also pins the overload selection",
+          "inputfile": "narrative-examples.json",
+          "model": "r4",
+          "expression": "Bundle.entry.resource.where(id='not-a-div').text.`div`.htmlChecks()",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "an unclosed void element is not valid XHTML",
+          "inputfile": "narrative-examples.json",
+          "model": "r4",
+          "expression": "Bundle.entry.resource.where(id='unclosed-br').text.`div`.htmlChecks()",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "a declared namespace other than XHTML is not narrative content: the narrative is XHTML contained in general XML",
+          "inputfile": "narrative-examples.json",
+          "model": "r4",
+          "expression": "Bundle.entry.resource.where(id='bad-namespace').text.`div`.htmlChecks()",
+          "result": [
+            false
+          ]
+        }
+      ]
+    },
+    {
+      "group: htmlChecks() on strings": [
+        {
+          "desc": "string literal with valid markup",
+          "expression": "'<p>hello</p>'.htmlChecks()",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "an empty string has no content",
+          "expression": "''.htmlChecks()",
+          "result": [
+            false
+          ]
+        },
+        {
+          "desc": "a FHIR string element",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.name.given[0].htmlChecks()",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "a FHIR code element, which is derived from string",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.text.status.htmlChecks()",
+          "result": [
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "group: htmlchecks() alias used by the STU3 invariants": [
+        {
+          "desc": "the STU3 txt-1/txt-2 invariant expression",
+          "inputfile": "patient-example.json",
+          "model": "stu3",
+          "expression": "Patient.text.`div`.htmlchecks()",
+          "result": [
+            true
+          ]
+        },
+        {
+          "desc": "the alias behaves identically on strings",
+          "expression": "'<p>hello</p>'.htmlchecks()",
+          "result": [
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "group: htmlChecks() on other kinds of elements": [
+        {
+          "desc": "an empty collection",
+          "expression": "{}.htmlChecks()",
+          "result": []
+        },
+        {
+          "desc": "a collection of more than one item",
+          "expression": "('<p>a</p>' | '<p>b</p>').htmlChecks()",
+          "result": []
+        },
+        {
+          "desc": "an integer",
+          "expression": "(1).htmlChecks()",
+          "result": []
+        },
+        {
+          "desc": "a complex type",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.name[0].htmlChecks()",
+          "result": []
+        },
+        {
+          "desc": "a date is not a string",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.birthDate.htmlChecks()",
+          "result": []
+        },
+        {
+          "desc": "a uri is not derived from string",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.identifier.system.htmlChecks()",
+          "result": []
+        },
+        {
+          "desc": "a Narrative is not an xhtml element",
+          "inputfile": "patient-example.json",
+          "model": "r4",
+          "expression": "Patient.text.htmlChecks()",
+          "result": []
+        }
+      ]
+    }
+  ]
+}

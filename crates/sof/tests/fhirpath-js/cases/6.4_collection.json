@@ -1,0 +1,85 @@
+{
+  "tests": [
+    {
+      "desc": "6.4. Collections"
+    },
+    {
+      "desc": "6.4.1. | (union collections)"
+    },
+    {
+      "desc": "see 5.4.1 tests"
+    },
+    {
+      "desc": "6.4.2. in (membership)"
+    },
+    {
+      "desc": "** item in coll",
+      "expression": "b in c",
+      "disable": true,
+      "result": [
+        true
+      ]
+    },
+    {
+      "desc": "** item not in coll",
+      "expression": "a in c",
+      "disable": true,
+      "result": [
+        false
+      ]
+    },
+    {
+      "desc": "** in empty coll",
+      "expression": "d in c",
+      "disable": true,
+      "result": []
+    },
+    {
+      "desc": "** in empty coll 2",
+      "disable": true,
+      "expression": "a in d",
+      "result": [
+        false
+      ]
+    },
+    {
+      "desc": "** in operand is coll",
+      "expression": "c in d",
+      "disable": true,
+      "error": true
+    },
+    {
+      "desc": "in operator for the null element of a collection",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "Patient.name.given[3] in Patient.name.given",
+      "result": [
+        true
+      ]
+    },
+    {
+      "desc": "6.4.3. contains (containership)"
+    },
+    {
+      "desc": "contains operator for the null element of a collection",
+      "inputfile": "patient-example-2.json",
+      "model": "r4",
+      "expression": "Patient.name.given contains Patient.name.given[3]",
+      "result": [
+        true
+      ]
+    }
+  ],
+  "subject": [
+    {
+      "a": 1,
+      "b": 2,
+      "c": [
+        2,
+        3,
+        4
+      ],
+      "d": []
+    }
+  ]
+}

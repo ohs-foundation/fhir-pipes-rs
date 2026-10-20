@@ -491,7 +491,10 @@ impl Evaluator {
     fn prepare(&self, path: &str, root: Option<&str>) -> Result<String> {
         let defined = defined_variables(path);
         let substituted = substitute_constants_keeping(path, &self.constants, |name| {
-            is_environment_variable(name) || defined.iter().any(|d| d == name)
+            is_environment_variable(name)
+                || defined
+                    .as_ref()
+                    .is_none_or(|defined| defined.iter().any(|d| d == name))
         })?;
         let prepared = rewrite_of_type(&substituted, root);
         Ok(match rename_context(&prepared) {
@@ -1035,6 +1038,12 @@ fn value_to_json(v: &FhirPathValue) -> Value {
         FhirPathValue::Decimal(d, ..) => {
             serde_json::from_str(&d.to_string()).unwrap_or_else(|_| v.to_json_value())
         }
+        // A time the engine made (`@T14:30`, `toTime()`) is written in its
+        // FHIRPath form, `T14:30`; FHIR's has no `T`.
+        FhirPathValue::Time(t, ..) => {
+            let text = t.to_string();
+            Value::String(text.strip_prefix('T').unwrap_or(&text).to_string())
+        }
         other => other.to_json_value(),
     }
 }
@@ -1065,20 +1074,23 @@ fn rename_context(path: &str) -> Option<String> {
 }
 
 /// FHIRPath environment variables the engine resolves itself, which constant
-/// substitution leaves in place.
+/// substitution leaves in place. `%factory` is FHIR's type factory.
 fn is_environment_variable(name: &str) -> bool {
     matches!(
         name,
-        "resource" | "rootResource" | "context" | "ucum" | "sct" | "loinc"
+        "resource" | "rootResource" | "context" | "ucum" | "sct" | "loinc" | "factory"
     ) || name.starts_with("vs-")
         || name.starts_with("ext-")
 }
 
 /// The names a path binds with `defineVariable('name', ...)`, so that its
 /// `%name` references are not taken for undefined constants. Empty if the
-/// path does not parse; compiling it then reports the error.
-fn defined_variables(path: &str) -> Vec<String> {
+/// path does not parse; compiling it then reports the error. `None` if a
+/// name is computed (`defineVariable(%param, ...)`), when any `%name` may be
+/// bound.
+fn defined_variables(path: &str) -> Option<Vec<String>> {
     let mut names = Vec::new();
+    let mut computed = false;
     if let Ok(ast) = octofhir_fhirpath::parse_ast(path) {
         visit(&ast, &mut |node| {
             let (name, args) = match node {
@@ -1086,15 +1098,20 @@ fn defined_variables(path: &str) -> Vec<String> {
                 ExpressionNode::FunctionCall(f) => (&f.name, &f.arguments),
                 _ => return,
             };
-            if name == "defineVariable"
-                && let Some(ExpressionNode::Literal(l)) = args.first()
-                && let octofhir_fhirpath::LiteralValue::String(s) = &l.value
-            {
-                names.push(s.clone());
+            if name != "defineVariable" {
+                return;
+            }
+            match args.first() {
+                Some(ExpressionNode::Literal(l)) => {
+                    if let octofhir_fhirpath::LiteralValue::String(s) = &l.value {
+                        names.push(s.clone());
+                    }
+                }
+                _ => computed = true,
             }
         });
     }
-    names
+    (!computed).then_some(names)
 }
 
 /// Whether the FHIRPath `path` calls a function named in `names`, as a

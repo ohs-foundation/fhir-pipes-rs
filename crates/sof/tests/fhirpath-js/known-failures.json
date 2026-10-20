@@ -1,0 +1,3068 @@
+{
+  "3_path_selection/CustomField = 'test'": {
+    "cause": "engine",
+    "note": "An element the FHIR model does not have is not navigated.",
+    "got": "expected [true], got []"
+  },
+  "3_path_selection/Observation.CustomField = 'test'": {
+    "cause": "engine",
+    "note": "An element the FHIR model does not have is not navigated.",
+    "got": "expected [true], got []"
+  },
+  "3_path_selection/Observation.descendants().value": {
+    "cause": "suite",
+    "note": "The spec leaves the order of children() and descendants() undefined.",
+    "got": "expected [\"medium\",\"low\",\"zero\",\"Red\",\"Blue\",\"Green\"], got [\"medium\",\"low\",\"zero\",\"Red\",\"Green\",\"Blue\"]"
+  },
+  "3_path_selection/Observation.value#5": {
+    "cause": "suite",
+    "note": "The test runs fhirpath.js without a FHIR model; fhir-pipes always has one.",
+    "got": "expected [], got [\"high\"]"
+  },
+  "3_path_selection/Resource.id": {
+    "cause": "engine",
+    "note": "A leading `Resource` should match any resource.",
+    "got": "expected [\"example\"], got []"
+  },
+  "4.1_literals/'\\u12'": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: found ''' expected '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', or 'F'"
+  },
+  "4.1_literals/'\\u123'": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: found ''' expected '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', or 'F'"
+  },
+  "4.1_literals/'\\u12G4'": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: found 'G' expected '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', or 'F'"
+  },
+  "4.1_literals/'\\uD83E\\uDDB6\\uD83D\\uDCA9'": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: Invalid unicode escape: \\uD83E"
+  },
+  "4.1_literals/'\\uZZZZ'": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: found 'Z' expected '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'A', 'B', 'C', 'D', 'E', or 'F'"
+  },
+  "4.1_literals/-((7).combine(3))": {
+    "cause": "engine",
+    "note": "Unary minus should apply after the function call, giving an error on two items.",
+    "got": "expected an error, got [-7,-3]"
+  },
+  "4.1_literals/-7.combine(3)": {
+    "cause": "engine",
+    "note": "Unary minus should apply after the function call, giving an error on two items.",
+    "got": "expected an error, got [-7,-3]"
+  },
+  "4.1_literals/@2024-01-31T23:59:59+14:01": {
+    "cause": "engine",
+    "note": "Accepts a time zone offset outside -12:00 to +14:00.",
+    "got": "expected an error, got [\"2024-01-31T23:59:59+14:01\"]"
+  },
+  "4.1_literals/`a\\\\b\\'\\\"\\`\\r\\n\\t\\u0065`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: found '\\' expected '(', '[', '.', '*', '/', 'd', 'm', '+', '-', '&', 'i', 'a', '|', '<', '>', '=', '!', '~', 'c', 'x', 'o', or end of input"
+  },
+  "4.1_literals/`bad\\u123`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "expected [\"malformed-u123\"], got []"
+  },
+  "4.1_literals/`bad\\u12G4`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "expected [\"malformed-u12G4\"], got []"
+  },
+  "4.1_literals/`bad\\u12`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "expected [\"malformed-u12\"], got []"
+  },
+  "4.1_literals/`bad\\uZZZZ`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "expected [\"malformed-uZZZZ\"], got []"
+  },
+  "4.1_literals/`id\\u00E9`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "expected [\"decoded-id\"], got []"
+  },
+  "4.1_literals/`id\\u00e9`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "expected [\"decoded-id\"], got []"
+  },
+  "5.1_existence/(1 year).combine(12 months).distinct()": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"1 year\"], got [{\"value\":1,\"unit\":\"year\",\"code\":\"year\"},{\"value\":12,\"unit\":\"months\",\"code\":\"months\"}]"
+  },
+  "5.1_existence/Functions.attrempty.all($this > 0)": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.attrempty.allTrue()": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.attrempty.anyTrue()": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [false], got []"
+  },
+  "5.1_existence/Functions.attrempty.isDistinct()": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.attrempty.subsetOf(Functions.attrdouble)": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.attrempty.supersetOf(Functions.attrdouble)": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [false], got []"
+  },
+  "5.1_existence/Functions.attrempty.supersetOf(Functions.attrdouble)#2": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [false], got []"
+  },
+  "5.1_existence/Functions.collWith2NullAndTrue.supersetOf(Functions.collWithNullAndTrue)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "5.1_existence/Functions.collWithNullAndTrue.anyFalse()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected an error, got [false]"
+  },
+  "5.1_existence/Functions.collWithNullAndTrue.anyTrue()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected an error, got [true]"
+  },
+  "5.1_existence/Functions.collWithNullAndTrue.subsetOf(Functions.collWith2NullAndTrue)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "5.1_existence/Functions.nothing.all($this > 0)": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.nothing.allTrue()": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.nothing.anyTrue()": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [false], got []"
+  },
+  "5.1_existence/Functions.nothing.isDistinct()": {
+    "cause": "engine",
+    "note": "On an empty input this gives empty instead of true or false.",
+    "got": "expected [true], got []"
+  },
+  "5.1_existence/Functions.objects.distinct()": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [{\"prop1\":1,\"prop2\":2},{\"prop1\":3,\"prop2\":4},{\"prop1\":5,\"prop2\":6}], got [{\"prop1\":1,\"prop2\":2},{\"prop1\":3,\"prop2\":4},{\"prop2\":2,\"prop1\":1},{\"prop1\":5,\"prop2\":6}]"
+  },
+  "5.1_existence/Functions.subsetTestC1.subsetOf(Functions.subsetTestC2)": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [true], got [false]"
+  },
+  "5.1_existence/Patient.name.given.distinct().count()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [4], got [3]"
+  },
+  "5.1_existence/Patient.name.given[0].all(id = 'Jacomus1Id')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "5.2_filtering_and_projection/(1 year).combine(12 months).repeat($this)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"1 year\"], got []"
+  },
+  "5.2_filtering_and_projection/(3 'min').combine(180 seconds).repeat($this)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"3 'min'\"], got []"
+  },
+  "5.2_filtering_and_projection/Functions.coll1.repeat(nothing)": {
+    "cause": "engine",
+    "note": "repeat() of a missing element gives an error.",
+    "got": "FHIRPath error: FP0054: Unsupported operator"
+  },
+  "5.2_filtering_and_projection/Patient.name.given.repeat(id)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Jacomus1Id\",\"Jacomus2Id\"], got []"
+  },
+  "5.2_filtering_and_projection/Patient.name.given.select($this & $this.id)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Jacomus1Id\",\"Peter\",\"James\",\"Jacomus2Id\"], got [\"Peter\",\"James\"]"
+  },
+  "5.2_filtering_and_projection/Patient.name.given.where(id = 'Jacomus1Id').count()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [1], got [0]"
+  },
+  "5.2_filtering_and_projection/heteroattr.ofType(Boolean)": {
+    "cause": "engine",
+    "note": "ofType(Boolean), ofType(Integer) and so on over JSON values with no FHIR type.",
+    "got": "expected [true,false], got []"
+  },
+  "5.2_filtering_and_projection/heteroattr.ofType(Decimal)": {
+    "cause": "engine",
+    "note": "ofType(Boolean), ofType(Integer) and so on over JSON values with no FHIR type.",
+    "got": "expected [1.01], got []"
+  },
+  "5.2_filtering_and_projection/heteroattr.ofType(Integer)": {
+    "cause": "engine",
+    "note": "ofType(Boolean), ofType(Integer) and so on over JSON values with no FHIR type.",
+    "got": "expected [1], got []"
+  },
+  "5.2_filtering_and_projection/heteroattr.ofType(String)": {
+    "cause": "engine",
+    "note": "ofType(Boolean), ofType(Integer) and so on over JSON values with no FHIR type.",
+    "got": "expected [\"string\"], got []"
+  },
+  "5.3_subsetting/(1 year | 2 year | 3 year | 4 year | 5 year | 6 year).combine(12 months).intersect(12 months)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"1 year\"], got []"
+  },
+  "5.3_subsetting/(1 year).combine(12 months).intersect(12 months)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"1 year\"], got []"
+  },
+  "5.3_subsetting/(3 'min' | 4 'min' | 5 'min' | 6 'min' | 7 'min').combine(180 seconds).intersect(180 seconds)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"3 'min'\"], got []"
+  },
+  "5.3_subsetting/(3 'min').combine(180 seconds).intersect(180 seconds)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"3 'min'\"], got []"
+  },
+  "5.3_subsetting/(Functions.collWithNullsAndTrue[0] | Functions.collWithNullsAndTrue[1]).exclude(Functions.collWithNullsAndTrue[1]).id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"nullId\"], got []"
+  },
+  "5.3_subsetting/Functions.collWithNullsAndTrue.first().id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"nullId\"], got []"
+  },
+  "5.3_subsetting/Functions.collWithNullsAndTrue.last().id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"lastNullId\"], got []"
+  },
+  "5.3_subsetting/Functions.collWithNullsAndTrue.skip(2).id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"lastNullId\"], got []"
+  },
+  "5.3_subsetting/Functions.collWithNullsAndTrue.tail()[1].id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"lastNullId\"], got []"
+  },
+  "5.3_subsetting/Functions.collWithNullsAndTrue.take(1).id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"nullId\"], got []"
+  },
+  "5.3_subsetting/Functions.objects.group1.intersect(Functions.objects.group2)": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [{\"prop1\":1,\"prop2\":2}], got []"
+  },
+  "5.4_combining/(1 year | 12 months)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"1 year\"], got [{\"value\":1,\"unit\":\"year\",\"code\":\"year\"},{\"value\":12,\"unit\":\"months\",\"code\":\"months\"}]"
+  },
+  "5.4_combining/(Patient.name.given[0] | Patient.name.given[3]).count()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [2], got [1]"
+  },
+  "5.4_combining/(Patient.name.given[0]).combine(Patient.name.given[3]).count()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [2], got [1]"
+  },
+  "5.4_combining/Functions.objects.group1 | Functions.objects.group2": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [{\"prop1\":1,\"prop2\":2},{\"prop1\":3,\"prop2\":4},{\"prop1\":5,\"prop2\":6}], got [{\"prop1\":1,\"prop2\":2},{\"prop1\":3,\"prop2\":4},{\"prop2\":2,\"prop1\":1},{\"prop1\":5,\"prop2\":6}]"
+  },
+  "5.4_combining/Patient.name.given[0].union(Patient.name.given[3]).count()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [2], got [1]"
+  },
+  "5.5_conversion/'0 \\'Cel\\''.toQuantity('K') = 273.15 'K'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'cm\\''.toQuantity('g')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'cm\\''.toQuantity('mm').value = 10": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'mo\\''.toQuantity('days')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'mo\\''.toQuantity('month')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'wk\\''.toQuantity('d') = 7 days": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'wk\\''.toQuantity('d').toString() = '7 \\'d\\''": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'wk\\''.toQuantity('days')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 \\'wk\\''.toQuantity('nonexistent-unit')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'1 nothing'.toQuantity('something')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'12 months'.toQuantity('year') = 1 year": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'2015'.toDateTime()=@2015": {
+    "cause": "engine",
+    "note": "toDateTime() of a partial date does not equal the same partial dateTime.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/'2015-02'.toDateTime()=@2015-02": {
+    "cause": "engine",
+    "note": "toDateTime() of a partial date does not equal the same partial dateTime.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/'2015-02-04'.toDateTime()=@2015-02-04": {
+    "cause": "engine",
+    "note": "toDateTime() of a partial date does not equal the same partial dateTime.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/'23 \\'Cel\\''.toQuantity('[degF]') ~ 73.4 '[degF]'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'73.4 \\'[degF]\\''.toQuantity('Cel') ~ 23 'Cel'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/'T14:34:28'.toTime()=@T14:34:28": {
+    "cause": "engine",
+    "note": "toTime() of a time with a time zone.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/('0' | '1').toBoolean()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [false,true]"
+  },
+  "5.5_conversion/('14:34:28' | '15:34:28').toTime()": {
+    "cause": "engine",
+    "note": "toTime() of a time with a time zone.",
+    "got": "expected an error, got []"
+  },
+  "5.5_conversion/('2015-02-04' | '2015-02-05').toDate()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "5.5_conversion/('2015-02-04' | '2015-02-05').toDateTime()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "5.5_conversion/('5' | '6').toDecimal()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [5,6]"
+  },
+  "5.5_conversion/('5' | '6').toInteger()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [5,6]"
+  },
+  "5.5_conversion/('5' | '6').toLong()": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: toLong"
+  },
+  "5.5_conversion/(5 | 6).toString()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [\"5\",\"6\"]"
+  },
+  "5.5_conversion/1L.toQuantity() = 1 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [true]"
+  },
+  "5.5_conversion/5.toLong() = 5L": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: toLong"
+  },
+  "5.5_conversion/@2015-02-04.toDateTime()=@2015-02-04": {
+    "cause": "engine",
+    "note": "toDateTime() of a partial date does not equal the same partial dateTime.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/@2015-02.toDateTime()=@2015-02": {
+    "cause": "engine",
+    "note": "toDateTime() of a partial date does not equal the same partial dateTime.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/@2015.toDateTime()=@2015": {
+    "cause": "engine",
+    "note": "toDateTime() of a partial date does not equal the same partial dateTime.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/Functions.attrtrue.toLong() = 1L": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: toLong"
+  },
+  "5.5_conversion/Functions.collWithNullsAndTrue[0].toLong()": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: toLong"
+  },
+  "5.5_conversion/Functions.iif(collWithNullsAndTrue[1], collWithNullsAndTrue[0], collWithNullsAndTrue[2]).id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"nullId\"], got []"
+  },
+  "5.5_conversion/MedicationRequest.dispenseRequest.expectedSupplyDuration.toQuantity() = 3 days": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/Observation.value.toQuantity('kg') ~ 84 'kg'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "5.5_conversion/Patient.name.given[0].toString()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: Cannot convert empty to string"
+  },
+  "5.5_conversion/intstr.toLong() = 101L": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: toLong"
+  },
+  "5.5_conversion/time.toTime() != @T18:15": {
+    "cause": "engine",
+    "note": "toTime() of a time with a time zone.",
+    "got": "expected [true], got []"
+  },
+  "5.5_conversion/time.toTime() = @T18:15": {
+    "cause": "engine",
+    "note": "toTime() of a time with a time zone.",
+    "got": "expected [false], got []"
+  },
+  "5.5_conversion/time.toTime() = @T19:15": {
+    "cause": "engine",
+    "note": "toTime() of a time with a time zone.",
+    "got": "expected [true], got []"
+  },
+  "5.6_string_manipulation/'Hello World'.matches('hello', '')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matches function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'Hello World'.matches('hello', 'i')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matches function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'Test String'.matchesFull('test string', '')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matchesFull function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'Test String'.matchesFull('test string', 'i')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matchesFull function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'\\\\1<2\\\\'.unescape('json')": {
+    "cause": "engine",
+    "note": "unescape() of an unknown escape.",
+    "got": "FHIRPath error: FP0059: Invalid escape sequence: \\1"
+  },
+  "5.6_string_manipulation/'abc\ndef'.matchesFull('abc', 'm')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matchesFull function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'first line\nsecond line'.matches('^SECOND', 'im')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matches function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'first line\nsecond line'.matches('^second', '')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matches function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'first line\nsecond line'.matches('^second', 'm')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matches function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'first line\nsecond line'.matches('line.second', '')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matches function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/'first line\nsecond line'.matchesFull('first line.second line', '')": {
+    "cause": "not-supported",
+    "note": "The flags argument of matches() and matchesFull().",
+    "got": "FHIRPath error: FP0053: matchesFull function requires exactly one argument (pattern)"
+  },
+  "5.6_string_manipulation/('a'|'2023-05-28'.toDate()|'c').join(',')": {
+    "cause": "engine",
+    "note": "join() on an item that is not a string should be an error.",
+    "got": "expected an error, got [\"a,2023-05-28,c\"]"
+  },
+  "5.6_string_manipulation/Functions.str.attr.endsWith(EmptyString)": {
+    "cause": "engine",
+    "note": "An empty argument should give empty.",
+    "got": "FHIRPath error: FP0055: endsWith function requires a string argument"
+  },
+  "5.6_string_manipulation/Functions.str.attr.matchesFull(EmptyRegex)": {
+    "cause": "engine",
+    "note": "An empty argument should give empty.",
+    "got": "FHIRPath error: FP0056: matchesFull function pattern argument must evaluate to a single value"
+  },
+  "5.6_string_manipulation/Functions.str.attr.startsWith(EmptyString)": {
+    "cause": "engine",
+    "note": "An empty argument should give empty.",
+    "got": "FHIRPath error: FP0055: startsWith function requires a string argument"
+  },
+  "5.6_string_manipulation/Functions.str.attr.substring(5, EmptyLength)": {
+    "cause": "engine",
+    "note": "An empty argument should give empty.",
+    "got": "expected [\"string\"], got []"
+  },
+  "5.6_string_manipulation/Patient.name.given.join(',')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Peter,James\"], got [\",Peter,James\"]"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].contains('P')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: contains function can only be applied to strings, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].decode('base64')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: decode function can only be called on string values"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].encode('base64')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: encode function can only be called on string values"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].endsWith('P')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: endsWith function can only be applied to strings, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].indexOf('Peter')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [-1]"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].length()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1]"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].lower()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: lower function can only be applied to strings, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].matches('.*')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: matches function can only be called on string values"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].replace('a', 'b')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: replace function can only be applied to strings, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].replaceMatches('(.*)', '$1')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: replaceMatches function can only be applied to strings, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].split(',')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: split function can only be called on string values"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].startsWith('P')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: startsWith function can only be applied to strings, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].substring(0)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: substring function can only be called on strings"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].toChars()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: toChars function can only be applied to string values, got empty"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].trim()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: trim function can only be called on string values"
+  },
+  "5.6_string_manipulation/Patient.name.given[0].upper()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: upper function can only be applied to strings, got empty"
+  },
+  "5.7_math/(-1.56 's').truncate() = -1 's'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0055: truncate function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/1.1 'kg'.ceiling() = 2 'kg'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0055: ceiling function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/2.315 's'.round(2) = 2.32 's'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0055: round function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/2.5 's'.floor() = 2 's'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0055: floor function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].abs()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: abs function can only be called on numeric values (Integer, Decimal, or Quantity)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].ceiling()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: ceiling function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].exp()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: exp function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].floor()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: floor function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].ln()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: ln function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].log(2)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: log function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].power(2)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: power function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].round(2)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: round function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].sqrt()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: sqrt function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.arrWithNullsAndVals[0].truncate()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: truncate function can only be called on numeric values (Integer or Decimal)"
+  },
+  "5.7_math/Math.d2.round(%context.arrWithNullsAndVals[0])": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0057: round function precision argument must be an integer"
+  },
+  "5.7_math/Math.d2.round(n2)": {
+    "cause": "engine",
+    "note": "An empty argument should give empty.",
+    "got": "FHIRPath error: FP0056: round function precision argument must be a single value"
+  },
+  "5.7_math/Math.n4.log(%context.arrWithNullsAndVals[0])": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0057: log function base argument must be a numeric value"
+  },
+  "5.7_math/Math.n4.power(%context.arrWithNullsAndVals[0])": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0057: power function exponent argument must be a numeric value"
+  },
+  "5.8_tree_navigation/Patient.children() = (Patient.birthDate | Patient.address | Patient.name | Patient.communication)": {
+    "cause": "suite",
+    "note": "The spec leaves the order of children() and descendants() undefined.",
+    "got": "expected [true], got [false]"
+  },
+  "5.8_tree_navigation/ch.descendants()": {
+    "cause": "suite",
+    "note": "The spec leaves the order of children() and descendants() undefined.",
+    "got": "expected [{\"d\":1},{\"e\":1},{\"d\":2},{\"e\":2},1,1,2,2], got [{\"d\":1},1,{\"e\":1},1,{\"d\":2},2,{\"e\":2},2]"
+  },
+  "5.8_tree_navigation/communication.children()[1] = communication.preferred": {
+    "cause": "suite",
+    "note": "The spec leaves the order of children() and descendants() undefined.",
+    "got": "expected [true], got []"
+  },
+  "5.8_tree_navigation/name.given.children()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Jacomus1Id\",{\"url\":\"http://hl7.org/fhir/StructureDefinition/display\",\"valueString\":\"Jacomus1\"},\"Jacomus2Id\",{\"url\":\"http://hl7.org/fhir/StructureDefinition/display\",\"valueString\":\"Jacomus2\""
+  },
+  "5.8_tree_navigation/name.given.descendants()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Jacomus1Id\",{\"url\":\"http://hl7.org/fhir/StructureDefinition/display\",\"valueString\":\"Jacomus1\"},\"Jacomus2Id\",{\"url\":\"http://hl7.org/fhir/StructureDefinition/display\",\"valueString\":\"Jacomus2\""
+  },
+  "5.9_utility_functions/'2012-01-01T12:30:00.000+08:45'.timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: timezoneOffsetOf function can only be called on datetime values"
+  },
+  "5.9_utility_functions/'2012-01-01T12:30:00.000-07:00'.dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/'2012-01-01T12:30:00.000-07:00'.timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/'2014-01-05T10:30:00.000'.hourOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: hourOf function can only be applied to DateTime or Time values, got String"
+  },
+  "5.9_utility_functions/'2014-01-05T10:30:00.000'.minuteOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: minuteOf function can only be applied to DateTime or Time values, got String"
+  },
+  "5.9_utility_functions/'2014-01-05T10:30:00.123+10:00'.millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/'2014-01-05T10:30:40.000'.secondOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: secondOf function can only be applied to DateTime or Time values, got String"
+  },
+  "5.9_utility_functions/(@2012).monthOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "expected [], got [1]"
+  },
+  "5.9_utility_functions/(@2012-01-01T12).timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000).timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "expected [], got [0]"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000+08:45).timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "expected [8.75], got [525]"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000+10:00).timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "expected [10.0], got [600]"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000+11:00).dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000-07:00).dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000-07:00).timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/(@2012-01-01T12:30:00.000-07:00).timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "expected [-7.0], got [-420]"
+  },
+  "5.9_utility_functions/(@2014-01-05T10:30:00).millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/(@2014-01-05T10:30:00.123+10:00).millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/(@2020-06).dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/(@2020-06).dayOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "expected [], got [1]"
+  },
+  "5.9_utility_functions/(@2020-06).hourOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: hourOf function can only be applied to DateTime or Time values, got Date"
+  },
+  "5.9_utility_functions/(@2020-06).timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/(@2020-06-15).dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/(@2020-06-15).hourOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: hourOf function can only be applied to DateTime or Time values, got Date"
+  },
+  "5.9_utility_functions/(@2020-06-15).millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/(@2020-06-15).minuteOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: minuteOf function can only be applied to DateTime or Time values, got Date"
+  },
+  "5.9_utility_functions/(@2020-06-15).secondOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: secondOf function can only be applied to DateTime or Time values, got Date"
+  },
+  "5.9_utility_functions/(@2020-06-15).timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/(@2020-06-15).timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: timezoneOffsetOf function can only be called on datetime values"
+  },
+  "5.9_utility_functions/(@T10:30:00).dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/(@T10:30:00).dayOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: dayOf function can only be applied to Date or DateTime values, got Time"
+  },
+  "5.9_utility_functions/(@T10:30:00).monthOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: monthOf function can only be applied to Date or DateTime values, got Time"
+  },
+  "5.9_utility_functions/(@T10:30:00).timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/(@T10:30:00).timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: timezoneOffsetOf function can only be called on datetime values"
+  },
+  "5.9_utility_functions/(@T10:30:00).yearOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: yearOf function can only be applied to Date or DateTime values, got Time"
+  },
+  "5.9_utility_functions/(@T12:30:00).millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/(@T12:30:00.002).millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/({}).dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/({}).millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/({}).timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/5.dateOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: dateOf"
+  },
+  "5.9_utility_functions/5.dayOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: dayOf function can only be applied to Date or DateTime values, got Integer"
+  },
+  "5.9_utility_functions/5.hourOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: hourOf function can only be applied to DateTime or Time values, got Integer"
+  },
+  "5.9_utility_functions/5.millisecondOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: millisecondOf"
+  },
+  "5.9_utility_functions/5.minuteOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: minuteOf function can only be applied to DateTime or Time values, got Integer"
+  },
+  "5.9_utility_functions/5.monthOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: monthOf function can only be applied to Date or DateTime values, got Integer"
+  },
+  "5.9_utility_functions/5.secondOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: secondOf function can only be applied to DateTime or Time values, got Integer"
+  },
+  "5.9_utility_functions/5.timeOf()": {
+    "cause": "not-supported",
+    "note": "dateOf(), timeOf() and millisecondOf().",
+    "got": "FHIRPath error: FP0054: Unknown function: timeOf"
+  },
+  "5.9_utility_functions/5.timezoneOffsetOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: timezoneOffsetOf function can only be called on datetime values"
+  },
+  "5.9_utility_functions/5.yearOf()": {
+    "cause": "engine",
+    "note": "The date and time component functions (yearOf() to timezoneOffsetOf()): conversion from strings, precision, empty input, and timezoneOffsetOf() should give hours.",
+    "got": "FHIRPath error: FP0055: yearOf function can only be applied to Date or DateTime values, got Integer"
+  },
+  "5.9_utility_functions/Patient.name.given.trace('coll')[0].id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Jacomus1Id\"], got []"
+  },
+  "5.9_utility_functions/now().toString().substring(11,12) = timeOfDay().toString()": {
+    "cause": "engine",
+    "note": "The string form of now() and timeOfDay().",
+    "got": "expected [true], got [false]"
+  },
+  "5.9_utility_functions/timeOfDay().toString().length() = 8 or timeOfDay().toString().length() = 12": {
+    "cause": "engine",
+    "note": "The string form of now() and timeOfDay().",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'\tab c' !~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'\tab c' ~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/'\nab c' !~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'\nab c' ~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/'  ab c' !~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'  ab c' ~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/'a   b' !~ 'a b'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'a   b' ~ 'a b'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/'ab c\t' !~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'ab c\t' ~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/'ab c\n' !~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'ab c\n' ~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/'ab c  ' !~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/'ab c  ' ~ 'ab c'": {
+    "cause": "engine",
+    "note": "`~` on strings also ignores leading, trailing and repeated whitespace. fhirpath.js only treats each whitespace character as equal to any other.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/(%factory.date('2024-01-01', %factory.Extension('someExt', 'someString')) =\n %factory.date('2024-01-01', %factory.Extension('someExt', 'someString'))) |\n(%factory.date('2024-01-01', %factory.Extension('someExt', 'someString1')) =\n %factory.date('2024-01-01', %factory.Extension('someExt', 'someString2')))": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: date"
+  },
+  "6.1_equality/0 'Cel' ~ 273.15 'K'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/1 'mo' = 30 days": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/1 month = 30 'd'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/1 month = 30 days": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/12 'mo' = 1 'a'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/12 months = 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/12 months ~ 1 'a'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/2 '1' = 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/2 's.s-1' = 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/23 'Cel' ~ 73.4 '[degF]'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/30 days ~ 1 'mo'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/4 'g' !~ 4040 'mg'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/4040 'mg' !~ 4 'g'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/4040 'mg' !~ 4.0409 'g'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/4040 'mg' !~ 4.041 'g'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/4040.01 'g' ~ 4040.009 'g'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/73.4 '[degF]' ~ 23 'Cel'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/9 = 9 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/9 = 9 'kg.kg-1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/@2018 != @2018-01": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [true]"
+  },
+  "6.1_equality/@2018 != @2018-02": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [true]"
+  },
+  "6.1_equality/@2018 = @2018-02": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/@2018-02-02 != date1.toDate()": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [true]"
+  },
+  "6.1_equality/@2018-02-02 = date1.toDate()": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/@2018-02-02T11 = @2018-02-02T11:00": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/@2018-02-02T11+04:00 = @2018-02-02T11+04:00": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "FHIRPath error: FP0001: FP0001: Invalid datetime format: 2018-02-02T11+04:00"
+  },
+  "6.1_equality/@2018-02-02T11+04:00 = @2018-02-02T12+04:00": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "FHIRPath error: FP0001: FP0001: Invalid datetime format: 2018-02-02T11+04:00"
+  },
+  "6.1_equality/@2018-02-02T22-04:00 = @2018-02-03T05:03+04:00": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "FHIRPath error: FP0001: FP0001: Invalid datetime format: 2018-02-02T22-04:00"
+  },
+  "6.1_equality/@2018-02-02T22-04:00 = @2018-02-03T06+04:00": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "FHIRPath error: FP0001: FP0001: Invalid datetime format: 2018-02-02T22-04:00"
+  },
+  "6.1_equality/@2018-02-02T22-04:00 = @2018-02-03T06:03+04:00": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "FHIRPath error: FP0001: FP0001: Invalid datetime format: 2018-02-02T22-04:00"
+  },
+  "6.1_equality/@T12 = time1.toTime()": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/@T12:34 != time1.toTime()": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [true]"
+  },
+  "6.1_equality/@T14:04:23 = @T14:04": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [false]"
+  },
+  "6.1_equality/Bundle.entry[1].resource.name.given[0] = Bundle.entry[2].resource.name.given[0]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/Ops.coll = Ops.collsame": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/Ops.complex = Ops.complexsame": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/Ops.complex ~ Ops.complexsimilar": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [true], got [false]"
+  },
+  "6.1_equality/Patient.name.given[0] != Patient.name.given[3]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "6.1_equality/Patient.name.given[0] !~ Patient.name.given[3]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [false], got [true]"
+  },
+  "6.1_equality/Patient.name.given[0] = Patient.name.given[3]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [false], got []"
+  },
+  "6.1_equality/Patient.name.given[0] ~ Patient.name.given[3]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/0 'Cel' >= 273.15 'K'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/1 '1' < 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/1 '1'.comparable(2)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/1 'kg.kg-1' < 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/1 'kg.kg-1'.comparable(2)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/1 < 2 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/1 < 2 'kg.kg-1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/1 year < 12 months": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [false], got [true]"
+  },
+  "6.2_comparision/1 year.comparable(1 second)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/1.comparable(2 '1')": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/1.comparable(2 'kg.kg-1')": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/2 '1' > 1": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/2 'kg.kg-1' > 1": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/2 > 1 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/2 > 1 'kg.kg-1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/23 'Cel' < 72 '[degF]'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [false], got [true]"
+  },
+  "6.2_comparision/23 'Cel' > 72 '[degF]'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/@2018 > @T12:34": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected an error, got []"
+  },
+  "6.2_comparision/@2018 > a": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected an error, got []"
+  },
+  "6.2_comparision/@2018 > d": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected an error, got []"
+  },
+  "6.2_comparision/@2020-08-04T12:34 < @2020": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [], got [false]"
+  },
+  "6.2_comparision/@T12:02:34.324 > @T12:01": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/@T13 > @T12:02:34.324": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/@T17:00 < timeWithT.toTime()": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/@T17:00 > timeWithT.toTime()": {
+    "cause": "engine",
+    "note": "Comparing dates and times: different precisions should give empty, a time zone on an hour-only time should parse, and a date compared with a time should be an error.",
+    "got": "expected [false], got []"
+  },
+  "6.2_comparision/Observation.value.comparable(1 year)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected an error, got [false]"
+  },
+  "6.2_comparision/Observation.value.comparable(2 years)": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.2_comparision/a < 2 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/b > 1 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.2_comparision/c < g": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [false]"
+  },
+  "6.2_comparision/c > g": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [true]"
+  },
+  "6.2_comparision/c >= g": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [true]"
+  },
+  "6.3_types/(Patient.name.given[3] as FHIR.string).count() = 1": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/1 year as FHIR.Quantity": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"year\",\"code\":\"year\"}]"
+  },
+  "6.3_types/1 year.as(FHIR.Quantity)": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"year\",\"code\":\"year\"}]"
+  },
+  "6.3_types/5L is Long": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Observation.value is FHIR.Quantity": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Observation.value.system is uri": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got []"
+  },
+  "6.3_types/Observation.value.unit is string": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Observation.value.value is decimal": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Patient.contact.name.family.extension('http://hl7.org/fhir/StructureDefinition/humanname-own-prefix').url is System.String": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Patient.id is System.String": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Patient.id is System.String#2": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Patient.name.given[3] is FHIR.string": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "6.3_types/Patient.name.given[3].as(FHIR.string).count() = 1": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/Patient.name.given[3].is(FHIR.string)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "6.3_types/Questionnaire.group.group.question.group.question.concept.where($this is Coding).count() = 4": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected [true], got [false]"
+  },
+  "6.3_types/mixedTypeVals as Integer": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected an error, got [1]"
+  },
+  "6.3_types/mixedTypeVals.as(Integer)": {
+    "cause": "engine",
+    "note": "Type tests with FHIR and System namespaces (is FHIR.string, is System.String, is uri).",
+    "got": "expected an error, got [1]"
+  },
+  "6.4_collection/Patient.name.given contains Patient.name.given[3]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "6.4_collection/Patient.name.given[3] in Patient.name.given": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "6.4_collections/coll contains coll": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected an error, got [true]"
+  },
+  "6.4_collections/coll contains el": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [true], got [false]"
+  },
+  "6.4_collections/coll contains not_el": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "FHIRPath error: FP0054: Unsupported operator"
+  },
+  "6.4_collections/coll | coll2": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [{\"a\":1},{\"a\":2},{\"a\":3},{\"a\":4},{\"a\":5}], got [{\"a\":1},{\"a\":2},{\"a\":3},{\"a\":3},{\"a\":4},{\"a\":5}]"
+  },
+  "6.4_collections/el in coll": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "expected [true], got [false]"
+  },
+  "6.4_collections/not_el in coll": {
+    "cause": "engine",
+    "note": "Equality, union, intersect and contains on objects and collections compare by value.",
+    "got": "FHIRPath error: FP0054: Unsupported operator"
+  },
+  "6.5_boolean_logic/ok1 and i": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [true]"
+  },
+  "6.5_boolean_logic/ok1 xor i": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [false]"
+  },
+  "6.5_boolean_logic/ups1 xor i": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [], got [true]"
+  },
+  "6.6_math/'c' & Patient.name.given[0]": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"c\"], got []"
+  },
+  "6.6_math/(0.1 'm' + 0.2 'm').toQuantity('m').value": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(0.3 'm' - 0.1 'm').toQuantity('m').value": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 'a') / (1 year).toQuantity('seconds').toQuantity('s') = 1.0006849315068493": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 'a').toQuantity('s') + (1 year).toQuantity('seconds') = 63093600 's'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 'a').toQuantity('s') - (1 year).toQuantity('seconds') = 21600 's'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 'mo') / (1 year).toQuantity('seconds').toQuantity('s') = 0.08339041095890411": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 year + 6 months).toQuantity('seconds') + (1 'a').toQuantity('s') + (5 days).toQuantity('seconds') = (1 'a').toQuantity('s') + (6 months).toQuantity('seconds') + (1 year).toQuantity('seconds')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 year).toQuantity('seconds') + (1 'a').toQuantity('s') = 63093600 seconds": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 year).toQuantity('seconds') + (6 'mo').toQuantity('s') + (1 'a').toQuantity('s') = (1 'a').toQuantity('s') + (6 'mo').toQuantity('s') + (1 year).toQuantity('seconds')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 year).toQuantity('seconds') - (1 'a').toQuantity('s') = -21600 seconds": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 year).toQuantity('seconds').toQuantity('s') / (1 'a') = 0.999315537303217": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(1 year).toQuantity('seconds').toQuantity('s') / (1 'mo') = 11.991786447638603": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(7.315 'm'/ 0.7).toQuantity('m').value": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(9 '1' + 9.0999).value": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [18.0999], got []"
+  },
+  "6.6_math/(9 '1' - 9.0999).value": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [-0.0999], got []"
+  },
+  "6.6_math/(9 + 9.0999 '1').value": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [18.0999], got []"
+  },
+  "6.6_math/(9.16 'g' * 8.22 'm').toQuantity('g.m').value": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(9.16 'g' * 8.22).toQuantity('g').value": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(9.16 * 8.22 'm').toQuantity('m').value": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/(99.27 'g' / 3 'g').value": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [33.09], got []"
+  },
+  "6.6_math/0.9 '1' - 1L": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"-0.1 '1'\"], got []"
+  },
+  "6.6_math/1 'B' * 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":2,\"unit\":\"B\",\"code\":\"B\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'B' + 1 'B'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":2,\"unit\":\"B\",\"code\":\"B\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'B' - 1 'B'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":0,\"unit\":\"B\",\"code\":\"B\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'B' / 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":0.5,\"unit\":\"B\",\"code\":\"B\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'B' / 2 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":0.5,\"unit\":\"B/1\",\"code\":\"B/1\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'a' * 1 second": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"a.second\",\"code\":\"a.second\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'a' + 6 'mo'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"18 'mo'\"], got [{\"value\":1.0416666666666667,\"unit\":\"a\",\"code\":\"a\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'a' / 1 second": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"a/second\",\"code\":\"a/second\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'a' / 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"a/year\",\"code\":\"a/year\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'kg' / (3 months).toQuantity('seconds')": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/1 'kg' / 3 months": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":0.33333333333333337,\"unit\":\"kg/months\",\"code\":\"kg/months\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 'm' * (1 year).toQuantity('seconds').toQuantity('s') = 31536000 'm.s'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "6.6_math/1 'm' * 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"m.year\",\"code\":\"m.year\"}]"
+  },
+  "6.6_math/1 'mo' / 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"mo/year\",\"code\":\"mo/year\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 's' * 1 second": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"s.second\",\"code\":\"s.second\"}]"
+  },
+  "6.6_math/1 - (0.9 '1')": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"0.1 '1'\"], got []"
+  },
+  "6.6_math/1 month / 1 'mo'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"month/mo\",\"code\":\"month/mo\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 second * 1 'a'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"second.a\",\"code\":\"second.a\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 second * 1 second": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"second.second\",\"code\":\"second.second\"}]"
+  },
+  "6.6_math/1 second / 1 'a'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"second/a\",\"code\":\"second/a\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 week / 1 'wk'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"week/wk\",\"code\":\"week/wk\"}]"
+  },
+  "6.6_math/1 year * 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"year.year\",\"code\":\"year.year\"}]"
+  },
+  "6.6_math/1 year + 6 months": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"18 months\"], got []"
+  },
+  "6.6_math/1 year + @2016-02-29": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2017-02-28\"], got []"
+  },
+  "6.6_math/1 year - 6 months - 1 year + 18 months = 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/1 year - @2016-02-29": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/1 year / 1 'a'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"year/a\",\"code\":\"year/a\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 year / 1 'mo'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"year/mo\",\"code\":\"year/mo\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/1 year / 2 = 6 months": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.6_math/1 year / 6 months": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":0.16666666666666669,\"unit\":\"year/months\",\"code\":\"year/months\"}]"
+  },
+  "6.6_math/10L mod 4.5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [1], got []"
+  },
+  "6.6_math/10L mod 4.5#2": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [1], got []"
+  },
+  "6.6_math/12 'h' + 7 'd'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"180 'h'\"], got []"
+  },
+  "6.6_math/12 hours + 7 days": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"180 hours\"], got []"
+  },
+  "6.6_math/1L - (0.9 '1')": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"0.1 '1'\"], got []"
+  },
+  "6.6_math/2 years + 6 months = 2.5 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/20 / 5 'kg' = 4 '1/kg'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/2L * 4 '1' = 8": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "6.6_math/2L + 4 '1' = 6": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/2L - 4 '1' = -2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 '1' + 2 = 5 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 '1' - 2 = 1 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 'm' + 3 'cm' = 303 'cm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 'm' - 3 'cm' = 297 'cm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 's' / 3 milliseconds": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1,\"unit\":\"s/milliseconds\",\"code\":\"s/milliseconds\"}]"
+  },
+  "6.6_math/3 + 2 '1' = 5 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 - 2 '1' = 1 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 - 2 'kg.kg-1' = 1 '1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/3 minutes / 1 's'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":3,\"unit\":\"minutes/s\",\"code\":\"minutes/s\"}]"
+  },
+  "6.6_math/3 month / 2 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":1.5,\"unit\":\"month/year\",\"code\":\"month/year\"}]"
+  },
+  "6.6_math/3 years / 1.5 years": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [2.0]"
+  },
+  "6.6_math/4 '1' + 2L = 6": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/4 '1' - 2L = 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/4 '1' div 2L = 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/4L / 2 '1' = 2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/4L / 2 'kg' = 2 '1/kg'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/5 '1' mod 2L = 1": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/57.3 mod 3": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [0.3], got []"
+  },
+  "6.6_math/7 'd' + 12 'h'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"180 'h'\"], got []"
+  },
+  "6.6_math/7 days + 12 hours": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"180 hours\"], got []"
+  },
+  "6.6_math/99.27 mod 3L": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [0.27], got []"
+  },
+  "6.6_math/@2011-01-10 + 1 year + 6 months = @2011-01-10 + (1 year + 6 months)": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/@2016 + 365 days": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2017\"], got [\"2016\"]"
+  },
+  "6.6_math/@2016 - 364 days": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2016\"], got [\"2015\"]"
+  },
+  "6.6_math/@2016-01 + 30 'd'": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2016-02\"], got [\"2016-01\"]"
+  },
+  "6.6_math/@2016-01 + 30 days": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2016-02\"], got [\"2016-01\"]"
+  },
+  "6.6_math/@2016-02-29 + 1 year": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2017-02-28\"], got []"
+  },
+  "6.6_math/@2016-02-29 + 1.5 year": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2017-02-28\"], got []"
+  },
+  "6.6_math/@2016-02-29 + @2016-02-29": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/@2018-02-18T12 + 59 minutes = @2018-02-18T12": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got [false]"
+  },
+  "6.6_math/@2018-02-18T12:00 + 59 seconds = @2018-02-18T12:00": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got [false]"
+  },
+  "6.6_math/@2018-02-18T12:23:45-05:00 + 2 years": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [\"2020-02-18T14:23:45-03:00\"], got [\"2020-02-18T12:23:45-05:00\"]"
+  },
+  "6.6_math/@T09:45 + 59 seconds = @T09:45": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got [false]"
+  },
+  "6.6_math/@T09:45:23 + 2 years": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/@T23:59:23 + 2 days": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected an error, got [\"23:59:23\"]"
+  },
+  "6.6_math/@T23:59:60 + 1 minute = @T00:00:59": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got [false]"
+  },
+  "6.6_math/MathTestData.n1 div MathTestData.a3": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [2]"
+  },
+  "6.6_math/MathTestData.n1 div MathTestData.s5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/MathTestData.n1 mod MathTestData.a3": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [0]"
+  },
+  "6.6_math/MathTestData.n1 mod MathTestData.s5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/Observation.value / 185 'mo'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [\"1 '1'\"], got [{\"value\":1,\"unit\":\"months/mo\",\"code\":\"mo/mo\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "6.6_math/Patient.birthDate + 1 day = @1974-12-26": {
+    "cause": "fhir-pipes",
+    "note": "fhir-pipes gives dates the FHIRPath type String so a column keeps their form, and octofhir does no date arithmetic on a String.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/Patient.birthDate + 1 day = @1974-12-26#2": {
+    "cause": "fhir-pipes",
+    "note": "fhir-pipes gives dates the FHIRPath type String so a column keeps their form, and octofhir does no date arithmetic on a String.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/Patient.birthDate - 1 day = @1974-12-24": {
+    "cause": "fhir-pipes",
+    "note": "fhir-pipes gives dates the FHIRPath type String so a column keeps their form, and octofhir does no date arithmetic on a String.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/Patient.name.given[0] & 'c'": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"c\"], got []"
+  },
+  "6.6_math/a3 * n1": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [2]"
+  },
+  "6.6_math/n1 * a3": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [2]"
+  },
+  "6.6_math/n1 + a3": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [3]"
+  },
+  "6.6_math/n1 + s5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/n1 / 2 'kg' = 1 'kg-1'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "6.6_math/n2 * s5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/s5 * n2": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/s5 * s5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "6.6_math/s5 + n1": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got []"
+  },
+  "7_aggregate/(1 'cm'|3 'cm'|1 'm').aggregate($total + $this, 0 'cm') = 104 'cm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "7_aggregate/(1 'cm'|3 'cm'|1 'm').max() = 1 'm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "7_aggregate/(1 'cm'|3 'cm'|1 'm').min() = 1 'cm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "7_aggregate/(1 'cm'|3 'cm'|1 'm').sum() = 104 'cm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "7_aggregate/(7 'm' |8 'm'|9 'm'|1 'm'|2 'm'|3 'm'|400 'cm'|5 'm'|6 'm').avg() = 5 'm'": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "7_aggregate/(Patient.name.given[1] | Patient.name.given[2]).aggregate($total & '-' & $this, %context.name.given[0])": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"-Peter-James\"], got [\"Peter-James\"]"
+  },
+  "7_aggregate/Functions.collWithNull1.avg()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1.5]"
+  },
+  "7_aggregate/Functions.collWithNull1.max()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [2]"
+  },
+  "7_aggregate/Functions.collWithNull1.min()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1]"
+  },
+  "7_aggregate/Functions.collWithNull2.avg()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1.5]"
+  },
+  "7_aggregate/Functions.collWithNull2.max()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [2]"
+  },
+  "7_aggregate/Functions.collWithNull2.min()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1]"
+  },
+  "7_aggregate/Patient.name.given.aggregate($total & '-' & $this & $this.id, '')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"-Jacomus1Id-Peter-James-Jacomus2Id\"], got [\"-Peter-James\"]"
+  },
+  "7_aggregate/Patient.name.given.aggregate($total & '-' & $this, '')": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"--Peter-James-\"], got [\"Peter-James\"]"
+  },
+  "7_aggregate/UndefinedInput.aggregate($total + $this, 3) = 3": {
+    "cause": "engine",
+    "note": "aggregate() on an empty input should give the initial value.",
+    "got": "expected [true], got []"
+  },
+  "bigint/(-1).convertsToLong()": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: convertsToLong"
+  },
+  "bigint/0.convertsToLong()": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: convertsToLong"
+  },
+  "bigint/1.convertsToLong()": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: convertsToLong"
+  },
+  "bigint/2147483647.convertsToLong()": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "FHIRPath error: FP0054: Unknown function: convertsToLong"
+  },
+  "bigint/Parameters.parameter.value + 1 = 12345678901234567891L": {
+    "cause": "not-supported",
+    "note": "The Long type (64-bit integers).",
+    "got": "expected [true], got []"
+  },
+  "extensions/Bundle.entry.resource.name[0].given[1].extension('http://hl7.org/fhir/StructureDefinition/display').value": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"Jacomus\"], got []"
+  },
+  "extensions/Functions.attrtrue.extension('url1').extension('url2').id = 'someid2'": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "extensions/Functions.attrtrue.id = 'someid'": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "extensions/Patient.address[1].id = 'someId'": {
+    "cause": "suite",
+    "note": "The input has `_address` beside a complex element, which FHIR JSON allows only for primitives.",
+    "got": "expected [true], got []"
+  },
+  "extensions/Patient.communication.preferred.extension('test').exists()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "extensions/Patient.communication.preferred.extension('test').value.id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [\"testing\"], got []"
+  },
+  "extensions/Patient.communication.preferred.extension('test').value.id is FHIR.id": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "extensions/Patient.communication.preferred.extension('test').value.id is System.String": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "extensions/Patient.name.given.count() = 4": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "extensions/Patient.name.given[0].extension('http://hl7.org/fhir/StructureDefinition/display').value = 'Jacomus1'": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "extensions/Patient.name.given[3].extension('http://hl7.org/fhir/StructureDefinition/display').value = 'Jacomus2'": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got []"
+  },
+  "factory/%factory.Address(1 | 'second line', 'SomeCity', 'EW', '0000', {}, 'home', 'physical')": {
+    "cause": "engine",
+    "note": "%factory does not check the types of its arguments.",
+    "got": "expected an error, got [{\"line\":[\"second line\"],\"city\":\"SomeCity\",\"state\":\"EW\",\"postalCode\":\"0000\",\"use\":\"home\",\"type\":\"physical\"}]"
+  },
+  "factory/%factory.CodeableConcept(1 | %factory.Coding('system2', '2'), 'Example Test')": {
+    "cause": "engine",
+    "note": "%factory does not check the types of its arguments.",
+    "got": "expected an error, got [{\"coding\":[{\"system\":\"system2\",\"code\":\"2\"}],\"text\":\"Example Test\"}]"
+  },
+  "factory/%factory.Extension('someExt', %factory.code('some code')).where($this is Extension and $this.valueCode is code).value = 'some code'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: code"
+  },
+  "factory/%factory.HumanName(1, 'Julia' | 'A', {}, {}, 'Julia Smith')": {
+    "cause": "engine",
+    "note": "%factory does not check the types of its arguments.",
+    "got": "expected an error, got [{\"given\":[\"Julia\",\"A\"],\"text\":\"Julia Smith\"}]"
+  },
+  "factory/%factory.Identifier('someSystem', 'someValue', 'someUse', %factory .create(CodeableConcept)).where($this.system = 'someSystem' and $this.value = 'someValue' and $this.use = 'someUse' and $this.type is CodeableConcept) is Identifier": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0056: create function requires a string type argument"
+  },
+  "factory/%factory.Identifier({}, 'someValue', 'someUse', %factory .create(CodeableConcept)).where($this.system.empty() and $this.value = 'someValue' and $this.use = 'someUse' and $this.type is CodeableConcept) is Identifier": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0056: create function requires a string type argument"
+  },
+  "factory/%factory.Quantity({}, 'mg/dL', 5.03, 'mg/dL').where(system.empty()) is Quantity": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0056: Quantity function requires a string system argument"
+  },
+  "factory/%factory.base64Binary('ZHNmZHNm').where($this is base64Binary) .decode('base64')": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: base64Binary"
+  },
+  "factory/%factory.base64Binary('ZHNmZHNm', %factory.Extension('someExt', 'someString')).extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: base64Binary"
+  },
+  "factory/%factory.boolean('false', %factory.Extension('someExt', 'someString')).where($this is boolean and $this = false) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: boolean"
+  },
+  "factory/%factory.boolean(true).where($this is boolean)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: boolean"
+  },
+  "factory/%factory.canonical('someUrl').where($this is canonical)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: canonical"
+  },
+  "factory/%factory.canonical('someUrl', %factory.Extension('someExt', 'someString')).where($this is canonical and $this = 'someUrl') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: canonical"
+  },
+  "factory/%factory.code('some code').where($this is code)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: code"
+  },
+  "factory/%factory.code('some code', %factory.Extension('someExt', 'someString')).where($this is code and $this = 'some code') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: code"
+  },
+  "factory/%factory.create(integer) is FHIR.integer": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0056: create function requires a string type argument"
+  },
+  "factory/%factory.date('2024-01-01').where($this is date) = @2024-01-01": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: date"
+  },
+  "factory/%factory.date('2024-01-01', %factory.Extension('someExt', 'someString')).where($this is date and $this = @2024-01-01) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: date"
+  },
+  "factory/%factory.dateTime('2024-01-01T01:01:01').where($this is dateTime) = @2024-01-01T01:01:01": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: dateTime"
+  },
+  "factory/%factory.dateTime('2024-01-01T01:01:01', %factory.Extension('someExt', 'someString')).where($this is dateTime and $this = @2024-01-01T01:01:01) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: dateTime"
+  },
+  "factory/%factory.decimal('1.1', %factory.Extension('someExt', 'someString')) .where($this is decimal and $this = 1.1).extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: decimal"
+  },
+  "factory/%factory.decimal(1.1).where($this is decimal)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: decimal"
+  },
+  "factory/%factory.id('someId-123').where($this is id) = 'someId-123'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: id"
+  },
+  "factory/%factory.id('someId-123', %factory.Extension('someExt', 'someString')).where($this is id and $this = 'someId-123') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: id"
+  },
+  "factory/%factory.instant('2024-01-01T01:01:01+01:00').where($this is instant) = @2024-01-01T01:01:01+01:00": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: instant"
+  },
+  "factory/%factory.instant('2024-01-01T01:01:01+01:00', %factory.Extension('someExt', 'someString')).where($this is instant and $this = @2024-01-01T01:01:01+01:00) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: instant"
+  },
+  "factory/%factory.integer(-134, %factory.Extension('someExt', 'someString')) .where($this is integer and $this = -134) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer"
+  },
+  "factory/%factory.integer(134).where($this is integer)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer"
+  },
+  "factory/%factory.integer64(134).where($this is integer64)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer64"
+  },
+  "factory/%factory.integer64(134, %factory.Extension('someExt', 'someString')) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer64"
+  },
+  "factory/%factory.markdown(' md md ').where($this is markdown)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: markdown"
+  },
+  "factory/%factory.markdown(' md md ', %factory.Extension('someExt', 'someString')) .where($this is markdown and $this = ' md md ') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: markdown"
+  },
+  "factory/%factory.oid('urn:oid:1.2.3').where($this is oid)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: oid"
+  },
+  "factory/%factory.oid('urn:oid:1.2.3', %factory.Extension('someExt', 'someString')) .where($this is oid and $this = 'urn:oid:1.2.3') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: oid"
+  },
+  "factory/%factory.positiveInt(134).where($this is positiveInt)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: positiveInt"
+  },
+  "factory/%factory.positiveInt(134, %factory.Extension('someExt', 'someString')) .where($this is positiveInt and $this = 134) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: positiveInt"
+  },
+  "factory/%factory.string('some string').where($this is string)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: string"
+  },
+  "factory/%factory.string('some string', %factory.Extension('someExt', 'someString')) .where($this is string and $this = 'some string') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: string"
+  },
+  "factory/%factory.time('10:00').where($this is time) =  @T10:00": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: time"
+  },
+  "factory/%factory.time('10:00', %factory.Extension('someExt', 'someString')) .where($this is time and $this = @T10:00) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: time"
+  },
+  "factory/%factory.unsignedInt(0, %factory.Extension('someExt', 'someString')) .where($this is unsignedInt and $this = 0) .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: unsignedInt"
+  },
+  "factory/%factory.unsignedInt(134).where($this is unsignedInt)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: unsignedInt"
+  },
+  "factory/%factory.uri('', %factory.Extension('someExt', 'someString')) .where($this is uri and $this = '') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: uri"
+  },
+  "factory/%factory.uri('/something').where($this is uri)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: uri"
+  },
+  "factory/%factory.url('', %factory.Extension('someExt', 'someString')) .where($this is url and $this = '') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: url"
+  },
+  "factory/%factory.url('/something').where($this is url)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: url"
+  },
+  "factory/%factory.uuid('urn:uuid:c757873d-ec9a-4326-a141-556f43239520') .where($this is uuid)": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: uuid"
+  },
+  "factory/%factory.uuid('urn:uuid:c757873d-ec9a-4326-a141-556f43239520', %factory.Extension('someExt', 'someString')).where($this is uuid and $this = 'urn:uuid:c757873d-ec9a-4326-a141-556f43239520') .extension('someExt').value = 'someString'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: uuid"
+  },
+  "factory/%factory.withExtension(%factory.integer(134, %factory.Extension( 'someExt1', 'someString')), 'someExt2', 1).extension.value = 'someString' | 1": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer"
+  },
+  "factory/%factory.withExtension(%factory.integer({}), 'someExt', 1).extension( 'someExt').value = 1": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer"
+  },
+  "factory/%factory.withProperty(%factory.integer(134, %factory.Extension( 'someExt1', 'someString')), 'id', 'someId').where(extension.value = 'someString').id = 'someId'": {
+    "cause": "not-supported",
+    "note": "%factory: the primitive type constructors and create(type).",
+    "got": "FHIRPath error: FP0054: Unknown function: integer"
+  },
+  "fhir-quantity/%n = (2).toQuantity()": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "fhir-quantity/(1 'a').toQuantity('month').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 'a').toQuantity('year').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 'day').toQuantity('d').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 'hour').toQuantity('h').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 'month').toQuantity('a').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 'year').toQuantity('mo').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 year).toQuantity('a').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(1 year).toQuantity('mo').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/(2).toQuantity() = %n": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got [false]"
+  },
+  "fhir-quantity/(30 days).toQuantity('mo').empty()": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/@2025 + (2).toQuantity() * Observation.value = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0081: Cannot add UCUM unit 'year' to a temporal value. Use word units instead"
+  },
+  "fhir-quantity/@2025 + (2000 'g' / 1 'kg') * Observation.value = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/@2025 + (2000 'g/kg') * Observation.value = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/@2025 + 2 * Observation.value = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0081: Cannot add UCUM unit 'year' to a temporal value. Use word units instead"
+  },
+  "fhir-quantity/@2025 + 2 * Observation.value = @2027#2": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0081: Cannot add UCUM unit 'year' to a temporal value. Use word units instead"
+  },
+  "fhir-quantity/@2025 + Observation.value * (2).toQuantity() = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0081: Cannot add UCUM unit 'year' to a temporal value. Use word units instead"
+  },
+  "fhir-quantity/@2025 + Observation.value * (2000 'g' / 1 'kg') = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/@2025 + Observation.value * (2000 'g/kg') = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/@2025 + Observation.value * 2 = @2027": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0081: Cannot add UCUM unit 'year' to a temporal value. Use word units instead"
+  },
+  "fhir-quantity/@2025 + Observation.value = @2026": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "FHIRPath error: FP0081: Cannot add UCUM unit 'year' to a temporal value. Use word units instead"
+  },
+  "fhir-quantity/@2025-01 + (Observation.value / (2).toQuantity()).toQuantity('month') = @2025-07": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/@2025-01 + (Observation.value / 2 'kg/kg').toQuantity('month') = @2025-07": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/@2025-01 + (Observation.value / 2).toQuantity('month') = @2025-07": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/Observation.value + 1 year = 2 years": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/Observation.value = 1 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/Observation.value.toQuantity('a') = 1 'a'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/Observation.value.toQuantity('mo') = 12 'mo'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/Observation.value.toQuantity('month') = 12 months": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/Observation.value.toQuantity('year') = 1 year": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/QuestionnaireResponse.item[0].answer.value = 2 year": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [true], got []"
+  },
+  "fhir-quantity/QuestionnaireResponse.item[0].answer.value.toQuantity('a') = 2 'a'": {
+    "cause": "not-supported",
+    "note": "toQuantity(unit), which converts to another unit.",
+    "got": "FHIRPath error: FP0053: toQuantity function takes no arguments"
+  },
+  "fhir-quantity/QuestionnaireResponse.item[2].answer.value.toQuantity()": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected [], got [{\"value\":4,\"unit\":\"year(real UCUM code in field 'code')\",\"code\":\"min\",\"system\":\"http://othersystemofmeasure.org\"}]"
+  },
+  "fhir-quantity/QuestionnaireResponse.item[3].answer.value.comparator": {
+    "cause": "engine",
+    "note": "A Quantity the engine types itself (here a choice element) loses its comparator. fhir-pipes leaves Quantity elements untyped for this reason.",
+    "got": "expected [\">\"], got []"
+  },
+  "fhir-quantity/QuestionnaireResponse.item[3].answer.value.toQuantity()": {
+    "cause": "engine",
+    "note": "Quantity arithmetic, comparison or UCUM unit conversion.",
+    "got": "expected an error, got [{\"value\":1,\"unit\":\"year(real UCUM code in field 'code')\",\"code\":\"min\",\"system\":\"http://unitsofmeasure.org\"}]"
+  },
+  "fhir-r5/%resource.parameter.where(name='goodHtml').value.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [true], got [false]"
+  },
+  "fhir-r5/%resource.parameter.where(name='notString').value.htmlChecks().empty()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [true], got [false]"
+  },
+  "fhir-r5/'123456789'.contains(length().toString())": {
+    "cause": "engine",
+    "note": "A function called in an argument (length()) should run on the outer focus, not the input string.",
+    "got": "expected an error, got [true]"
+  },
+  "fhir-r5/'123456789'.endsWith(length().toString())": {
+    "cause": "engine",
+    "note": "A function called in an argument (length()) should run on the outer focus, not the input string.",
+    "got": "expected an error, got [true]"
+  },
+  "fhir-r5/'2015'.toDateTime() = @2015": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got []"
+  },
+  "fhir-r5/'2015-02'.toDateTime() = @2015-02": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got []"
+  },
+  "fhir-r5/'2015-02-04'.toDateTime() = @2015-02-04": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected [true], got []"
+  },
+  "fhir-r5/'987654321'.startsWith(length().toString())": {
+    "cause": "engine",
+    "note": "A function called in an argument (length()) should run on the outer focus, not the input string.",
+    "got": "expected an error, got [true]"
+  },
+  "fhir-r5/-5.5 mod 2 = -1.5": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [true], got []"
+  },
+  "fhir-r5/1.0 'm' / 1.0 'm' = 1 '1'": {
+    "cause": "engine",
+    "note": "UCUM: 1.0 'm' / 1.0 'm' should equal 1 '1'.",
+    "got": "expected [true], got [false]"
+  },
+  "fhir-r5/1.toDecimal().lowBoundary()": {
+    "cause": "fhir-pipes",
+    "issue": "octofhir/fhirpath-rs#182",
+    "note": "The decimal reaches fhir-pipes' lowBoundary() as 1.0, one digit more precise than written. octofhir/fhirpath-rs#182 keeps the digits.",
+    "got": "expected [0.5], got [0.95]"
+  },
+  "fhir-r5/@1974-12-25 + 7": {
+    "cause": "engine",
+    "note": "Date and time arithmetic: whole units at the value's precision, leap days, and errors for a date plus a date or a time plus days.",
+    "got": "expected an error, got []"
+  },
+  "fhir-r5/Patient.name.as(HumanName).use": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected an error, got [\"official\",\"usual\",\"maiden\"]"
+  },
+  "fhir-r5/Patient.name.family.first().substring(2, length()-5)": {
+    "cause": "engine",
+    "note": "A function called in an argument (length()) should run on the outer focus, not the input string.",
+    "got": "expected an error, got [\"alm\"]"
+  },
+  "fhir-r5/Patient.name.given.first().exists() and Patient.name.given.first().length() = 1": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [true]"
+  },
+  "fhir-r5/Patient.name.given.first().exists() and Patient.name.given.first().length() = 1#2": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [true]"
+  },
+  "fhir-r5/Patient.name.given.first().length()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1]"
+  },
+  "fhir-r5/Patient.name.given.first().length()#2": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [], got [1]"
+  },
+  "fhir-r5/Patient.name.given.first().substring(0, 1)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: substring function can only be called on strings"
+  },
+  "fhir-r5/Patient.name.given.first().toChars()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: toChars function can only be applied to string values, got empty"
+  },
+  "fhir-r5/Patient.name.given.first().upper()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "FHIRPath error: FP0055: upper function can only be applied to strings, got empty"
+  },
+  "getValue/Patient.name.given.getValue()": {
+    "cause": "engine",
+    "note": "getValue() on more than one item should give empty.",
+    "got": "expected [], got [\"Peter\",\"James\",\"Jim\",\"Peter\",\"James\"]"
+  },
+  "getValue/Patient.name.given.getValue()#2": {
+    "cause": "engine",
+    "note": "getValue() on more than one item should give empty.",
+    "got": "expected [], got [\"Peter\",\"James\",\"Jim\",\"Peter\",\"James\"]"
+  },
+  "getValue/Patient.name.given.getValue()#3": {
+    "cause": "engine",
+    "note": "getValue() on more than one item should give empty.",
+    "got": "expected [], got [\"Peter\",\"James\",\"Jim\",\"Peter\",\"James\"]"
+  },
+  "getValue/Patient.name.given.getValue()#4": {
+    "cause": "engine",
+    "note": "getValue() on more than one item should give empty.",
+    "got": "expected [], got [\"Peter\",\"James\",\"Jim\",\"Peter\",\"James\"]"
+  },
+  "getValue/Patient.name.given.getValue()#5": {
+    "cause": "engine",
+    "note": "getValue() on more than one item should give empty.",
+    "got": "expected [], got [\"Peter\",\"James\",\"Jim\",\"Peter\",\"James\"]"
+  },
+  "hasValue/Patient.birthDate.hasValue()": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [false], got []"
+  },
+  "hasValue/Patient.birthDate.hasValue()#2": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [false], got []"
+  },
+  "hasValue/Patient.text.`div`.hasValue()": {
+    "cause": "engine",
+    "note": "Should be an error on more than one item, or on an item of the wrong type.",
+    "got": "expected [false], got [true]"
+  },
+  "htmlChecks/''.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [false], got [true]"
+  },
+  "htmlChecks/'<p>hello</p>'.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [true], got [false]"
+  },
+  "htmlChecks/'<p>hello</p>'.htmlchecks()": {
+    "cause": "not-supported",
+    "note": "htmlchecks(), the R4 spelling of htmlChecks().",
+    "got": "FHIRPath error: FP0054: Unknown function: htmlchecks"
+  },
+  "htmlChecks/('<p>a</p>' | '<p>b</p>').htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [], got [false]"
+  },
+  "htmlChecks/(1).htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [], got [false]"
+  },
+  "htmlChecks/Bundle.entry.resource.where(id='bad-namespace').text.`div`.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [false], got [true]"
+  },
+  "htmlChecks/Bundle.entry.resource.where(id='no-content').text.`div`.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [false], got [true]"
+  },
+  "htmlChecks/Bundle.entry.resource.where(id='unclosed-br').text.`div`.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [false], got [true]"
+  },
+  "htmlChecks/Patient.birthDate.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [], got [false]"
+  },
+  "htmlChecks/Patient.identifier.system.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [], got [false]"
+  },
+  "htmlChecks/Patient.name.given[0].htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [true], got [false]"
+  },
+  "htmlChecks/Patient.name[0].htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [], got [false]"
+  },
+  "htmlChecks/Patient.text.`div`.htmlchecks()": {
+    "cause": "not-supported",
+    "note": "htmlchecks(), the R4 spelling of htmlChecks().",
+    "got": "FHIRPath error: FP0054: Unknown function: htmlchecks"
+  },
+  "htmlChecks/Patient.text.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [], got [false]"
+  },
+  "htmlChecks/Patient.text.status.htmlChecks()": {
+    "cause": "engine",
+    "note": "htmlChecks() does not check the XHTML rules.",
+    "got": "expected [true], got [false]"
+  },
+  "simple/Patient.`odd\\`name`": {
+    "cause": "engine",
+    "note": "Escape sequences in strings and quoted identifiers.",
+    "got": "FHIRPath error: FP0001: FP0001: found 'n' expected '(', '[', '.', '*', '/', 'd', 'm', '+', '-', '&', 'i', 'a', '|', '<', '>', '=', '!', '~', 'c', 'x', 'o', or end of input"
+  },
+  "simple/Patient.name.exists(given)": {
+    "cause": "engine",
+    "note": "A primitive with no value, only an id or extensions (JSON null beside `_name`): octofhir drops it, fhirpath.js keeps it.",
+    "got": "expected [true], got [false]"
+  },
+  "simple/Patient.name.given.ofType(string)[0]": {
+    "cause": "suite",
+    "note": "With no FHIR model, fhirpath.js reads `string` as System.String, which a FHIR string is not.",
+    "got": "expected [], got [\"Peter\"]"
+  },
+  "simple/Patient.name.given.select($this.length) = Patient.name.given.select(length)": {
+    "cause": "engine",
+    "note": "`length` without parentheses.",
+    "got": "expected [true], got []"
+  },
+  "simple/Patient.name.given.type()": {
+    "cause": "engine",
+    "note": "type() on a FHIR value.",
+    "got": "expected [{\"name\":\"string\",\"namespace\":\"FHIR\"},{\"name\":\"string\",\"namespace\":\"FHIR\"},{\"name\":\"string\",\"namespace\":\"FHIR\"},{\"name\":\"string\",\"namespace\":\"FHIR\"}], got [{\"namespace\":\"System\",\"name\":\"Empty"
+  }
+}

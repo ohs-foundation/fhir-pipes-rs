@@ -16,9 +16,11 @@ The official FHIRPath tests, run by `tests/fhirpath_hl7.rs`.
   The converted `patient-example.json` equals the R4 core example
   `Patient-example.json` (hl7.fhir.r4.examples#4.0.1) apart from `text` and
   `meta`.
-- `known-failures.json`: the tests fhir-pipes fails today, each with the
-  reason the run gave. Written by the test itself; see `tests/fhirpath_hl7.rs`.
+- `known-failures.json`: the tests fhir-pipes fails today, each with its
+  cause (see `Cause` in `tests/common/mod.rs`), a note, and what the last run
+  gave. The test writes `got`; the cause and note are written by hand.
 
 To refresh, replace `tests-fhir-r4.xml` and `input/` from a newer commit, then
-run `FHIRPATH_UPDATE_KNOWN_FAILURES=1 cargo test -p fhir-pipes-sof --test fhirpath_hl7`
-and review the change to `known-failures.json`.
+run `FHIRPATH_UPDATE_KNOWN_FAILURES=1 cargo test -p fhir-pipes-sof --test fhirpath_hl7`,
+give each new failure a cause and note, and review the change to
+`known-failures.json`.
