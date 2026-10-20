@@ -277,8 +277,9 @@ pub fn upsert_cell(obj: &mut Object, url: &str, scheme: &str, level: u32, cell: 
 /// Recompute every computable cell already on the resource for a new
 /// position (a position edit must not leave stale cells behind). H3 cells,
 /// which fhir-pipes cannot compute, are dropped rather than left wrong. A
-/// malformed entry is reported as `malformed_field` against `id` and left
-/// as it is.
+/// cell of a scheme fhir-pipes does not know is someone else's: it is left
+/// as it is and reported as `spatial_cell_not_recomputed`. A malformed entry
+/// is reported as `malformed_field` against `id` and left as it is.
 pub fn refresh_cells(
     obj: &mut Object,
     url: &str,
@@ -302,10 +303,19 @@ pub fn refresh_cells(
                     changed += 1;
                 }
             }
-            None => {
+            None if level_range(&existing.scheme).is_some() => {
                 remove_cell(obj, url, &existing.scheme, existing.level);
                 changed += 1;
             }
+            None => report.add(
+                "spatial_cell_not_recomputed",
+                id,
+                &format!(
+                    "the {} cell is of a scheme fhir-pipes does not compute; left as it \
+                     was, so it may not match the new position",
+                    existing.scheme
+                ),
+            ),
         }
     }
     changed
@@ -502,5 +512,18 @@ mod tests {
         );
         remove_all_cells(&mut obj, URL);
         assert!(obj.get("extension").is_none());
+    }
+
+    #[test]
+    fn a_cell_of_an_unknown_scheme_is_left_and_reported() {
+        let mut obj = Object::new();
+        upsert_cell(&mut obj, URL, "s2", 13, "89c25");
+        let mut report = Report::default();
+        assert_eq!(
+            refresh_cells(&mut obj, URL, 3.39, 6.45, "a", &mut report),
+            0
+        );
+        assert_eq!(cells_of(&obj, URL).len(), 1);
+        assert_eq!(report.count("spatial_cell_not_recomputed"), 1);
     }
 }

@@ -117,14 +117,21 @@ impl<R: BufRead> Lines<R> {
                 break;
             }
             self.line_no += 1;
-            let line = &text[start..];
+            // A UTF-8 byte order mark before the first line is not part of
+            // it (fhir::ndjson skips it too).
+            let bom = if self.line_no == 1 && text[start..].starts_with('\u{feff}') {
+                '\u{feff}'.len_utf8()
+            } else {
+                0
+            };
+            let line = &text[start + bom..];
             if line.trim().is_empty() {
                 text.truncate(start);
             } else {
                 // JSON's own whitespace only, so the text parses as the whole
                 // line would.
                 let json_ws: &[char] = &[' ', '\t', '\r', '\n'];
-                let lead = line.len() - line.trim_start_matches(json_ws).len();
+                let lead = bom + line.len() - line.trim_start_matches(json_ws).len();
                 let kept = line.trim_matches(json_ws).len();
                 lines.push(Line {
                     number: self.line_no,
@@ -240,6 +247,16 @@ mod tests {
         // Line numbers count the blank lines.
         let numbers: Vec<usize> = parts[1].lines().map(|(l, _)| l.number).collect();
         assert_eq!(numbers, [15, 17, 19, 21, 23, 25, 27]);
+    }
+
+    #[test]
+    fn a_byte_order_mark_before_the_first_line_is_skipped() {
+        let text = "\u{feff}{\"a\":1}\n\u{feff}{\"b\":2}\n";
+        let parts = chunks(text, 100, usize::MAX);
+        let lines: Vec<(u64, &str)> = parts[0].lines().map(|(l, t)| (l.offset, t)).collect();
+        // Only the first: a BOM inside the file is the line's own text.
+        assert_eq!(lines, [(3, "{\"a\":1}"), (11, "\u{feff}{\"b\":2}")]);
+        assert_eq!(&text[3..10], "{\"a\":1}");
     }
 
     #[test]

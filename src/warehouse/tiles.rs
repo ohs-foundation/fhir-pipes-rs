@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::config::Settings;
 use super::sql::sql_path;
@@ -32,15 +32,19 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
     let tmp = tempfile::tempdir()?;
     let t = tmp.path();
-    // Each country's `dir`, where it exists, with `pattern` appended: duckdb
-    // fails on a glob that matches nothing.
-    let globs = |dir: &str, pattern: &str| -> Vec<PathBuf> {
-        countries
-            .iter()
-            .map(|c| locations.join(format!("country={c}")).join(dir))
-            .filter(|d| d.is_dir())
-            .map(|d| d.join(pattern))
-            .collect()
+    // The files matching `pattern` in each country's `dir`, listed for
+    // duckdb rather than given as a glob: a directory name can hold `[` or
+    // `{`, which duckdb would read as a pattern, and duckdb fails on a glob
+    // that matches nothing.
+    let globs = |dir: &str, pattern: &str| -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        for c in &countries {
+            let d = locations.join(format!("country={c}")).join(dir);
+            if d.is_dir() {
+                files.extend(matching(&d, pattern)?);
+            }
+        }
+        Ok(files)
     };
     let list = |paths: &[PathBuf]| {
         format!(
@@ -53,7 +57,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         )
     };
 
-    let poly = globs("geom_type=polygon/type=admin-unit", "*.parquet");
+    let poly = globs("geom_type=polygon/type=admin-unit", "*.parquet")?;
     if poly.is_empty() {
         bail!("no admin-unit polygons for {}", countries.join(", "));
     }
@@ -70,7 +74,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
                 sql_path(&file)
             ),
         )?;
-        println!("   {name}: {} features", features(&file));
+        println!("   {name}: {} features", features(&file)?);
     }
     tippecanoe(
         s,
@@ -90,7 +94,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         ],
     )?;
 
-    let points = globs("geom_type=point", "**/*.parquet");
+    let points = globs("geom_type=point", "**/*.parquet")?;
     let points = if points.is_empty() {
         None
     } else {
@@ -124,7 +128,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
                 sql_path(&file)
             ),
         )?;
-        println!("   {layer}: {} features", features(&file));
+        println!("   {layer}: {} features", features(&file)?);
         let mut args = zooms.to_vec();
         args.extend([
             "--drop-rate=1",
@@ -139,12 +143,13 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         )?;
     }
 
-    let catchment_globs: Vec<PathBuf> = countries
-        .iter()
-        .map(|c| locations.join(format!("country={c}/geom_type=polygon")))
-        .filter(|d| has_catchments(d))
-        .map(|d| d.join("type=*-catchment/*.parquet"))
-        .collect();
+    let mut catchment_globs: Vec<PathBuf> = Vec::new();
+    for c in &countries {
+        let d = locations.join(format!("country={c}/geom_type=polygon"));
+        if has_catchments(&d) {
+            catchment_globs.extend(matching(&d, "type=*-catchment/*.parquet")?);
+        }
+    }
     // `out` starts empty, so an archive not built is not in the new tiles/.
     if catchment_globs.is_empty() {
         println!("   catchments: none in the registry, not built");
@@ -163,7 +168,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
                  TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSONSeq');",
                 sql_path(&file)
             ))?;
-            println!("   {kind}_catchments: {} features", features(&file));
+            println!("   {kind}_catchments: {} features", features(&file)?);
             layers.push((format!("{kind}_catchments"), file));
         }
         let layers: Vec<(&str, PathBuf)> = layers
@@ -235,7 +240,13 @@ fn has_catchments(polygon_dir: &Path) -> bool {
 /// Build one archive from its layers. Empty layers are left out (tippecanoe
 /// fails on them); with none left the archive is not built.
 fn tippecanoe(s: &Settings, out: &Path, args: &[&str], layers: &[(&str, PathBuf)]) -> Result<()> {
-    let layers: Vec<&(&str, PathBuf)> = layers.iter().filter(|(_, f)| features(f) > 0).collect();
+    let mut kept = Vec::new();
+    for layer in layers {
+        if features(&layer.1)? > 0 {
+            kept.push(layer);
+        }
+    }
+    let layers = kept;
     let name = out.file_name().unwrap_or_default().to_string_lossy();
     if layers.is_empty() {
         println!("   → {name}: no features, not built");
@@ -258,9 +269,61 @@ fn tippecanoe(s: &Settings, out: &Path, args: &[&str], layers: &[(&str, PathBuf)
     Ok(())
 }
 
-/// GeoJSON or GeoJSONSeq feature count, for the log.
-fn features(file: &Path) -> usize {
-    fs::read_to_string(file)
-        .map(|t| t.matches("\"Feature\"").count())
-        .unwrap_or(0)
+/// GeoJSON or GeoJSONSeq feature count. GDAL writes one feature a line, so
+/// the file is read a line at a time; a file that cannot be read is an
+/// error, not a layer with nothing in it.
+fn features(file: &Path) -> Result<usize> {
+    use std::io::BufRead as _;
+    let f = fs::File::open(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut n = 0;
+    for line in std::io::BufReader::new(f).lines() {
+        let line = line.with_context(|| format!("reading {}", file.display()))?;
+        n += line.matches("\"Feature\"").count();
+    }
+    Ok(n)
+}
+
+/// The files under `dir` that `pattern` matches, sorted. `dir` is taken as
+/// it is, not as a pattern.
+fn matching(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+    let full = format!(
+        "{}/{pattern}",
+        glob::Pattern::escape(&dir.to_string_lossy())
+    );
+    let mut files = glob::glob(&full)
+        .with_context(|| format!("listing {full}"))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("listing {}", dir.display()))?;
+    files.sort();
+    Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_directory_name_is_not_a_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("country=[A]");
+        std::fs::create_dir_all(odd.join("type=x-catchment")).unwrap();
+        std::fs::write(odd.join("type=x-catchment/part-0.parquet"), "").unwrap();
+        std::fs::create_dir_all(dir.path().join("country=A")).unwrap();
+        std::fs::write(dir.path().join("country=A/part-0.parquet"), "").unwrap();
+        let found = matching(&odd, "type=*-catchment/*.parquet").unwrap();
+        assert_eq!(found, [odd.join("type=x-catchment/part-0.parquet")]);
+    }
+
+    #[test]
+    fn features_are_counted_and_an_unreadable_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("l.geojson");
+        std::fs::write(
+            &f,
+            "{\"type\":\"FeatureCollection\",\"features\":[\n{\"type\":\"Feature\"},\n{\"type\":\"Feature\"}\n]}\n",
+        )
+        .unwrap();
+        assert_eq!(features(&f).unwrap(), 2);
+        assert!(features(&dir.path().join("missing.geojson")).is_err());
+    }
 }

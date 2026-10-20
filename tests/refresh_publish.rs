@@ -424,8 +424,13 @@ fn tiles_are_swapped_in_with_the_tables() {
         tippecanoe.display()
     ));
     let data = dir.path().join("data");
-    fs::create_dir_all(
-        data.join("parquet/locations/country=SLE/geom_type=polygon/type=admin-unit"),
+    let admin = data.join("parquet/locations/country=SLE/geom_type=polygon/type=admin-unit");
+    fs::create_dir_all(&admin).unwrap();
+    // The tiles step lists the files it reads (the fake duckdb reads none);
+    // the views step's lookup reads this one too, so it is a real table.
+    fs::copy(
+        data.join("parquet/locations/country=SLE/part-0.parquet"),
+        admin.join("part-0.parquet"),
     )
     .unwrap();
     fs::create_dir_all(data.join("tiles")).unwrap();
