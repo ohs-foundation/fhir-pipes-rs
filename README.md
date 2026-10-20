@@ -392,9 +392,14 @@ files, so `refresh` and the views read them unchanged. The connection string
 comes only from `FHIR_PIPES_HAPI_DATABASE_URL`, never from a flag or a file:
 
 ```sh
-export FHIR_PIPES_HAPI_DATABASE_URL='postgres://fhir_pipes_ro:...@hapi-db.example.org:5432/hapi?sslmode=require'
+export FHIR_PIPES_HAPI_DATABASE_URL='postgres://fhir_pipes_ro:...@hapi-db.example.org:5432/hapi?sslmode=verify-full'
 fhir-pipes export --hapi-db --incremental --type Patient --type Observation --out raw/
 ```
+
+Use `sslmode=verify-full` for a database on another machine: the default,
+`prefer`, falls back to plain text, and `require` does not check the
+server's certificate. fhir-pipes warns when a remote database is reached
+with anything else.
 
 This reads HAPI's internal tables, not a FHIR API, so it ties fhir-pipes to
 HAPI's database schema, which HAPI changes between releases. It was tested

@@ -453,7 +453,7 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
         return Ok(paged.iter().flat_map(|p| p.notes.clone()).collect());
     }
     let mut kept = Vec::with_capacity(last.len());
-    let file = std::fs::File::create(out).map_err(|e| PipesError::io(out, e))?;
+    let file = crate::fs::create_private(out).map_err(|e| PipesError::io(out, e))?;
     let mut writer = BufWriter::new(file);
     for (w, (path, p)) in files.iter().zip(paged).enumerate() {
         let reader =
@@ -480,7 +480,7 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
 /// appended to it, each removed once copied.
 pub(super) fn concatenate(files: &[PathBuf], out: &Path) -> Result<()> {
     let Some((first, rest)) = files.split_first() else {
-        std::fs::File::create(out).map_err(|e| PipesError::io(out, e))?;
+        crate::fs::create_private(out).map_err(|e| PipesError::io(out, e))?;
         return Ok(());
     };
     std::fs::rename(first, out).map_err(|e| PipesError::io(out, e))?;

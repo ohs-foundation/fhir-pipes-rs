@@ -351,15 +351,8 @@ fn manifest(got: &Exchange, status_url: &str) -> Result<Manifest> {
 
 /// `Type/id`: a FHIR reference, relative to the server's base.
 fn is_reference(url: &str) -> bool {
-    url.split_once('/').is_some_and(|(t, id)| {
-        t.starts_with(|c: char| c.is_ascii_uppercase())
-            && t.chars().all(|c| c.is_ascii_alphabetic())
-            && !id.is_empty()
-            && id.len() <= 64
-            && id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-    })
+    url.split_once('/')
+        .is_some_and(|(t, id)| super::valid_type(t) && crate::fhir::group::is_valid_id(id))
 }
 
 /// Medplum lists each file as a reference, `Binary/<id>`, relative to the

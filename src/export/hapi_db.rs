@@ -495,6 +495,30 @@ pub fn export(url: &str, args: &ExportArgs, types: &[&str], report: &mut Report)
     rt.block_on(export_all(url, args, types, report))
 }
 
+/// A warning when the database is on another machine and the connection
+/// does not verify the server's certificate and name: sqlx's default,
+/// `sslmode=prefer`, falls back to plain text, and `require` checks no
+/// certificate, so the password and every row can be read on the way.
+fn tls_warning(url: &str) -> Option<String> {
+    use sqlx_postgres::{PgConnectOptions, PgSslMode};
+    let options: PgConnectOptions = url.parse().ok()?;
+    let host = options.get_host();
+    let local = options.get_socket().is_some()
+        || host.starts_with('/')
+        || host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    let mode = options.get_ssl_mode();
+    (!local && !matches!(mode, PgSslMode::VerifyFull)).then(|| {
+        format!(
+            "warning: the HAPI database at {host} is reached with sslmode={}, which does not \
+             check the server's certificate; add sslmode=verify-full to the URL",
+            format!("{mode:?}").to_lowercase()
+        )
+    })
+}
+
 async fn export_all(
     url: &str,
     args: &ExportArgs,
@@ -504,6 +528,9 @@ async fn export_all(
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
     crate::extract::client::ensure_crypto_provider();
+    if let Some(warning) = tls_warning(url) {
+        eprintln!("{warning}");
+    }
     let mut conn = PgConnection::connect(url)
         .await
         .map_err(db_error("connecting to the HAPI database"))?;
@@ -716,7 +743,7 @@ async fn read_all(
     let mut total = 0usize;
     let mut watermark: Option<String> = None;
     let result = async {
-        let file = crate::fs::AtomicFile::create_at(&out, tmp.clone())?;
+        let file = crate::fs::AtomicFile::create_private_at(&out, tmp.clone())?;
         let mut w = std::io::BufWriter::new(file);
         read_rows(
             conn,
@@ -786,7 +813,8 @@ async fn read_changes(
     let mut deleted: HashSet<String> = HashSet::new();
     let mut watermark = since.to_string();
     let result = async {
-        let file = std::fs::File::create(&incoming).map_err(|e| PipesError::io(&incoming, e))?;
+        let file =
+            crate::fs::create_private(&incoming).map_err(|e| PipesError::io(&incoming, e))?;
         let mut w = std::io::BufWriter::new(file);
         read_rows(
             conn,
@@ -941,6 +969,15 @@ mod tests {
                 &[("forced_id", "text"), ("resource_pid", "bigint")],
             ),
         ])
+    }
+
+    #[test]
+    fn a_remote_database_without_verify_full_gets_a_warning() {
+        assert!(tls_warning("postgres://u:p@db.example.org/hapi").is_some());
+        assert!(tls_warning("postgres://u:p@db.example.org/hapi?sslmode=require").is_some());
+        assert!(tls_warning("postgres://u:p@db.example.org/hapi?sslmode=verify-full").is_none());
+        assert!(tls_warning("postgres://u:p@localhost/hapi").is_none());
+        assert!(tls_warning("postgres://u:p@127.0.0.1:5432/hapi").is_none());
     }
 
     #[test]

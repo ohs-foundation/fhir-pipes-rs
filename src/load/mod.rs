@@ -165,6 +165,14 @@ pub fn read_plan(path: &Path) -> Result<LoadPlan> {
         if resource_type.is_empty() || id.is_empty() {
             return Err(not_a_resource());
         }
+        // Both go into request URLs (`Type/id`, and the conflict check's GET).
+        if !crate::export::valid_type(&resource_type) || !crate::fhir::group::is_valid_id(&id) {
+            return Err(PipesError::Usage(format!(
+                "{}: line {}: {resource_type}/{id} is not a FHIR resource type and id",
+                path.display(),
+                line.number
+            )));
+        }
         let t = match type_index.get(&resource_type) {
             Some(&t) => t,
             None => {
@@ -645,6 +653,27 @@ mod tests {
             .iter()
             .map(|&i| reread.resource(plan, &plan.resources[i]))
             .collect()
+    }
+
+    #[test]
+    fn an_id_or_type_that_would_change_the_url_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for line in [
+            r#"{"resourceType":"Patient","id":"x?_id=y"}"#,
+            r#"{"resourceType":"Patient","id":"../Observation/1"}"#,
+            r#"{"resourceType":"Patient/x","id":"y"}"#,
+        ] {
+            let path = dir.path().join("p.ndjson");
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let Err(err) = read_plan(&path) else {
+                panic!("{line} was accepted")
+            };
+            assert!(
+                err.to_string()
+                    .contains("is not a FHIR resource type and id"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

@@ -224,7 +224,8 @@ pub fn page_search(
     if let Some(parent) = incoming.parent() {
         std::fs::create_dir_all(parent).map_err(|e| PipesError::io(parent, e))?;
     }
-    let file = std::fs::File::create(incoming).map_err(|e| PipesError::io(incoming, e))?;
+    // Search results can be patient data: readable only by the owner.
+    let file = crate::fs::create_private(incoming).map_err(|e| PipesError::io(incoming, e))?;
     let mut out = std::io::BufWriter::new(file);
     let mut seen: HashSet<String> = HashSet::new();
     let mut notes = Vec::new();
