@@ -13,7 +13,7 @@
 //! octofhir-fhirschema's provider, without its schema files or package
 //! manager.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
@@ -92,11 +92,19 @@ fn type_entry(name: &str) -> Option<(&'static Kind, &'static [&'static str])> {
     Some((kind, *bases))
 }
 
-/// The elements of a type or backbone element, sorted by name.
-fn owned(owner: &str) -> &'static [(&'static str, &'static str, bool, ElementType)] {
-    let start = ELEMENTS.partition_point(|(o, ..)| *o < owner);
-    let len = ELEMENTS[start..].partition_point(|(o, ..)| *o == owner);
-    &ELEMENTS[start..start + len]
+type Row = (&'static str, &'static str, bool, ElementType);
+
+/// The elements of a type or backbone element, sorted by name. The engine
+/// asks for an element type at every step it navigates, so owners are
+/// indexed once rather than searched for in all of `ELEMENTS`.
+fn owned(owner: &str) -> &'static [Row] {
+    static OWNERS: LazyLock<HashMap<&'static str, &'static [Row]>> = LazyLock::new(|| {
+        ELEMENTS
+            .chunk_by(|a, b| a.0 == b.0)
+            .map(|rows| (rows[0].0, rows))
+            .collect()
+    });
+    OWNERS.get(owner).copied().unwrap_or(&[])
 }
 
 /// The elements of a type (`Patient`) or backbone element
@@ -120,24 +128,20 @@ pub fn element(owner: &str, name: &str) -> Option<(bool, &'static ElementType)> 
 /// A choice element by its JSON name: `valueQuantity` is `value[x]` as a
 /// Quantity, `valueString` as a string. `(repeats, type)`.
 pub fn choice_by_json_name(owner: &str, name: &str) -> Option<(bool, &'static str)> {
-    // The type starts at an upper-case letter.
-    name.char_indices()
-        .skip(1)
-        .filter(|(_, c)| c.is_ascii_uppercase())
-        .find_map(|(at, _)| {
-            let (base, suffix) = name.split_at(at);
-            let (repeats, ElementType::Choice(types)) = element(owner, &format!("{base}[x]"))?
-            else {
-                return None;
-            };
-            // `Quantity` for `Quantity`, `DateTime` for `dateTime`.
-            let ty = types.iter().find(|t| {
-                let (mut ty, mut written) = (t.chars(), suffix.chars());
-                ty.next().map(|c| c.to_ascii_uppercase()) == written.next()
-                    && ty.as_str() == written.as_str()
-            })?;
-            Some((repeats, *ty))
-        })
+    owned(owner).iter().find_map(|(_, element, repeats, ty)| {
+        let ElementType::Choice(types) = ty else {
+            return None;
+        };
+        // `valueQuantity` is `value` and `Quantity`.
+        let suffix = name.strip_prefix(element.strip_suffix("[x]")?)?;
+        // `Quantity` for `Quantity`, `DateTime` for `dateTime`.
+        let ty = types.iter().find(|t| {
+            let (mut ty, mut written) = (t.chars(), suffix.chars());
+            ty.next().map(|c| c.to_ascii_uppercase()) == written.next()
+                && ty.as_str() == written.as_str()
+        })?;
+        Some((*repeats, *ty))
+    })
 }
 
 /// Whether `name` is a FHIR type (resource, datatype or primitive).
@@ -234,6 +238,69 @@ fn named_type(ty: &str, singleton: bool) -> Option<TypeInfo> {
     }
 }
 
+/// `get_element_type`'s answer for each element of each owner, by the name
+/// the engine asks for: the table's names, and a choice element's JSON names
+/// (`valueQuantity`). Computed once: the engine asks at every step it
+/// navigates, and the answer depends only on the owner and the name.
+#[allow(clippy::type_complexity)]
+static ELEMENT_TYPES: LazyLock<HashMap<&str, HashMap<Box<str>, TypeInfo, Fnv>, Fnv>> =
+    LazyLock::new(|| {
+        let mut map: HashMap<&str, HashMap<Box<str>, TypeInfo, Fnv>, Fnv> = HashMap::default();
+        for (owner, name, repeats, ty) in ELEMENTS {
+            let elements = map.entry(owner).or_default();
+            let singleton = !repeats;
+            match ty {
+                ElementType::Named(ty) => {
+                    if let Some(info) = named_type(ty, singleton) {
+                        elements.insert((*name).into(), info);
+                    }
+                }
+                ElementType::Backbone(path) => {
+                    elements.insert((*name).into(), type_info("Any", singleton, "FHIR", path));
+                }
+                // `value` alone has no type: it depends on the JSON name used.
+                ElementType::Choice(types) => {
+                    let base = name.trim_end_matches("[x]");
+                    for ty in types.iter() {
+                        let mut chars = ty.chars();
+                        let first = chars.next().map(|c| c.to_ascii_uppercase());
+                        let json = format!("{base}{}{}", first.unwrap_or_default(), chars.as_str());
+                        // An element of that name, if any, wins.
+                        if let Some(info) = named_type(ty, singleton) {
+                            elements.entry(json.into()).or_insert(info);
+                        }
+                    }
+                }
+                ElementType::Unknown => {}
+            }
+        }
+        map
+    });
+
+/// FNV-1a: a fast hash for the short names the lookups use.
+type Fnv = std::hash::BuildHasherDefault<FnvHasher>;
+
+#[derive(Default)]
+struct FnvHasher(u64);
+
+impl std::hash::Hasher for FnvHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        };
+        for b in bytes {
+            hash = (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+}
+
 /// A `ModelProvider` over the generated FHIR type table.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TableModelProvider;
@@ -263,16 +330,10 @@ impl ModelProvider for TableModelProvider {
         let Some(owner) = parent_type.name.as_deref() else {
             return Ok(None);
         };
-        if let Some((repeats, ty)) = element(owner, property_name) {
-            return Ok(match ty {
-                ElementType::Named(ty) => named_type(ty, !repeats),
-                ElementType::Backbone(path) => Some(type_info("Any", !repeats, "FHIR", path)),
-                ElementType::Choice(_) | ElementType::Unknown => None,
-            });
-        }
-        // `value` alone has no type: it depends on the JSON name used.
-        Ok(choice_by_json_name(owner, property_name)
-            .and_then(|(repeats, ty)| named_type(ty, !repeats)))
+        Ok(ELEMENT_TYPES
+            .get(owner)
+            .and_then(|elements| elements.get(property_name))
+            .cloned())
     }
 
     fn of_type(&self, type_info: &TypeInfo, target_type: &str) -> Option<TypeInfo> {

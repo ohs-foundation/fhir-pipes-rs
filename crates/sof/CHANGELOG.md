@@ -20,7 +20,8 @@ All notable changes to this project are documented here. The format follows
   FHIRPath suite goes from 936 to 962 of 1,001. Elements whose type differs
   between R4 and R5, and Quantity elements, stay untyped; dates keep the form
   they were written in. Output of the 22 views tried on Synthea data is
-  unchanged; they run about 15% slower.
+  unchanged; they run about 6% slower (the model's element types are
+  computed once and looked up by hash).
 - **Native temporal types in Parquet output** — `ParquetWriter::with_temporal(
   TemporalEncoding::Native)` (CLI: `run --output parquet --parquet-temporal
   native`) writes `date` columns as Arrow `Date32`, `dateTime`/`instant` as
