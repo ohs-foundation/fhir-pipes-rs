@@ -30,6 +30,8 @@ pub struct FetchOptions {
     pub refresh: bool,
     /// 0 disables the breaker.
     pub max_consecutive_failures: usize,
+    /// The FHIR base a relative boundary URL (`Binary/123`) is read from.
+    pub base: Option<url::Url>,
 }
 
 #[derive(Debug)]
@@ -98,7 +100,16 @@ fn resolve_one(
             Err(e) => cache_errors.push(e),
         }
     }
-    let body = match client.get(url) {
+    // The cache and the snapshot know a boundary by its URL as written; a
+    // relative one is read from the FHIR base.
+    let resolved = match &opts.base {
+        Some(base) if url::Url::parse(url).is_err() => match base.join(url) {
+            Ok(u) => u.to_string(),
+            Err(e) => return Outcome::Failed(format!("{url} is not a URL: {e}")),
+        },
+        _ => url.to_string(),
+    };
+    let body = match client.get(&resolved) {
         Ok(f) => f.body,
         Err(e) => return Outcome::Failed(e.to_string()),
     };
@@ -279,6 +290,7 @@ mod tests {
             cache: Some(cache.clone()),
             refresh: false,
             max_consecutive_failures: 50,
+            base: None,
         };
         let summary = fetch_boundaries(&client(1), &urls, &opts, &mut report).unwrap();
         assert_eq!((summary.cached, summary.fetched, summary.failed), (1, 1, 1));
@@ -293,6 +305,29 @@ mod tests {
             0,
             "failures are reported per resource by the merge, not here"
         );
+    }
+
+    #[test]
+    fn a_relative_boundary_url_is_read_from_the_fhir_base() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Binary/b1"))
+                .respond_with(status_code(200).body("{\"type\":\"Point\"}")),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: Some(cache.clone()),
+            refresh: false,
+            max_consecutive_failures: 0,
+            base: Some(server.url("/fhir/").to_string().parse().unwrap()),
+        };
+        let urls = ["Binary/b1".to_string()];
+        let summary = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap();
+        assert_eq!(summary.fetched, 1);
+        // Cached under the URL as the Location wrote it.
+        assert!(cache.read("Binary/b1").unwrap().is_some());
     }
 
     #[test]
@@ -312,6 +347,7 @@ mod tests {
             cache: Some(cache.clone()),
             refresh: true,
             max_consecutive_failures: 0,
+            base: None,
         };
         let summary = fetch_boundaries(
             &client(1),
@@ -337,6 +373,7 @@ mod tests {
             cache: None,
             refresh: false,
             max_consecutive_failures: 0,
+            base: None,
         };
         let summary = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap();
         assert_eq!(
@@ -369,6 +406,7 @@ mod tests {
             cache: Some(cache.clone()),
             refresh: false,
             max_consecutive_failures: 0,
+            base: None,
         };
         let summary =
             fetch_boundaries(&client(1), std::slice::from_ref(&url), &opts, &mut report).unwrap();
@@ -397,6 +435,7 @@ mod tests {
             cache: None,
             refresh: false,
             max_consecutive_failures: 3,
+            base: None,
         };
         let err = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap_err();
         assert_eq!(err.exit_code(), 1);
@@ -425,6 +464,7 @@ mod tests {
             cache: None,
             refresh: false,
             max_consecutive_failures: 2,
+            base: None,
         };
         let summary = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap();
         assert_eq!((summary.fetched, summary.failed), (1, 5));
@@ -436,6 +476,7 @@ mod tests {
             cache: None,
             refresh: false,
             max_consecutive_failures: 0,
+            base: None,
         };
         let summary = fetch_boundaries(&client(1), &dead, &opts, &mut Report::default()).unwrap();
         assert_eq!(summary.failed, 5);
@@ -448,6 +489,7 @@ mod tests {
             cache: None,
             refresh: false,
             max_consecutive_failures: 5,
+            base: None,
         };
         let summary = fetch_boundaries(&client(1), &[], &opts, &mut Report::default()).unwrap();
         assert_eq!((summary.cached, summary.fetched, summary.failed), (0, 0, 0));
@@ -496,6 +538,7 @@ mod tests {
                 cache: None,
                 refresh: false,
                 max_consecutive_failures: 3,
+                base: None,
             };
             let err =
                 fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap_err();
@@ -527,6 +570,7 @@ mod tests {
             cache: Some(cache),
             refresh: true,
             max_consecutive_failures: 0,
+            base: None,
         };
         let summary =
             fetch_boundaries(&client(1), std::slice::from_ref(&url), &opts, &mut report).unwrap();
@@ -569,6 +613,7 @@ mod tests {
             cache: None,
             refresh: false,
             max_consecutive_failures: 3,
+            base: None,
         };
         fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap_err();
         let seen = requested.load(std::sync::atomic::Ordering::SeqCst);
