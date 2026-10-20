@@ -18,6 +18,10 @@ The kind's parameters are added to the first page of each search and kept on
 the server's next links. The kind does not change authentication or
 `--hapi-db`.
 
+The files `export` and `extract` write the resources into are readable only
+by their owner on Unix (mode 0600), since they can hold patient data. Copy
+or share them on purpose.
+
 The window limits are targets, not guarantees. The windows' counts
 must add up to the type's before any halving, and past the usual number of
 windows (eight per `--concurrency`), halving stops at a window whose halves
