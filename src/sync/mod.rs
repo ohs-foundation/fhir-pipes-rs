@@ -510,7 +510,8 @@ pub fn run_sync(args: &SyncArgs) -> Result<()> {
         args.auth.auth()?,
         args.retries,
         Duration::from_secs(args.timeout),
-    )?;
+    )?
+    .for_server(&args.server);
     let creates: Vec<String> = plans
         .iter()
         .filter(|p| !p.changed.is_empty())

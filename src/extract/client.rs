@@ -337,6 +337,9 @@ pub struct FhirClient {
     user_project: Option<HeaderValue>,
     /// The limit on requests in flight, when the client has one.
     gate: Option<Gate>,
+    /// The origin (scheme, host and port) the credentials may go to, set by
+    /// `for_server`. Requests to any other origin go without them.
+    origin: Option<url::Origin>,
 }
 
 /// A limit on the requests in flight from all the threads sharing a client
@@ -359,8 +362,12 @@ struct GateState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Attempt {
     /// Waits for a place in the gate, then adds the Authorization header as
-    /// it is then, renewing a token that is due.
+    /// it is then, renewing a token that is due, when the request goes to
+    /// the server's origin.
     Authorized,
+    /// `Authorized`, to any origin: a Bulk Data output file whose manifest
+    /// says it needs the token, which the spec lets live on another host.
+    AuthorizedAnywhere,
     /// Waits for a place; no credentials (a signed storage URL).
     Anonymous,
     /// Neither: a token request. It runs while a request holds a place and
@@ -630,6 +637,7 @@ impl FhirClient {
             auth: Authorizer::None,
             user_project: None,
             gate: None,
+            origin: None,
         };
         client.auth = match auth {
             Auth::None => Authorizer::None,
@@ -709,6 +717,15 @@ impl FhirClient {
     /// this client, and a Retry-After on any response pauses them all.
     pub fn with_concurrency(mut self, limit: usize) -> Self {
         self.gate = Some(Gate::new(limit));
+        self
+    }
+
+    /// Send the credentials only to `server`'s origin (scheme, host and
+    /// port). A URL taken from resource data (a boundary) or from a response
+    /// (a next link, a status URL) can name another host, which must not get
+    /// the server's token. Without this, no request gets the credentials.
+    pub fn for_server(mut self, server: &str) -> Self {
+        self.origin = url::Url::parse(server).ok().map(|u| u.origin());
         self
     }
 
@@ -839,7 +856,7 @@ impl FhirClient {
             };
             // After the wait for a place, which can outlast a token.
             if let Some(v) = self.authorization()? {
-                request = self.authorize(request, &v);
+                request = self.authorize(request, &v, false)?;
             }
             // After both: the wait and a token renewal take from the time
             // left, and a request must not start after the deadline.
@@ -890,7 +907,7 @@ impl FhirClient {
                 .map_err(|e| FetchError::Transport(format!("reading body: {e}")))
         };
         let attempt = if authorize {
-            Attempt::Authorized
+            Attempt::AuthorizedAnywhere
         } else {
             Attempt::Anonymous
         };
@@ -992,13 +1009,24 @@ impl FhirClient {
         self.retrying(Attempt::Authorized, request, success)
     }
 
-    /// The Authorization header, and `x-goog-user-project` when set.
-    fn authorize(&self, request: RequestBuilder, auth: &HeaderValue) -> RequestBuilder {
-        let request = request.header(AUTHORIZATION, auth.clone());
-        match &self.user_project {
-            Some(p) => request.header("x-goog-user-project", p.clone()),
-            None => request,
+    /// The Authorization header, and `x-goog-user-project` when set, when
+    /// `request` goes to the server's origin, or to any with `anywhere`.
+    fn authorize(
+        &self,
+        request: RequestBuilder,
+        auth: &HeaderValue,
+        anywhere: bool,
+    ) -> std::result::Result<RequestBuilder, FetchError> {
+        let (client, built) = request.build_split();
+        let mut built = built.map_err(|e| FetchError::Transport(e.to_string()))?;
+        if anywhere || self.origin.as_ref() == Some(&built.url().origin()) {
+            let headers = built.headers_mut();
+            headers.insert(AUTHORIZATION, auth.clone());
+            if let Some(p) = &self.user_project {
+                headers.insert("x-goog-user-project", p.clone());
+            }
         }
+        Ok(RequestBuilder::from_parts(client, built))
     }
 
     /// The retry loop. Any 2xx is a success, handed to `success`; 429 and
@@ -1033,19 +1061,22 @@ impl FhirClient {
         for attempt in 1..=self.retries {
             let pass = match kind {
                 Attempt::Token => None,
-                Attempt::Authorized | Attempt::Anonymous => match self.enter_by(deadline) {
-                    Ok(pass) => pass,
-                    Err(()) => break,
-                },
+                Attempt::Authorized | Attempt::AuthorizedAnywhere | Attempt::Anonymous => {
+                    match self.enter_by(deadline) {
+                        Ok(pass) => pass,
+                        Err(()) => break,
+                    }
+                }
             };
             let mut request = request();
             // Chosen once admitted, for every attempt: the wait for a place
             // and the sleeps between attempts can outlast a token, and the
             // token is renewed here when it is due.
-            if kind == Attempt::Authorized
+            let anywhere = kind == Attempt::AuthorizedAnywhere;
+            if (kind == Attempt::Authorized || anywhere)
                 && let Some(v) = self.authorization()?
             {
-                request = self.authorize(request, &v);
+                request = self.authorize(request, &v, anywhere)?;
             }
             // After both: the wait for a place and a token renewal take from
             // the time left.
@@ -1252,6 +1283,7 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap()
+        .for_server(&server.url_str("/"))
         .with_concurrency(1);
         client.get(&server.url_str("/busy")).unwrap_err();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1297,7 +1329,8 @@ mod tests {
             3,
             Duration::from_secs(5),
         )
-        .unwrap();
+        .unwrap()
+        .for_server(&server.url_str("/"));
         let deadline = Instant::now() + Duration::from_millis(400);
         let err = client
             .exchange_by(Method::GET, &server.url_str("/status"), Some(deadline))
@@ -1751,6 +1784,61 @@ mod tests {
     }
 
     #[test]
+    fn the_token_goes_only_to_the_servers_origin() {
+        let fhir = Server::run();
+        let elsewhere = Server::run();
+        fhir.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Location"),
+                request::headers(contains(("authorization", "Bearer secret"))),
+            ])
+            .respond_with(status_code(200)),
+        );
+        // A boundary URL from a Location, on another host (another port
+        // is another origin): no token.
+        elsewhere.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/boundary.geojson"),
+                request::headers(not(contains(key("authorization")))),
+            ])
+            .respond_with(status_code(200)),
+        );
+        // A Bulk Data file whose manifest says it needs the token: sent.
+        elsewhere.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/files/p.ndjson"),
+                request::headers(contains(("authorization", "Bearer secret"))),
+            ])
+            .respond_with(status_code(200)),
+        );
+        let c = FhirClient::new(Auth::Token("secret".into()), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&fhir.url_str("/fhir"));
+        c.get(&fhir.url_str("/fhir/Location")).unwrap();
+        c.get(&elsewhere.url_str("/boundary.geojson")).unwrap();
+        c.download(
+            &elsewhere.url_str("/files/p.ndjson"),
+            true,
+            Duration::from_secs(5),
+            |_| Ok(()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn without_a_server_no_request_gets_the_token() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::headers(not(contains(key("authorization")))))
+                .respond_with(status_code(200)),
+        );
+        FhirClient::new(Auth::Token("secret".into()), 1, Duration::from_secs(5))
+            .unwrap()
+            .get(&server.url_str("/t"))
+            .unwrap();
+    }
+
+    #[test]
     fn bearer_and_accept_headers_are_sent() {
         let server = Server::run();
         server.expect(
@@ -1767,6 +1855,7 @@ mod tests {
             std::time::Duration::from_secs(5),
         )
         .unwrap()
+        .for_server(&server.url_str("/"))
         .get(&server.url("/t").to_string())
         .unwrap();
     }
@@ -1823,7 +1912,9 @@ mod tests {
             .times(2)
             .respond_with(status_code(200).body("ok")),
         );
-        let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url("/t").to_string()).unwrap();
         c.get(&server.url("/t").to_string()).unwrap();
     }
@@ -1871,7 +1962,9 @@ mod tests {
             token_auth: TokenAuth::Basic,
             scope: None,
         };
-        let c = FhirClient::new(auth, 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(auth, 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url_str("/t")).unwrap();
     }
 
@@ -1924,7 +2017,9 @@ mod tests {
             .times(2)
             .respond_with(status_code(200).body("ok")),
         );
-        let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(credentials(&server), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url("/t").to_string()).unwrap();
         c.get(&server.url("/t").to_string()).unwrap();
     }
@@ -2007,7 +2102,9 @@ mod tests {
             .respond_with(status_code(200).body("ok")),
         );
         let json = google::tests::service_account_json(&server.url_str("/token"));
-        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url_str("/fhir/Patient")).unwrap();
         c.get(&server.url_str("/fhir/Patient")).unwrap();
     }
@@ -2032,7 +2129,9 @@ mod tests {
             .respond_with(status_code(200).body("ok")),
         );
         let json = google::tests::service_account_json(&server.url_str("/token"));
-        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url_str("/t")).unwrap();
         c.get(&server.url_str("/t")).unwrap();
     }
@@ -2084,7 +2183,9 @@ mod tests {
             .respond_with(status_code(200).body("ok")),
         );
         let json = google::tests::authorized_user_json(Some(&server.url_str("/token")));
-        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(google(&json), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url_str("/t")).unwrap();
     }
 
@@ -2107,7 +2208,9 @@ mod tests {
             .times(2)
             .respond_with(status_code(200).body("ok")),
         );
-        let c = FhirClient::new(metadata(&server), 1, Duration::from_secs(5)).unwrap();
+        let c = FhirClient::new(metadata(&server), 1, Duration::from_secs(5))
+            .unwrap()
+            .for_server(&server.url_str("/"));
         c.get(&server.url_str("/t")).unwrap();
         c.get(&server.url_str("/t")).unwrap();
     }

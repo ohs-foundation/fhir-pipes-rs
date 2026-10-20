@@ -155,6 +155,7 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
         args.retries,
         Duration::from_secs(args.timeout),
     )?
+    .for_server(&args.server)
     .with_concurrency(args.concurrency);
     let mut state = ExportState::read(&args.out);
     if !same_server(&state.server, &args.server) {

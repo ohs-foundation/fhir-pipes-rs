@@ -18,6 +18,13 @@ The kind's parameters are added to the first page of each search and kept on
 the server's next links. The kind does not change authentication or
 `--hapi-db`.
 
+The token or other credentials go only to the `--server` origin: the same
+scheme, host and port. A boundary file on another host is fetched without
+them. A Bulk Data output file gets them wherever it is when the manifest says
+`requiresAccessToken`. A next link to another origin stops the run. That
+usually means the server does not know its public URL; behind a proxy, HAPI
+needs `X-Forwarded-Host` and `X-Forwarded-Proto`.
+
 The window limits are targets, not guarantees. The windows' counts
 must add up to the type's before any halving, and past the usual number of
 windows (eight per `--concurrency`), halving stops at a window whose halves

@@ -75,6 +75,14 @@ impl SqlGenerator {
             ));
         }
 
+        // The resource names the table, which goes into the SQL unquoted.
+        if !is_resource_name(&view.resource) {
+            return Err(Error::InvalidViewDefinition(format!(
+                "`resource` must be a FHIR resource type name, got {:?}",
+                view.resource
+            )));
+        }
+
         let constants = build_constants(view)?;
         let table = view.resource.to_lowercase();
         let ctx0 = format!("{}.resource", self.table_pattern);
@@ -166,6 +174,12 @@ impl SqlGenerator {
         }
         sql
     }
+}
+
+/// A resource type name as FHIR spells them: a capital letter, then letters
+/// and digits.
+fn is_resource_name(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_uppercase()) && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// A column produced by a plan, with the SQL expression that yields it.
@@ -296,5 +310,30 @@ mod tests {
         }))
         .unwrap();
         assert!(SqlGenerator::new().generate(&v).is_err());
+    }
+
+    #[test]
+    fn a_resource_that_is_not_a_type_name_errors() {
+        for resource in ["Patient base, pg_user u --", "patient", "Patient;"] {
+            let v = ViewDefinition::from_json(&json!({
+                "resource": resource,
+                "select": [{ "column": [{ "name": "id", "path": "id" }] }]
+            }))
+            .unwrap();
+            assert!(SqlGenerator::new().generate(&v).is_err(), "{resource}");
+        }
+    }
+
+    #[test]
+    fn strings_from_the_view_are_quoted() {
+        let g = build_sql(json!({
+            "resource": "Patient",
+            "select": [{ "column": [
+                { "name": "given", "path": "name.given.join('\\',(select 1))--')" },
+                { "name": "ext", "path": "extension('it\\'s').value.ofType(string)" }
+            ] }]
+        }));
+        assert!(g.sql.contains(", ''',(select 1))--')"), "{}", g.sql);
+        assert!(g.sql.contains("= 'it''s'"), "{}", g.sql);
     }
 }

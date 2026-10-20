@@ -231,6 +231,7 @@ pub fn page_search(
     let mut pages = 0usize;
     let mut last_page_len;
     let mut started: Option<String> = None;
+    let origin = url.origin();
 
     loop {
         let current = url.to_string();
@@ -311,6 +312,17 @@ pub fn page_search(
                     ))
                 })?;
                 keep_params(&mut url, kind.page_params());
+                // The credentials go only to the server's origin, so a link
+                // elsewhere would fail without them, or be followed with
+                // nothing to stop it from leaving the server.
+                if url.origin() != origin {
+                    return Err(PipesError::Environment(format!(
+                        "the server's next link {url} is not on {}; check the base URL the \
+                         server is configured with (behind a proxy, HAPI needs \
+                         X-Forwarded-Host and X-Forwarded-Proto)",
+                        origin.ascii_serialization()
+                    )));
+                }
             }
             None => break,
         }
@@ -478,6 +490,34 @@ mod tests {
     }
     fn client() -> FhirClient {
         FhirClient::new(Auth::None, 1, std::time::Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn a_next_link_to_another_origin_is_refused() {
+        let server = Server::run();
+        let elsewhere = Server::run();
+        let next = elsewhere.url("/fhir/Organization?page=2").to_string();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Organization")).respond_with(
+                status_code(200).body(bundle(
+                    &[serde_json::json!({"resourceType":"Organization","id":"org-1"})],
+                    Some(&next),
+                )),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let err = page_resources(
+            &client(),
+            &server.url("/fhir").to_string(),
+            ServerKind::Generic,
+            "Organization",
+            None,
+            &dir.path().join("inc.ndjson"),
+            &mut Report::default(),
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not on"), "{err}");
     }
 
     #[test]
