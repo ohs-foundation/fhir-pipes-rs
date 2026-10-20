@@ -99,6 +99,11 @@ changes.
 
 ### Fixed
 
+- **A `repeat` path that does not read child elements is refused.**
+  `repeat: ["$this"]` grew the in-memory worklist until memory ran out, and
+  the SQL engines' recursive CTE never ended. Both engines now refuse a path
+  that starts from `$this`, `%resource`, the resource type or a literal, and
+  the in-memory engine stops past 128 levels.
 - **`views run --db` returned every decimal column as null.** The SQL casts
   decimals to `numeric`, and the runner read them as `f64`, which sqlx cannot
   decode from `numeric`; the error was dropped. Each row is now read as one

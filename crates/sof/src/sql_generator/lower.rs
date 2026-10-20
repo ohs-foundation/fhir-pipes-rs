@@ -181,9 +181,11 @@ impl Lower {
             .iter()
             .map(|p| {
                 let s = self.substitute(p)?;
-                parse_ast(&s).map_err(|e| Error::FhirPath(e.to_string()))
+                let ast = parse_ast(&s).map_err(|e| Error::FhirPath(e.to_string()))?;
+                crate::repeat_path::check(p, &ast, &self.resource_type)?;
+                Ok(ast)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
         let n = self.fresh();
         let cte = format!("_rep{n}");

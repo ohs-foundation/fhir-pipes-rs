@@ -109,6 +109,18 @@ paths follow the element's owner type from the view's resource. Below a
 `forEach`, where they do not know the items' type, they treat an element as a
 choice element when any FHIR type has a choice element of that name.
 
+## `repeat` paths
+
+The spec applies a `repeat` path again to everything it returns, until
+nothing new is found. It says nothing about a path that returns its own input
+(`$this`), the resource (`%resource`), or a literal: applied again, each
+returns what it was given, and the traversal never ends. A `repeat` path must
+read child elements of the node it is applied to (`item`, `answer.item`,
+`item.where(type = 'group')`, or a union of such paths). Each step then goes
+one level down the resource, so the traversal ends. Both engines refuse other
+paths when the view is compiled or its SQL generated, and the in-memory
+engine also stops with an error past 128 levels.
+
 ## FHIRPath functions that need a type checker
 
 The FHIRPath spec wants some expressions rejected before evaluation because of

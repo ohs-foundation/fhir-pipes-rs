@@ -395,6 +395,9 @@ pub fn delete(client: &FhirClient, status_url: &str) -> std::result::Result<(), 
     }
 }
 
+/// The longest line of a Bulk Data file read: far more than any resource.
+const MAX_LINE: u64 = 256 << 20;
+
 /// Download `url` and hand each non-blank line to `each`. The bearer token
 /// goes with the request only when the manifest says `requiresAccessToken`.
 /// `timeout` covers the whole file.
@@ -409,10 +412,29 @@ pub fn read_lines(
     // first is kept here and the download stopped with a placeholder.
     let mut failed: Option<PipesError> = None;
     let got = client.download(url, authorize, timeout, |body| {
-        let reader = std::io::BufReader::with_capacity(1 << 20, body);
-        for line in reader.lines() {
-            let line = line?;
-            let line = line.trim_end_matches('\r');
+        let mut reader = std::io::BufReader::with_capacity(1 << 20, body);
+        let mut buf = Vec::new();
+        let mut first = true;
+        loop {
+            buf.clear();
+            // A line is read up to MAX_LINE: a file with no newline would
+            // otherwise be held whole.
+            let n = std::io::Read::take(&mut reader, MAX_LINE + 1).read_until(b'\n', &mut buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            if buf.len() as u64 > MAX_LINE {
+                return Err(std::io::Error::other(format!(
+                    "a line is longer than {} MB",
+                    MAX_LINE >> 20
+                )));
+            }
+            let text = std::str::from_utf8(&buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let mut line = text.trim_end_matches('\n').trim_end_matches('\r');
+            if std::mem::take(&mut first) {
+                line = line.strip_prefix('\u{feff}').unwrap_or(line);
+            }
             if line.trim().is_empty() {
                 continue;
             }
@@ -421,7 +443,6 @@ pub fn read_lines(
                 return Err(std::io::Error::other("stopped"));
             }
         }
-        Ok(())
     });
     if let Some(e) = failed {
         return Err(e);
@@ -520,6 +541,35 @@ fn outcome_text(body: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn bulk_lines_skip_a_bom_and_blank_lines() {
+        use httptest::{Expectation, Server, matchers::*, responders::*};
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/f.ndjson"))
+                .respond_with(status_code(200).body("\u{feff}{\"id\":\"a\"}\r\n\n{\"id\":\"b\"}")),
+        );
+        let client = FhirClient::new(
+            crate::extract::client::Auth::None,
+            1,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut lines = Vec::new();
+        read_lines(
+            &client,
+            &server.url_str("/f.ndjson"),
+            false,
+            Duration::from_secs(5),
+            |l| {
+                lines.push(l.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(lines, [r#"{"id":"a"}"#, r#"{"id":"b"}"#]);
+    }
 
     #[test]
     fn the_kick_off_lists_the_types_and_encodes_since() {

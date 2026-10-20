@@ -54,6 +54,11 @@ fn cached(spec: &str) -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// The largest JSON file read from a package, and the most in all: the
+/// biggest packages (hl7.terminology) hold a few hundred MB.
+const MAX_ENTRY: u64 = 512 << 20;
+const MAX_TOTAL: u64 = 4 << 30;
+
 /// A gzipped tar of JSON files, as the IG publisher writes `package.tgz`.
 fn read_tgz(
     bytes: &[u8],
@@ -61,14 +66,39 @@ fn read_tgz(
     flag: &str,
     visit: &mut impl FnMut(&str, &str),
 ) -> Result<()> {
+    read_tgz_up_to(bytes, spec, flag, visit, (MAX_ENTRY, MAX_TOTAL))
+}
+
+fn read_tgz_up_to(
+    bytes: &[u8],
+    spec: &str,
+    flag: &str,
+    visit: &mut impl FnMut(&str, &str),
+    (max_entry, max_total): (u64, u64),
+) -> Result<()> {
     let bad =
         |e: std::io::Error| PipesError::Usage(format!("{flag} {spec}: not a FHIR package: {e}"));
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let mut total = 0u64;
     for entry in archive.entries().map_err(bad)? {
         let mut entry = entry.map_err(bad)?;
         let name = entry.path().map_err(bad)?.to_string_lossy().into_owned();
         if !name.ends_with(".json") {
             continue;
+        }
+        // Each entry's size is in its tar header, read before its content:
+        // a few MB of gzip can claim, and hold, far more.
+        let size = entry.size();
+        total += size;
+        if size > max_entry || total > max_total {
+            return Err(PipesError::Usage(format!(
+                "{flag} {spec}: {name} is {} MB, and the JSON files {} MB so far; over the \
+                 {} MB per file or {} MB in all a FHIR package is read up to",
+                size >> 20,
+                total >> 20,
+                max_entry >> 20,
+                max_total >> 20
+            )));
         }
         let mut text = String::new();
         if entry.read_to_string(&mut text).is_ok() {
@@ -81,8 +111,11 @@ fn read_tgz(
 fn read_dir(dir: &Path, visit: &mut impl FnMut(&str, &str)) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|e| PipesError::io(dir, e))?;
     for entry in entries {
-        let path = entry.map_err(|e| PipesError::io(dir, e))?.path();
-        if path.is_dir() {
+        let entry = entry.map_err(|e| PipesError::io(dir, e))?;
+        let path = entry.path();
+        // Not through a symlink: a link back up the tree would recurse until
+        // the stack ran out.
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             read_dir(&path, visit)?;
         } else if path.extension().is_some_and(|e| e == "json")
             && let Ok(text) = std::fs::read_to_string(&path)
@@ -112,6 +145,31 @@ pub(crate) fn tgz(files: &[(&str, &str)]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_package_past_the_size_limits_is_refused() {
+        let bytes = tgz(&[("a.json", "{}"), ("b.json", "[1, 2, 3]")]);
+        let read = |limits| read_tgz_up_to(&bytes, "p.tgz", "--package", &mut |_, _| {}, limits);
+        read((1 << 20, 1 << 20)).unwrap();
+        assert!(
+            read((4, 1 << 20))
+                .unwrap_err()
+                .to_string()
+                .contains("b.json")
+        );
+        assert!(read((1 << 20, 6)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        let mut seen = 0;
+        read_dir(dir.path(), &mut |_, _| seen += 1).unwrap();
+        assert_eq!(seen, 1);
+    }
 
     #[test]
     fn not_a_package_is_a_usage_error() {
