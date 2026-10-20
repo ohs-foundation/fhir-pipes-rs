@@ -64,6 +64,9 @@ const ERROR_BODY_READ_LIMIT: u64 = 8192;
 /// parses it (a Bulk Data OperationOutcome). Beyond it the body is cut and
 /// `truncated` set.
 const EXCHANGE_BODY_LIMIT: u64 = 1 << 20;
+/// The most a 2xx body read whole may decode to: far more than a search
+/// page, a boundary or a package holds.
+const DEFAULT_BODY_LIMIT: u64 = 1 << 30;
 /// Assumed token lifetime, in seconds, when a token response omits `expires_in`.
 const DEFAULT_TOKEN_LIFETIME: u64 = 300;
 /// Per-request timeout for the Google metadata server, which answers in
@@ -273,35 +276,43 @@ fn decoded(resp: Response) -> Box<dyn Read> {
     Box::new(flate2::bufread::MultiGzDecoder::new(body))
 }
 
-/// The whole decoded body.
-fn read_body(resp: Response) -> std::result::Result<Vec<u8>, FetchError> {
+/// The whole decoded body, failing past `limit` bytes: a small gzip body can
+/// decode to far more than memory holds.
+fn read_body(resp: Response, limit: u64) -> std::result::Result<Vec<u8>, FetchError> {
     let mut body = Vec::new();
     decoded(resp)
+        .take(limit.saturating_add(1))
         .read_to_end(&mut body)
         .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?;
+    if body.len() as u64 > limit {
+        return Err(FetchError::Transport(format!(
+            "the response is larger than {} MB once decoded; not read",
+            limit >> 20
+        )));
+    }
     Ok(body)
 }
 
 /// A 2xx response's body and `Date`.
-fn fetched(resp: Response) -> std::result::Result<Fetched, FetchError> {
+fn fetched(resp: Response, limit: u64) -> std::result::Result<Fetched, FetchError> {
     let date = resp
         .headers()
         .get(reqwest::header::DATE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     Ok(Fetched {
-        body: read_body(resp)?,
+        body: read_body(resp, limit)?,
         date,
     })
 }
 
 /// Any response, with its status and headers.
-fn exchanged(resp: Response) -> std::result::Result<Exchange, FetchError> {
+fn exchanged(resp: Response, limit: u64) -> std::result::Result<Exchange, FetchError> {
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();
     let mut truncated = false;
     let body = if (200..300).contains(&status) {
-        read_body(resp)?
+        read_body(resp, limit)?
     } else {
         let mut buf = Vec::new();
         let _ = decoded(resp)
@@ -340,6 +351,8 @@ pub struct FhirClient {
     /// The origin (scheme, host and port) the credentials may go to, set by
     /// `for_server`. Requests to any other origin go without them.
     origin: Option<url::Origin>,
+    /// The most a body read whole may decode to.
+    body_limit: u64,
 }
 
 /// A limit on the requests in flight from all the threads sharing a client
@@ -638,6 +651,7 @@ impl FhirClient {
             user_project: None,
             gate: None,
             origin: None,
+            body_limit: DEFAULT_BODY_LIMIT,
         };
         client.auth = match auth {
             Auth::None => Authorizer::None,
@@ -720,6 +734,13 @@ impl FhirClient {
         self
     }
 
+    /// Read whole bodies of up to `bytes` once decoded, in place of 1 GiB:
+    /// for a raster, which can be larger.
+    pub fn with_body_limit(mut self, bytes: u64) -> Self {
+        self.body_limit = bytes;
+        self
+    }
+
     /// Send the credentials only to `server`'s origin (scheme, host and
     /// port). A URL taken from resource data (a boundary) or from a response
     /// (a next link, a status URL) can name another host, which must not get
@@ -751,7 +772,7 @@ impl FhirClient {
 
     /// GET with the retry policy. Sleeps between attempts.
     pub fn get(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
-        self.send(|| self.fhir_get(url), fetched)
+        self.send(|| self.fhir_get(url), |r| fetched(r, self.body_limit))
     }
 
     /// A FHIR GET: `no-cache`, so a search or count is not answered from a
@@ -771,7 +792,7 @@ impl FhirClient {
                     .header(ACCEPT, "application/json")
                     .header(CACHE_CONTROL, "no-cache")
             },
-            fetched,
+            |r| fetched(r, self.body_limit),
         )
     }
 
@@ -798,7 +819,7 @@ impl FhirClient {
                     .header(CONTENT_TYPE, "application/fhir+json")
                     .body(body.clone())
             },
-            fetched,
+            |r| fetched(r, self.body_limit),
         );
         (got, sent.get())
     }
@@ -820,7 +841,7 @@ impl FhirClient {
             || self.fhir_get(url).header("prefer", "respond-async"),
             |status| status == 429,
             deadline,
-            exchanged,
+            |r| exchanged(r, self.body_limit),
         )
     }
 
@@ -867,7 +888,7 @@ impl FhirClient {
                 request = request.timeout(self.timeout.min(left));
             }
             match request.send() {
-                Ok(resp) => return exchanged(resp),
+                Ok(resp) => return exchanged(resp, self.body_limit),
                 Err(e) => {
                     drop(pass);
                     last = Some(FetchError::Transport(e.to_string()));
@@ -937,7 +958,7 @@ impl FhirClient {
                         None => request,
                     }
                 },
-                fetched,
+                |r| fetched(r, self.body_limit),
             )
         };
         let got = match grant {
@@ -960,7 +981,7 @@ impl FhirClient {
                         .header("metadata-flavor", "Google")
                         .timeout(METADATA_TIMEOUT)
                 },
-                fetched,
+                |r| fetched(r, self.body_limit),
             )?,
         };
         let body: Value = serde_json::from_slice(&got.body)
@@ -1781,6 +1802,24 @@ mod tests {
     fn connection_refused_is_a_transport_error() {
         let err = client(1).get("http://127.0.0.1:9/nothing").unwrap_err();
         assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_body_that_decodes_past_the_limit_is_not_read() {
+        let server = Server::run();
+        // 2 MB of zeros, a few KB once gzipped.
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/big")).respond_with(
+                status_code(200)
+                    .insert_header("content-encoding", "gzip")
+                    .body(gzip_members(&[&vec![0u8; 2 << 20]])),
+            ),
+        );
+        let err = client(1)
+            .with_body_limit(1 << 20)
+            .get(&server.url_str("/big"))
+            .unwrap_err();
+        assert!(err.to_string().contains("larger than 1 MB"), "{err}");
     }
 
     #[test]

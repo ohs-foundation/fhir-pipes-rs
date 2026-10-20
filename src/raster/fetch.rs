@@ -87,7 +87,8 @@ pub fn load(
         Ok(None) => {}
         Err(e) => cache_errors.push(format!("read: {e}")),
     }
-    let client = FhirClient::new(Auth::None, retries, timeout)?;
+    // A national raster at 100 m can pass the client's 1 GiB.
+    let client = FhirClient::new(Auth::None, retries, timeout)?.with_body_limit(8 << 30);
     eprintln!("raster: fetching {label} …");
     let fetched = client
         .get(source)

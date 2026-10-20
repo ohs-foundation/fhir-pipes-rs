@@ -1,0 +1,72 @@
+{
+  "title": "repeat_path",
+  "description": "A repeat path that does not read child elements could loop for ever, and is refused (issue #104).",
+  "resources": [
+    {
+      "resourceType": "Questionnaire",
+      "id": "q1",
+      "status": "active",
+      "item": [
+        {
+          "linkId": "1",
+          "item": [
+            {
+              "linkId": "1.1"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "title": "repeat over child items",
+      "view": {
+        "resource": "Questionnaire",
+        "select": [
+          {
+            "repeat": [
+              "item"
+            ],
+            "column": [
+              {
+                "name": "link_id",
+                "path": "linkId",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": [
+        {
+          "link_id": "1"
+        },
+        {
+          "link_id": "1.1"
+        }
+      ]
+    },
+    {
+      "title": "repeat over $this is refused",
+      "view": {
+        "resource": "Questionnaire",
+        "select": [
+          {
+            "repeat": [
+              "$this"
+            ],
+            "column": [
+              {
+                "name": "id",
+                "path": "id",
+                "type": "string"
+              }
+            ]
+          }
+        ]
+      },
+      "expectError": true
+    }
+  ]
+}

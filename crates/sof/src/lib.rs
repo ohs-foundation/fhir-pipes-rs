@@ -53,6 +53,7 @@ mod eval;
 pub mod fhir_model;
 mod lexer;
 pub mod output;
+mod repeat_path;
 mod runner;
 mod sql_generator;
 mod view_definition;

@@ -134,6 +134,9 @@ fn thread_panicked() -> Error {
     Error::FhirPath("evaluation thread panicked".to_string())
 }
 
+/// Deeper than any resource's JSON can be (serde_json stops at 128).
+const MAX_REPEAT_DEPTH: usize = 128;
+
 /// A ViewDefinition compiled once for repeated, resource-at-a-time execution.
 ///
 /// Validates the view (columns, name collisions, constants) and compiles every
@@ -560,7 +563,12 @@ impl Evaluator {
         let repeat = select
             .repeat
             .iter()
-            .map(|p| self.plan(&self.prepare(p, None)?))
+            .map(|p| {
+                let ast =
+                    octofhir_fhirpath::parse_ast(p).map_err(|e| Error::FhirPath(e.to_string()))?;
+                crate::repeat_path::check(p, &ast, &self.resource_type)?;
+                self.plan(&self.prepare(p, None)?)
+            })
             .collect::<Result<Vec<_>>>()?;
         // forEach wins when both are given; forEachOrNull's presence alone
         // decides whether an empty result keeps a row.
@@ -890,13 +898,22 @@ impl Evaluator {
         // Iterative worklist (preorder) to avoid recursive async lifetimes.
         // Pushed in reverse so that, popped LIFO, children come out in source
         // order.
-        let mut stack: Vec<FhirPathValue> = Vec::new();
+        // Each node is paired with its depth. The paths only go down the
+        // resource (`repeat_path::check`), so the depth is the JSON's at most;
+        // the limit is there in case a path still finds its way back.
+        let mut stack: Vec<(FhirPathValue, usize)> = Vec::new();
         let seed = self.repeat_children(plans, root, node).await?;
-        stack.extend(seed.into_iter().rev());
-        while let Some(current) = stack.pop() {
+        stack.extend(seed.into_iter().rev().map(|v| (v, 1)));
+        while let Some((current, depth)) = stack.pop() {
+            if depth > MAX_REPEAT_DEPTH {
+                return Err(Error::InvalidPath(format!(
+                    "repeat went more than {MAX_REPEAT_DEPTH} levels deep; its path keeps \
+                     finding nodes it has already been through"
+                )));
+            }
             let children = self.repeat_children(plans, root, &current).await?;
             out.push(current);
-            stack.extend(children.into_iter().rev());
+            stack.extend(children.into_iter().rev().map(|v| (v, depth + 1)));
         }
         Ok(())
     }
