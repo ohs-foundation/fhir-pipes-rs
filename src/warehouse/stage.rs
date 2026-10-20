@@ -18,6 +18,12 @@
 //! A run holds an exclusive lock on `.refresh.lock` in the warehouse directory
 //! from start to end, so two refreshes of one warehouse take turns instead of
 //! removing each other's staging.
+//!
+//! `publish` writes `.staging/.publishing` before its first rename and removes
+//! it after its last. A run that finds it, because the publish before it
+//! failed or was killed part way, finishes that publish before anything else:
+//! the database already holds that run's rows, and the warehouse would
+//! otherwise be left with some tables from each run.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -30,6 +36,8 @@ use super::partition;
 
 const DIR: &str = ".staging";
 const LOCK: &str = ".refresh.lock";
+/// In `.staging` while a publish is under way.
+const PUBLISHING: &str = ".publishing";
 /// The warehouse directories a run stages and swaps in whole.
 const DIRS: [&str; 2] = ["views", "tiles"];
 
@@ -83,13 +91,25 @@ impl Stage {
             tables: parquet.join(DIR),
             files: data.join(DIR),
         };
-        stage.clear()?;
+        let unfinished = stage.publishing();
+        if !unfinished {
+            stage.clear()?;
+        }
         recover(&stage.parquet, "parquet/", |_| true)?;
         recover(&stage.data, "", |name| DIRS.contains(&name))?;
+        if unfinished {
+            println!("   finishing the publish of a refresh that stopped part way");
+            stage.publish()?;
+        }
         for dir in [&stage.tables, &stage.files] {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         Ok(stage)
+    }
+
+    /// Whether a publish has started and not finished.
+    fn publishing(&self) -> bool {
+        self.files.join(PUBLISHING).exists()
     }
 
     fn clear(&self) -> Result<()> {
@@ -166,6 +186,14 @@ impl Stage {
     /// and catalog. Returns the number of tables and the directories swapped
     /// in.
     pub fn publish(&self) -> Result<(usize, Vec<String>)> {
+        let marker = self.files.join(PUBLISHING);
+        crate::fs::atomic_write(&marker, "")
+            .with_context(|| format!("writing {}", marker.display()))?;
+        self.swap_in()
+            .context("publishing the warehouse stopped part way; the next refresh finishes it")
+    }
+
+    fn swap_in(&self) -> Result<(usize, Vec<String>)> {
         let mut tables = 0;
         for staged in entries(&self.tables)? {
             let live = self
@@ -193,6 +221,7 @@ impl Stage {
             fs::rename(&staged, &live)
                 .with_context(|| format!("renaming {} into place", staged.display()))?;
         }
+        fs::remove_file(self.files.join(PUBLISHING))?;
         self.clear()?;
         Ok((tables, published))
     }
@@ -203,11 +232,14 @@ impl Stage {
     }
 }
 
-/// A run that stops early leaves nothing staged behind. The lock is released
-/// after this, when the file is closed.
+/// A run that stops early leaves nothing staged behind, unless it stopped
+/// while publishing: the next run finishes that. The lock is released after
+/// this, when the file is closed.
 impl Drop for Stage {
     fn drop(&mut self) {
-        let _ = self.clear();
+        if !self.publishing() {
+            let _ = self.clear();
+        }
     }
 }
 
@@ -367,6 +399,40 @@ mod tests {
         ));
         drop(s);
         other.try_lock_shared().unwrap();
+    }
+
+    #[test]
+    fn a_publish_that_stopped_part_way_is_finished_by_the_next_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        table(&data.join("parquet/a"), "old a");
+        table(&data.join("parquet/b"), "old b");
+        fs::write(data.join("manifest.json"), "old").unwrap();
+        let s = stage(data);
+        table(&s.table("a"), "new a");
+        table(&s.table("b"), "new b");
+        fs::write(s.file("manifest.json"), "new").unwrap();
+        // The publish stopped after its first table, as a failed rename or
+        // a kill would leave it.
+        fs::write(s.file(PUBLISHING), "").unwrap();
+        partition::replace(&s.table("a"), &data.join("parquet/a")).unwrap();
+        drop(s);
+        assert_eq!(marker(&data.join("parquet/a")), "new a");
+        assert_eq!(marker(&data.join("parquet/b")), "old b");
+        assert!(
+            data.join("parquet/.staging/b").exists(),
+            "kept for the next run"
+        );
+
+        let s = stage(data);
+        assert_eq!(marker(&data.join("parquet/a")), "new a");
+        assert_eq!(marker(&data.join("parquet/b")), "new b");
+        assert_eq!(
+            fs::read_to_string(data.join("manifest.json")).unwrap(),
+            "new"
+        );
+        assert!(!s.publishing());
+        assert!(s.is_empty().unwrap());
     }
 
     #[test]
