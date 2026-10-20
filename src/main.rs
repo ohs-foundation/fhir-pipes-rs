@@ -15,6 +15,7 @@ mod load;
 mod population;
 mod profile;
 mod raster;
+mod redact;
 mod report;
 mod run;
 mod snapshot;

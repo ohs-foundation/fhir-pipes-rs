@@ -49,7 +49,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
     }
     println!(
         "== locations ({} → {} → {})",
-        s.server,
+        crate::redact::url(&s.server),
         snapshot.display(),
         s.parquet_dir().join("locations").display()
     );

@@ -573,11 +573,12 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             }
         }),
         files,
-        server: google::server_url(
+        server: google::parse_server(
             &o.server
                 .or(file.server.base)
                 .unwrap_or_else(|| "http://localhost:3447/fhir".into()),
-        ),
+        )
+        .map_err(|e| anyhow::anyhow!("server.base: {e}"))?,
         auth,
         server_kind: o.server_kind.or(file.server.kind).unwrap_or_default(),
         fetch: file.server.fetch.unwrap_or_default(),
