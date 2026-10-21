@@ -327,3 +327,232 @@ pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> anyhow::Result<()> {
     println!("{}", report.summary());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::diff::rebuild::tests::{icr, row, text};
+
+    fn location(id: &str, name: &str) -> Value {
+        json!({"resourceType": "Location", "id": id, "name": name, "status": "active"})
+    }
+
+    /// A row for Location `id` with `cols`.
+    fn row_for(id: Option<&str>, cols: &[(&str, ColumnValue)]) -> InputRow {
+        InputRow {
+            id: id.map(str::to_string),
+            ..row(cols)
+        }
+    }
+
+    /// What diff writes and counts for `rows` against a snapshot of
+    /// `locations` (and of `organizations`, when given).
+    struct Run {
+        written: Vec<Value>,
+        stats: DiffStats,
+        report: Report,
+        result: Result<()>,
+    }
+
+    fn run(
+        locations: &[Value],
+        organizations: Option<&[Value]>,
+        profile: Profile,
+        rows: Vec<InputRow>,
+    ) -> Run {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, resources: &[Value]| {
+            let path = dir.path().join(name);
+            let text: String = resources.iter().map(|r| format!("{r}\n")).collect();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let mut report = Report::default();
+        let ndjson = write("locations.ndjson", locations);
+        let organizations = organizations.map(|orgs| {
+            let path = write("organizations.ndjson", orgs);
+            let index = index_by_id(&path, &mut report, "organization_line_unparsed").unwrap();
+            (index, LineAccess::open(&path).unwrap())
+        });
+        let out_path = dir.path().join("changes.ndjson");
+        let file = AtomicFile::create(&out_path).unwrap();
+        let tmp = file.tmp().to_path_buf();
+        let mut diff = Diff {
+            index: index_by_id(&ndjson, &mut report, "snapshot_line_unparsed").unwrap(),
+            access: LineAccess::open(&ndjson).unwrap(),
+            organizations,
+            out: Output::new(file, false),
+            out_path: &tmp,
+            seen: HashSet::new(),
+            stats: DiffStats::default(),
+            profile,
+        };
+        let result = rows
+            .into_iter()
+            .try_for_each(|r| diff.process(r, &mut report));
+        let Diff { out, stats, .. } = diff;
+        finish(out, &tmp).unwrap();
+        let written = std::fs::read_to_string(&out_path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        Run {
+            written,
+            stats,
+            report,
+            result,
+        }
+    }
+
+    #[test]
+    fn only_changed_and_new_locations_are_written() {
+        let r = run(
+            &[location("a", "A"), location("b", "B")],
+            None,
+            Profile::base(),
+            vec![
+                row_for(Some("a"), &[("name", text("A"))]),
+                row_for(Some("b"), &[("name", text("B2"))]),
+                row_for(Some("c"), &[("name", text("C"))]),
+                row_for(Some("a"), &[("name", text("A3"))]),
+            ],
+        );
+        r.result.unwrap();
+        assert_eq!(
+            r.stats,
+            DiffStats {
+                changed: 1,
+                unchanged: 1,
+                created: 1,
+                locations: 2,
+                organizations: 0,
+            }
+        );
+        let written: Vec<(&str, &str)> = r
+            .written
+            .iter()
+            .map(|v| (v["id"].as_str().unwrap(), v["name"].as_str().unwrap()))
+            .collect();
+        // The second row for a is skipped, not applied.
+        assert_eq!(written, [("b", "B2"), ("c", "C")]);
+        assert_eq!(r.report.count("duplicate_id"), 1);
+        assert_eq!(r.report.count("new_location"), 1);
+    }
+
+    #[test]
+    fn a_row_without_an_id_is_a_create_with_a_new_id() {
+        let r = run(
+            &[location("a", "A")],
+            None,
+            Profile::base(),
+            vec![row_for(None, &[("name", text("New"))])],
+        );
+        r.result.unwrap();
+        assert_eq!(r.stats.created, 1);
+        assert_eq!(r.report.count("new_location_generated_id"), 1);
+        let id = r.written[0]["id"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(id).is_ok(), "{id}");
+        assert_eq!(r.written[0]["resourceType"], "Location");
+    }
+
+    #[test]
+    fn a_column_not_built_in_or_in_the_profile_stops_the_diff() {
+        let mut unread = row_for(Some("a"), &[]);
+        unread.unread.push("colour".into());
+        for (profile, rows, says) in [
+            (
+                Profile::base(),
+                vec![row_for(Some("a"), &[("colour", text("red"))])],
+                "no profile was given",
+            ),
+            (
+                icr(),
+                vec![unread],
+                "the profile is examples/profiles/icr.toml",
+            ),
+        ] {
+            let r = run(&[location("a", "A")], None, profile, rows);
+            let err = r.result.unwrap_err().to_string();
+            assert!(err.contains("column(s) colour "), "{err}");
+            assert!(err.contains(says), "{err}");
+            assert!(r.written.is_empty());
+        }
+        // A column the profile declares is not refused.
+        let r = run(
+            &[location("a", "A")],
+            None,
+            icr(),
+            vec![row_for(
+                Some("a"),
+                &[("settlement_type", ColumnValue::Null)],
+            )],
+        );
+        r.result.unwrap();
+    }
+
+    #[test]
+    fn a_new_facility_gets_a_new_organization() {
+        let r = run(
+            &[location("a", "A")],
+            Some(&[]),
+            icr(),
+            vec![
+                row_for(
+                    Some("f"),
+                    &[("name", text("F")), ("type", text("facility"))],
+                ),
+                row_for(
+                    Some("s"),
+                    &[("name", text("S")), ("type", text("settlement"))],
+                ),
+            ],
+        );
+        r.result.unwrap();
+        assert_eq!(r.stats.created, 2);
+        assert_eq!(r.stats.organizations, 1);
+        assert_eq!(r.stats.locations, 2);
+        let org = &r.written[0];
+        assert_eq!(org["resourceType"], "Organization");
+        assert_eq!(org["id"], "org-f");
+        let f = &r.written[1];
+        assert_eq!(f["managingOrganization"]["reference"], "Organization/org-f");
+        assert!(r.written[2].get("managingOrganization").is_none());
+    }
+
+    #[test]
+    fn a_managing_organization_missing_from_the_snapshot_is_reported() {
+        let mut a = location("a", "A");
+        a["managingOrganization"] = json!({"reference": "Organization/gone"});
+        let r = run(
+            &[a],
+            Some(&[]),
+            icr(),
+            vec![row_for(Some("a"), &[("name", text("A"))])],
+        );
+        r.result.unwrap();
+        assert_eq!(r.report.count("organization_missing"), 1);
+        assert_eq!(r.stats.unchanged, 1);
+        assert!(r.written.is_empty());
+    }
+
+    #[test]
+    fn the_input_format_comes_from_the_extension() {
+        for (name, format) in [
+            ("a.geojson", InputFormat::FeatureCollection),
+            ("a.JSON", InputFormat::FeatureCollection),
+            ("a.geojsonl", InputFormat::FeatureLines),
+            ("a.geojsons", InputFormat::FeatureLines),
+            ("a.parquet", InputFormat::GeoParquet),
+        ] {
+            assert_eq!(InputFormat::from_path(Path::new(name)).unwrap(), format);
+        }
+        for name in ["a.csv", "a"] {
+            assert!(matches!(
+                InputFormat::from_path(Path::new(name)),
+                Err(PipesError::Usage(_))
+            ));
+        }
+    }
+}

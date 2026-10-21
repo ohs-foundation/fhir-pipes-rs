@@ -342,3 +342,177 @@ impl Concepts {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    const CS: &str = "http://example.org/CodeSystem/c";
+
+    fn content(resources: Vec<Value>) -> Content {
+        let mut c = Content::default();
+        for r in resources {
+            c.add(r);
+        }
+        c
+    }
+
+    fn vs(id: &str, body: Value) -> Value {
+        let mut v = json!({"resourceType": "ValueSet",
+                           "url": format!("http://example.org/ValueSet/{id}")});
+        v.as_object_mut()
+            .unwrap()
+            .extend(body.as_object().unwrap().clone());
+        v
+    }
+
+    fn expand(c: &Content, id: &str) -> Result<Vec<String>> {
+        let mut stack = Vec::new();
+        let members = members(c, &format!("http://example.org/ValueSet/{id}"), &mut stack)?;
+        assert!(stack.is_empty(), "the stack is left as it was");
+        Ok(members.into_iter().map(|m| m.code).collect())
+    }
+
+    fn concepts(concept: Value) -> Concepts {
+        Concepts::of(&json!({"concept": concept}))
+    }
+
+    fn sorted(set: HashSet<&str>) -> Vec<&str> {
+        let mut v: Vec<&str> = set.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn concept_properties_give_inactive_and_not_selectable() {
+        let c = concepts(json!([
+            {"code": "a", "property": [{"code": "inactive", "valueBoolean": true}]},
+            {"code": "b", "property": [{"code": "inactive", "valueBoolean": false},
+                                       {"code": "status", "valueCode": "retired"}]},
+            {"code": "c", "property": [{"code": "status", "valueCode": "active"}]},
+            {"code": "d", "property": [{"code": "abstract", "valueBoolean": true}]},
+            {"code": "e"},
+            {"display": "no code"}
+        ]));
+        assert_eq!(c.get("a").unwrap().inactive, Some(true));
+        // `inactive` wins over `status`.
+        assert_eq!(c.get("b").unwrap().inactive, Some(false));
+        assert_eq!(c.get("c").unwrap().inactive, Some(false));
+        assert_eq!(c.get("e").unwrap().inactive, None);
+        assert!(c.get("d").unwrap().not_selectable);
+        assert!(!c.get("e").unwrap().not_selectable);
+        assert_eq!(c.by_code.len(), 5);
+    }
+
+    #[test]
+    fn descendants_follow_nesting_parent_and_subsumed_by_and_stop_at_a_cycle() {
+        let c = concepts(json!([
+            {"code": "top", "concept": [{"code": "mid", "concept": [{"code": "low"}]}]},
+            {"code": "side", "property": [{"code": "subsumedBy", "valueCode": "top"}]},
+            // A cycle: p is under q, and q under p.
+            {"code": "p", "property": [{"code": "parent", "valueCode": "q"}]},
+            {"code": "q", "property": [{"code": "parent", "valueCode": "p"}]}
+        ]));
+        assert_eq!(
+            sorted(c.descendants("top", true)),
+            ["low", "mid", "side", "top"]
+        );
+        assert_eq!(sorted(c.descendants("mid", false)), ["low"]);
+        assert_eq!(sorted(c.descendants("p", false)), ["p", "q"]);
+        // A code the system does not have has no descendants, nor itself.
+        assert!(c.descendants("nothing", true).is_empty());
+    }
+
+    #[test]
+    fn entries_without_a_system_or_code_are_not_members_but_count_toward_the_total() {
+        let c = content(vec![vs(
+            "e",
+            json!({"expansion": {"total": 3, "contains": [
+                {"system": CS, "code": "a"},
+                {"code": "no-system"},
+                {"system": CS, "display": "no code"}
+            ]}}),
+        )]);
+        assert_eq!(expand(&c, "e").unwrap(), ["a"]);
+    }
+
+    #[test]
+    fn the_same_code_in_two_versions_is_two_members() {
+        let c = content(vec![vs(
+            "e",
+            json!({"expansion": {"contains": [
+                {"system": CS, "version": "1", "code": "a"},
+                {"system": CS, "version": "2", "code": "a"},
+                {"system": CS, "version": "1", "code": "a"}
+            ]}}),
+        )]);
+        assert_eq!(expand(&c, "e").unwrap(), ["a", "a"]);
+    }
+
+    #[test]
+    fn an_exclude_removes_a_code_in_every_version_and_can_name_a_value_set() {
+        let url = |id: &str| format!("http://example.org/ValueSet/{id}");
+        let c = content(vec![
+            vs(
+                "drop",
+                json!({"compose": {"include": [{"system": CS, "concept": [{"code": "b"}]}]}}),
+            ),
+            vs(
+                "all",
+                json!({"compose": {
+                    "include": [
+                        {"system": CS, "version": "1", "concept": [{"code": "a"}, {"code": "b"}]},
+                        {"system": CS, "version": "2", "concept": [{"code": "b"}, {"code": "c"}]}
+                    ],
+                    "exclude": [{"valueSet": [url("drop")]}]
+                }}),
+            ),
+        ]);
+        assert_eq!(expand(&c, "all").unwrap(), ["a", "c"]);
+    }
+
+    #[test]
+    fn a_value_set_included_twice_is_not_a_loop() {
+        let url = |id: &str| format!("http://example.org/ValueSet/{id}");
+        let c = content(vec![
+            vs(
+                "base",
+                json!({"compose": {"include": [{"system": CS, "concept": [{"code": "a"}]}]}}),
+            ),
+            vs(
+                "one",
+                json!({"compose": {"include": [{"valueSet": [url("base")]}]}}),
+            ),
+            vs(
+                "both",
+                json!({"compose": {"include": [
+                    {"valueSet": [url("base")]}, {"valueSet": [url("one")]}
+                ]}}),
+            ),
+        ]);
+        assert_eq!(expand(&c, "both").unwrap(), ["a"]);
+    }
+
+    #[test]
+    fn a_value_set_with_nothing_to_expand_fails() {
+        let c = content(vec![
+            vs("bare", json!({})),
+            vs(
+                "empty-part",
+                json!({"compose": {"include": [{"concept": []}]}}),
+            ),
+        ]);
+        let bare = format!("{:#}", expand(&c, "bare").unwrap_err());
+        assert!(
+            bare.contains("has neither an expansion nor a compose"),
+            "{bare}"
+        );
+        let part = format!("{:#}", expand(&c, "empty-part").unwrap_err());
+        assert!(
+            part.contains("an include or exclude has neither a system nor a valueSet"),
+            "{part}"
+        );
+    }
+}

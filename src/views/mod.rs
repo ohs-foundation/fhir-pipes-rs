@@ -307,3 +307,84 @@ fn sql(view: &Path, ddl: bool, dialect: &str, table: Option<&str>) -> Result<()>
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    fn is_usage(err: &anyhow::Error) -> bool {
+        crate::error::exit_code(err) == 2
+    }
+
+    fn view_json(name: Option<&str>) -> serde_json::Value {
+        let mut v = json!({"resourceType": "ViewDefinition", "resource": "Patient",
+            "status": "active", "select": [{"column": [{"name": "id", "path": "id"}]}]});
+        if let Some(n) = name {
+            v["name"] = json!(n);
+        }
+        v
+    }
+
+    #[test]
+    fn the_ddl_table_is_the_view_name_else_the_resource() {
+        let named = ViewDefinition::from_json(&view_json(Some("patients"))).unwrap();
+        assert_eq!(default_table_name(&named), "patients");
+        for v in [view_json(None), view_json(Some(""))] {
+            let unnamed = ViewDefinition::from_json(&v).unwrap();
+            assert_eq!(default_table_name(&unnamed), "patient_view");
+        }
+    }
+
+    #[test]
+    fn a_view_file_or_a_directory_of_them_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("v.json");
+        fs::write(&file, view_json(None).to_string()).unwrap();
+        let views = load_views(&file).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].0, "view");
+
+        let views_dir = dir.path().join("views");
+        fs::create_dir(&views_dir).unwrap();
+        let err = load_views(&views_dir).unwrap_err();
+        assert!(is_usage(&err));
+        assert!(
+            err.to_string().starts_with("no ViewDefinitions in "),
+            "{err}"
+        );
+        for name in ["b", "a"] {
+            fs::write(
+                views_dir.join(format!("{name}.json")),
+                view_json(Some(name)).to_string(),
+            )
+            .unwrap();
+        }
+        let names: Vec<String> = load_views(&views_dir)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_view_is_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let patient = dir.path().join("p.json");
+        fs::write(&patient, r#"{"resourceType": "Patient"}"#).unwrap();
+        let err = read_view(&patient).unwrap_err();
+        assert!(is_usage(&err));
+        assert!(
+            err.to_string().ends_with("is not a ViewDefinition"),
+            "{err}"
+        );
+        let broken = dir.path().join("b.json");
+        fs::write(&broken, "{").unwrap();
+        assert!(is_usage(&read_view(&broken).unwrap_err()));
+        assert!(is_usage(
+            &read_view(&dir.path().join("missing.json")).unwrap_err()
+        ));
+    }
+}

@@ -104,3 +104,78 @@ pub(super) fn report_findings(
     }
     findings.iter().any(|f| f.severity == Severity::Error)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sarif_wins_over_json() {
+        assert!(ReportFormat::from_flags(false, false) == ReportFormat::Human);
+        assert!(ReportFormat::from_flags(true, false) == ReportFormat::Json);
+        assert!(ReportFormat::from_flags(true, true) == ReportFormat::Sarif);
+    }
+
+    #[test]
+    fn only_an_error_fails_the_check() {
+        let warning = Finding::fhir("FH05", Severity::Warning, "a warning");
+        let error = Finding::fhir("FH01", Severity::Error, "an error");
+        for fmt in [ReportFormat::Human, ReportFormat::Json, ReportFormat::Sarif] {
+            assert!(!report_findings("v.json", "{}", &[], fmt, false, "ok"));
+            assert!(!report_findings(
+                "v.json",
+                "{}",
+                std::slice::from_ref(&warning),
+                fmt,
+                false,
+                "ok"
+            ));
+            assert!(report_findings(
+                "v.json",
+                "{}",
+                &[warning.clone(), error.clone()],
+                fmt,
+                false,
+                "ok"
+            ));
+        }
+    }
+
+    fn view() -> ViewDefinition {
+        ViewDefinition::from_json(&serde_json::json!({"resource": "Patient",
+            "select": [{"column": [{"name": "id", "path": "id"}]}]}))
+        .unwrap()
+    }
+
+    #[cfg(not(feature = "fhir-packages"))]
+    #[tokio::test]
+    async fn without_package_support_a_package_is_a_usage_error() {
+        let err = package_findings(&view(), "hl7.fhir.r4.core#4.0.1", None)
+            .await
+            .unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2);
+        assert!(
+            err.to_string().contains("--features fhir-packages"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "fhir-packages")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_package_without_structure_definitions_is_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ValueSet-x.json"),
+            r#"{"resourceType": "ValueSet", "url": "http://example.org/vs"}"#,
+        )
+        .unwrap();
+        let spec = dir.path().display().to_string();
+        let err = package_findings(&view(), &spec, None).await.unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2);
+        assert!(
+            err.to_string()
+                .ends_with("has no StructureDefinitions of resources"),
+            "{err}"
+        );
+    }
+}

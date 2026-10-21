@@ -434,3 +434,149 @@ pub(crate) fn close_sink(sink: Output<Box<dyn Write>>, out: Option<&PathBuf>) ->
         None => "writing to stdout".to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::{Value, json};
+
+    fn is_usage(err: &anyhow::Error) -> bool {
+        crate::error::exit_code(err) == 2
+    }
+
+    fn view(resource: &str, columns: Value) -> ViewDefinition {
+        ViewDefinition::from_json(&json!({"resource": resource,
+            "select": [{"column": columns}]}))
+        .unwrap()
+    }
+
+    fn ids(result: &ViewResult) -> Vec<&str> {
+        result.data.iter().map(|r| r[0].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn parquet_is_not_written_as_gzip_and_out_is_not_the_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let gz = dir.path().join("rows.parquet.gz");
+        assert!(is_usage(
+            &check_out(None, Some(&gz), "Parquet").unwrap_err()
+        ));
+        check_out(None, Some(&gz), "csv").unwrap();
+
+        let input = dir.path().join("in.ndjson");
+        fs::write(&input, "").unwrap();
+        // The same file under another name.
+        let same = dir.path().join(".").join("in.ndjson");
+        let err = check_out(Some(&input), Some(&same), "ndjson").unwrap_err();
+        assert!(is_usage(&err));
+        assert!(err.to_string().contains("is the --input file"), "{err}");
+        check_out(Some(&input), Some(&dir.path().join("out.ndjson")), "ndjson").unwrap();
+        check_out(Some(&PathBuf::from("-")), Some(&input), "ndjson").unwrap();
+    }
+
+    #[test]
+    fn writers_and_extensions_follow_the_format() {
+        assert_eq!(output_extension("NDJSON"), "ndjson");
+        assert_eq!(output_extension("parquet"), "parquet");
+        assert_eq!(output_extension("csv"), "csv");
+        assert_eq!(output_extension("anything"), "csv");
+        select_writer("CSV", "native").unwrap();
+        select_writer("parquet", "native").unwrap();
+        assert!(is_usage(&select_writer("parquet", "epoch").err().unwrap()));
+        assert!(is_usage(&select_writer("xml", "text").err().unwrap()));
+    }
+
+    #[test]
+    fn files_give_each_view_the_rows_of_its_type_in_file_order() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.ndjson"),
+            [
+                json!({"resourceType": "Patient", "id": "p1"}),
+                json!({"resourceType": "Encounter", "id": "e1"}),
+                json!({"resourceType": "Observation", "id": "o1"}),
+                json!({"resourceType": "Patient", "id": "p2"}),
+            ]
+            .map(|r| r.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.json"),
+            json!({"resourceType": "Bundle", "type": "collection", "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p3"}}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let id = json!([{"name": "id", "path": "id"}]);
+        let views = vec![
+            ("patients".to_string(), view("Patient", id.clone())),
+            ("observations".to_string(), view("Observation", id.clone())),
+            ("conditions".to_string(), view("Condition", id)),
+        ];
+        let results = run_on_files(&views, dir.path(), None, 2).unwrap();
+        let results: Vec<ViewResult> = results.into_iter().map(Option::unwrap).collect();
+        assert_eq!(ids(&results[0]), ["p1", "p2", "p3"]);
+        assert_eq!(ids(&results[1]), ["o1"]);
+        // A view no resource is for still has its columns.
+        assert!(results[2].data.is_empty());
+        assert_eq!(results[2].columns[0].name, "id");
+
+        let empty = tempfile::tempdir().unwrap();
+        fs::write(empty.path().join("none.ndjson"), "").unwrap();
+        let err = run_on_files(&views, empty.path(), None, 2).unwrap_err();
+        assert!(is_usage(&err));
+        assert!(
+            err.to_string().starts_with("no FHIR resources in "),
+            "{err}"
+        );
+        let missing = dir.path().join("missing.ndjson");
+        assert!(is_usage(
+            &run_on_files(&views, &missing, None, 2).unwrap_err()
+        ));
+    }
+
+    /// Stream `text` through `view`, as NDJSON.
+    fn streamed(view: &ViewDefinition, text: &str) -> Result<(usize, String)> {
+        let reader: Box<dyn io::BufRead> = Box::new(io::Cursor::new(text.as_bytes().to_vec()));
+        let mut lines = Splitter::new(reader);
+        let first = next_line(&mut lines, "in")?;
+        let mut out = Vec::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let n = rt.block_on(stream_ndjson(view, first, lines, "in", &mut out))?;
+        Ok((n, String::from_utf8(out).unwrap()))
+    }
+
+    #[test]
+    fn ndjson_is_streamed_a_line_at_a_time() {
+        let v = view(
+            "Patient",
+            json!([{"name": "id", "path": "id"}, {"name": "given", "path": "name.given",
+                    "collection": true}]),
+        );
+        let text = "\n{\"resourceType\":\"Patient\",\"id\":\"p1\",\"name\":[{\"given\":[\"A\",\"B\"]}]}\n\n\
+                    {\"resourceType\":\"Observation\",\"id\":\"o1\"}\n\
+                    {\"resourceType\":\"Patient\",\"id\":\"p2\"}\n";
+        let (n, out) = streamed(&v, text).unwrap();
+        assert_eq!(n, 2);
+        let rows: Vec<Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                json!({"id": "p1", "given": ["A", "B"]}),
+                json!({"id": "p2", "given": []})
+            ]
+        );
+        let err = streamed(&v, "{\"resourceType\":\"Patient\"}\nnot json\n").unwrap_err();
+        assert!(is_usage(&err));
+        assert!(err.to_string().starts_with("parsing in line 2: "), "{err}");
+        assert_eq!(streamed(&v, "\n\n").unwrap(), (0, String::new()));
+    }
+}
