@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod notify;
 pub mod output;
 pub mod runner;
 pub mod secrets;
