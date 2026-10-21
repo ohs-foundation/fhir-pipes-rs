@@ -209,6 +209,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
     let (later, now): (Vec<_>, Vec<_>) = needed
         .iter()
         .partition(|t| s.reads_files() && t.step == Step::Tiles);
+    crate::stop::install();
     let mut ran = Ran::default();
     locked(
         &s,
