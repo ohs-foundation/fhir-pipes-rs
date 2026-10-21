@@ -37,6 +37,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::head::Head;
 use crate::fhir::ndjson::{Line, NdjsonReader};
+use crate::fs::Stamp;
 use crate::load::bundle::{Bundle, dependencies, depends_on, describe_put, put_bundle};
 use crate::load::capability::check_update_create;
 use crate::load::order::{Node, parents_first, reference_key};
@@ -63,12 +64,9 @@ pub struct LoadPlan {
     stamp: Stamp,
 }
 
-type Stamp = (u64, std::time::SystemTime);
-
 /// The length and modification time of `path`, to tell whether it changed.
 fn stamp(path: &Path) -> Result<Stamp> {
-    let m = std::fs::metadata(path).map_err(|e| PipesError::io(path, e))?;
-    Ok((m.len(), m.modified().map_err(|e| PipesError::io(path, e))?))
+    crate::fs::stamp(path).map_err(|e| PipesError::io(path, e))
 }
 
 /// The input changed after it was planned: an environment error, since the

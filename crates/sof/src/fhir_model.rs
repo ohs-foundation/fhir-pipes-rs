@@ -149,6 +149,13 @@ pub fn is_type(name: &str) -> bool {
     type_entry(name).is_some()
 }
 
+/// Whether `name` is a datatype a choice element can be narrowed to with
+/// `ofType()`: a FHIR primitive or complex datatype, or a FHIRPath system
+/// type (`String`, `Boolean`).
+pub fn is_datatype(name: &str) -> bool {
+    type_kind(name).is_some_and(|k| k != Kind::Resource) || SYSTEM_TYPES.contains(&name)
+}
+
 /// What the FHIR type `name` is, if the table has it.
 pub fn type_kind(name: &str) -> Option<Kind> {
     type_entry(name).map(|(kind, _)| *kind)

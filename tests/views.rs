@@ -253,6 +253,30 @@ fn stdin_takes_formatted_json_and_ndjson_for_ndjson_output() {
         .stderr(contains("2 rows"));
 }
 
+/// A byte order mark before stdin's text is skipped, as it is in a file,
+/// whether the text is one JSON value or NDJSON.
+#[test]
+fn stdin_may_start_with_a_byte_order_mark() {
+    let view = fixtures().join("views/Binary-IcrPatient.json");
+    let formatted = "\u{feff}{\n  \"resourceType\": \"Patient\",\n  \"id\": \"p1\"\n}\n";
+    let ndjson = "\u{feff}{\"resourceType\": \"Patient\", \"id\": \"p1\"}\n\n{\"resourceType\": \"Patient\", \"id\": \"p2\"}\n";
+    for (input, ids) in [(formatted, vec!["p1"]), (ndjson, vec!["p1", "p2"])] {
+        for output in ["csv", "ndjson"] {
+            let a = views()
+                .arg("run")
+                .arg(&view)
+                .args(["--input", "-", "--output", output])
+                .write_stdin(input)
+                .assert()
+                .success();
+            let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+            for id in &ids {
+                assert!(out.contains(id), "{output}: {input}\n{out}");
+            }
+        }
+    }
+}
+
 #[test]
 #[cfg(not(feature = "postgres"))]
 fn db_says_how_to_get_postgres_support() {
@@ -263,6 +287,58 @@ fn db_says_how_to_get_postgres_support() {
         .assert()
         .failure()
         .stderr(contains("--features postgres"));
+}
+
+/// `--package` reads a directory of StructureDefinitions as every FHIR
+/// package is read, with no download.
+#[test]
+#[cfg(feature = "fhir-packages")]
+fn package_lint_reads_a_directory_of_structure_definitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("package");
+    fs::create_dir(&package).unwrap();
+    fs::write(
+        package.join("StructureDefinition-Patient.json"),
+        r#"{"resourceType": "StructureDefinition", "url": "http://hl7.org/fhir/StructureDefinition/Patient",
+            "name": "Patient", "type": "Patient", "kind": "resource", "abstract": false,
+            "derivation": "specialization", "status": "active",
+            "snapshot": {"element": [
+                {"id": "Patient", "path": "Patient", "min": 0, "max": "*"},
+                {"id": "Patient.id", "path": "Patient.id", "min": 0, "max": "1", "type": [{"code": "id"}]},
+                {"id": "Patient.gender", "path": "Patient.gender", "min": 0, "max": "1", "type": [{"code": "code"}]}]},
+            "differential": {"element": [
+                {"id": "Patient", "path": "Patient", "min": 0, "max": "*"},
+                {"id": "Patient.id", "path": "Patient.id", "min": 0, "max": "1", "type": [{"code": "id"}]},
+                {"id": "Patient.gender", "path": "Patient.gender", "min": 0, "max": "1", "type": [{"code": "code"}]}]}}"#,
+    )
+    .unwrap();
+    let view = dir.path().join("patient.json");
+    let write = |path: &str| {
+        fs::write(
+            &view,
+            format!(
+                r#"{{"resourceType": "ViewDefinition", "name": "Patients", "status": "active",
+                    "resource": "Patient", "select": [{{"column": [
+                        {{"name": "g", "path": "{path}"}}]}}]}}"#
+            ),
+        )
+        .unwrap();
+    };
+    write("gender");
+    views()
+        .args(["--no-color", "lint", "--package"])
+        .arg(&package)
+        .arg(&view)
+        .assert()
+        .success();
+    write("gendr");
+    views()
+        .args(["--no-color", "lint", "--package"])
+        .arg(&package)
+        .arg(&view)
+        .assert()
+        .failure()
+        .stdout(contains("FH01"));
 }
 
 #[test]

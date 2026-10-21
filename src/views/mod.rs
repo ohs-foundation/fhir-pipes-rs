@@ -20,13 +20,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use fhir_pipes_sof::output::{
-    OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
+    NdjsonWriter, OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
 };
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_core, lint_shareable, validate_structure};
 
 use crate::error::usage;
-use crate::fhir::ndjson::{Output, is_gz, read_text};
+use crate::fhir::ndjson::{Output, Splitter, is_gz, read_text};
 use crate::warehouse::views::{ViewRows, discover, parse_view};
 
 #[derive(clap::Args, Debug)]
@@ -119,12 +119,15 @@ enum ViewsCommand {
     Lint {
         /// The ViewDefinition JSON file.
         view: PathBuf,
-        /// FHIR package name (e.g. hl7.fhir.r4.core), to check against in
-        /// place of the built-in core types.
+        /// FHIR package to check against in place of the built-in core
+        /// types: a package.tgz (path or https URL), an unpacked package or
+        /// directory of JSON resources, name#version in the local FHIR
+        /// package cache (~/.fhir/packages), or a name with --version.
         #[arg(long)]
         package: Option<String>,
-        /// Package version. When given, the package is installed if missing;
-        /// otherwise only an already-present package is used (offline).
+        /// Version of the package --package names (e.g. hl7.fhir.r4.core
+        /// with 4.0.1): taken from the local FHIR package cache, else
+        /// downloaded from the FHIR package registry (packages.fhir.org).
         #[arg(long)]
         version: Option<String>,
         /// Flag any FHIRPath function, operator or literal outside the
@@ -228,20 +231,36 @@ async fn connect(_db: &str) -> Result<Source> {
 }
 
 /// Findings from checking `view`'s selectors and generated SQL against a
-/// FHIR package (FH01–FH10).
+/// FHIR package (FH01–FH10). The package is read as every package is
+/// (`fhir::package`); a name with `version` is `name#version` in the local
+/// FHIR package cache, or downloaded from the FHIR package registry.
 #[cfg(feature = "fhir-packages")]
 async fn package_findings(
     view: &ViewDefinition,
     package: &str,
     version: Option<&str>,
 ) -> Result<Vec<Finding>> {
-    let provider = fhir_pipes_sof_lint::FhirSchemaProvider::load(package, version)
-        .await
-        .with_context(|| format!("loading package {package}"))?;
+    let spec = match version {
+        Some(v) => crate::fhir::package::by_version(package, v),
+        None => package.to_string(),
+    };
+    // Reading a package may download it, with a blocking client.
+    let mut index = tokio::task::block_in_place(|| {
+        crate::fhir::package::Index::load(
+            std::slice::from_ref(&spec),
+            "--package",
+            &["StructureDefinition"],
+        )
+    })?;
+    let provider = fhir_pipes_sof_lint::FhirSchemaProvider::from_structure_definitions(
+        index
+            .take_type("StructureDefinition")
+            .into_values()
+            .flatten(),
+    );
     if provider.is_empty() {
         return Err(usage(anyhow::anyhow!(
-            "package `{package}` has no StructureDefinitions in the store; \
-             pass --version to install it"
+            "--package {spec} has no StructureDefinitions of resources"
         )));
     }
     Ok(fhir_pipes_sof_lint::lint(view, &provider))
@@ -535,29 +554,26 @@ pub(crate) fn load_json_file(
     Ok(())
 }
 
-/// The next non-blank line of `reader` and its 1-based number, counting from
-/// `*line_no`. `name` is the input's name in messages.
+/// The next non-blank line of `lines` and its 1-based number. `name` is the
+/// input's name in messages.
 fn next_line(
-    reader: &mut dyn io::BufRead,
+    lines: &mut Splitter<Box<dyn io::BufRead>>,
     name: &str,
-    line_no: &mut usize,
 ) -> Result<Option<(usize, String)>> {
-    loop {
-        let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| ndjson::read_error(e, format!("reading {name} line {}", *line_no + 1)))?;
-        if n == 0 {
-            return Ok(None);
-        }
-        *line_no += 1;
-        if *line_no == 1 && line.starts_with('\u{feff}') {
-            line.drain(..'\u{feff}'.len_utf8());
-        }
-        if !line.trim().is_empty() {
-            return Ok(Some((*line_no, line)));
-        }
-    }
+    let mut buf = Vec::new();
+    let Some(span) = lines.next_into(&mut buf).map_err(|e| {
+        ndjson::read_error(e, format!("reading {name} line {}", lines.lines_read() + 1))
+    })?
+    else {
+        return Ok(None);
+    };
+    buf.truncate(span.end);
+    buf.drain(..span.start);
+    let line = String::from_utf8(buf).map_err(|e| {
+        let e = io::Error::new(io::ErrorKind::InvalidData, e.utf8_error());
+        ndjson::read_error(e, format!("reading {name} line {}", span.number))
+    })?;
+    Ok(Some((span.number, line)))
 }
 
 /// Stream NDJSON through one view, writing NDJSON rows as they are produced,
@@ -566,16 +582,14 @@ fn next_line(
 async fn stream_ndjson(
     view: &ViewDefinition,
     first: Option<(usize, String)>,
-    mut reader: Box<dyn io::BufRead>,
+    mut lines: Splitter<Box<dyn io::BufRead>>,
     name: &str,
-    mut line_no: usize,
     sink: &mut dyn Write,
 ) -> Result<usize> {
     let compiled = fhir_pipes_sof::CompiledView::compile(view)
         .await
         .context("compiling view")
         .map_err(usage)?;
-    let names: Vec<String> = compiled.columns().iter().map(|c| c.name.clone()).collect();
     let mut total = 0;
     let mut next = first;
     while let Some((number, line)) = next {
@@ -587,18 +601,12 @@ async fn stream_ndjson(
         push_resource(value, &mut resources, view.resource == "Bundle");
         for resource in &resources {
             for row in compiled.execute_resource(resource).await? {
-                let obj: serde_json::Map<String, serde_json::Value> = names
-                    .iter()
-                    .cloned()
-                    .zip(row)
-                    .filter(|(_, v)| !v.is_null())
-                    .collect();
-                writeln!(sink, "{}", serde_json::Value::Object(obj))
-                    .context("writing NDJSON row")?;
+                let obj = NdjsonWriter::row_to_object(compiled.columns(), row);
+                writeln!(sink, "{obj}").context("writing NDJSON row")?;
                 total += 1;
             }
         }
-        next = next_line(reader.as_mut(), name, &mut line_no)?;
+        next = next_line(&mut lines, name)?;
     }
     Ok(total)
 }
@@ -656,17 +664,18 @@ fn parse_resource_text(
     out: &mut Vec<serde_json::Value>,
     keep_bundles: bool,
 ) -> Result<()> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+    let whole = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(whole) {
         push_resource(value, out, keep_bundles);
         return Ok(());
     }
-    for (i, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: serde_json::Value =
-            serde_json::from_str(line).with_context(|| format!("parsing line {}", i + 1))?;
+    let mut lines = Splitter::new(text.as_bytes());
+    let mut buf = Vec::new();
+    while let Some(span) = lines.next_into(&mut buf)? {
+        let value: serde_json::Value = serde_json::from_slice(&buf[span.start..span.end])
+            .with_context(|| format!("parsing line {}", span.number))?;
         push_resource(value, out, keep_bundles);
+        buf.clear();
     }
     Ok(())
 }
@@ -1006,7 +1015,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 } else {
                     path.display().to_string()
                 };
-                let mut reader: Box<dyn io::BufRead> = if stdin_in {
+                let reader: Box<dyn io::BufRead> = if stdin_in {
                     Box::new(io::BufReader::new(io::stdin()))
                 } else {
                     read_text(
@@ -1016,22 +1025,23 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                         is_gz(path),
                     )
                 };
-                let mut line_no = 0;
-                let first = next_line(reader.as_mut(), &name, &mut line_no)?;
+                let mut lines = Splitter::new(reader);
+                let first = next_line(&mut lines, &name)?;
                 let one_value_per_line = !stdin_in
                     || first.as_ref().is_none_or(|(_, l)| {
                         serde_json::from_str::<serde::de::IgnoredAny>(l).is_ok()
                     });
                 if one_value_per_line {
                     let mut sink = open_sink(out.as_ref())?;
-                    let n =
-                        stream_ndjson(&view_def, first, reader, &name, line_no, &mut sink).await?;
+                    let n = stream_ndjson(&view_def, first, lines, &name, &mut sink).await?;
                     close_sink(sink, out.as_ref())?;
                     eprintln!("{n} rows");
                     return Ok(());
                 }
-                let mut text = first.map(|(_, l)| l).unwrap_or_default();
-                reader
+                // The first line, trimmed, and the rest as they are.
+                let mut text = first.map(|(_, l)| l + "\n").unwrap_or_default();
+                lines
+                    .into_inner()
                     .read_to_string(&mut text)
                     .context("reading FHIR resources from stdin")?;
                 let mut resources = Vec::new();

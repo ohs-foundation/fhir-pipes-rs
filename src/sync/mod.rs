@@ -33,6 +33,7 @@ use crate::cli::SyncArgs;
 use crate::error::{PipesError, Result};
 use crate::export::valid_type;
 use crate::extract::client::FhirClient;
+use crate::fhir::group::is_valid_id;
 use crate::fhir::head::Head;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::load::bundle::{Bundle, plan, plan_deletes};
@@ -82,12 +83,6 @@ struct Outcome {
     /// Gone from the file, not deleted: more than `--max-delete-share`.
     refused: usize,
     error: Option<String>,
-}
-
-/// A FHIR id. It goes into a URL and the state file, so nothing else is
-/// accepted.
-fn valid_id(id: &str) -> bool {
-    crate::fhir::group::is_valid_id(id)
 }
 
 /// Drop `meta.versionId` and `meta.lastUpdated`, and `meta` when nothing
@@ -174,7 +169,8 @@ fn plan_type(resource_type: &str, path: &Path, synced: &Synced, full: bool) -> R
             return Err(at(&format!("not a {resource_type}")));
         }
         let id = head.id.as_deref().unwrap_or("");
-        if !valid_id(id) {
+        // A FHIR id: it goes into a URL and the state file.
+        if !is_valid_id(id) {
             return Err(at(&format!(
                 "id {id:?} is not a FHIR id (1 to 64 letters, digits, '-' and '.')"
             )));
@@ -596,15 +592,6 @@ mod tests {
         let mut r = json!({"resourceType": "Patient", "id": "p", "meta": {"versionId": "3"}});
         strip_version(&mut r);
         assert_eq!(r, json!({"resourceType": "Patient", "id": "p"}));
-    }
-
-    #[test]
-    fn ids_are_checked_against_the_fhir_rule() {
-        assert!(valid_id("a-b.C9"));
-        assert!(!valid_id(""));
-        assert!(!valid_id("a/b"));
-        assert!(!valid_id("a\tb"));
-        assert!(!valid_id(&"x".repeat(65)));
     }
 
     #[test]

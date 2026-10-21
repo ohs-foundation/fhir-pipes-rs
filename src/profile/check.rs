@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use crate::cli::ReportSource;
 use crate::error::{PipesError, Result};
+use crate::fhir::package::Index;
 use crate::profile::{Column, Kind, Profile};
 
 /// The parts of an IG the check reads.
@@ -46,50 +47,70 @@ impl Ig {
     /// directory of JSON resources, or `name#version` in the FHIR package
     /// cache.
     pub fn load(spec: &str) -> Result<Self> {
+        let mut index = Index::load(
+            &[spec.to_string()],
+            "--ig",
+            &[
+                "StructureDefinition",
+                "CodeSystem",
+                "ValueSet",
+                "ImplementationGuide",
+            ],
+        )?;
         let mut ig = Ig {
             label: spec.to_string(),
             ..Ig::default()
         };
-        crate::fhir::package::read_json_files(spec, "--ig", |name, text| ig.add(name, text))?;
+        // The package's own canonical, else the ImplementationGuide's base.
+        for m in index.manifests() {
+            if let Some(c) = m.get("canonical").and_then(Value::as_str) {
+                ig.canonical = Some(c.trim_end_matches('/').to_string());
+            }
+            if let (Some(n), Some(ver)) = (
+                m.get("name").and_then(Value::as_str),
+                m.get("version").and_then(Value::as_str),
+            ) {
+                ig.label = format!("{n} {ver}");
+            }
+        }
+        if ig.canonical.is_none() {
+            let mut guides: Vec<String> =
+                index.take_type("ImplementationGuide").into_keys().collect();
+            guides.sort();
+            ig.canonical = guides.iter().find_map(|u| {
+                u.split_once("/ImplementationGuide/")
+                    .map(|(base, _)| base.to_string())
+            });
+        }
+        // An IG holds one version of each resource; with two, the check
+        // could not say which it compared the profile with.
+        let mut one = |kind: &str| -> Result<HashMap<String, Value>> {
+            let mut out = HashMap::new();
+            for (url, mut versions) in index.take_type(kind) {
+                if versions.len() > 1 {
+                    let listed: Vec<&str> = versions
+                        .iter()
+                        .map(|v| v["version"].as_str().unwrap_or("(none)"))
+                        .collect();
+                    return Err(PipesError::Usage(format!(
+                        "--ig {spec}: holds {kind} {url} in versions {}; point --ig at one \
+                         version of the IG",
+                        listed.join(", ")
+                    )));
+                }
+                out.insert(url, versions.remove(0));
+            }
+            Ok(out)
+        };
+        ig.structure_definitions = one("StructureDefinition")?;
+        ig.code_systems = one("CodeSystem")?;
+        ig.value_sets = one("ValueSet")?;
         if ig.structure_definitions.is_empty() && ig.code_systems.is_empty() {
             return Err(PipesError::Usage(format!(
                 "--ig {spec}: no StructureDefinitions or CodeSystems found"
             )));
         }
         Ok(ig)
-    }
-
-    fn add(&mut self, name: &str, v: Value) {
-        if name.ends_with("package.json") && v.get("resourceType").is_none() {
-            if let Some(c) = v.get("canonical").and_then(Value::as_str) {
-                self.canonical = Some(c.trim_end_matches('/').to_string());
-            }
-            if let (Some(n), Some(ver)) = (
-                v.get("name").and_then(Value::as_str),
-                v.get("version").and_then(Value::as_str),
-            ) {
-                self.label = format!("{n} {ver}");
-            }
-            return;
-        }
-        let url = v.get("url").and_then(Value::as_str).map(str::to_string);
-        match (v.get("resourceType").and_then(Value::as_str), url) {
-            (Some("StructureDefinition"), Some(u)) => {
-                self.structure_definitions.insert(u, v);
-            }
-            (Some("CodeSystem"), Some(u)) => {
-                self.code_systems.insert(u, v);
-            }
-            (Some("ValueSet"), Some(u)) => {
-                self.value_sets.insert(u, v);
-            }
-            (Some("ImplementationGuide"), Some(u)) if self.canonical.is_none() => {
-                if let Some((base, _)) = u.split_once("/ImplementationGuide/") {
-                    self.canonical = Some(base.to_string());
-                }
-            }
-            _ => {}
-        }
     }
 
     /// The IG's own URL: under its canonical, or any URL when that is unknown.
@@ -889,9 +910,34 @@ mod tests {
             ..Ig::default()
         };
         for r in resources {
-            ig.add("r.json", r.clone());
+            let url = r["url"].as_str().unwrap().to_string();
+            let map = match r["resourceType"].as_str() {
+                Some("StructureDefinition") => &mut ig.structure_definitions,
+                Some("CodeSystem") => &mut ig.code_systems,
+                Some("ValueSet") => &mut ig.value_sets,
+                _ => continue,
+            };
+            map.insert(url, r.clone());
         }
         ig
+    }
+
+    #[test]
+    fn an_ig_with_two_versions_of_a_resource_is_refused() {
+        let cs = |version: &str| {
+            format!(
+                r#"{{"resourceType":"CodeSystem","url":"https://example.org/CodeSystem/k","version":"{version}"}}"#
+            )
+        };
+        let bytes = crate::fhir::package::tgz(&[("a.json", &cs("1")), ("b.json", &cs("2"))]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.tgz");
+        std::fs::write(&path, bytes).unwrap();
+        let err = Ig::load(path.to_str().unwrap()).unwrap_err().to_string();
+        assert!(
+            err.contains("CodeSystem https://example.org/CodeSystem/k in versions"),
+            "{err}"
+        );
     }
 
     fn extension(id: &str, context: Value, value: Value) -> Value {

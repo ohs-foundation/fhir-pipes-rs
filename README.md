@@ -221,8 +221,11 @@ complex element, an array or a Reference in a scalar column (FH03–FH05).
 Columns under a `forEach` are checked from its items. An element whose type
 differs between R4 and R5 is accepted, but not checked further. `views lint
 --package hl7.fhir.r4.core --version 4.0.1` checks against a FHIR package
-instead, such as an IG's, downloading it if it is not installed yet; without
-`--version` it uses only a package that is already installed. That needs a
+instead, such as an IG's: taken from the local FHIR package cache
+(`~/.fhir/packages`) when it is there, otherwise downloaded from
+packages.fhir.org. `--package` also takes a package.tgz (a path or an https
+URL), an unpacked package or a directory of StructureDefinitions, as
+`terminology` and `profile check` do. That needs a
 build with the `fhir-packages` feature (see
 [Building and testing](#building-and-testing)). `views validate` and
 `views lint` also write their findings as JSON (`--json`) or SARIF

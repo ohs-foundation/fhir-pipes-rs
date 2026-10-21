@@ -37,7 +37,6 @@
 //! table's owner.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -50,7 +49,7 @@ use arrow::datatypes::{
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use fhir_pipes_sof::{SelectColumn, ViewDefinition};
 use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter};
 use sqlx_core::connection::Connection;
 use sqlx_core::row::Row;
 use sqlx_core::sql_str::AssertSqlSafe;
@@ -60,7 +59,7 @@ use crate::error::usage;
 use crate::export::changes::Changes;
 
 use super::config::{Database, Mode, Settings};
-use super::partition::table_files_checked;
+use super::partition::{open_parquet, table_files_checked};
 use super::sql::ident;
 
 /// Rows sent to COPY per message.
@@ -214,10 +213,7 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
 /// and yes where a file has none.
 fn key_has_nulls(files: &[PathBuf], key: &str) -> Result<bool> {
     for f in files {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(
-            fs::File::open(f).with_context(|| format!("opening {}", f.display()))?,
-        )
-        .with_context(|| format!("reading {}", f.display()))?;
+        let builder = open_parquet(f)?;
         let Some(i) = builder
             .parquet_schema()
             .columns()
@@ -395,10 +391,7 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
     })?;
     let mut columns: Option<Vec<(String, &'static str)>> = None;
     for f in &files {
-        let reader = ParquetRecordBatchReaderBuilder::try_new(
-            fs::File::open(f).with_context(|| format!("opening {}", f.display()))?,
-        )
-        .with_context(|| format!("reading {}", f.display()))?;
+        let reader = open_parquet(f)?;
         let these = reader
             .schema()
             .fields()
@@ -973,8 +966,7 @@ async fn copy(
         .await
         .with_context(|| format!("starting COPY into {name}"))?;
     for f in &p.files {
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(f)?)?
-            .with_batch_size(COPY_ROWS);
+        let mut builder = open_parquet(f)?.with_batch_size(COPY_ROWS);
         if let Some((key, ids)) = only {
             let mask = ProjectionMask::columns(builder.parquet_schema(), [key]);
             builder = builder.with_row_filter(RowFilter::new(vec![Box::new(

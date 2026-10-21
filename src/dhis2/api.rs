@@ -66,34 +66,33 @@ impl ServerInfo {
 /// a date alone), read as UTC: on a server in another time zone it is off
 /// by those hours, which does not matter for an age in days.
 pub fn epoch_seconds(ts: &str) -> Option<i64> {
-    let b = ts.as_bytes();
+    let days = crate::calendar::day_of(ts.get(..10)?)?;
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
         let s = ts.get(r)?;
         s.bytes()
             .all(|c| c.is_ascii_digit())
             .then(|| s.parse().ok())?
     };
-    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
-        return None;
-    }
-    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
+    let b = ts.as_bytes();
     let (hh, mm, ss) = if b.len() >= 19 && b[10] == b'T' {
         (num(11..13)?, num(14..16)?, num(17..19)?)
     } else {
         (0, 0, 0)
     };
-    // Days from 1970-01-01 to y-m-d in the proleptic Gregorian calendar
-    // (Howard Hinnant's days_from_civil).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
     Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// A metadata filter for the objects whose `field` is one of `ids`:
+/// `id:in:[a,b]`.
+pub fn in_filter<S: AsRef<str>>(field: &str, ids: impl IntoIterator<Item = S>) -> String {
+    let ids: Vec<S> = ids.into_iter().collect();
+    let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+    format!("{field}:in:[{}]", ids.join(","))
+}
+
+/// A metadata filter for the org units under `root`, itself included.
+pub fn under(root: &str) -> String {
+    format!("path:like:{root}")
 }
 
 /// `--max-analytics-age`: `7d`, `36h`, `2w`.
@@ -268,6 +267,16 @@ impl Dhis2 {
         }
     }
 
+    /// The metadata object `{kind}/{uid}.json` with `fields`, or `None` when
+    /// DHIS2 has none by that uid (404).
+    pub fn get_one(&self, kind: &str, uid: &str, fields: &str) -> Result<Option<Value>> {
+        match self.try_get(&format!("{kind}/{uid}.json"), &[("fields", fields.into())])? {
+            Ok(v) => Ok(Some(v)),
+            Err(FetchError::Status { status: 404, .. }) => Ok(None),
+            Err(e) => Err(self.error(kind, e)),
+        }
+    }
+
     pub fn error(&self, path: &str, e: FetchError) -> PipesError {
         match e {
             FetchError::Status { status: 401, .. } | FetchError::Status { status: 403, .. } => {
@@ -378,6 +387,17 @@ mod tests {
         );
         assert_eq!(epoch_seconds("nonsense"), None);
         assert_eq!(epoch_seconds("2026-13-01"), None);
+        assert_eq!(epoch_seconds("2026-02-31"), None);
+    }
+
+    #[test]
+    fn metadata_filters() {
+        assert_eq!(in_filter("id", ["a", "b"]), "id:in:[a,b]");
+        assert_eq!(
+            in_filter("id", std::collections::BTreeSet::from(["x".to_string()])),
+            "id:in:[x]"
+        );
+        assert_eq!(under("ImspTQPwCqd"), "path:like:ImspTQPwCqd");
     }
 
     #[test]

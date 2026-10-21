@@ -5,11 +5,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use parquet::file::reader::{FileReader, SerializedFileReader};
 use serde_json::{Map, Value, json};
 
 use super::config::Settings;
-use super::partition::{partition_key, table_files};
+use super::partition::{open_parquet, partition_key, table_files};
 use super::stage::Stage;
 
 /// The time now as `refreshed_at` gives it: UTC, to the second.
@@ -114,12 +113,7 @@ fn configured_server(s: &Settings, contacted: bool) -> Option<String> {
 pub fn rows(table_dir: &Path, column: &str) -> Result<i64> {
     let mut n = 0;
     for file in table_files(table_dir, &partition_key(table_dir, column)) {
-        let f = fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
-        n += SerializedFileReader::new(f)
-            .with_context(|| format!("reading {}", file.display()))?
-            .metadata()
-            .file_metadata()
-            .num_rows();
+        n += open_parquet(&file)?.metadata().file_metadata().num_rows();
     }
     Ok(n)
 }

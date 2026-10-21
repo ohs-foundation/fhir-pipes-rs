@@ -189,6 +189,38 @@ impl ViewDefinition {
         }
         cols
     }
+
+    /// Every select of the view, the nested ones too: each select, then
+    /// those in it (`SelectColumn::nested`), depth first.
+    pub fn selects(&self) -> Vec<&SelectColumn> {
+        fn add<'a>(select: &'a SelectColumn, out: &mut Vec<&'a SelectColumn>) {
+            out.push(select);
+            for nested in select.nested() {
+                add(nested, out);
+            }
+        }
+        let mut out = Vec::new();
+        for select in &self.select {
+            add(select, &mut out);
+        }
+        out
+    }
+}
+
+impl SelectColumn {
+    /// The selects directly in this one: its nested `select`s, then its
+    /// `unionAll` branches.
+    pub fn nested(&self) -> impl Iterator<Item = &SelectColumn> {
+        self.select.iter().chain(self.union_all.iter().flatten())
+    }
+
+    /// The columns this select gives a row, in order, as
+    /// `ViewDefinition::output_columns` lists them for the whole view.
+    pub fn output_columns(&self, mut mismatch: impl FnMut()) -> Vec<&Column> {
+        let mut cols = Vec::new();
+        output_columns_of(self, &mut mismatch, &mut cols);
+        cols
+    }
 }
 
 fn output_columns_of<'a>(
@@ -331,6 +363,26 @@ mod tests {
         assert_eq!(view.constant[0].name, "statusFilter");
         assert_eq!(view.constant[0].value_string, Some("active".to_string()));
         assert_eq!(view.constant[1].value_integer, Some(65));
+    }
+
+    #[test]
+    fn selects_lists_every_select_depth_first() {
+        let view = ViewDefinition::from_json(&json!({
+            "resource": "Patient",
+            "select": [
+                { "path": "a",
+                  "select": [{ "path": "b" }],
+                  "unionAll": [{ "path": "c", "select": [{ "path": "d" }] }, { "path": "e" }] },
+                { "path": "f" }
+            ]
+        }))
+        .unwrap();
+        let paths: Vec<&str> = view
+            .selects()
+            .iter()
+            .map(|s| s.path.as_deref().unwrap())
+            .collect();
+        assert_eq!(paths, ["a", "b", "c", "d", "e", "f"]);
     }
 
     #[test]

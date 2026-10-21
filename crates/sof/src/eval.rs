@@ -968,20 +968,12 @@ impl Evaluator {
 /// The all-null row for an empty `forEachOrNull`, in shape order. Per spec,
 /// columns whose path is `%rowIndex` are bound to 0 rather than null.
 fn null_fill(select: &SelectColumn, row: &mut Vec<Value>) {
-    if let Some(columns) = &select.column {
-        for col in columns {
-            row.push(if col.path.trim() == "%rowIndex" {
-                Value::Number(0.into())
-            } else {
-                Value::Null
-            });
-        }
-    }
-    for nested in &select.select {
-        null_fill(nested, row);
-    }
-    if let Some(first) = select.union_all.as_ref().and_then(|b| b.first()) {
-        null_fill(first, row);
+    for col in select.output_columns(|| {}) {
+        row.push(if col.path.trim() == "%rowIndex" {
+            Value::Number(0.into())
+        } else {
+            Value::Null
+        });
     }
 }
 
@@ -1229,7 +1221,7 @@ fn rewrite_of_type(path: &str, root: Option<&str>) -> String {
             && text(open) == "("
             && ty.kind == Kind::Ident
             && text(close) == ")"
-            && is_fhir_datatype(text(ty))
+            && fhir_model::is_datatype(text(ty))
             // On an element that is not a choice element the engine, which
             // knows the element's type from the model, answers it
             // (`name.ofType(HumanName)`, `gender.ofType(code)`).
@@ -1381,30 +1373,10 @@ fn walk_chain(path: &str, chain: &[&Token], root: Option<&str>) -> Option<String
     (!owner.is_empty()).then_some(owner)
 }
 
-/// Whether `name` is a FHIR datatype a choice element can take (R4 and R5),
-/// or a FHIRPath system type name, as opposed to a resource type.
-fn is_fhir_datatype(name: &str) -> bool {
-    matches!(
-        name,
-        // Primitive types.
-        "base64Binary" | "boolean" | "canonical" | "code" | "date" | "dateTime" | "decimal"
-            | "id" | "instant" | "integer" | "integer64" | "markdown" | "oid" | "positiveInt"
-            | "string" | "time" | "unsignedInt" | "uri" | "url" | "uuid"
-            // General-purpose and metadata types.
-            | "Address" | "Age" | "Annotation" | "Attachment" | "Availability"
-            | "CodeableConcept" | "CodeableReference" | "Coding" | "ContactDetail"
-            | "ContactPoint" | "Contributor" | "Count" | "DataRequirement" | "Distance"
-            | "Dosage" | "Duration" | "Expression" | "ExtendedContactDetail" | "HumanName"
-            | "Identifier" | "Meta" | "MonetaryComponent" | "Money" | "ParameterDefinition"
-            | "Period" | "Quantity" | "Range" | "Ratio" | "RatioRange" | "Reference"
-            | "RelatedArtifact" | "SampledData" | "Signature" | "Timing"
-            | "TriggerDefinition" | "UsageContext" | "VirtualServiceDetail"
-            // FHIRPath system types.
-            | "Boolean" | "String" | "Integer" | "Decimal" | "Date" | "DateTime" | "Time"
-    )
-}
-
-fn column_type(col: &Column) -> ColumnType {
+/// A column's type: JSON for a collection, else its `ansi/type` tag, else
+/// the FHIR type it declares, else a string. The evaluator and the SQL
+/// generator both type columns with this.
+pub(crate) fn column_type(col: &Column) -> ColumnType {
     if col.collection.unwrap_or(false) {
         return ColumnType::Json;
     }

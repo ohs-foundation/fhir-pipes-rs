@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
 use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow, out_of_range};
 use crate::fhir::location::{
-    self, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension,
+    self, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension, position_of,
 };
 use crate::fhir::organization::NewOrganization;
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
@@ -433,11 +433,6 @@ fn upsert_type_coding(obj: &mut Object, system: &str, code: Option<&str>) {
     if types.is_empty() {
         obj.remove("type");
     }
-}
-
-pub fn position_of(obj: &Object) -> Option<(f64, f64)> {
-    let p = obj.get("position")?.as_object()?;
-    Some((p.get("longitude")?.as_f64()?, p.get("latitude")?.as_f64()?))
 }
 
 fn write_position(obj: &mut Object, lon: f64, lat: f64) {

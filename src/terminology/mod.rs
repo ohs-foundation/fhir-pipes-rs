@@ -17,7 +17,7 @@
 
 pub mod expand;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
@@ -25,6 +25,7 @@ use fhir_pipes_sof::{ColumnInfo, ColumnType, ViewResult};
 use serde_json::Value;
 
 use crate::error::usage;
+use crate::fhir::package::Index;
 
 #[derive(clap::Subcommand, Debug)]
 pub enum TerminologyCommand {
@@ -97,51 +98,42 @@ pub fn run(command: &TerminologyCommand) -> Result<()> {
 
 /// The ValueSets, CodeSystems and ConceptMaps of a set of packages, by
 /// canonical URL.
-#[derive(Debug, Default)]
-pub struct Content {
-    value_sets: HashMap<String, Vec<Value>>,
-    code_systems: HashMap<String, Vec<Value>>,
-    concept_maps: HashMap<String, Vec<Value>>,
+#[derive(Debug)]
+pub struct Content(Index);
+
+/// The resource types `Content` keeps.
+const TYPES: [&str; 3] = ["ValueSet", "CodeSystem", "ConceptMap"];
+
+impl Default for Content {
+    fn default() -> Self {
+        Content(Index::new(&TYPES))
+    }
 }
 
 impl Content {
     pub fn load(packages: &[String]) -> Result<Self> {
-        let mut content = Content::default();
-        for spec in packages {
-            crate::fhir::package::read_json_files(spec, "--package", |_, v| content.add(v))?;
-        }
-        Ok(content)
+        Ok(Content(Index::load(packages, "--package", &TYPES)?))
     }
 
     /// Keep `resource` if it is a ValueSet, CodeSystem or ConceptMap with a
     /// URL. The same URL and version from two packages is kept once.
+    #[cfg(test)]
     pub fn add(&mut self, resource: Value) {
-        let map = match resource["resourceType"].as_str() {
-            Some("ValueSet") => &mut self.value_sets,
-            Some("CodeSystem") => &mut self.code_systems,
-            Some("ConceptMap") => &mut self.concept_maps,
-            _ => return,
-        };
-        let Some(url) = resource["url"].as_str().map(str::to_string) else {
-            return;
-        };
-        let versions = map.entry(url).or_default();
-        if !versions.iter().any(|v| v["version"] == resource["version"]) {
-            versions.push(resource);
-        }
+        self.0.add("", resource);
     }
 
     /// The value set `canonical` (`url` or `url|version`) names.
     fn value_set(&self, canonical: &str) -> Result<&Value> {
-        resolve(&self.value_sets, canonical, "ValueSet")
+        resolve(&self.0, canonical, "ValueSet")
     }
 
     /// The code system `url` at `version`, if the packages hold it; an error
     /// if they hold several versions and `version` does not pick one.
     fn code_system(&self, url: &str, version: Option<&str>) -> Result<Option<&Value>> {
-        let Some(versions) = self.code_systems.get(url) else {
+        let versions = self.0.versions("CodeSystem", url);
+        if versions.is_empty() {
             return Ok(None);
-        };
+        }
         match version {
             Some(v) => Ok(versions.iter().find(|cs| cs["version"].as_str() == Some(v))),
             None if versions.len() == 1 => Ok(versions.first()),
@@ -160,21 +152,18 @@ impl Content {
 
     /// The rows of the concept map `canonical` names.
     pub fn concept_map_rows(&self, canonical: &str) -> Result<Vec<MapRow>> {
-        let cm = resolve(&self.concept_maps, canonical, "ConceptMap")?;
+        let cm = resolve(&self.0, canonical, "ConceptMap")?;
         concept_map(cm, canonical)
     }
 }
 
 /// The resource of `kind` that `canonical` (`url` or `url|version`) names.
-fn resolve<'a>(
-    map: &'a HashMap<String, Vec<Value>>,
-    canonical: &str,
-    kind: &str,
-) -> Result<&'a Value> {
+fn resolve<'a>(index: &'a Index, canonical: &str, kind: &str) -> Result<&'a Value> {
     let (url, version) = split_canonical(canonical);
-    let versions = map
-        .get(url)
-        .ok_or_else(|| usage(anyhow!("no {kind} {url} in the packages")))?;
+    let versions = index.versions(kind, url);
+    if versions.is_empty() {
+        return Err(usage(anyhow!("no {kind} {url} in the packages")));
+    }
     match version {
         Some(v) => versions
             .iter()

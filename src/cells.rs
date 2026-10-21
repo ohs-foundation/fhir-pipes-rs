@@ -27,12 +27,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
             ndjson.display()
         )));
     }
-    if args.out.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--out {}: is a directory",
-            args.out.display()
-        )));
-    }
+    crate::fs::check_out(&args.out)?;
     // The cells go in the profile's spatial index extension.
     let profile = crate::profile::Profile::for_snapshot(profile, &args.snapshot)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
@@ -76,7 +71,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or("<no id>")
             .to_string();
-        let Some((lon, lat)) = crate::diff::rebuild::position_of(obj) else {
+        let Some((lon, lat)) = crate::fhir::location::position_of(obj) else {
             report.add("no_position", &id, "no position; nothing to index");
             continue;
         };
@@ -116,8 +111,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
         report.counts().get("no_position").copied().unwrap_or(0)
     );
     if let Some(path) = &args.report {
-        let json = serde_json::to_string_pretty(&report.to_json())?;
-        std::fs::write(path, json).map_err(|e| PipesError::io(path, e))?;
+        crate::transform::write_report(path, &report)?;
     }
     Ok(())
 }

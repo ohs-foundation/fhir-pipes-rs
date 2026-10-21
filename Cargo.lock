@@ -1273,11 +1273,9 @@ dependencies = [
  "banshee_hir",
  "banshee_parser",
  "fhir-pipes-sof",
- "octofhir-canonical-manager",
  "octofhir-fhirpath",
  "octofhir-fhirschema",
  "serde_json",
- "thiserror 2.0.20",
  "tokio",
 ]
 

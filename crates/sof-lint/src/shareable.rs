@@ -40,32 +40,28 @@ const EXPERIMENTAL_FUNCS: &[&str] = &["join", "lowBoundary", "highBoundary"];
 /// FHIRPath functions) that should not be flagged.
 pub fn lint_shareable(view: &ViewDefinition, allowed_custom: &[String]) -> Vec<Finding> {
     let mut out = Vec::new();
-    walk_selects(&view.select, allowed_custom, &mut out);
+    for select in view.selects() {
+        check_select(select, allowed_custom, &mut out);
+    }
     for w in &view.where_ {
         check_expr(&w.path, &w.path, allowed_custom, &mut out);
     }
     out
 }
 
-fn walk_selects(selects: &[SelectColumn], allowed: &[String], out: &mut Vec<Finding>) {
-    for select in selects {
-        if let Some(p) = &select.for_each {
-            check_expr(p, p, allowed, out);
-        }
-        if let Some(p) = &select.for_each_or_null {
-            check_expr(p, p, allowed, out);
-        }
-        for p in &select.repeat {
-            check_expr(p, p, allowed, out);
-        }
-        if let Some(columns) = &select.column {
-            for col in columns {
-                check_expr(&col.path, &col.name, allowed, out);
-            }
-        }
-        walk_selects(&select.select, allowed, out);
-        if let Some(union) = &select.union_all {
-            walk_selects(union, allowed, out);
+fn check_select(select: &SelectColumn, allowed: &[String], out: &mut Vec<Finding>) {
+    if let Some(p) = &select.for_each {
+        check_expr(p, p, allowed, out);
+    }
+    if let Some(p) = &select.for_each_or_null {
+        check_expr(p, p, allowed, out);
+    }
+    for p in &select.repeat {
+        check_expr(p, p, allowed, out);
+    }
+    if let Some(columns) = &select.column {
+        for col in columns {
+            check_expr(&col.path, &col.name, allowed, out);
         }
     }
 }

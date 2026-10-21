@@ -1,31 +1,8 @@
 //! FHIR `instant` values: parse to (seconds, nanos) since the epoch for
-//! comparison, and format the current time. No calendar crate: the civil
-//! date arithmetic is Howard Hinnant's days-from-civil.
+//! comparison, and format the current time. Days are counted by
+//! `crate::calendar`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
-
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u64;
-    let mp = (m as u64 + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d as u64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe as i64 - 719468
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
 
 /// `YYYY-MM-DDThh:mm:ss[.fraction](Z|±hh:mm)` -> (unix seconds, nanoseconds).
 ///
@@ -53,18 +30,14 @@ pub fn parse_instant(s: &str) -> Option<(i64, u32)> {
         }
         slice.parse::<i64>().ok()
     };
-    let (y, mo, d) = (digits(0..4)?, digits(5..7)? as u32, digits(8..10)? as u32);
+    let (y, mo, d) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
     let (h, mi, sec) = (digits(11..13)?, digits(14..16)?, digits(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+    if h > 23 || mi > 59 || sec > 60 {
         return None;
     }
-    // Reject days that don't exist in their month (e.g. 2026-02-31, or
-    // 2026-02-29 in a non-leap year) by round-tripping through the
-    // civil-calendar conversion.
-    let days = days_from_civil(y, mo, d);
-    if civil_from_days(days) != (y, mo, d) {
-        return None;
-    }
+    // Days that don't exist in their month (e.g. 2026-02-31, or 2026-02-29
+    // in a non-leap year) are rejected.
+    let days = crate::calendar::days_from_civil(y, mo, d)?;
     let mut i = 19;
     let mut nanos = 0u32;
     if b.get(i) == Some(&b'.') {
@@ -140,11 +113,10 @@ pub fn format_utc(t: SystemTime) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let days = secs.div_euclid(86400);
     let rem = secs.rem_euclid(86400);
-    let (y, m, d) = civil_from_days(days);
     format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        "{}T{:02}:{:02}:{:02}Z",
+        crate::calendar::iso(secs.div_euclid(86400)),
         rem / 3600,
         (rem % 3600) / 60,
         rem % 60

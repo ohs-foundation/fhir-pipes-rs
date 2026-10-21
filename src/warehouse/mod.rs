@@ -1067,7 +1067,7 @@ fn fingerprint(v: &views::View, partition_column: &str, lookup: &str) -> String 
         h.update(part.as_bytes());
         h.update([0]);
     }
-    hex(&h.finalize())
+    crate::fs::hex(&h.finalize())
 }
 
 /// A digest of a lookup: its keys and values, sorted.
@@ -1082,11 +1082,7 @@ fn lookup_digest(m: &HashMap<String, String>) -> String {
         h.update(v.as_bytes());
         h.update([0]);
     }
-    hex(&h.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::fs::hex(&h.finalize())
 }
 
 /// Writes the views' tables to the staging directory, reading the lookup

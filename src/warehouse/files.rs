@@ -196,9 +196,8 @@ impl Sources {
         })
     }
 
-    fn stamp(path: &Path) -> Result<(u64, std::time::SystemTime)> {
-        let m = fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
-        Ok((m.len(), m.modified()?))
+    fn stamp(path: &Path) -> Result<crate::fs::Stamp> {
+        crate::fs::stamp(path).with_context(|| format!("reading {}", path.display()))
     }
 
     /// Add an NDJSON input; returns its index.
@@ -268,15 +267,6 @@ impl SlotReader<'_> {
     }
 }
 
-/// Removes the spill file however `split` ends.
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
 /// Read every input file and write each resource type to
 /// raw/<name>/<Type>.ndjson, written beside it and renamed into place. A
 /// resource seen twice (same type and id) is kept once: the one with the later
@@ -309,7 +299,8 @@ pub fn split(s: &Settings) -> Result<()> {
     }
     fs::create_dir_all(&raw).with_context(|| format!("creating {}", raw.display()))?;
     let spill_path = raw.join(".files-spill.ndjson.tmp");
-    let _spill = RemoveOnDrop(spill_path.clone());
+    // Removed however `split` ends.
+    let _spill = crate::fs::RemoveOnDrop(vec![spill_path.clone()]);
     let mut sources = Sources::new(&spill_path)?;
     let mut index = Index::default();
     // Bundles are unwrapped into their entries; a view over Bundles needs

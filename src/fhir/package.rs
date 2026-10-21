@@ -1,8 +1,11 @@
 //! FHIR packages and directories of FHIR JSON, read for the resources in
 //! them: `package.tgz` files (a path or an https URL), unpacked packages, a
 //! package in the local FHIR package cache by `name#version`, and directories
-//! such as SUSHI's `fsh-generated/resources`.
+//! such as SUSHI's `fsh-generated/resources`. `Index` keeps the resources
+//! of some types by canonical URL; `terminology`, `profile check` and
+//! `views lint --package` read packages through it.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -42,6 +45,88 @@ pub fn read_json_files(
     read
 }
 
+/// The resources of the types asked for in a set of packages, by type and
+/// canonical URL, every version kept: the same URL and version read twice
+/// (from two packages, or two copies in a directory) is kept once. The
+/// packages' own `package.json` manifests are kept too.
+#[derive(Debug, Default)]
+pub struct Index {
+    types: Vec<String>,
+    resources: HashMap<String, HashMap<String, Vec<serde_json::Value>>>,
+    manifests: Vec<serde_json::Value>,
+}
+
+impl Index {
+    /// An empty index that keeps resources of `types`.
+    pub fn new(types: &[&str]) -> Self {
+        Self {
+            types: types.iter().map(|t| t.to_string()).collect(),
+            ..Self::default()
+        }
+    }
+
+    /// The resources of `types` in every package of `specs` (as
+    /// `read_json_files` reads them; `flag` names the option for messages).
+    pub fn load(specs: &[String], flag: &str, types: &[&str]) -> Result<Self> {
+        let mut index = Self::new(types);
+        for spec in specs {
+            read_json_files(spec, flag, |name, v| index.add(name, v))?;
+        }
+        Ok(index)
+    }
+
+    /// Keep `v`, read from the file `name`, if it is a package manifest or a
+    /// resource of one of the index's types with a URL.
+    pub fn add(&mut self, name: &str, v: serde_json::Value) {
+        if v.get("resourceType").is_none() {
+            if Path::new(name)
+                .file_name()
+                .is_some_and(|n| n == "package.json")
+            {
+                self.manifests.push(v);
+            }
+            return;
+        }
+        let Some(kind) = v["resourceType"]
+            .as_str()
+            .filter(|t| self.types.iter().any(|k| k == t))
+        else {
+            return;
+        };
+        let Some(url) = v["url"].as_str().map(str::to_string) else {
+            return;
+        };
+        let versions = self
+            .resources
+            .entry(kind.to_string())
+            .or_default()
+            .entry(url)
+            .or_default();
+        if !versions.iter().any(|r| r["version"] == v["version"]) {
+            versions.push(v);
+        }
+    }
+
+    /// Every version of the `resource_type` at `url`, in the order read.
+    pub fn versions(&self, resource_type: &str, url: &str) -> &[serde_json::Value] {
+        self.resources
+            .get(resource_type)
+            .and_then(|m| m.get(url))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The resources of `resource_type`, by URL, each URL's versions in the
+    /// order read, taken out of the index.
+    pub fn take_type(&mut self, resource_type: &str) -> HashMap<String, Vec<serde_json::Value>> {
+        self.resources.remove(resource_type).unwrap_or_default()
+    }
+
+    /// The `package.json` manifests read.
+    pub fn manifests(&self) -> &[serde_json::Value] {
+        &self.manifests
+    }
+}
+
 type Visit<'a> = dyn FnMut(&str, std::result::Result<&str, String>) + 'a;
 
 fn read_any(spec: &str, flag: &str, visit: &mut Visit) -> Result<()> {
@@ -69,6 +154,22 @@ fn read_any(spec: &str, flag: &str, visit: &mut Visit) -> Result<()> {
         )))
     }
 }
+
+/// The package `name` at `version`, as a spec for `read_json_files`:
+/// `name#version` when it is in the local FHIR package cache, otherwise its
+/// download from the FHIR package registry.
+#[cfg(feature = "fhir-packages")]
+pub fn by_version(name: &str, version: &str) -> String {
+    let spec = format!("{name}#{version}");
+    if cached(&spec).is_some() {
+        return spec;
+    }
+    format!("{REGISTRY}/{name}/{version}")
+}
+
+/// The FHIR package registry.
+#[cfg(feature = "fhir-packages")]
+const REGISTRY: &str = "https://packages.fhir.org";
 
 /// The unpacked package `name#version` names in the local FHIR package cache,
 /// where the IG publisher, SUSHI and the validator keep packages.
@@ -216,6 +317,40 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ids, ["a"]);
+    }
+
+    #[test]
+    fn the_index_keeps_each_version_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.tgz");
+        let vs = |version: &str| {
+            format!(r#"{{"resourceType":"ValueSet","url":"http://x/vs","version":"{version}"}}"#)
+        };
+        std::fs::write(
+            &path,
+            tgz(&[
+                ("package.json", r#"{"name":"p","version":"1"}"#),
+                ("a.json", &vs("1")),
+                ("b.json", &vs("2")),
+                ("c.json", &vs("1")),
+                ("d.json", r#"{"resourceType":"Patient","url":"http://x/p"}"#),
+                ("e.json", r#"{"resourceType":"ValueSet"}"#),
+            ]),
+        )
+        .unwrap();
+        let spec = path.to_str().unwrap().to_string();
+        let index = Index::load(&[spec.clone(), spec], "--package", &["ValueSet"]).unwrap();
+        let versions: Vec<&str> = index
+            .versions("ValueSet", "http://x/vs")
+            .iter()
+            .map(|v| v["version"].as_str().unwrap())
+            .collect();
+        assert_eq!(versions, ["1", "2"]);
+        assert_eq!(index.manifests().len(), 2);
+        let mut index = index;
+        assert_eq!(index.take_type("ValueSet").len(), 1);
+        assert!(index.take_type("Patient").is_empty());
+        assert!(index.versions("ValueSet", "http://x/vs").is_empty());
     }
 
     #[test]

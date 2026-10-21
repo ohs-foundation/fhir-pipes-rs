@@ -188,23 +188,6 @@ fn valid_source_code(code: &str) -> bool {
     !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// `YYYY-MM-DD`: 10 chars, digits at 0-3, 5-6, 8-9, hyphens at 4 and 7. Not a
-/// calendar check (no month/day range validation) -- just the shape the
-/// `estimate-date` extension's `valueDate` needs.
-fn valid_iso_date(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b.iter().enumerate().all(|(i, &c)| {
-            if i == 4 || i == 7 {
-                true
-            } else {
-                c.is_ascii_digit()
-            }
-        })
-}
-
 pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()> {
     let snapshot = Snapshot::new(&args.snapshot);
     let ndjson = snapshot.locations();
@@ -214,12 +197,7 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
             ndjson.display()
         )));
     }
-    if args.out.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--out {}: is a directory",
-            args.out.display()
-        )));
-    }
+    crate::fs::check_out(&args.out)?;
     if !valid_source_code(&args.source) {
         return Err(PipesError::Usage(format!(
             "--source must be a code of letters, digits and hyphens, got {:?}",
@@ -233,10 +211,10 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
         )));
     }
     if let Some(d) = &args.estimate_date
-        && !valid_iso_date(d)
+        && !crate::calendar::is_date(d)
     {
         return Err(PipesError::Usage(format!(
-            "--estimate-date must be YYYY-MM-DD, got {d:?}"
+            "--estimate-date must be a date, YYYY-MM-DD, got {d:?}"
         )));
     }
     let estimate_date = args
@@ -772,14 +750,5 @@ mod tests {
         assert!(
             !valid_source_code("") && !valid_source_code("world pop") && !valid_source_code("a/b")
         );
-    }
-
-    #[test]
-    fn iso_dates_are_shape_checked() {
-        assert!(valid_iso_date("2026-01-01"));
-        assert!(!valid_iso_date("2026-1-1"));
-        assert!(!valid_iso_date("20260101"));
-        assert!(!valid_iso_date("2026-01-01T00:00:00Z"));
-        assert!(!valid_iso_date(""));
     }
 }

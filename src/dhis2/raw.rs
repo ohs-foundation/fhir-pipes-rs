@@ -32,13 +32,13 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::api::Dhis2;
-use super::calendar::{days_in_year, iso, period_days};
+use super::api::{Dhis2, in_filter};
+use super::calendar::period_days;
 use super::expression::{Expr, Item};
 use super::measures::{Indicator, Kind};
 use super::reports::{Analytics, AnalyticsRow, DateRange};
+use crate::calendar::{days_in_year, iso};
 use crate::error::{PipesError, Result};
-use crate::extract::client::FetchError;
 
 /// Root org units in one `dataValueSets` request: 100 `orgUnit=` parameters
 /// are about 2 KB of URL.
@@ -88,8 +88,8 @@ impl Span {
     pub fn of_range(r: &DateRange) -> Option<Self> {
         Some(Self {
             code: r.code(),
-            start: super::calendar::day_of(&r.start)?,
-            end: super::calendar::day_of(&r.end)?,
+            start: crate::calendar::day_of(&r.start)?,
+            end: crate::calendar::day_of(&r.end)?,
         })
     }
 }
@@ -214,7 +214,7 @@ pub fn prepare(
                     "fields",
                     "id,name,aggregationType,categoryCombo[categories[id],categoryOptionCombos[id,categoryOptions[id]]]".into(),
                 ),
-                ("filter", format!("id:in:[{}]", des.iter().cloned().collect::<Vec<_>>().join(","))),
+                ("filter", in_filter("id", &des)),
             ],
         )?;
         for v in list
@@ -290,13 +290,7 @@ pub fn prepare(
             &[
                 ("paging", "false".into()),
                 ("fields", "id,value".into()),
-                (
-                    "filter",
-                    format!(
-                        "id:in:[{}]",
-                        constants.iter().cloned().collect::<Vec<_>>().join(",")
-                    ),
-                ),
+                ("filter", in_filter("id", &constants)),
             ],
         )?;
         for v in list
@@ -318,17 +312,10 @@ pub fn prepare(
     }
 
     for b in breakdowns {
-        let v = match api.try_get(
-            &format!("categories/{b}.json"),
-            &[("fields", "id,name,categoryOptions[id,name]".into())],
-        )? {
-            Ok(v) => v,
-            Err(FetchError::Status { status: 404, .. }) => {
-                return Err(usage(format!(
-                    "--breakdown {b}: with --source data-values a breakdown must be a category, and DHIS2 has no category {b}"
-                )));
-            }
-            Err(e) => return Err(api.error("categories", e)),
+        let Some(v) = api.get_one("categories", b, "id,name,categoryOptions[id,name]")? else {
+            return Err(usage(format!(
+                "--breakdown {b}: with --source data-values a breakdown must be a category, and DHIS2 has no category {b}"
+            )));
         };
         let options = v
             .get("categoryOptions")
@@ -721,7 +708,7 @@ impl RawSource {
             return None;
         }
         let days = (target.end - target.start + 1) as f64;
-        let year = super::calendar::civil_from_days(target.start).0;
+        let year = crate::calendar::civil_from_days(target.start).0;
         let annual = if ind.annualized {
             days_in_year(year) as f64 / days
         } else {

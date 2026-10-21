@@ -28,19 +28,20 @@
 //! its newer version.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::Value;
-use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{
     PAGE_SIZE, PageNote, PageResult, ServerKind, count_matching, count_resources, page_search,
+    server_url,
 };
+use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
 
@@ -257,7 +258,7 @@ pub fn download(
         .filter(|(i, (_, c))| *c > 0 || *i == last)
         .map(|(_, job)| job)
         .collect();
-    let files = Remove(
+    let files = crate::fs::RemoveOnDrop(
         (0..jobs.len())
             .map(|i| {
                 o.dir
@@ -322,9 +323,7 @@ fn probe(
     resource_type: &str,
 ) -> std::result::Result<(i64, i64, Option<String>), String> {
     let first = |sort: &str| -> std::result::Result<(i64, Option<String>), String> {
-        let base = server.trim_end_matches('/');
-        let mut url = Url::parse(&format!("{base}/{resource_type}"))
-            .map_err(|_| format!("--server is not a valid URL: {server}"))?;
+        let mut url = server_url(server, resource_type).map_err(|e| e.to_string())?;
         url.query_pairs_mut()
             .append_pair("_sort", sort)
             .append_pair("_count", "1")
@@ -456,10 +455,8 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
     let file = crate::fs::create_private(out).map_err(|e| PipesError::io(out, e))?;
     let mut writer = BufWriter::new(file);
     for (w, (path, p)) in files.iter().zip(paged).enumerate() {
-        let reader =
-            BufReader::new(std::fs::File::open(path).map_err(|e| PipesError::io(path, e))?);
-        for (n, line) in reader.lines().enumerate() {
-            let line = line.map_err(|e| PipesError::io(path, e))?;
+        for (n, line) in NdjsonReader::open(path)?.enumerate() {
+            let line = line?.text;
             let note = p.notes.get(n).ok_or_else(|| {
                 PipesError::Environment(format!(
                     "{}: more lines than resources paged",
@@ -520,17 +517,6 @@ pub(super) fn parallel<T: Sync, R: Send>(
         .into_iter()
         .map(|r| r.expect("every item was run"))
         .collect()
-}
-
-/// Files removed when dropped, whether the download worked or not.
-pub(super) struct Remove(pub(super) Vec<PathBuf>);
-
-impl Drop for Remove {
-    fn drop(&mut self) {
-        for path in &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
-    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,6 @@
 //! with the partition value looked up through another warehouse table.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +15,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde_json::Value;
 
 use super::config::Lookup;
+use crate::index::partition::{self, Claims, unescape};
+use crate::report::Report;
 
 /// The directory name hive (and DuckDB) give the null partition.
 pub const NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
@@ -95,6 +96,14 @@ fn collect_parquet(dir: &Path, entries: Entries, out: &mut Vec<PathBuf>) -> Resu
     Ok(())
 }
 
+/// A Parquet file of the warehouse, opened to read: its metadata and schema
+/// are read, and an error names the file.
+pub fn open_parquet(path: &Path) -> Result<ParquetRecordBatchReaderBuilder<fs::File>> {
+    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("reading {}", path.display()))
+}
+
 /// key → partition value, read from a warehouse table. Where a key has several
 /// values the first one read wins. The value is the table's own first-level
 /// partition (`partition_key`, `column` by default), which need not be named
@@ -106,9 +115,7 @@ pub fn read_lookup(table_dir: &Path, key: &str, column: &str) -> Result<HashMap<
     let mut map = HashMap::new();
     for file in table_files(table_dir, column) {
         let from_path = partition_value_in_path(&file, table_dir, column);
-        let f = fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(f)
-            .with_context(|| format!("reading {}", file.display()))?;
+        let builder = open_parquet(&file)?;
         let has = |c: &str| builder.schema().column_with_name(c).is_some();
         if !has(key) {
             continue;
@@ -203,11 +210,14 @@ pub fn write(
     let mut columns = result.columns;
     columns.push(ColumnInfo::new(column, ColumnType::String));
     let mut summary = WriteSummary::default();
-    let mut segments = Segments::default();
+    // The directory name of a value that cannot be read back from it (empty,
+    // or very long) is not reported here: the value is in the files too.
+    let mut claims = Claims::default();
+    let mut unread = Report::default();
     for (value, rows) in groups {
         let segment = match value.as_deref() {
             None => NULL_PARTITION.to_string(),
-            Some(v) => segments.claim(v)?,
+            Some(v) => partition::segment(column, v, &mut claims, &mut unread),
         };
         let dir = staging.join(format!("{column}={segment}"));
         fs::create_dir_all(&dir)?;
@@ -241,7 +251,8 @@ pub fn write(
 }
 
 /// Put the table at `staged` in place of `table_dir`: the old one is renamed
-/// to `.<table>.old`, the new one renamed in, then the old one removed.
+/// to `.<table>.old`, the new one renamed in, then the old one removed
+/// (`fs::swap_dir`).
 pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
     let parent = table_dir
         .parent()
@@ -250,94 +261,8 @@ pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
         .file_name()
         .context("table directory has no name")?
         .to_string_lossy();
-    let old = parent.join(format!(".{name}.old"));
-    let _ = fs::remove_dir_all(&old);
-    if table_dir.exists() {
-        fs::rename(table_dir, &old)
-            .with_context(|| format!("moving {} aside", table_dir.display()))?;
-    }
-    fs::rename(staged, table_dir)
-        .with_context(|| format!("renaming {} into place", staged.display()))?;
-    let _ = fs::remove_dir_all(&old);
+    crate::fs::swap_dir(staged, table_dir, &parent.join(format!(".{name}.old")))?;
     Ok(())
-}
-
-/// The directory names given to one table's partition values. A
-/// case-insensitive disk (default macOS, Windows) holds `SLE` and `sle` in
-/// one directory, where one file would replace the other; the second value
-/// gets every letter escaped (`%73%6C%65`), which DuckDB reads back as `sle`.
-#[derive(Default)]
-struct Segments(HashMap<String, String>);
-
-impl Segments {
-    fn claim(&mut self, value: &str) -> Result<String> {
-        for segment in [escape(value, false), escape(value, true)] {
-            match self.0.get(&segment.to_lowercase()) {
-                Some(owner) if owner != value => continue,
-                _ => {
-                    self.0.insert(segment.to_lowercase(), value.to_string());
-                    return Ok(segment);
-                }
-            }
-        }
-        anyhow::bail!("partition value {value:?} has no directory name of its own")
-    }
-}
-
-/// A partition value as one path segment, in the `%XX` escapes hive uses and
-/// DuckDB decodes when it reads the value from the directory name. Escaped:
-/// what a path or a Windows file name cannot hold, control characters, `%`
-/// itself, a trailing dot or space (Windows drops them), the first letter of
-/// a Windows device name (`CON`), and with `letters` every ASCII letter.
-fn escape(v: &str, letters: bool) -> String {
-    let base = v.split('.').next().unwrap_or(v);
-    let device = crate::index::partition::RESERVED_WINDOWS_NAMES
-        .iter()
-        .any(|n| n.eq_ignore_ascii_case(base));
-    let trailing = v.len() - v.trim_end_matches(['.', ' ']).len();
-    let mut out = String::with_capacity(v.len());
-    for (i, c) in v.char_indices() {
-        let escaped = matches!(
-            c,
-            '/' | '\\' | '=' | '%' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-        ) || c.is_control()
-            || i >= v.len() - trailing
-            || (device && i == 0)
-            || (letters && c.is_ascii_alphabetic());
-        if escaped {
-            let mut buf = [0; 4];
-            for b in c.encode_utf8(&mut buf).bytes() {
-                let _ = write!(out, "%{b:02X}");
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// A directory name's partition value: `escape` undone.
-fn unescape(segment: &str) -> String {
-    let bytes = segment.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| std::str::from_utf8(h).ok())
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match (bytes[i], hex) {
-            (b'%', Some(b)) => {
-                out.push(b);
-                i += 3;
-            }
-            (b, _) => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -486,33 +411,5 @@ mod tests {
             Some("campaign_calendar")
         );
         assert!(rule_for(&result(&["x"], vec![]), &lookups).is_none());
-    }
-
-    #[test]
-    fn values_are_escaped_as_path_segments() {
-        assert_eq!(escape("SLE", false), "SLE");
-        assert_eq!(escape("a/b=c", false), "a%2Fb%3Dc");
-        assert_eq!(escape("a*b?", false), "a%2Ab%3F");
-        assert_eq!(escape("x. ", false), "x%2E%20");
-        assert_eq!(escape("con.txt", false), "%63on.txt");
-        assert_eq!(escape("é\n", false), "é%0A");
-        assert_eq!(escape("Ab1", true), "%41%621");
-        for v in ["SLE", "a/b=c", "a*b?", "x. ", "con.txt", "é\n", "50%"] {
-            assert_eq!(unescape(&escape(v, false)), v);
-            assert_eq!(unescape(&escape(v, true)), v);
-        }
-    }
-
-    #[test]
-    fn values_that_differ_only_in_case_get_directories_of_their_own() {
-        let mut s = Segments::default();
-        let got: Vec<String> = ["SLE", "Sle", "sle", "SLE"]
-            .iter()
-            .map(|v| s.claim(v).unwrap())
-            .collect();
-        assert_eq!(got, ["SLE", "%53%6C%65", "%73%6C%65", "SLE"]);
-        let lower: std::collections::HashSet<String> =
-            got.iter().map(|g| g.to_lowercase()).collect();
-        assert_eq!(lower.len(), 3);
     }
 }

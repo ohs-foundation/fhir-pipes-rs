@@ -46,6 +46,12 @@ pub fn reference(resource_type: &str, id: &str) -> Value {
 }
 
 /// `{"system": .., "value": ..}`.
+/// A Location's `position` as (longitude, latitude), when both are numbers.
+pub fn position_of(obj: &Map<String, Value>) -> Option<(f64, f64)> {
+    let p = obj.get("position")?.as_object()?;
+    Some((p.get("longitude")?.as_f64()?, p.get("latitude")?.as_f64()?))
+}
+
 pub fn identifier(system: &str, value: &str) -> Value {
     json!({"system": system, "value": value})
 }
@@ -539,17 +545,12 @@ impl Location {
             .admin_code_index()
             .and_then(|i| loc.columns[i].clone());
 
-        if let Some(Value::Object(pos)) = obj.get("position") {
-            match (
-                pos.get("longitude").and_then(Value::as_f64),
-                pos.get("latitude").and_then(Value::as_f64),
-            ) {
-                (Some(lon), Some(lat)) => loc.position = Some((lon, lat)),
-                _ if pos.contains_key("longitude") || pos.contains_key("latitude") => {
-                    report.add("malformed_field", &id, "position coordinates not numeric")
-                }
-                _ => {}
-            }
+        loc.position = position_of(obj);
+        if loc.position.is_none()
+            && let Some(Value::Object(pos)) = obj.get("position")
+            && (pos.contains_key("longitude") || pos.contains_key("latitude"))
+        {
+            report.add("malformed_field", &id, "position coordinates not numeric")
         }
 
         // Index of the extension whose boundary was captured into

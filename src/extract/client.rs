@@ -881,42 +881,21 @@ impl FhirClient {
         url: &str,
         deadline: Option<Instant>,
     ) -> std::result::Result<Exchange, FetchError> {
-        let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        let mut last = None;
-        for attempt in 1..=self.retries {
-            let mut request = if method == Method::GET {
+        let request = || {
+            if method == Method::GET {
                 self.fhir_get(url)
             } else {
                 self.http.request(method.clone(), url)
-            };
-            let Ok(pass) = self.enter_by(deadline) else {
-                break;
-            };
-            // After the wait for a place, which can outlast a token.
-            if let Some(v) = self.authorization()? {
-                request = self.authorize(request, &v, false)?;
             }
-            // After both: the wait and a token renewal take from the time
-            // left, and a request must not start after the deadline.
-            if let Some(left) = left() {
-                if left.is_zero() {
-                    break;
-                }
-                request = request.timeout(self.timeout.min(left));
-            }
-            match request.send() {
-                Ok(resp) => return exchanged(resp, self.body_limit),
-                Err(e) => {
-                    drop(pass);
-                    last = Some(FetchError::Transport(e.to_string()));
-                    if attempt < self.retries {
-                        let wait = jittered(backoff_delay(attempt, None));
-                        std::thread::sleep(left().map_or(wait, |l| wait.min(l)));
-                    }
-                }
-            }
-        }
-        Err(last.unwrap_or_else(|| FetchError::Transport("the deadline passed".to_string())))
+        };
+        // Every status is the caller's: only connection errors are retried.
+        self.retrying_by(
+            Attempt::Authorized,
+            request,
+            |_| true,
+            deadline,
+            |r| exchanged(r, self.body_limit),
+        )
     }
 
     /// GET an NDJSON file and hand its body to `read` as it arrives, with the

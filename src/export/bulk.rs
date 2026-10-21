@@ -7,7 +7,6 @@
 //! same waits as a status poll: a server that runs one export at a time
 //! (Aidbox) answers 429 while another is running.
 
-use std::io::BufRead;
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
@@ -17,6 +16,8 @@ use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::{Exchange, FetchError, FhirClient};
+use crate::extract::page::{server_path, server_url};
+use crate::fhir::ndjson::Splitter;
 use crate::snapshot::instant::{format_utc, parse_instant};
 
 /// The longest failure text shown from a status response.
@@ -81,6 +82,20 @@ pub struct Manifest {
     pub error: Vec<ManifestFile>,
 }
 
+impl Manifest {
+    /// Every file the manifest lists: `output`, `deleted`, then `error`.
+    pub fn files(&self) -> impl Iterator<Item = &ManifestFile> {
+        self.output.iter().chain(&self.deleted).chain(&self.error)
+    }
+
+    fn files_mut(&mut self) -> impl Iterator<Item = &mut ManifestFile> {
+        self.output
+            .iter_mut()
+            .chain(&mut self.deleted)
+            .chain(&mut self.error)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ManifestFile {
     #[serde(rename = "type")]
@@ -107,9 +122,7 @@ pub enum Polled {
 
 /// `[base]/$export?_type=…`, with `_since` for an incremental export.
 pub fn kick_off_url(server: &str, types: &[String], since: Option<&str>) -> Result<Url> {
-    let base = server.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/$export"))
-        .map_err(|_| PipesError::Usage(format!("--server is not a valid URL: {server}")))?;
+    let mut url = server_url(server, "$export")?;
     {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("_type", &types.join(","));
@@ -332,12 +345,7 @@ fn manifest(got: &Exchange, status_url: &str) -> Result<Manifest> {
     })?;
     let base = Url::parse(status_url)
         .map_err(|_| PipesError::Environment(format!("{status_url} is not a URL")))?;
-    for f in m
-        .output
-        .iter_mut()
-        .chain(&mut m.deleted)
-        .chain(&mut m.error)
-    {
+    for f in m.files_mut() {
         if is_reference(&f.url) {
             f.reference = Some(f.url.clone());
         }
@@ -360,19 +368,12 @@ fn is_reference(url: &str) -> bool {
 /// token, although the manifest says `requiresAccessToken: false`. When every
 /// file is such a reference, they are read from `server` with the token.
 pub fn read_references_from(m: &mut Manifest, server: &str) {
-    let files = || m.output.iter().chain(&m.deleted).chain(&m.error);
-    if files().next().is_none() || !files().all(|f| f.reference.is_some()) {
+    if m.files().next().is_none() || !m.files().all(|f| f.reference.is_some()) {
         return;
     }
-    let base = server.trim_end_matches('/');
-    for f in m
-        .output
-        .iter_mut()
-        .chain(&mut m.deleted)
-        .chain(&mut m.error)
-    {
+    for f in m.files_mut() {
         if let Some(r) = &f.reference {
-            f.url = format!("{base}/{r}");
+            f.url = server_path(server, r);
         }
     }
     m.requires_access_token = true;
@@ -405,32 +406,18 @@ pub fn read_lines(
     // first is kept here and the download stopped with a placeholder.
     let mut failed: Option<PipesError> = None;
     let got = client.download(url, authorize, timeout, |body| {
-        let mut reader = std::io::BufReader::with_capacity(1 << 20, body);
+        // A line is read up to MAX_LINE: a file with no newline would
+        // otherwise be held whole.
+        let mut lines =
+            Splitter::new(std::io::BufReader::with_capacity(1 << 20, body)).with_max_len(MAX_LINE);
         let mut buf = Vec::new();
-        let mut first = true;
         loop {
             buf.clear();
-            // A line is read up to MAX_LINE: a file with no newline would
-            // otherwise be held whole.
-            let n = std::io::Read::take(&mut reader, MAX_LINE + 1).read_until(b'\n', &mut buf)?;
-            if n == 0 {
+            let Some(span) = lines.next_into(&mut buf)? else {
                 return Ok(());
-            }
-            if buf.len() as u64 > MAX_LINE {
-                return Err(std::io::Error::other(format!(
-                    "a line is longer than {} MB",
-                    MAX_LINE >> 20
-                )));
-            }
-            let text = std::str::from_utf8(&buf)
+            };
+            let line = std::str::from_utf8(&buf[span.start..span.end])
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let mut line = text.trim_end_matches('\n').trim_end_matches('\r');
-            if std::mem::take(&mut first) {
-                line = line.strip_prefix('\u{feff}').unwrap_or(line);
-            }
-            if line.trim().is_empty() {
-                continue;
-            }
             if let Err(e) = each(line) {
                 failed = Some(e);
                 return Err(std::io::Error::other("stopped"));

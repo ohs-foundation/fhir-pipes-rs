@@ -37,7 +37,9 @@ pub fn lint_core(view: &ViewDefinition) -> Vec<Finding> {
 pub fn lint_selectors(view: &ViewDefinition, model: &dyn ElementModel) -> Vec<Finding> {
     let mut findings = Vec::new();
     let resource = view.resource.as_str();
-    walk_selects(&view.select, resource, Some(&[]), model, &mut findings);
+    for select in &view.select {
+        walk_select(select, resource, Some(&[]), model, &mut findings);
+    }
     // A where path is a filter: it may go through arrays.
     for w in &view.where_ {
         check(
@@ -54,44 +56,41 @@ pub fn lint_selectors(view: &ViewDefinition, model: &dyn ElementModel) -> Vec<Fi
     findings
 }
 
-/// `prefix` is the steps of the `forEach` paths above `selects`, each item
+/// `prefix` is the steps of the `forEach` paths above `select`, each item
 /// one value; `None` when one of them cannot be followed (or under `repeat`),
 /// and the selectors below are not checked.
-fn walk_selects(
-    selects: &[SelectColumn],
+fn walk_select(
+    select: &SelectColumn,
     resource: &str,
     prefix: Option<&[Step]>,
     model: &dyn ElementModel,
     out: &mut Vec<Finding>,
 ) {
-    for select in selects {
-        let for_each = select
-            .for_each
-            .as_ref()
-            .or(select.for_each_or_null.as_ref());
-        let mut inner = prefix.map(<[Step]>::to_vec);
-        if let (Some(path), Some(pre)) = (for_each, prefix) {
-            check(path, path, resource, pre, true, false, model, out);
-            inner = steps(path).map(|own| {
-                let mut all = pre.to_vec();
-                all.extend(own);
-                // Each forEach item is one value.
-                all.push(Step::Collapse);
-                all
-            });
+    let for_each = select
+        .for_each
+        .as_ref()
+        .or(select.for_each_or_null.as_ref());
+    let mut inner = prefix.map(<[Step]>::to_vec);
+    if let (Some(path), Some(pre)) = (for_each, prefix) {
+        check(path, path, resource, pre, true, false, model, out);
+        inner = steps(path).map(|own| {
+            let mut all = pre.to_vec();
+            all.extend(own);
+            // Each forEach item is one value.
+            all.push(Step::Collapse);
+            all
+        });
+    }
+    if !select.repeat.is_empty() {
+        inner = None;
+    }
+    if let Some(pre) = inner.as_deref() {
+        for col in select.column.iter().flatten() {
+            check_column(col, resource, pre, model, out);
         }
-        if !select.repeat.is_empty() {
-            inner = None;
-        }
-        if let Some(pre) = inner.as_deref() {
-            for col in select.column.iter().flatten() {
-                check_column(col, resource, pre, model, out);
-            }
-        }
-        walk_selects(&select.select, resource, inner.as_deref(), model, out);
-        if let Some(union) = &select.union_all {
-            walk_selects(union, resource, inner.as_deref(), model, out);
-        }
+    }
+    for nested in select.nested() {
+        walk_select(nested, resource, inner.as_deref(), model, out);
     }
 }
 

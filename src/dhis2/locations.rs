@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-use super::api::Dhis2;
-use super::{Instance, NdjsonWriter, check_out, valid_name};
+use super::api::{Dhis2, under};
+use super::{Instance, NdjsonWriter, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
@@ -19,6 +19,7 @@ use crate::fhir::location::{
     LocationKey, NewLocation, PhysicalType, boundary_extension, identifier,
 };
 use crate::fhir::organization::{NewOrganization, OrganizationKey};
+use crate::fs::check_out;
 use crate::report::Report;
 use crate::transform::write_report;
 
@@ -422,18 +423,12 @@ fn add_org_unit_groups(
     } else {
         let mut list = Vec::new();
         for uid in &args.org_unit_groups {
-            match api.try_get(
-                &format!("organisationUnitGroups/{uid}.json"),
-                &[("fields", GROUP_FIELDS.into())],
-            )? {
-                Ok(v) => list.push(v),
-                Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
-                    return Err(PipesError::Usage(format!(
-                        "DHIS2 has no org unit group {uid}"
-                    )));
-                }
-                Err(e) => return Err(api.error("organisationUnitGroups", e)),
-            }
+            let Some(v) = api.get_one("organisationUnitGroups", uid, GROUP_FIELDS)? else {
+                return Err(PipesError::Usage(format!(
+                    "DHIS2 has no org unit group {uid}"
+                )));
+            };
+            list.push(v);
         }
         list
     };
@@ -516,7 +511,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
 
     let mut query = vec![("fields", ORG_UNIT_FIELDS.to_string())];
     if let Some(root) = &args.root {
-        query.push(("filter", format!("path:like:{root}")));
+        query.push(("filter", under(root)));
     }
     let raw = api.paged("organisationUnits.json", "organisationUnits", &query)?;
     let mut report = Report::default();
@@ -536,20 +531,15 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     fill_missing_boundaries(&mut units, facility_level, &mut report);
     let mut groups: HashMap<String, Vec<GroupType>> = HashMap::new();
     for set in &args.group_sets {
-        let v = match api.try_get(
-            &format!("organisationUnitGroupSets/{set}.json"),
-            &[(
-                "fields",
-                "id,name,organisationUnitGroups[id,name,organisationUnits[id]]".into(),
-            )],
-        )? {
-            Ok(v) => v,
-            Err(crate::extract::client::FetchError::Status { status: 404, .. }) => {
-                return Err(PipesError::Usage(format!(
-                    "DHIS2 has no org unit group set {set}"
-                )));
-            }
-            Err(e) => return Err(api.error("organisationUnitGroupSets", e)),
+        let Some(v) = api.get_one(
+            "organisationUnitGroupSets",
+            set,
+            "id,name,organisationUnitGroups[id,name,organisationUnits[id]]",
+        )?
+        else {
+            return Err(PipesError::Usage(format!(
+                "DHIS2 has no org unit group set {set}"
+            )));
         };
         for g in v
             .get("organisationUnitGroups")

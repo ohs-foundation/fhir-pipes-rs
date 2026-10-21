@@ -15,23 +15,19 @@ categories = ["development-tools", "parser-implementations"]
 fhir-pipes-sof = { workspace = true }
 octofhir-fhirpath = { workspace = true }
 octofhir-fhirschema = { workspace = true, optional = true }
-octofhir-canonical-manager = { workspace = true, optional = true }
 banshee_hir = { workspace = true, optional = true }
 banshee_parser = { workspace = true, optional = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true, optional = true }
 
 [features]
 default = []
 # Lint selectors and generated SQL against a FHIR package (lint, lint_view,
-# lint_sql, FhirSchemaProvider). Downloads packages over HTTP. Structure
+# lint_sql, FhirSchemaProvider). The caller reads the package. Structure
 # checks and the shareable-subset lint need none of it.
 packages = [
     "dep:octofhir-fhirschema",
-    "dep:octofhir-canonical-manager",
     "dep:banshee_hir",
     "dep:banshee_parser",
-    "dep:thiserror",
 ]
 
 [dev-dependencies]

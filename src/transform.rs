@@ -123,6 +123,7 @@ pub fn transform_with(args: &TransformArgs, profile: &Profile) -> Result<()> {
     Ok(())
 }
 
+/// `report` as JSON at `path`, written whole or not at all.
 pub fn write_report(path: &Path, report: &Report) -> Result<()> {
     write_json(path, &report.to_json())
 }
@@ -130,5 +131,5 @@ pub fn write_report(path: &Path, report: &Report) -> Result<()> {
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    std::fs::write(path, text).map_err(|e| PipesError::io(path, e))
+    crate::fs::atomic_write(path, text)
 }

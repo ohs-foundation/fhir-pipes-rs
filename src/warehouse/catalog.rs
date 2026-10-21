@@ -37,7 +37,6 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use arrow::datatypes::{DataType, TimeUnit};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::config::{Catalog, Settings};
 use super::partition::{partition_key, table_files};
@@ -295,9 +294,7 @@ fn spark_columns(dir: &Path, t: &Table) -> Result<Vec<SparkColumn>> {
     for f in &t.files {
         // `files` are named where they will be; read them from `dir`.
         let path = dir.join(f.strip_prefix(&prefix).unwrap_or(f));
-        let file = fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let builder = super::partition::open_parquet(&path)?;
         for field in builder.schema().fields() {
             if columns.iter().any(|c| c.name == *field.name()) {
                 continue;
