@@ -271,7 +271,7 @@ pub fn download(
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(jobs[i].1));
     let failed = AtomicBool::new(false);
-    let results = parallel(&order, workers, |&i| {
+    let results = crate::work::parallel(&order, workers, |&i| {
         if failed.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -361,7 +361,7 @@ fn probe(
 
 /// Each window's count, or `None` when the server gives no count for one.
 fn count_all(client: &FhirClient, o: &Options, windows: &[Window]) -> Option<Vec<u64>> {
-    parallel(windows, o.workers, |w| {
+    crate::work::parallel(windows, o.workers, |w| {
         count_matching(client, o.server, o.resource_type, &w.params())
     })
     .into_iter()
@@ -448,7 +448,7 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
     }
     let lines: usize = paged.iter().map(|p| p.notes.len()).sum();
     if last.len() == lines {
-        concatenate(files, out)?;
+        crate::fs::concatenate(files, out)?;
         return Ok(paged.iter().flat_map(|p| p.notes.clone()).collect());
     }
     let mut kept = Vec::with_capacity(last.len());
@@ -471,52 +471,6 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
     }
     writer.flush().map_err(|e| PipesError::io(out, e))?;
     Ok(kept)
-}
-
-/// `files` one after another into `out`: the first renamed, the rest
-/// appended to it, each removed once copied.
-pub(super) fn concatenate(files: &[PathBuf], out: &Path) -> Result<()> {
-    let Some((first, rest)) = files.split_first() else {
-        crate::fs::create_private(out).map_err(|e| PipesError::io(out, e))?;
-        return Ok(());
-    };
-    std::fs::rename(first, out).map_err(|e| PipesError::io(out, e))?;
-    if rest.is_empty() {
-        return Ok(());
-    }
-    let mut writer = std::fs::OpenOptions::new()
-        .append(true)
-        .open(out)
-        .map_err(|e| PipesError::io(out, e))?;
-    for path in rest {
-        let mut reader = std::fs::File::open(path).map_err(|e| PipesError::io(path, e))?;
-        std::io::copy(&mut reader, &mut writer).map_err(|e| PipesError::io(out, e))?;
-        drop(reader);
-        let _ = std::fs::remove_file(path);
-    }
-    Ok(())
-}
-
-/// `f` over `items` on up to `workers` threads; the results in item order.
-pub(super) fn parallel<T: Sync, R: Send>(
-    items: &[T],
-    workers: usize,
-    f: impl Fn(&T) -> R + Sync,
-) -> Vec<R> {
-    let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
-    crate::work::run(
-        workers.clamp(1, items.len().max(1)),
-        crate::work::indices(0, items.len()),
-        |i| (i, f(&items[i])),
-        |(i, r)| {
-            results[i] = Some(r);
-            true
-        },
-    );
-    results
-        .into_iter()
-        .map(|r| r.expect("every item was run"))
-        .collect()
 }
 
 #[cfg(test)]

@@ -954,7 +954,7 @@ fn download_job(
     let timeout = Duration::from_secs(args.bulk_timeout);
     let failed = AtomicBool::new(false);
     let indexes: Vec<usize> = (0..files.len()).collect();
-    let results = window::parallel(&indexes, args.concurrency, |&i| {
+    let results = crate::work::parallel(&indexes, args.concurrency, |&i| {
         if failed.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -977,7 +977,7 @@ fn download_job(
     for t in &job.types {
         let mine: Vec<usize> = (0..files.len()).filter(|&i| files[i].0 == t).collect();
         let paths: Vec<PathBuf> = mine.iter().map(|&i| parts.0[i].clone()).collect();
-        window::concatenate(&paths, &incoming_path(&args.out, t))?;
+        crate::fs::concatenate(&paths, &incoming_path(&args.out, t))?;
         let mut d = Downloaded {
             notes: Vec::new(),
             files: mine.len(),
