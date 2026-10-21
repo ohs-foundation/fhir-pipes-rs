@@ -2,6 +2,7 @@
 //! filesystem-safe, collision-free `key=value` directory segment.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
@@ -75,74 +76,107 @@ pub fn parse_keys(spec: &str) -> Result<Vec<PartitionKey>> {
     Ok(keys)
 }
 
-pub(crate) const RESERVED_WINDOWS_NAMES: [&str; 22] = [
+const RESERVED_WINDOWS_NAMES: [&str; 22] = [
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-/// Render one partition value as filesystem-safe text, unconditionally
-/// sanitising for the strictest common target (a dataset written on Linux
-/// must survive copying to Windows or a case-insensitive macOS volume).
-///
-/// Returns `(candidate, was_sanitized)`. NUL is dropped outright; `/`, `\`,
-/// the other characters Windows forbids in a filename, and every remaining
-/// control character become `_`; trailing dots and spaces (which Windows
-/// silently strips) are trimmed; a result that collides with a reserved
-/// Windows device name (case-insensitively, looking only at the portion
-/// before the first `.` -- Windows reserves `CON.txt` exactly as it
-/// reserves bare `CON`) gets a `_` appended to that base portion, e.g.
-/// `CON.txt` -> `CON_.txt`. An empty result becomes `"empty"`.
-fn sanitize(value: &str) -> (String, bool) {
-    let mut result: String = value
-        .chars()
-        .filter(|&c| c != '\0')
-        .map(|c| match c {
-            '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
-            c if (c as u32) < 0x20 => '_',
-            c => c,
-        })
-        .collect();
-
-    while matches!(result.chars().last(), Some('.') | Some(' ')) {
-        result.pop();
-    }
-
-    let base_end = result.find('.').unwrap_or(result.len());
-    if RESERVED_WINDOWS_NAMES
+/// A partition value as one path segment, in the `%XX` escapes hive uses and
+/// DuckDB decodes when it reads the value from the directory name. Escaped:
+/// what a path or a Windows file name cannot hold, control characters, `%`
+/// itself, a trailing dot or space (Windows drops them), the first letter of
+/// a Windows device name (`CON`, `CON.txt`: Windows reserves the part before
+/// the first `.`), and with `letters` every ASCII letter.
+fn escape(v: &str, letters: bool) -> String {
+    let base = v.split('.').next().unwrap_or(v);
+    let device = RESERVED_WINDOWS_NAMES
         .iter()
-        .any(|name| name.eq_ignore_ascii_case(&result[..base_end]))
-    {
-        result.insert(base_end, '_');
-    }
-
-    if result.is_empty() {
-        result = "empty".to_string();
-    }
-
-    // A file name is at most 255 bytes on most filesystems, and `key=` and
-    // a collision suffix come on top: a longer value is cut, and a hash of
-    // the whole value keeps two values that start the same apart.
-    if result.len() > MAX_SEGMENT {
-        let mut cut = MAX_SEGMENT - 9;
-        while !result.is_char_boundary(cut) {
-            cut -= 1;
+        .any(|n| n.eq_ignore_ascii_case(base));
+    let trailing = v.len() - v.trim_end_matches(['.', ' ']).len();
+    let mut out = String::with_capacity(v.len());
+    for (i, c) in v.char_indices() {
+        let escaped = matches!(
+            c,
+            '/' | '\\' | '=' | '%' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+        ) || c.is_control()
+            || i >= v.len() - trailing
+            || (device && i == 0)
+            || (letters && c.is_ascii_alphabetic());
+        if escaped {
+            let mut buf = [0; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                let _ = write!(out, "%{b:02X}");
+            }
+        } else {
+            out.push(c);
         }
-        let digest = Sha256::digest(value.as_bytes());
-        result = format!(
-            "{}~{:02x}{:02x}{:02x}{:02x}",
-            &result[..cut],
-            digest[0],
-            digest[1],
-            digest[2],
-            digest[3]
-        );
     }
-
-    let sanitized = result != value;
-    (result, sanitized)
+    out
 }
 
-/// The longest partition value written as it is, in bytes.
+/// A directory name's partition value: `escape` undone.
+pub(crate) fn unescape(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One partition value as a directory name (`escape`), safe on the strictest
+/// common target (a dataset written on Linux must survive copying to
+/// Windows or a case-insensitive macOS volume).
+///
+/// Returns `(candidate, lossy)`: `lossy` when the value cannot be read back
+/// from the name. An empty value becomes `"empty"`, and a name longer than
+/// `MAX_SEGMENT` is cut, with a hash of the whole value to keep two values
+/// that start the same apart.
+fn render(value: &str, letters: bool) -> (String, bool) {
+    if value.is_empty() {
+        return ("empty".to_string(), true);
+    }
+    let result = escape(value, letters);
+    // A file name is at most 255 bytes on most filesystems, and `key=` and
+    // a collision suffix come on top.
+    if result.len() <= MAX_SEGMENT {
+        return (result, false);
+    }
+    let mut cut = MAX_SEGMENT - 9;
+    while !result.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    // Not inside a `%XX`: every `%` in the name starts one.
+    if let Some(p) = result[cut.saturating_sub(2)..cut].find('%') {
+        cut -= 2 - p;
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    let result = format!(
+        "{}~{:02x}{:02x}{:02x}{:02x}",
+        &result[..cut],
+        digest[0],
+        digest[1],
+        digest[2],
+        digest[3]
+    );
+    (result, true)
+}
+
+/// The longest partition directory name written whole, in bytes.
 const MAX_SEGMENT: usize = 200;
 
 /// Segment claims within one parent directory, keyed case-insensitively:
@@ -152,59 +186,87 @@ const MAX_SEGMENT: usize = 200;
 #[derive(Debug, Default)]
 pub struct Claims(HashMap<String, (String, String)>);
 
-/// Render one `--partition-by` value as a filesystem-safe, collision-free
-/// directory name segment (without the `key=` prefix), scoped to `claims`
-/// (one `Claims` per parent-directory-and-key context).
-///
-/// Two distinct values that render (or sanitise) to the same segment --
-/// case-insensitively -- must not silently share a directory: the second
-/// one to claim a segment gets a short deterministic hash of its own
-/// candidate and value appended, so the two never collide on disk. A value
-/// that is both sanitised and collides only reports the collision.
-pub fn segment(key: &str, value: &str, claims: &mut Claims, report: &mut Report) -> String {
-    let (candidate, sanitized) = sanitize(value);
-    let lower = candidate.to_lowercase();
+/// What `Claims::take` found.
+#[derive(PartialEq, Eq)]
+enum Claim {
+    /// The segment was free and is the value's now.
+    New,
+    /// The value had it already.
+    Mine,
+    /// Another value has it.
+    Taken,
+}
 
-    match claims.0.get(&lower) {
-        None => {
-            claims
-                .0
-                .insert(lower, (candidate.clone(), value.to_string()));
-            if sanitized {
+impl Claims {
+    fn take(&mut self, segment: &str, value: &str) -> Claim {
+        match self.0.get(&segment.to_lowercase()) {
+            Some((_, owner)) if owner == value => Claim::Mine,
+            Some(_) => Claim::Taken,
+            None => {
+                self.0.insert(
+                    segment.to_lowercase(),
+                    (segment.to_string(), value.to_string()),
+                );
+                Claim::New
+            }
+        }
+    }
+}
+
+/// Render one partition value as a filesystem-safe, collision-free
+/// directory name segment (without the `key=` prefix), scoped to `claims`
+/// (one `Claims` per parent-directory-and-key context). The views step of
+/// `refresh` and the Location dataset both name their partitions with this.
+///
+/// Two distinct values that render to the same segment -- case-insensitively
+/// -- must not silently share a directory. The second gets every letter
+/// escaped (`Kano`, then `%4B%41%4E%4F` for `KANO`), which still reads back
+/// as the value; where that is taken too, or the value was cut, it gets a
+/// short deterministic hash of its own candidate and value appended. What
+/// cannot be read back from the directory name is reported: a value that is
+/// empty or too long as `partition_value_sanitized`, a hash suffix as
+/// `partition_value_collision` (only that, when both apply).
+pub fn segment(key: &str, value: &str, claims: &mut Claims, report: &mut Report) -> String {
+    let (candidate, lossy) = render(value, false);
+    match claims.take(&candidate, value) {
+        Claim::Mine => return candidate,
+        Claim::New => {
+            if lossy {
                 report.add(
                     "partition_value_sanitized",
                     &format!("{key}={value}"),
                     &format!(
-                        "cannot be a directory name as it is (a path separator, a control character, a reserved name or more than {MAX_SEGMENT} bytes); written to the directory {key}={candidate:?} instead"
+                        "cannot be a directory name as it is (empty or more than {MAX_SEGMENT} bytes); written to the directory {key}={candidate:?} instead"
                     ),
                 );
             }
-            candidate
+            return candidate;
         }
-        Some((existing_segment, owner)) if owner == value => existing_segment.clone(),
-        Some(_) => {
-            let mut salt = String::new();
-            loop {
-                let digest = Sha256::digest(format!("{candidate}\0{value}{salt}").as_bytes());
-                let seg = format!(
-                    "{candidate}~{:02x}{:02x}{:02x}{:02x}",
-                    digest[0], digest[1], digest[2], digest[3]
+        Claim::Taken => {}
+    }
+    let (letters, lossy) = render(value, true);
+    if !lossy && claims.take(&letters, value) != Claim::Taken {
+        return letters;
+    }
+    let mut salt = String::new();
+    loop {
+        let digest = Sha256::digest(format!("{candidate}\0{value}{salt}").as_bytes());
+        let seg = format!(
+            "{candidate}~{:02x}{:02x}{:02x}{:02x}",
+            digest[0], digest[1], digest[2], digest[3]
+        );
+        match claims.take(&seg, value) {
+            Claim::Mine => return seg,
+            Claim::Taken => salt.push('#'),
+            Claim::New => {
+                report.add(
+                    "partition_value_collision",
+                    &format!("{key}={value}"),
+                    &format!(
+                        "renders to the same directory segment {key}={candidate:?} as a different value already written under this partition; disambiguated to {key}={seg:?} instead"
+                    ),
                 );
-                let seg_lower = seg.to_lowercase();
-                match claims.0.get(&seg_lower) {
-                    Some((_, owner)) if owner != value => salt.push('#'),
-                    _ => {
-                        claims.0.insert(seg_lower, (seg.clone(), value.to_string()));
-                        report.add(
-                            "partition_value_collision",
-                            &format!("{key}={value}"),
-                            &format!(
-                                "renders to the same directory segment {key}={candidate:?} as a different value already written under this partition; disambiguated to {key}={seg:?} instead"
-                            ),
-                        );
-                        return seg;
-                    }
-                }
+                return seg;
             }
         }
     }
@@ -256,112 +318,100 @@ mod tests {
     fn a_long_value_is_cut_with_a_hash_of_the_whole() {
         let a = "x".repeat(300) + "a";
         let b = "x".repeat(300) + "b";
-        let (sa, changed) = sanitize(&a);
-        let (sb, _) = sanitize(&b);
-        assert!(changed);
+        let (sa, lossy) = render(&a, false);
+        let (sb, _) = render(&b, false);
+        assert!(lossy);
         assert!(sa.len() <= MAX_SEGMENT, "{}", sa.len());
         assert_ne!(sa, sb);
-        // Cut on a character boundary.
-        let (s, _) = sanitize(&"é".repeat(150));
+        // Cut on a character boundary, and not inside an escape.
+        let (s, _) = render(&"é".repeat(150), false);
         assert!(s.len() <= MAX_SEGMENT);
+        for n in 0..3 {
+            let (s, _) = render(&("x".repeat(n) + &"/".repeat(100)), false);
+            let name = s.split('~').next().unwrap();
+            assert!(name.ends_with("%2F"), "{name}");
+        }
     }
 
     #[test]
-    fn slashes_are_sanitised_and_reported() {
+    fn values_are_escaped_as_path_segments() {
+        assert_eq!(escape("SLE", false), "SLE");
+        assert_eq!(escape("a/b=c", false), "a%2Fb%3Dc");
+        assert_eq!(escape("a*b?", false), "a%2Ab%3F");
+        assert_eq!(escape("x. ", false), "x%2E%20");
+        assert_eq!(escape("con.txt", false), "%63on.txt");
+        assert_eq!(escape("é\n", false), "é%0A");
+        assert_eq!(escape("Ab1", true), "%41%621");
+        for v in ["SLE", "a/b=c", "a*b?", "x. ", "con.txt", "é\n", "50%", "\0"] {
+            assert_eq!(unescape(&escape(v, false)), v);
+            assert_eq!(unescape(&escape(v, true)), v);
+        }
+    }
+
+    #[test]
+    fn escaped_values_are_not_reported() {
         let mut report = Report::default();
         let mut claims = Claims::default();
-        assert_eq!(segment("country", "A/B", &mut claims, &mut report), "A_B");
-        assert_eq!(report.count("partition_value_sanitized"), 1);
+        assert_eq!(segment("country", "A/B", &mut claims, &mut report), "A%2FB");
+        assert_eq!(
+            segment("country", "a:b*c", &mut claims, &mut report),
+            "a%3Ab%2Ac"
+        );
+        assert_eq!(segment("country", "CON", &mut claims, &mut report), "%43ON");
+        assert_eq!(
+            segment("country", "CON.txt", &mut claims, &mut report),
+            "%43ON.txt"
+        );
+        assert_eq!(
+            segment("country", "name.", &mut claims, &mut report),
+            "name%2E"
+        );
+        assert_eq!(segment("country", "\0", &mut claims, &mut report), "%00");
+        assert_eq!(report.count("partition_value_sanitized"), 0);
+        assert_eq!(report.count("partition_value_collision"), 0);
     }
 
     #[test]
-    fn colliding_values_get_distinct_segments() {
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        let first = segment("country", "A/B", &mut claims, &mut report);
-        let second = segment("country", "A_B", &mut claims, &mut report);
-        assert_eq!(first, "A_B");
-        assert_ne!(second, first);
-        assert!(second.starts_with("A_B~"));
-        assert_eq!(report.count("partition_value_collision"), 1);
-        // Same value again reuses its segment.
-        assert_eq!(segment("country", "A/B", &mut claims, &mut report), "A_B");
-    }
-
-    #[test]
-    fn empty_and_nul_only_values_become_empty() {
+    fn an_empty_value_is_named_empty_and_reported() {
         let mut report = Report::default();
         let mut claims = Claims::default();
         assert_eq!(segment("country", "", &mut claims, &mut report), "empty");
         assert_eq!(report.count("partition_value_sanitized"), 1);
-
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        assert_eq!(segment("country", "\0", &mut claims, &mut report), "empty");
+        // The value "empty" is then told apart by its escaped letters.
+        assert_eq!(
+            segment("country", "empty", &mut claims, &mut report),
+            "%65%6D%70%74%79"
+        );
+        assert_eq!(segment("country", "", &mut claims, &mut report), "empty");
         assert_eq!(report.count("partition_value_sanitized"), 1);
     }
 
     #[test]
-    fn sanitised_value_that_also_collides_reports_only_the_collision() {
+    fn values_that_differ_only_in_case_get_directories_of_their_own() {
         let mut report = Report::default();
         let mut claims = Claims::default();
-        segment("country", "A_B", &mut claims, &mut report);
-        let second = segment("country", "A/B", &mut claims, &mut report);
-        assert!(second.starts_with("A_B~"));
-        assert_eq!(report.count("partition_value_sanitized"), 0);
+        let got: Vec<String> = ["SLE", "Sle", "sle", "SLE", "sle"]
+            .iter()
+            .map(|v| segment("country", v, &mut claims, &mut report))
+            .collect();
+        assert_eq!(got, ["SLE", "%53%6C%65", "%73%6C%65", "SLE", "%73%6C%65"]);
+        // Each reads back as its value: nothing to report.
+        assert_eq!(report.count("partition_value_collision"), 0);
+    }
+
+    #[test]
+    fn a_hash_tells_apart_what_escaping_cannot() {
+        // Only ASCII letters are escaped, so `É` and `é` still share a
+        // directory on a case-insensitive disk.
+        let mut report = Report::default();
+        let mut claims = Claims::default();
+        assert_eq!(segment("country", "É", &mut claims, &mut report), "É");
+        let second = segment("country", "é", &mut claims, &mut report);
+        assert_eq!(second, "é~2c36a6c7");
         assert_eq!(report.count("partition_value_collision"), 1);
-    }
-
-    #[test]
-    fn hash_suffix_is_stable() {
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        segment("country", "A_B", &mut claims, &mut report);
-        let second = segment("country", "A/B", &mut claims, &mut report);
-        assert_eq!(second, "A_B~ab5339ed");
-    }
-
-    #[test]
-    fn case_only_twins_are_disambiguated() {
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        let first = segment("country", "AB", &mut claims, &mut report);
-        let second = segment("country", "ab", &mut claims, &mut report);
-        assert_eq!(first, "AB");
-        assert!(second.starts_with("ab~"));
+        // Same value again reuses its segment, with no second report.
+        assert_eq!(segment("country", "é", &mut claims, &mut report), second);
         assert_eq!(report.count("partition_value_collision"), 1);
-    }
-
-    #[test]
-    fn windows_hostile_characters_are_replaced() {
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        assert_eq!(
-            segment("country", "a:b*c", &mut claims, &mut report),
-            "a_b_c"
-        );
-        assert_eq!(report.count("partition_value_sanitized"), 1);
-
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        assert_eq!(segment("country", "CON", &mut claims, &mut report), "CON_");
-        assert_eq!(report.count("partition_value_sanitized"), 1);
-
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        assert_eq!(
-            segment("country", "CON.txt", &mut claims, &mut report),
-            "CON_.txt"
-        );
-        assert_eq!(report.count("partition_value_sanitized"), 1);
-
-        let mut report = Report::default();
-        let mut claims = Claims::default();
-        assert_eq!(
-            segment("country", "name.", &mut claims, &mut report),
-            "name"
-        );
-        assert_eq!(report.count("partition_value_sanitized"), 1);
     }
 
     #[test]
