@@ -33,10 +33,11 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::api::Dhis2;
-use super::calendar::{days_in_year, iso, period_days};
+use super::calendar::period_days;
 use super::expression::{Expr, Item};
 use super::measures::{Indicator, Kind};
 use super::reports::{Analytics, AnalyticsRow, DateRange};
+use crate::calendar::{days_in_year, iso};
 use crate::error::{PipesError, Result};
 use crate::extract::client::FetchError;
 
@@ -88,8 +89,8 @@ impl Span {
     pub fn of_range(r: &DateRange) -> Option<Self> {
         Some(Self {
             code: r.code(),
-            start: super::calendar::day_of(&r.start)?,
-            end: super::calendar::day_of(&r.end)?,
+            start: crate::calendar::day_of(&r.start)?,
+            end: crate::calendar::day_of(&r.end)?,
         })
     }
 }
@@ -721,7 +722,7 @@ impl RawSource {
             return None;
         }
         let days = (target.end - target.start + 1) as f64;
-        let year = super::calendar::civil_from_days(target.start).0;
+        let year = crate::calendar::civil_from_days(target.start).0;
         let annual = if ind.annualized {
             days_in_year(year) as f64 / days
         } else {

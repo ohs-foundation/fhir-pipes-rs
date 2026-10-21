@@ -1,3 +1,4 @@
+mod calendar;
 mod cells;
 mod cli;
 mod dhis2;

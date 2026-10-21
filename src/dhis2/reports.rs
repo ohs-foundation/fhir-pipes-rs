@@ -37,7 +37,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::api::{Dhis2, ServerInfo, check_analytics_age};
-use super::calendar::now_utc;
 use super::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fetch_indicators, fhir_key};
 use super::raw::{RawSource, Span, load_parents, prepare};
 use super::rerun::{
@@ -50,6 +49,7 @@ use crate::extract::client::FetchError;
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
+use crate::snapshot::instant::format_utc;
 use crate::transform::write_report;
 use crate::work::InOrder;
 
@@ -405,7 +405,7 @@ impl DateRange {
         };
         let (start, end) = s.split_once(':').ok_or_else(|| bad("no colon"))?;
         for d in [start, end] {
-            if !is_date(d) {
+            if !crate::calendar::is_date(d) {
                 return Err(bad(&format!("{d:?} is not a date")));
             }
         }
@@ -451,31 +451,6 @@ pub fn period_value(pe: &str) -> String {
         Some(range) => range.label(),
         None => pe.to_string(),
     }
-}
-
-/// A real calendar date written `YYYY-MM-DD`.
-fn is_date(s: &str) -> bool {
-    let b = s.as_bytes();
-    let shaped = b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b.iter()
-            .enumerate()
-            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
-    if !shaped {
-        return false;
-    }
-    let n = |r: std::ops::Range<usize>| s[r].parse::<u32>().unwrap_or(0);
-    let (y, m, d) = (n(0..4), n(5..7), n(8..10));
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let days = match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=days).contains(&d)
 }
 
 /// A `--campaign` reference, `ResourceType/id`.
@@ -1709,7 +1684,8 @@ fn open_outputs(
                 .transpose()?,
             Checkpoint {
                 plan: fingerprint,
-                as_of: (args.source == ReportSource::DataValues).then(now_utc),
+                as_of: (args.source == ReportSource::DataValues)
+                    .then(|| format_utc(std::time::SystemTime::now())),
                 ..Checkpoint::default()
             },
         ),

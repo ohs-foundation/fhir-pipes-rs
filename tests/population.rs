@@ -322,14 +322,17 @@ fn usage_errors_exit_2_and_write_nothing() {
         .failure()
         .code(2)
         .stderr(predicates::str::contains("--year"));
-    run(
-        dir.path(),
-        FIXTURE,
-        &["--level", "1", "--estimate-date", "2026-1-1"],
-    )
-    .failure()
-    .code(2)
-    .stderr(predicates::str::contains("--estimate-date"));
+    // The shape, and a real date: no month 13.
+    for bad in ["2026-1-1", "2025-13-45"] {
+        run(
+            dir.path(),
+            FIXTURE,
+            &["--level", "1", "--estimate-date", bad],
+        )
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("--estimate-date"));
+    }
 
     let far_dir = tempfile::tempdir().unwrap();
     let far = vec![
