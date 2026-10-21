@@ -47,6 +47,7 @@ mod retry;
 
 pub use auth::{Auth, TokenAuth};
 
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
@@ -58,7 +59,8 @@ use reqwest::header::{
 use crate::error::{PipesError, Result};
 
 use auth::Authorizer;
-use body::{DEFAULT_BODY_LIMIT, decoded, exchanged, fetched};
+pub use body::DEFAULT_BODY_LIMIT;
+use body::{decoded, exchanged, fetched};
 use gate::Gate;
 use retry::{Attempt, server_wait};
 
@@ -199,6 +201,24 @@ impl FhirClient {
         };
         client.auth = client.authorizer(auth)?;
         Ok(client)
+    }
+
+    /// An unauthenticated client for one-off downloads (`--profile`, FHIR
+    /// packages, rasters), shared by every caller asking for the same
+    /// retries, timeout and body limit. Each reqwest blocking client starts a
+    /// thread with a runtime of its own, so a run fetching several files
+    /// starts one.
+    pub fn shared(retries: usize, timeout: Duration, body_limit: u64) -> Result<Arc<Self>> {
+        type Key = (usize, Duration, u64);
+        static CLIENTS: Mutex<Vec<(Key, Arc<FhirClient>)>> = Mutex::new(Vec::new());
+        let key = (retries, timeout, body_limit);
+        let mut clients = CLIENTS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, c)) = clients.iter().find(|(k, _)| *k == key) {
+            return Ok(Arc::clone(c));
+        }
+        let c = Arc::new(Self::new(Auth::None, retries, timeout)?.with_body_limit(body_limit));
+        clients.push((key, Arc::clone(&c)));
+        Ok(c)
     }
 
     /// At most `limit` requests in flight at once from all the threads using

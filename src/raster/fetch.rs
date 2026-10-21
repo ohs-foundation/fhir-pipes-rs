@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::error::{PipesError, Result};
 use crate::extract::cache::Cache;
-use crate::http::{Auth, FhirClient};
+use crate::http::FhirClient;
 
 /// Classic and BigTIFF headers, both byte orders.
 const TIFF_MAGIC: [&[u8; 4]; 4] = [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"];
@@ -88,7 +88,7 @@ pub fn load(
         Err(e) => cache_errors.push(format!("read: {e}")),
     }
     // A national raster at 100 m can pass the client's 1 GiB.
-    let client = FhirClient::new(Auth::None, retries, timeout)?.with_body_limit(8 << 30);
+    let client = FhirClient::shared(retries, timeout, 8 << 30)?;
     eprintln!("raster: fetching {label} …");
     let fetched = client
         .get(source)

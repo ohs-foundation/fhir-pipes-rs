@@ -227,11 +227,8 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
     } else {
         None
     };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("starting the database runtime")?;
-    rt.block_on(write(&url, &d.schema, tables, &plans, upsert.as_ref()))?;
+    crate::runtime::block_on(write(&url, &d.schema, tables, &plans, upsert.as_ref()))
+        .context("starting the database runtime")??;
     if let Some(u) = &upsert {
         record_load(s, &u.next, &plans, built)?;
     }

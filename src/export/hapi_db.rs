@@ -488,11 +488,8 @@ fn db_error(what: &str) -> impl FnOnce(sqlx_core::error::Error) -> PipesError + 
 /// Bring OUT/<TYPE>.ndjson up to date from the database `url` for each of
 /// `types`, recording each in the export state's `hapi_db` as it finishes.
 pub fn export(url: &str, args: &ExportArgs, types: &[&str], report: &mut Report) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| PipesError::Environment(format!("starting the database runtime: {e}")))?;
-    rt.block_on(export_all(url, args, types, report))
+    crate::runtime::block_on(export_all(url, args, types, report))
+        .map_err(|e| PipesError::Environment(format!("starting the database runtime: {e}")))?
 }
 
 /// A warning when the database is on another machine and the connection
