@@ -62,32 +62,14 @@ pub fn plan(
     max_rows: usize,
 ) -> Vec<Unit> {
     let groups = period_groups(periods);
-    let mut units = Vec::new();
-    for &(level, org_units) in levels {
-        for indicators in ids.chunks(chunk) {
-            let per_period = indicators.len() as u64 * org_units.max(1);
-            let per_batch = (max_rows as u64 / per_period).max(1) as usize;
-            for group in &groups {
-                for batch in group.chunks(per_batch) {
-                    units.push(Unit {
-                        levels: vec![level],
-                        periods: batch.to_vec(),
-                        range: None,
-                        indicators: indicators.to_vec(),
-                    });
-                }
-            }
-            for range in ranges {
-                units.push(Unit {
-                    levels: vec![level],
-                    periods: Vec::new(),
-                    range: Some(range.clone()),
-                    indicators: indicators.to_vec(),
-                });
-            }
-        }
-    }
-    units
+    levels
+        .iter()
+        .flat_map(|&(level, org_units)| {
+            batches(&[level], &groups, ranges, ids, chunk, &|indicators| {
+                fit(max_rows, indicators.len() as u64 * org_units.max(1))
+            })
+        })
+        .collect()
 }
 
 /// Units for `--source data-values`: every level at once, by indicator
@@ -107,17 +89,34 @@ pub fn plan_all_levels(
     elements: &dyn Fn(&[String]) -> usize,
 ) -> Vec<Unit> {
     let groups = period_groups(periods);
+    batches(levels, &groups, ranges, ids, chunk, &|indicators| {
+        fit(
+            max_rows,
+            elements(indicators).max(1) as u64 * org_units.max(1),
+        )
+    })
+}
+
+/// The units at `levels`: by indicator chunk, then period batch (each
+/// group cut into batches of `per_batch` periods for the chunk), then range.
+fn batches(
+    levels: &[u32],
+    groups: &[Vec<String>],
+    ranges: &[DateRange],
+    ids: &[String],
+    chunk: usize,
+    per_batch: &dyn Fn(&[String]) -> usize,
+) -> Vec<Unit> {
     let mut units = Vec::new();
     for indicators in ids.chunks(chunk) {
-        let per_period = elements(indicators).max(1) as u64 * org_units.max(1);
-        let per_batch = (max_rows as u64 / per_period).max(1) as usize;
+        let per_batch = per_batch(indicators);
         let unit = |periods: Vec<String>, range: Option<DateRange>| Unit {
             levels: levels.to_vec(),
             periods,
             range,
             indicators: indicators.to_vec(),
         };
-        for group in &groups {
+        for group in groups {
             for batch in group.chunks(per_batch) {
                 units.push(unit(batch.to_vec(), None));
             }
@@ -127,6 +126,11 @@ pub fn plan_all_levels(
         }
     }
     units
+}
+
+/// How many periods of `per_period` rows fit in `max_rows`; at least one.
+fn fit(max_rows: usize, per_period: u64) -> usize {
+    (max_rows as u64 / per_period).max(1) as usize
 }
 
 /// Every org unit DHIS2 has at `level` (under `root`).
