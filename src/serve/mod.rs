@@ -9,7 +9,9 @@
 // Parts are used by the tasks that follow; removed once serve is whole.
 #![allow(dead_code)]
 
+pub mod api;
 pub mod config;
+pub mod metrics;
 pub mod notify;
 pub mod output;
 pub mod runner;
@@ -19,6 +21,7 @@ pub mod store;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
@@ -56,10 +59,59 @@ struct App {
     token: Option<String>,
 }
 
+/// The pieces of a serve that the API and the schedule share.
+fn server(
+    inputs: &crate::warehouse::ServeInputs,
+    data_flag: Option<&PathBuf>,
+    cfg: config::ServeConfig,
+) -> Result<Arc<api::Server>> {
+    let store = Arc::new(store::Store::open(inputs.data.join(".serve/runs"))?);
+    let (redactor, warnings) =
+        secrets::Redactor::from_env(&cfg, inputs.database_url_env.as_deref());
+    for w in warnings {
+        eprintln!("fhir-pipes: warning: {w}");
+    }
+    let redactor = Arc::new(redactor);
+    let stdout = output::StdoutQueue::start(Box::new(std::io::stdout()));
+    let metrics = Arc::new(metrics::Metrics::default());
+    let mut base_args = vec![
+        "refresh".to_string(),
+        "--config".to_string(),
+        inputs.config.display().to_string(),
+    ];
+    if let Some(d) = data_flag {
+        base_args.extend(["--data".to_string(), d.display().to_string()]);
+    }
+    let notifier = notify::Notifier::start(
+        store.clone(),
+        cfg.notify.clone(),
+        redactor.clone(),
+        notify::Times::default(),
+        stdout.clone(),
+        Some(metrics.clone()),
+    );
+    let job = Arc::new(runner::Job {
+        program: std::env::current_exe().context("finding the fhir-pipes binary")?,
+        base_args,
+        cfg,
+        store,
+        redactor,
+        stdout,
+        write_failing: Arc::default(),
+    });
+    Ok(Arc::new(api::Server {
+        job,
+        notifier,
+        metrics,
+        data: inputs.data.clone(),
+        current: std::sync::Mutex::new(None),
+    }))
+}
+
 pub fn run(args: &ServeArgs) -> Result<()> {
     let inputs =
         crate::warehouse::serve_inputs(args.config.as_deref(), args.data.clone()).map_err(usage)?;
-    let _cfg = config::parse(inputs.serve.clone()).map_err(usage)?;
+    let cfg = config::parse(inputs.serve.clone()).map_err(usage)?;
     let listen: SocketAddr = args
         .listen
         .parse()
@@ -74,6 +126,13 @@ pub fn run(args: &ServeArgs) -> Result<()> {
     let dir = inputs.data.join(".serve");
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let _lock = lock(&dir.join("serve.lock"))?;
+    // FHIR_PIPES_DATA reaches the refreshes through the environment; a
+    // --data flag is passed on.
+    let data_flag = args
+        .data
+        .as_ref()
+        .filter(|_| std::env::var_os("FHIR_PIPES_DATA").is_none());
+    let server = server(&inputs, data_flag, cfg)?;
 
     let app = App { token };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -86,16 +145,17 @@ pub fn run(args: &ServeArgs) -> Result<()> {
             .with_context(|| format!("listening on {listen}"))?;
         let addr = listener.local_addr()?;
         println!("listening on http://{addr}");
-        axum::serve(listener, router(app)).await.context("serving")
+        axum::serve(listener, router(app, server))
+            .await
+            .context("serving")
     })
 }
 
-fn router(app: App) -> Router {
-    Router::new()
+fn router(app: App, server: Arc<api::Server>) -> Router {
+    api::routes(server)
         .fallback(|| async { StatusCode::NOT_FOUND })
-        .layer(middleware::from_fn_with_state(app.clone(), auth))
+        .layer(middleware::from_fn_with_state(app, auth))
         .route("/health", get(|| async { "ok" }))
-        .with_state(app)
 }
 
 /// Every path but /health needs the token, checked before anything else

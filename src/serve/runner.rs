@@ -45,6 +45,9 @@ pub struct Job {
     pub redactor: Arc<super::secrets::Redactor>,
     /// serve's stdout, where every attempt's output also goes.
     pub stdout: Arc<super::output::StdoutQueue>,
+    /// Set while the end of a run cannot be written: no run is accepted
+    /// meanwhile.
+    pub write_failing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Asks a run to stop. Shared between the run and whoever cancels it.
@@ -218,7 +221,7 @@ pub fn retry_decision(
     Ok(())
 }
 
-fn now() -> String {
+pub fn now() -> String {
     chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S+00:00")
         .to_string()
@@ -478,6 +481,8 @@ pub fn finish(job: &Job, rec: &mut RunRecord) {
         );
     }
     while let Err(e) = job.store.save(rec) {
+        job.write_failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         eprintln!(
             "fhir-pipes: error: {}; trying again in {} s",
             crate::error::message(&e),
@@ -485,6 +490,8 @@ pub fn finish(job: &Job, rec: &mut RunRecord) {
         );
         std::thread::sleep(SAVE_RETRY);
     }
+    job.write_failing
+        .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -576,6 +583,7 @@ mod tests {
             store: Arc::new(Store::open(dir.join("runs")).unwrap()),
             redactor: Arc::default(),
             stdout: crate::serve::output::StdoutQueue::start(Box::new(std::io::sink())),
+            write_failing: Arc::default(),
         }
     }
 

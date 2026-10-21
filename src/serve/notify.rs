@@ -65,6 +65,7 @@ impl Notifier {
         redactor: Arc<Redactor>,
         times: Times,
         out: Arc<super::output::StdoutQueue>,
+        metrics: Option<Arc<super::metrics::Metrics>>,
     ) -> Notifier {
         let (tx, rx) = mpsc::channel::<RunId>();
         let left = match store.pending() {
@@ -91,8 +92,17 @@ impl Notifier {
                     return;
                 }
             };
+            let sender = Sender {
+                store,
+                client,
+                destinations,
+                redactor,
+                times,
+                out,
+                metrics,
+            };
             for id in rx {
-                deliver(&store, &client, &destinations, &redactor, times, &out, &id);
+                sender.deliver(&id);
             }
         });
         Notifier { tx }
@@ -104,57 +114,68 @@ impl Notifier {
     }
 }
 
-/// Send run `id` to each of its pending destinations, saving its state
-/// after every try.
-fn deliver(
-    store: &Store,
-    client: &reqwest::blocking::Client,
-    destinations: &[Destination],
-    redactor: &Redactor,
+/// What the sending thread works with.
+struct Sender {
+    store: Arc<Store>,
+    client: reqwest::blocking::Client,
+    destinations: Vec<Destination>,
+    redactor: Arc<Redactor>,
     times: Times,
-    out: &super::output::StdoutQueue,
-    id: &RunId,
-) {
-    let Ok(mut rec) = store.load(id) else {
-        return;
-    };
-    // A destination taken out of the config is not sent old runs.
-    let before = rec.notify.len();
-    rec.notify
-        .retain(|name, _| destinations.iter().any(|d| &d.name == name));
-    if rec.notify.len() != before {
-        save(store, &rec);
-    }
-    let text = body(&rec, redactor).to_string();
-    for d in destinations {
-        if rec.notify.get(&d.name).map(|x| x.state) != Some(DeliveryState::Pending) {
-            continue;
+    out: Arc<super::output::StdoutQueue>,
+    metrics: Option<Arc<super::metrics::Metrics>>,
+}
+
+impl Sender {
+    /// Send run `id` to each of its pending destinations, saving its state
+    /// after every try.
+    fn deliver(&self, id: &RunId) {
+        let store = &*self.store;
+        let Ok(mut rec) = store.load(id) else {
+            return;
+        };
+        // A destination taken out of the config is not sent old runs.
+        let before = rec.notify.len();
+        rec.notify
+            .retain(|name, _| self.destinations.iter().any(|d| &d.name == name));
+        if rec.notify.len() != before {
+            save(store, &rec);
         }
-        loop {
-            let tried = post(client, d, &text).map_err(|e| redactor.redact(&e));
-            let delivery = rec.notify.get_mut(&d.name).expect("checked above");
-            delivery.tries += 1;
-            match tried {
-                Ok(()) => {
-                    delivery.state = DeliveryState::Delivered;
-                    delivery.last_error = None;
-                    out.push(format!("{} notify {} delivered", id.as_str(), d.name));
-                }
-                Err(e) => {
-                    out.push(format!("{} notify {} failed: {e}", id.as_str(), d.name));
-                    delivery.last_error = Some(e);
-                    if delivery.tries >= 3 {
-                        delivery.state = DeliveryState::Failed;
+        let text = body(&rec, &self.redactor).to_string();
+        for d in &self.destinations {
+            if rec.notify.get(&d.name).map(|x| x.state) != Some(DeliveryState::Pending) {
+                continue;
+            }
+            loop {
+                let tried = post(&self.client, d, &text).map_err(|e| self.redactor.redact(&e));
+                let delivery = rec.notify.get_mut(&d.name).expect("checked above");
+                delivery.tries += 1;
+                match tried {
+                    Ok(()) => {
+                        delivery.state = DeliveryState::Delivered;
+                        delivery.last_error = None;
+                        self.out
+                            .push(format!("{} notify {} delivered", id.as_str(), d.name));
+                    }
+                    Err(e) => {
+                        self.out
+                            .push(format!("{} notify {} failed: {e}", id.as_str(), d.name));
+                        if let Some(m) = &self.metrics {
+                            m.notify_failed(&d.name);
+                        }
+                        delivery.last_error = Some(e);
+                        if delivery.tries >= 3 {
+                            delivery.state = DeliveryState::Failed;
+                        }
                     }
                 }
+                let tries = delivery.tries;
+                let state = delivery.state;
+                save(store, &rec);
+                if state != DeliveryState::Pending {
+                    break;
+                }
+                std::thread::sleep(self.times.delays[(tries as usize - 1).min(1)]);
             }
-            let tries = delivery.tries;
-            let state = delivery.state;
-            save(store, &rec);
-            if state != DeliveryState::Pending {
-                break;
-            }
-            std::thread::sleep(times.delays[(tries as usize - 1).min(1)]);
         }
     }
 }
@@ -311,6 +332,7 @@ mod tests {
             Arc::default(),
             quick(),
             sink(),
+            None,
         );
         n.enqueue(r.id.clone());
         let done = delivered(&store, &r.id);
@@ -350,6 +372,7 @@ mod tests {
             Arc::default(),
             quick(),
             sink(),
+            None,
         );
         let done = delivered(&store, &r.id);
         assert_eq!(done.notify["b"].state, DeliveryState::Delivered);
@@ -360,7 +383,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().join("runs")).unwrap());
         let r = ended(&store, &[("gone", DeliveryState::Pending)]);
-        let _n = Notifier::start(store.clone(), vec![], Arc::default(), quick(), sink());
+        let _n = Notifier::start(store.clone(), vec![], Arc::default(), quick(), sink(), None);
         let done = delivered(&store, &r.id);
         assert!(done.notify.is_empty(), "{:?}", done.notify);
     }
@@ -390,6 +413,7 @@ mod tests {
             Arc::default(),
             quick(),
             sink(),
+            None,
         );
         n.enqueue(r.id.clone());
         let done = delivered(&store, &r.id);
@@ -426,6 +450,7 @@ mod tests {
             Arc::default(),
             quick(),
             sink(),
+            None,
         );
         n.enqueue(r.id.clone());
         let done = delivered(&store, &r.id);
@@ -448,7 +473,14 @@ mod tests {
         );
         let mut d = destination("a", server.url_str("/i"));
         d.header = Some(("x-api-key".into(), "FHIR_PIPES_TEST_NOTIFY_KEY".into()));
-        let n = Notifier::start(store.clone(), vec![d], Arc::default(), quick(), sink());
+        let n = Notifier::start(
+            store.clone(),
+            vec![d],
+            Arc::default(),
+            quick(),
+            sink(),
+            None,
+        );
         n.enqueue(r.id.clone());
         assert_eq!(
             delivered(&store, &r.id).notify["a"].state,
