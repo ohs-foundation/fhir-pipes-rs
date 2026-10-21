@@ -121,6 +121,27 @@ The same day, Uganda got its own Portolan catalog at
     to a step that did run, so it could run with it, or `--check` could list
     the hooks that won't.
 
+## Problems found adding WorldPop populations
+
+Then `fhir-pipes population --level 2` gave every Uganda district a WorldPop
+2026 total (`country/uganda/population.sh` in `recodelabs/icr`). It assigned
+99.9% of the raster to the 146 districts and wrote 151 Groups that loaded
+without trouble.
+
+14. **WorldPop's current rasters are LZW-compressed.** The R2025A release
+    (`Global_2015_2030/R2025A/2026/UGA/v1/100m/constrained/`) fails with
+    "compression method LZW is unsupported". The docs describe WorldPop
+    grids as DEFLATE, which the older releases were. `population.sh`
+    rewrites the raster with `gdal_translate -co COMPRESS=DEFLATE` first;
+    LZW support in the reader would remove that step.
+
+15. **The docs wait for an age-band characteristic the ICR IG already has.**
+    "What this is not" says age–sex rasters can be run "when the IG gains a
+    characteristic for them". `icr-group-characteristic-cs#age-band` exists.
+    WorldPop publishes age–sex rasters for the same release, so
+    `population --age-band 0-1` (or a characteristic option) would give
+    under-1 and 6–59-month estimates to set beside a ministry's targets.
+
 ## Suggestion: an Overture importer
 
 Most of step 1 was generic Overture handling that every country will repeat:
