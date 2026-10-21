@@ -155,6 +155,22 @@ fn read_any(spec: &str, flag: &str, visit: &mut Visit) -> Result<()> {
     }
 }
 
+/// The package `name` at `version`, as a spec for `read_json_files`:
+/// `name#version` when it is in the local FHIR package cache, otherwise its
+/// download from the FHIR package registry.
+#[cfg(feature = "fhir-packages")]
+pub fn by_version(name: &str, version: &str) -> String {
+    let spec = format!("{name}#{version}");
+    if cached(&spec).is_some() {
+        return spec;
+    }
+    format!("{REGISTRY}/{name}/{version}")
+}
+
+/// The FHIR package registry.
+#[cfg(feature = "fhir-packages")]
+const REGISTRY: &str = "https://packages.fhir.org";
+
 /// The unpacked package `name#version` names in the local FHIR package cache,
 /// where the IG publisher, SUSHI and the validator keep packages.
 fn cached(spec: &str) -> Option<PathBuf> {

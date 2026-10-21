@@ -119,12 +119,15 @@ enum ViewsCommand {
     Lint {
         /// The ViewDefinition JSON file.
         view: PathBuf,
-        /// FHIR package name (e.g. hl7.fhir.r4.core), to check against in
-        /// place of the built-in core types.
+        /// FHIR package to check against in place of the built-in core
+        /// types: a package.tgz (path or https URL), an unpacked package or
+        /// directory of JSON resources, name#version in the local FHIR
+        /// package cache (~/.fhir/packages), or a name with --version.
         #[arg(long)]
         package: Option<String>,
-        /// Package version. When given, the package is installed if missing;
-        /// otherwise only an already-present package is used (offline).
+        /// Version of the package --package names (e.g. hl7.fhir.r4.core
+        /// with 4.0.1): taken from the local FHIR package cache, else
+        /// downloaded from the FHIR package registry (packages.fhir.org).
         #[arg(long)]
         version: Option<String>,
         /// Flag any FHIRPath function, operator or literal outside the
@@ -228,20 +231,36 @@ async fn connect(_db: &str) -> Result<Source> {
 }
 
 /// Findings from checking `view`'s selectors and generated SQL against a
-/// FHIR package (FH01–FH10).
+/// FHIR package (FH01–FH10). The package is read as every package is
+/// (`fhir::package`); a name with `version` is `name#version` in the local
+/// FHIR package cache, or downloaded from the FHIR package registry.
 #[cfg(feature = "fhir-packages")]
 async fn package_findings(
     view: &ViewDefinition,
     package: &str,
     version: Option<&str>,
 ) -> Result<Vec<Finding>> {
-    let provider = fhir_pipes_sof_lint::FhirSchemaProvider::load(package, version)
-        .await
-        .with_context(|| format!("loading package {package}"))?;
+    let spec = match version {
+        Some(v) => crate::fhir::package::by_version(package, v),
+        None => package.to_string(),
+    };
+    // Reading a package may download it, with a blocking client.
+    let mut index = tokio::task::block_in_place(|| {
+        crate::fhir::package::Index::load(
+            std::slice::from_ref(&spec),
+            "--package",
+            &["StructureDefinition"],
+        )
+    })?;
+    let provider = fhir_pipes_sof_lint::FhirSchemaProvider::from_structure_definitions(
+        index
+            .take_type("StructureDefinition")
+            .into_values()
+            .flatten(),
+    );
     if provider.is_empty() {
         return Err(usage(anyhow::anyhow!(
-            "package `{package}` has no StructureDefinitions in the store; \
-             pass --version to install it"
+            "--package {spec} has no StructureDefinitions of resources"
         )));
     }
     Ok(fhir_pipes_sof_lint::lint(view, &provider))

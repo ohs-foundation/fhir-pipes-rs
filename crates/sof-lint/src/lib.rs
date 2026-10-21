@@ -5,11 +5,11 @@
 //! `ofType()`, arrays and complex values in scalar columns (FH01–FH05).
 //! [`lint_core`] checks against the FHIR R4 and R5 core types built into
 //! fhir-pipes-sof, with no package. With the `packages` feature, [`lint`]
-//! checks against a FHIR package instead: it adapts the FHIR schema (via
-//! `octofhir-fhirschema` and `octofhir-canonical-manager`) into the analysis
+//! checks against a FHIR package instead: it adapts the package's
+//! StructureDefinitions (via `octofhir-fhirschema`) into the analysis
 //! engine's `SchemaProvider` contract, so generated SQL can also be validated
-//! against the shape of a resource. That provider is offline once the package
-//! is in the canonical-manager store.
+//! against the shape of a resource. Reading the package is the caller's:
+//! fhir-pipes reads it as it reads every package, with `fhir::package`.
 
 mod finding;
 mod model;
@@ -30,13 +30,3 @@ pub use shareable::lint_shareable;
 pub use structure::validate_structure;
 #[cfg(feature = "packages")]
 pub use view_lint::{lint, lint_sql, lint_view};
-
-/// Errors raised while loading a FHIR package into a `FhirSchemaProvider`.
-#[cfg(feature = "packages")]
-#[derive(Debug, thiserror::Error)]
-pub enum LintError {
-    /// The canonical-manager could not be initialised or the package failed to
-    /// load.
-    #[error("package load error: {0}")]
-    PackageLoad(String),
-}

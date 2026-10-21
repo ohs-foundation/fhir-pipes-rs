@@ -289,6 +289,58 @@ fn db_says_how_to_get_postgres_support() {
         .stderr(contains("--features postgres"));
 }
 
+/// `--package` reads a directory of StructureDefinitions as every FHIR
+/// package is read, with no download.
+#[test]
+#[cfg(feature = "fhir-packages")]
+fn package_lint_reads_a_directory_of_structure_definitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("package");
+    fs::create_dir(&package).unwrap();
+    fs::write(
+        package.join("StructureDefinition-Patient.json"),
+        r#"{"resourceType": "StructureDefinition", "url": "http://hl7.org/fhir/StructureDefinition/Patient",
+            "name": "Patient", "type": "Patient", "kind": "resource", "abstract": false,
+            "derivation": "specialization", "status": "active",
+            "snapshot": {"element": [
+                {"id": "Patient", "path": "Patient", "min": 0, "max": "*"},
+                {"id": "Patient.id", "path": "Patient.id", "min": 0, "max": "1", "type": [{"code": "id"}]},
+                {"id": "Patient.gender", "path": "Patient.gender", "min": 0, "max": "1", "type": [{"code": "code"}]}]},
+            "differential": {"element": [
+                {"id": "Patient", "path": "Patient", "min": 0, "max": "*"},
+                {"id": "Patient.id", "path": "Patient.id", "min": 0, "max": "1", "type": [{"code": "id"}]},
+                {"id": "Patient.gender", "path": "Patient.gender", "min": 0, "max": "1", "type": [{"code": "code"}]}]}}"#,
+    )
+    .unwrap();
+    let view = dir.path().join("patient.json");
+    let write = |path: &str| {
+        fs::write(
+            &view,
+            format!(
+                r#"{{"resourceType": "ViewDefinition", "name": "Patients", "status": "active",
+                    "resource": "Patient", "select": [{{"column": [
+                        {{"name": "g", "path": "{path}"}}]}}]}}"#
+            ),
+        )
+        .unwrap();
+    };
+    write("gender");
+    views()
+        .args(["--no-color", "lint", "--package"])
+        .arg(&package)
+        .arg(&view)
+        .assert()
+        .success();
+    write("gendr");
+    views()
+        .args(["--no-color", "lint", "--package"])
+        .arg(&package)
+        .arg(&view)
+        .assert()
+        .failure()
+        .stdout(contains("FH01"));
+}
+
 #[test]
 #[cfg(not(feature = "fhir-packages"))]
 fn package_lint_says_how_to_get_package_support() {

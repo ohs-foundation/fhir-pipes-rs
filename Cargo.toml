@@ -95,7 +95,6 @@ fhir-pipes-sof-lint = { path = "crates/sof-lint" }
 # 0.4.56 is the first release without an HTTP client (octofhir/fhirpath-rs#175).
 octofhir-fhirpath = { version = "0.4.57", default-features = false }
 octofhir-fhirschema = "0.3.29"
-octofhir-canonical-manager = "0.2.4"
 banshee_hir = "0.2.3"
 banshee_parser = "0.2.3"
 serde = { version = "1.0", features = ["derive"] }

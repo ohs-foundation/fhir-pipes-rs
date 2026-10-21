@@ -4,10 +4,8 @@
 use std::collections::HashMap;
 
 use banshee_hir::{ColumnInfo, DataType, SchemaProvider, TableInfo, TableType};
-use octofhir_canonical_manager::CanonicalManager;
 use octofhir_fhirschema::{FhirSchema, FhirSchemaElement, StructureDefinition, translate};
 
-use crate::LintError;
 use crate::model::{ElementKind, ElementModel};
 
 /// A [`SchemaProvider`] backed by FHIR schemas.
@@ -52,48 +50,32 @@ impl FhirSchemaProvider {
         self.schemas.insert(schema.type_name.clone(), schema);
     }
 
-    /// Load every `StructureDefinition` of a package already present in the
-    /// canonical-manager store and adapt them into schemas.
-    pub async fn from_package(
-        manager: &CanonicalManager,
-        package_name: &str,
-    ) -> Result<Self, LintError> {
-        let result = manager
-            .search()
-            .await
-            .resource_type("StructureDefinition")
-            .package(package_name)
-            .limit(1_000_000)
-            .execute()
-            .await
-            .map_err(|e| LintError::PackageLoad(e.to_string()))?;
-
+    /// Adapt the `StructureDefinition`s of a FHIR package, as JSON, into
+    /// schemas. One that does not parse or translate is skipped. A type's
+    /// base definition wins over a profile of it (in hl7.fhir.r4.core,
+    /// `Observation` over `vitalsigns`, whose differential holds only the
+    /// elements it constrains); among profiles of one type, the one with the
+    /// last URL.
+    pub fn from_structure_definitions(
+        structure_definitions: impl IntoIterator<Item = serde_json::Value>,
+    ) -> Self {
+        let mut sds: Vec<serde_json::Value> = structure_definitions.into_iter().collect();
+        sds.sort_by_cached_key(|sd| {
+            (
+                sd["derivation"] != "constraint",
+                sd["url"].as_str().unwrap_or("").to_string(),
+            )
+        });
         let mut provider = Self::default();
-        for matched in result.resources {
-            let Ok(sd) = serde_json::from_value::<StructureDefinition>(matched.resource.content)
-            else {
+        for sd in sds {
+            let Ok(sd) = serde_json::from_value::<StructureDefinition>(sd) else {
                 continue;
             };
             if let Ok(schema) = translate(sd, None) {
                 provider.insert(schema);
             }
         }
-        Ok(provider)
-    }
-
-    /// Initialise a default canonical-manager and load a package, installing it
-    /// first when a `version` is given (offline-only when it is omitted).
-    pub async fn load(package_name: &str, version: Option<&str>) -> Result<Self, LintError> {
-        let manager = CanonicalManager::with_default_config()
-            .await
-            .map_err(|e| LintError::PackageLoad(e.to_string()))?;
-        if let Some(version) = version {
-            manager
-                .install_package(package_name, version)
-                .await
-                .map_err(|e| LintError::PackageLoad(e.to_string()))?;
-        }
-        Self::from_package(&manager, package_name).await
+        provider
     }
 
     /// True when no resource tables are known (e.g. the package was not found).
@@ -307,6 +289,41 @@ mod tests {
         }))
         .unwrap();
         FhirSchemaProvider::with_schemas([patient, human_name])
+    }
+
+    #[test]
+    fn a_base_definition_wins_over_a_profile_of_its_type() {
+        let sd = |url: &str, derivation: &str, elements: &[&str]| {
+            let mut element = vec![json!({"id": "Observation", "path": "Observation"})];
+            for e in elements {
+                let path = format!("Observation.{e}");
+                element.push(json!({"id": path, "path": path, "min": 0, "max": "1",
+                    "type": [{"code": "string"}]}));
+            }
+            json!({"resourceType": "StructureDefinition", "url": url, "name": "Observation",
+                "type": "Observation", "kind": "resource", "abstract": false,
+                "derivation": derivation, "status": "active",
+                "differential": {"element": element}})
+        };
+        let base = sd(
+            "http://hl7.org/fhir/StructureDefinition/Observation",
+            "specialization",
+            &["status", "subject"],
+        );
+        let profile = sd(
+            "http://hl7.org/fhir/StructureDefinition/vitalsigns",
+            "constraint",
+            &["status"],
+        );
+        for sds in [
+            vec![base.clone(), profile.clone()],
+            vec![profile.clone(), base.clone()],
+        ] {
+            let p = FhirSchemaProvider::from_structure_definitions(sds);
+            let mut names = p.element_names("Observation", &[]).unwrap();
+            names.sort();
+            assert_eq!(names, ["status", "subject"]);
+        }
     }
 
     #[test]
