@@ -1,5 +1,4 @@
 mod calendar;
-mod cells;
 mod cli;
 mod dhis2;
 mod diff;
@@ -78,7 +77,7 @@ fn main() {
         cli::Command::Diff(args) => diff::run_diff(&args, profile),
         cli::Command::Load(args) => load::run_load(&args),
         cli::Command::Sync(args) => sync::run_sync(&args),
-        cli::Command::Index(args) => cells::run_index(&args, profile),
+        cli::Command::Index(args) => index::command::run_index(&args, profile),
         cli::Command::Population(args) => population::run_population(&args, profile),
         cli::Command::Dhis2(cmd) => dhis2::run(&cmd, profile),
         cli::Command::Profile(cli::ProfileCommand::Check(args)) => {
