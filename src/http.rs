@@ -249,12 +249,6 @@ impl std::fmt::Debug for Exchange {
     }
 }
 
-/// A response's body as it was sent, before `Content-Encoding: gzip`.
-/// `MultiGzDecoder` reads every member: concatenated gzip members are one
-/// valid gzip body (RFC 1952 section 2.2), and a decoder that stops after
-/// the first loses the rest without an error. Any other encoding is passed
-/// through as it came; the client only asks for gzip. An empty body is
-/// empty whatever its `Content-Encoding` says (a 202 from a server that
 /// Whether `host` is this machine, where plain http does not cross a network.
 fn is_this_machine(host: &str) -> bool {
     host == "localhost"
@@ -264,6 +258,12 @@ fn is_this_machine(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// A response's body as it was sent, before `Content-Encoding: gzip`.
+/// `MultiGzDecoder` reads every member: concatenated gzip members are one
+/// valid gzip body (RFC 1952 section 2.2), and a decoder that stops after
+/// the first loses the rest without an error. Any other encoding is passed
+/// through as it came; the client only asks for gzip. An empty body is
+/// empty whatever its `Content-Encoding` says (a 202 from a server that
 /// marks every response gzip), as reqwest's decoder treated it.
 fn decoded(resp: Response) -> Box<dyn Read> {
     use std::io::BufRead as _;
@@ -664,77 +664,7 @@ impl FhirClient {
             origin: None,
             body_limit: DEFAULT_BODY_LIMIT,
         };
-        client.auth = match auth {
-            Auth::None => Authorizer::None,
-            Auth::Token(t) => Authorizer::Fixed(bearer(&t).ok_or_else(|| {
-                PipesError::Usage("token contains characters that are not valid in a header".into())
-            })?),
-            Auth::Header(h) => {
-                let mut v = HeaderValue::from_str(&h).map_err(|_| {
-                    PipesError::Usage(
-                        "credentials contain characters that are not valid in a header".into(),
-                    )
-                })?;
-                v.set_sensitive(true);
-                Authorizer::Fixed(v)
-            }
-            Auth::ClientCredentials {
-                token_url,
-                client_id,
-                client_secret,
-                token_auth,
-                scope,
-            } => {
-                let mut form = url::form_urlencoded::Serializer::new(String::new());
-                form.append_pair("grant_type", "client_credentials");
-                if let Some(scope) = &scope {
-                    form.append_pair("scope", scope);
-                }
-                let authorization = match token_auth {
-                    TokenAuth::Post => {
-                        form.append_pair("client_id", &client_id)
-                            .append_pair("client_secret", &client_secret);
-                        None
-                    }
-                    TokenAuth::Basic => Some(client_basic(&client_id, &client_secret)?),
-                };
-                client.renewing(Grant::Form {
-                    url: token_url,
-                    form: form.finish(),
-                    authorization,
-                })?
-            }
-            Auth::Google(creds) => {
-                if let Some(project) = &creds.quota_project {
-                    client.user_project = Some(HeaderValue::from_str(project).map_err(|_| {
-                        PipesError::Usage(
-                            "the Google quota project is not valid in a header".into(),
-                        )
-                    })?);
-                }
-                let grant = match &creds.source {
-                    google::Source::ServiceAccount(sa) => Grant::Jwt(sa.clone()),
-                    google::Source::RefreshToken { token_uri, form } => Grant::Form {
-                        url: token_uri.clone(),
-                        form: form.clone(),
-                        authorization: None,
-                    },
-                    google::Source::Metadata { url } => Grant::Metadata { url: url.clone() },
-                };
-                client.renewing(grant).map_err(|e| {
-                    let hint = if creds.is_metadata() {
-                        ". Off Google Cloud, set GOOGLE_APPLICATION_CREDENTIALS to a service \
-                         account key file or run `gcloud auth application-default login`"
-                    } else {
-                        ""
-                    };
-                    PipesError::Environment(format!(
-                        "Google credentials from {}: {e}{hint}",
-                        creds.describe()
-                    ))
-                })?
-            }
-        };
+        client.auth = client.authorizer(auth)?;
         Ok(client)
     }
 
@@ -767,26 +697,6 @@ impl FhirClient {
         }
         self.origin = url.map(|u| u.origin());
         self
-    }
-
-    /// A place in the gate, when the client has one, or Err when `deadline`
-    /// passes before one is free.
-    fn enter_by(&self, deadline: Option<Instant>) -> std::result::Result<Option<Pass<'_>>, ()> {
-        match &self.gate {
-            None => Ok(None),
-            Some(gate) => gate.enter_by(deadline).map(Some).ok_or(()),
-        }
-    }
-
-    /// A renewing authorizer, with its first token fetched now.
-    fn renewing(&self, grant: Grant) -> Result<Authorizer> {
-        let first = self.request_token(&grant).map_err(|e| {
-            PipesError::Environment(format!("cannot get a token from {}: {e}", grant.url()))
-        })?;
-        Ok(Authorizer::Renewing(TokenSource {
-            grant,
-            current: Mutex::new(first),
-        }))
     }
 
     /// GET with the retry policy. Sleeps between attempts.
@@ -932,6 +842,95 @@ impl FhirClient {
         };
         self.retrying(attempt, request, body)
     }
+}
+
+impl FhirClient {
+    /// The authorizer for `auth`. With client credentials or Google
+    /// credentials the first token is fetched now.
+    fn authorizer(&mut self, auth: Auth) -> Result<Authorizer> {
+        Ok(match auth {
+            Auth::None => Authorizer::None,
+            Auth::Token(t) => Authorizer::Fixed(bearer(&t).ok_or_else(|| {
+                PipesError::Usage("token contains characters that are not valid in a header".into())
+            })?),
+            Auth::Header(h) => {
+                let mut v = HeaderValue::from_str(&h).map_err(|_| {
+                    PipesError::Usage(
+                        "credentials contain characters that are not valid in a header".into(),
+                    )
+                })?;
+                v.set_sensitive(true);
+                Authorizer::Fixed(v)
+            }
+            Auth::ClientCredentials {
+                token_url,
+                client_id,
+                client_secret,
+                token_auth,
+                scope,
+            } => {
+                let mut form = url::form_urlencoded::Serializer::new(String::new());
+                form.append_pair("grant_type", "client_credentials");
+                if let Some(scope) = &scope {
+                    form.append_pair("scope", scope);
+                }
+                let authorization = match token_auth {
+                    TokenAuth::Post => {
+                        form.append_pair("client_id", &client_id)
+                            .append_pair("client_secret", &client_secret);
+                        None
+                    }
+                    TokenAuth::Basic => Some(client_basic(&client_id, &client_secret)?),
+                };
+                self.renewing(Grant::Form {
+                    url: token_url,
+                    form: form.finish(),
+                    authorization,
+                })?
+            }
+            Auth::Google(creds) => {
+                if let Some(project) = &creds.quota_project {
+                    self.user_project = Some(HeaderValue::from_str(project).map_err(|_| {
+                        PipesError::Usage(
+                            "the Google quota project is not valid in a header".into(),
+                        )
+                    })?);
+                }
+                let grant = match &creds.source {
+                    google::Source::ServiceAccount(sa) => Grant::Jwt(sa.clone()),
+                    google::Source::RefreshToken { token_uri, form } => Grant::Form {
+                        url: token_uri.clone(),
+                        form: form.clone(),
+                        authorization: None,
+                    },
+                    google::Source::Metadata { url } => Grant::Metadata { url: url.clone() },
+                };
+                self.renewing(grant).map_err(|e| {
+                    let hint = if creds.is_metadata() {
+                        ". Off Google Cloud, set GOOGLE_APPLICATION_CREDENTIALS to a service \
+                         account key file or run `gcloud auth application-default login`"
+                    } else {
+                        ""
+                    };
+                    PipesError::Environment(format!(
+                        "Google credentials from {}: {e}{hint}",
+                        creds.describe()
+                    ))
+                })?
+            }
+        })
+    }
+
+    /// A renewing authorizer, with its first token fetched now.
+    fn renewing(&self, grant: Grant) -> Result<Authorizer> {
+        let first = self.request_token(&grant).map_err(|e| {
+            PipesError::Environment(format!("cannot get a token from {}: {e}", grant.url()))
+        })?;
+        Ok(Authorizer::Renewing(TokenSource {
+            grant,
+            current: Mutex::new(first),
+        }))
+    }
 
     /// One token request, with the retry policy. Returns the Authorization
     /// header and when to replace it, counted from before the request so the
@@ -1019,15 +1018,6 @@ impl FhirClient {
         }
     }
 
-    /// The retry loop with the Authorization header added to every attempt.
-    fn send<T>(
-        &self,
-        request: impl Fn() -> RequestBuilder,
-        success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
-    ) -> std::result::Result<T, FetchError> {
-        self.retrying(Attempt::Authorized, request, success)
-    }
-
     /// The Authorization header, and `x-goog-user-project` when set, when
     /// `request` goes to the server's origin, or to any with `anywhere`.
     fn authorize(
@@ -1046,6 +1036,28 @@ impl FhirClient {
             }
         }
         Ok(RequestBuilder::from_parts(client, built))
+    }
+}
+
+impl FhirClient {
+    /// A place in the gate, when the client has one, or Err when `deadline`
+    /// passes before one is free.
+    fn enter_by(&self, deadline: Option<Instant>) -> std::result::Result<Option<Pass<'_>>, ()> {
+        match &self.gate {
+            None => Ok(None),
+            Some(gate) => gate.enter_by(deadline).map(Some).ok_or(()),
+        }
+    }
+}
+
+impl FhirClient {
+    /// The retry loop with the Authorization header added to every attempt.
+    fn send<T>(
+        &self,
+        request: impl Fn() -> RequestBuilder,
+        success: impl FnOnce(Response) -> std::result::Result<T, FetchError>,
+    ) -> std::result::Result<T, FetchError> {
+        self.retrying(Attempt::Authorized, request, success)
     }
 
     /// The retry loop. Any 2xx is a success, handed to `success`; 429 and
