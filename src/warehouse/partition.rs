@@ -245,7 +245,8 @@ pub fn write(
 }
 
 /// Put the table at `staged` in place of `table_dir`: the old one is renamed
-/// to `.<table>.old`, the new one renamed in, then the old one removed.
+/// to `.<table>.old`, the new one renamed in, then the old one removed
+/// (`fs::swap_dir`).
 pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
     let parent = table_dir
         .parent()
@@ -254,15 +255,7 @@ pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
         .file_name()
         .context("table directory has no name")?
         .to_string_lossy();
-    let old = parent.join(format!(".{name}.old"));
-    let _ = fs::remove_dir_all(&old);
-    if table_dir.exists() {
-        fs::rename(table_dir, &old)
-            .with_context(|| format!("moving {} aside", table_dir.display()))?;
-    }
-    fs::rename(staged, table_dir)
-        .with_context(|| format!("renaming {} into place", staged.display()))?;
-    let _ = fs::remove_dir_all(&old);
+    crate::fs::swap_dir(staged, table_dir, &parent.join(format!(".{name}.old")))?;
     Ok(())
 }
 

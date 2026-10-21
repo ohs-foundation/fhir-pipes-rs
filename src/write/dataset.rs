@@ -112,29 +112,6 @@ fn nearest_polygon_ancestor(
     None
 }
 
-fn recover_incomplete_swap(dataset: &Path, backup: &Path, staging: &Path) -> Result<()> {
-    if backup.exists() && !dataset.exists() {
-        std::fs::rename(backup, dataset).map_err(|e| PipesError::io(backup, e))?;
-    } else if backup.exists() {
-        std::fs::remove_dir_all(backup).map_err(|e| PipesError::io(backup, e))?;
-    }
-    if staging.exists() {
-        std::fs::remove_dir_all(staging).map_err(|e| PipesError::io(staging, e))?;
-    }
-    Ok(())
-}
-
-fn swap_in(dataset: &Path, backup: &Path, staging: &Path) -> Result<()> {
-    if dataset.exists() {
-        std::fs::rename(dataset, backup).map_err(|e| PipesError::io(dataset, e))?;
-    }
-    std::fs::rename(staging, dataset).map_err(|e| PipesError::io(staging, e))?;
-    if backup.exists() {
-        std::fs::remove_dir_all(backup).map_err(|e| PipesError::io(backup, e))?;
-    }
-    Ok(())
-}
-
 pub fn write_dataset(
     ndjson: &Path,
     profile: &Profile,
@@ -154,7 +131,10 @@ pub fn write_dataset(
             dataset.display()
         )));
     }
-    recover_incomplete_swap(&dataset, &backup, &staging)?;
+    crate::fs::recover_swap(&dataset, &backup)?;
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| PipesError::io(&staging, e))?;
+    }
     std::fs::create_dir(&staging).map_err(|e| PipesError::io(&staging, e))?;
 
     let written = match write_partitions(
@@ -172,15 +152,7 @@ pub fn write_dataset(
             return Err(e);
         }
     };
-    swap_in(&dataset, &backup, &staging)?;
-    // Durability: fsync the directory whose entry (the `locations` rename)
-    // just changed, so that change survives a crash right after this
-    // returns. Not every platform/filesystem supports fsync on a
-    // directory; that is a best-effort improvement, not something worth
-    // failing an otherwise-successful write over.
-    if let Ok(dir) = std::fs::File::open(out_dir) {
-        let _ = dir.sync_all();
-    }
+    crate::fs::swap_dir(&staging, &dataset, &backup)?;
     Ok(written
         .into_iter()
         .map(|w| WrittenPartition {

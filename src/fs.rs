@@ -40,6 +40,36 @@ pub fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
     f.commit()
 }
 
+/// Puts the directory `staged` in place of `target`: `target` is renamed to
+/// `backup`, `staged` renamed in, then `backup` removed and the parent
+/// fsynced. A reader sees the old directory or the new one, never a mix;
+/// between the two renames there is none, which `recover_swap` undoes.
+/// A backup that cannot be removed afterwards is left for the next run: the
+/// new directory is in place.
+pub fn swap_dir(staged: &Path, target: &Path, backup: &Path) -> Result<()> {
+    if backup.exists() {
+        std::fs::remove_dir_all(backup).map_err(|e| PipesError::io(backup, e))?;
+    }
+    if target.exists() {
+        std::fs::rename(target, backup).map_err(|e| PipesError::io(target, e))?;
+    }
+    std::fs::rename(staged, target).map_err(|e| PipesError::io(staged, e))?;
+    let _ = std::fs::remove_dir_all(backup);
+    sync_dir(target.parent());
+    Ok(())
+}
+
+/// After a `swap_dir` cut short between its two renames: the backup is put
+/// back where `target` was. A backup left beside a `target` is removed.
+pub fn recover_swap(target: &Path, backup: &Path) -> Result<()> {
+    if backup.exists() && !target.exists() {
+        std::fs::rename(backup, target).map_err(|e| PipesError::io(backup, e))?;
+    } else if backup.exists() {
+        std::fs::remove_dir_all(backup).map_err(|e| PipesError::io(backup, e))?;
+    }
+    Ok(())
+}
+
 /// Why a state file could not be read.
 #[derive(Debug)]
 pub enum StateError {
@@ -288,6 +318,31 @@ impl Drop for AtomicFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_is_swapped_in_and_a_cut_short_swap_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (staged, target, backup) = (
+            dir.path().join(".t.new"),
+            dir.path().join("t"),
+            dir.path().join(".t.old"),
+        );
+        for (d, f) in [(&target, "old"), (&staged, "new")] {
+            std::fs::create_dir(d).unwrap();
+            std::fs::write(d.join(f), "").unwrap();
+        }
+        swap_dir(&staged, &target, &backup).unwrap();
+        assert!(target.join("new").exists() && !target.join("old").exists());
+        assert!(!staged.exists() && !backup.exists());
+        // Cut short after the first rename: the backup comes back.
+        std::fs::rename(&target, &backup).unwrap();
+        recover_swap(&target, &backup).unwrap();
+        assert!(target.join("new").exists() && !backup.exists());
+        // A backup beside the target is left over: removed.
+        std::fs::create_dir(&backup).unwrap();
+        recover_swap(&target, &backup).unwrap();
+        assert!(target.exists() && !backup.exists());
+    }
 
     #[cfg(unix)]
     #[test]
