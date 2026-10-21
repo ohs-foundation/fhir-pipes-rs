@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod notify;
 pub mod output;
 pub mod runner;
+pub mod schedule;
 pub mod secrets;
 pub mod store;
 
@@ -105,6 +106,7 @@ fn server(
         metrics,
         data: inputs.data.clone(),
         current: std::sync::Mutex::new(None),
+        clock: schedule::clock(),
     }))
 }
 
@@ -133,6 +135,38 @@ pub fn run(args: &ServeArgs) -> Result<()> {
         .as_ref()
         .filter(|_| std::env::var_os("FHIR_PIPES_DATA").is_none());
     let server = server(&inputs, data_flag, cfg)?;
+    if !server.job.cfg.schedule.is_empty() {
+        let s = server.clone();
+        std::thread::spawn(move || {
+            schedule::run(
+                &s.job.cfg.schedule,
+                &*s.clock,
+                |at, mode| {
+                    let request = store::RunRequest {
+                        mode,
+                        ..Default::default()
+                    };
+                    match s.start(store::Trigger::Schedule, request) {
+                        Ok(_) => schedule::Fired::Started,
+                        Err(api::Refused::Busy(id)) => {
+                            s.metrics.schedule_skipped();
+                            s.job.stdout.push(format!(
+                                "schedule {}: skipped, run {} is under way",
+                                at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                                id.as_str()
+                            ));
+                            schedule::Fired::Skipped
+                        }
+                        Err(api::Refused::Unrecorded(e)) => {
+                            eprintln!("fhir-pipes: error: a scheduled run was not started: {e}");
+                            schedule::Fired::Refused
+                        }
+                    }
+                },
+                None,
+            );
+        });
+    }
 
     let app = App { token };
     let runtime = tokio::runtime::Builder::new_multi_thread()

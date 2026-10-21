@@ -44,6 +44,8 @@ pub struct Server {
     /// The run accepted, running or waiting, if any: one at a time, decided
     /// under this lock by the API and the schedule alike.
     pub current: Mutex<Option<(RunId, CancelToken)>>,
+    /// The schedule's clock, for `next_scheduled`.
+    pub clock: Arc<dyn super::schedule::Clock>,
 }
 
 /// Why a run was not started.
@@ -202,7 +204,8 @@ async fn status(State(server): State<Arc<Server>>) -> Response {
         json!({
             "current": current.as_ref().map(summary),
             "last": last.as_ref().map(summary),
-            "next_scheduled": Value::Null,
+            "next_scheduled": super::schedule::next_fire(&s.job.cfg.schedule, s.clock.now())
+                .map(|(at, _)| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         })
     })
     .await;
@@ -311,4 +314,60 @@ async fn metrics(State(server): State<Arc<Server>>) -> Response {
         server.job.stdout.dropped(),
     );
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], text).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A server whose runs are `script` in place of refresh.
+    fn server(dir: &std::path::Path, script: &str) -> Arc<Server> {
+        let program = dir.join("refresh");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Arc::new(super::super::store::Store::open(dir.join("runs")).unwrap());
+        let stdout = super::super::output::StdoutQueue::start(Box::new(std::io::sink()));
+        let cfg = super::super::config::parse(None).unwrap();
+        let notifier = Notifier::start(
+            store.clone(),
+            vec![],
+            Arc::default(),
+            super::super::notify::Times::default(),
+            stdout.clone(),
+            None,
+        );
+        Arc::new(Server {
+            job: Arc::new(Job {
+                program,
+                base_args: vec![],
+                cfg,
+                store,
+                redactor: Arc::default(),
+                stdout,
+                write_failing: Arc::default(),
+            }),
+            notifier,
+            metrics: Arc::default(),
+            data: dir.to_path_buf(),
+            current: Mutex::new(None),
+            clock: Arc::new(super::super::schedule::SystemClock),
+        })
+    }
+
+    #[test]
+    fn the_api_and_the_schedule_cannot_both_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = server(dir.path(), "sleep 1");
+        let a = {
+            let s = s.clone();
+            std::thread::spawn(move || s.start(Trigger::Api, RunRequest::default()).is_ok())
+        };
+        let b = {
+            let s = s.clone();
+            std::thread::spawn(move || s.start(Trigger::Schedule, RunRequest::default()).is_ok())
+        };
+        let started = [a.join().unwrap(), b.join().unwrap()];
+        assert_eq!(started.iter().filter(|x| **x).count(), 1, "{started:?}");
+    }
 }

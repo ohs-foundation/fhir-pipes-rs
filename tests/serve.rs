@@ -630,3 +630,34 @@ fn no_secret_in_records_logs_stdout_or_notify() {
         }
     }
 }
+
+// ---- The schedule (Task B7) ----
+
+#[test]
+fn a_schedule_fires() {
+    let (_dir, config) =
+        setup_with_raw("\n[[serve.schedule]]\ncron = \"* * * * *\"\nmode = \"incremental\"\n");
+    // One second before a minute: the schedule fires a second after start.
+    let s = start_api(
+        &config,
+        &[("FHIR_PIPES_SERVE_TEST_NOW", "2026-10-21T02:00:59Z")],
+    );
+    let (_, text) = s.get("/status");
+    let st: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(st["next_scheduled"], "2026-10-21T02:01:00Z", "{st}");
+    let started = Instant::now();
+    loop {
+        let (_, text) = s.get("/runs");
+        let runs: Value = serde_json::from_str(&text).unwrap();
+        if let Some(r) = runs.as_array().unwrap().first() {
+            assert_eq!(r["trigger"], "schedule", "{r}");
+            assert_eq!(r["request"]["mode"], "incremental");
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no scheduled run"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
