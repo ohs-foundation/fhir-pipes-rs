@@ -111,8 +111,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
         report.counts().get("no_position").copied().unwrap_or(0)
     );
     if let Some(path) = &args.report {
-        let json = serde_json::to_string_pretty(&report.to_json())?;
-        std::fs::write(path, json).map_err(|e| PipesError::io(path, e))?;
+        crate::transform::write_report(path, &report)?;
     }
     Ok(())
 }
