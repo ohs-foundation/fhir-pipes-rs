@@ -440,7 +440,12 @@ fn cancel_stops_a_running_child_and_its_hook_writer() {
     let s = start_api(&config, &[]);
     let id = s.start_run(r#"{"only": ["views", "hooks"]}"#);
     let pid_file = dir.path().join("w.pid");
-    wait_for(&pid_file);
+    // The file appears before the shell writes the pid into it.
+    let started = Instant::now();
+    while fs::read_to_string(&pid_file).map_or(true, |p| p.trim().is_empty()) {
+        assert!(started.elapsed() < Duration::from_secs(20), "no w.pid");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let (status, _) = s.post(&format!("/runs/{id}/cancel"), None);
     assert_eq!(status, 200);
     let r = s.finished(&id);
