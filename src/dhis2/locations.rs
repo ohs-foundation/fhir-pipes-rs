@@ -21,8 +21,7 @@ use crate::fhir::location::{
 use crate::fhir::ndjson::NdjsonWriter;
 use crate::fhir::organization::{NewOrganization, OrganizationKey};
 use crate::fs::check_out;
-use crate::report::Report;
-use crate::transform::write_report;
+use crate::report::{Report, write_report};
 
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;

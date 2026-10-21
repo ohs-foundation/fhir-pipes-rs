@@ -111,7 +111,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
         report.counts().get("no_position").copied().unwrap_or(0)
     );
     if let Some(path) = &args.report {
-        crate::transform::write_report(path, &report)?;
+        crate::report::write_report(path, &report)?;
     }
     Ok(())
 }

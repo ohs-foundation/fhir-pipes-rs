@@ -32,9 +32,8 @@ use crate::raster::Raster;
 use crate::raster::fetch;
 use crate::raster::geotiff::GeoTiff;
 use crate::raster::zonal::{ZonalSum, raster_total, zonal_sum};
-use crate::report::Report;
+use crate::report::{Report, write_report};
 use crate::snapshot::Snapshot;
-use crate::transform::write_report;
 
 /// Which Locations to measure: every admin unit at one level, or every Location of one
 /// type code (catchments, operational areas). Only the level mode rolls up: a catchment

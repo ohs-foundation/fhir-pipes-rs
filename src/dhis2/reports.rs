@@ -50,9 +50,8 @@ use crate::fhir::ndjson::NdjsonReader;
 use crate::fhir::ndjson::NdjsonWriter;
 use crate::fs::check_out;
 use crate::http::FetchError;
-use crate::report::Report;
+use crate::report::{Report, write_report};
 use crate::snapshot::instant::format_utc;
-use crate::transform::write_report;
 use crate::work::InOrder;
 
 /// DHIS2 UIDs are 11 characters.

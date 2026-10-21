@@ -7,7 +7,7 @@ use crate::error::{PipesError, Result};
 use crate::index::build_index;
 use crate::index::partition::parse_keys;
 use crate::profile::Profile;
-use crate::report::Report;
+use crate::report::write_json;
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::write::dataset::write_dataset;
 
@@ -121,15 +121,4 @@ pub fn transform_with(args: &TransformArgs, profile: &Profile) -> Result<()> {
     }
     println!("{}", index.report.summary());
     Ok(())
-}
-
-/// `report` as JSON at `path`, written whole or not at all.
-pub fn write_report(path: &Path, report: &Report) -> Result<()> {
-    write_json(path, &report.to_json())
-}
-
-fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
-    let mut text = serde_json::to_string_pretty(value)?;
-    text.push('\n');
-    crate::fs::atomic_write(path, text)
 }

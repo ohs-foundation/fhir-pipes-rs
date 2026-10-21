@@ -28,10 +28,10 @@ use crate::fhir::location::strip_reference;
 use crate::fhir::ndjson::{LineAccess, Output, is_gz};
 use crate::fs::AtomicFile;
 use crate::profile::Profile;
-use crate::report::Report;
+use crate::report::{Report, write_report};
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::snapshot::index::index_by_id;
-use crate::transform::{SNAPSHOT_FILE, write_report};
+use crate::transform::SNAPSHOT_FILE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {

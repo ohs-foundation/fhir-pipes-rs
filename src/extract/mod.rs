@@ -13,11 +13,10 @@ use crate::extract::boundary::{FetchOptions, fetch_boundaries};
 use crate::extract::cache::Cache;
 use crate::extract::page::{CountCheck, check_count, page_locations, page_resources};
 use crate::http::FhirClient;
-use crate::report::Report;
+use crate::report::{Report, write_report};
 use crate::snapshot::instant::{capped_watermark, format_utc, parse_instant};
 use crate::snapshot::merge::{MergeFiles, MergeOptions, merge, merge_file};
 use crate::snapshot::{Snapshot, State, same_server};
-use crate::transform::write_report;
 
 /// Fetch Locations into the snapshot, incrementally unless `--full`.
 ///

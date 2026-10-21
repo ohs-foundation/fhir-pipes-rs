@@ -54,11 +54,10 @@ use crate::extract::page::{
     page_resources, page_search,
 };
 use crate::http::FhirClient;
-use crate::report::Report;
+use crate::report::{Report, write_report};
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
 use crate::snapshot::merge::{MergeFiles, MergeOptions, MergeStats, id_and_updated, merge_file};
 use crate::snapshot::same_server;
-use crate::transform::write_report;
 
 pub(crate) const STATE_FILE: &str = ".export-state.json";
 

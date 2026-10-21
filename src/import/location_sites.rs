@@ -772,7 +772,7 @@ pub fn run(args: &LocationSitesArgs, profile: &Profile) -> Result<()> {
     );
     println!("{}", report.summary());
     if let Some(path) = &args.report {
-        crate::transform::write_report(path, &report)?;
+        crate::report::write_report(path, &report)?;
     }
     Ok(())
 }
