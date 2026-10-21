@@ -193,7 +193,6 @@ impl Step {
 
 /// What `fhir-pipes serve` needs from the refresh config.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub struct ServeInputs {
     /// The config file, as an absolute path, for the refreshes it starts.
     pub config: PathBuf,

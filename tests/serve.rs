@@ -666,3 +666,89 @@ fn a_schedule_fires() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+// ---- Restart and shutdown (Task B8) ----
+
+fn read_pid(path: &Path) -> i32 {
+    let started = Instant::now();
+    loop {
+        if let Ok(p) = fs::read_to_string(path)
+            && let Ok(pid) = p.trim().parse()
+        {
+            return pid;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "no {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn pid_alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[test]
+fn a_killed_serve_marks_the_run_interrupted_and_notifies_at_start() {
+    let notify = HttpServer::run();
+    notify.expect(
+        Expectation::matching(all_of![
+            request::method_path("POST", "/i"),
+            request::body(json_decoded(json_value_status("interrupted"))),
+        ])
+        .times(1)
+        .respond_with(status_code(200)),
+    );
+    let (dir, config) = setup_with_raw(&format!(
+        "\n[[hooks]]\nname = \"slow\"\nrun = [\"sh\", \"-c\", \"echo $$ > slow.pid; exec sleep 30\"]\n{}",
+        notify_config(&notify)
+    ));
+    let mut first = start_api(&config, &[]);
+    let id = first.start_run(r#"{"only": ["views", "hooks"]}"#);
+    let hook = read_pid(&dir.path().join("slow.pid"));
+    // SAFETY: kill(2) on the serve this test started.
+    unsafe { libc::kill(first.child.id() as i32, libc::SIGKILL) };
+    let _ = first.child.wait();
+    let second = start_api(&config, &[]);
+    let r = delivered(&second, &id);
+    assert_eq!(r["status"], "interrupted", "{r}");
+    assert_eq!(r["notify"]["openfn"]["state"], "delivered", "{r}");
+    // The new serve signals nothing: the old refresh's hook still runs.
+    assert!(pid_alive(hook), "the restart signalled an old process");
+    // SAFETY: kill(2) on the hook this test's run started.
+    unsafe { libc::kill(hook, libc::SIGKILL) };
+}
+
+#[test]
+fn sigterm_stops_the_child_and_exits() {
+    let (dir, config) = setup_with_raw(
+        "\n[serve]\nstop_grace = 5\n\n[[hooks]]\nname = \"slow\"\nrun = [\"sh\", \"-c\", \"echo $$ > slow.pid; exec sleep 30\"]\n",
+    );
+    let mut s = start_api(&config, &[]);
+    let id = s.start_run(r#"{"only": ["views", "hooks"]}"#);
+    let hook = read_pid(&dir.path().join("slow.pid"));
+    // SAFETY: kill(2) on the serve this test started.
+    unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
+    let started = Instant::now();
+    let status = loop {
+        if let Some(st) = s.child.try_wait().unwrap() {
+            break st;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "serve still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+    assert!(!pid_alive(hook), "the hook outlived serve");
+    let r: Value = serde_json::from_str(
+        &fs::read_to_string(data(&config).join(format!(".serve/runs/{id}/run.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r["status"], "interrupted", "{r}");
+    assert!(r["finished_at"].is_string(), "{r}");
+}

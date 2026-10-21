@@ -49,8 +49,6 @@ pub enum Mode {
 #[derive(Debug, Clone)]
 pub struct Schedule {
     pub cron: croner::Cron,
-    /// The expression as written, for messages.
-    pub text: String,
     pub mode: Mode,
 }
 
@@ -85,11 +83,7 @@ pub fn parse(section: Option<toml::Table>) -> Result<ServeConfig> {
         let cron = croner::Cron::new(&s.cron)
             .parse()
             .map_err(|e| anyhow::anyhow!("[[serve.schedule]] cron = \"{}\": {e}", s.cron))?;
-        schedule.push(Schedule {
-            cron,
-            text: s.cron,
-            mode: s.mode,
-        });
+        schedule.push(Schedule { cron, mode: s.mode });
     }
     let mut notify: Vec<Destination> = Vec::new();
     for n in file.notify {

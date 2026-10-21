@@ -6,9 +6,6 @@
 //! it for its whole life. Each attempt of a run is a child
 //! `fhir-pipes refresh` in a process group of its own.
 
-// Parts are used by the tasks that follow; removed once serve is whole.
-#![allow(dead_code)]
-
 pub mod api;
 pub mod config;
 pub mod metrics;
@@ -83,6 +80,7 @@ fn server(
     if let Some(d) = data_flag {
         base_args.extend(["--data".to_string(), d.display().to_string()]);
     }
+    interrupt_unfinished(&store, &cfg);
     let notifier = notify::Notifier::start(
         store.clone(),
         cfg.notify.clone(),
@@ -179,7 +177,8 @@ pub fn run(args: &ServeArgs) -> Result<()> {
             .with_context(|| format!("listening on {listen}"))?;
         let addr = listener.local_addr()?;
         println!("listening on http://{addr}");
-        axum::serve(listener, router(app, server))
+        axum::serve(listener, router(app, server.clone()))
+            .with_graceful_shutdown(shutdown(server))
             .await
             .context("serving")
     })
@@ -190,6 +189,90 @@ fn router(app: App, server: Arc<api::Server>) -> Router {
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(app, auth))
         .route("/health", get(|| async { "ok" }))
+}
+
+/// Runs a previous serve left accepted, running or waiting are over: they
+/// are marked interrupted with their destinations pending, so the notifier
+/// sends them. No process is signalled: a process group number in an old
+/// record says nothing about who owns it now.
+fn interrupt_unfinished(store: &store::Store, cfg: &config::ServeConfig) {
+    let runs = match store.unfinished() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fhir-pipes: warning: {}", crate::error::message(&e));
+            return;
+        }
+    };
+    for mut rec in runs {
+        rec.status = store::RunStatus::Interrupted;
+        rec.finished_at = Some(runner::now());
+        for d in &cfg.notify {
+            rec.notify.insert(
+                d.name.clone(),
+                store::Delivery {
+                    state: store::DeliveryState::Pending,
+                    tries: 0,
+                    last_error: None,
+                },
+            );
+        }
+        match store.save(&rec) {
+            Ok(()) => println!("{} interrupted: serve stopped during it", rec.id.as_str()),
+            Err(e) => eprintln!("fhir-pipes: warning: {}", crate::error::message(&e)),
+        }
+    }
+}
+
+/// Wait for SIGTERM or Ctrl-C, then stop: the current run is interrupted,
+/// given `stop_grace`, and its end written; the notifier gets the rest of
+/// the time, and anything not sent goes at the next start.
+async fn shutdown(server: Arc<api::Server>) {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        Err(e) => {
+            eprintln!("fhir-pipes: warning: cannot handle SIGTERM: {e}");
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+    println!("stopping: no new runs");
+    let _ = tokio::task::spawn_blocking(move || stop(&server)).await;
+}
+
+fn stop(server: &api::Server) {
+    let grace = server.job.cfg.stop_grace;
+    let deadline = std::time::Instant::now() + grace + std::time::Duration::from_secs(5);
+    let current = server
+        .current
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(id, token)| (id.clone(), token.clone()));
+    let Some((id, token)) = current else {
+        return;
+    };
+    println!("{} interrupted: serve is stopping", id.as_str());
+    token.interrupt(grace);
+    let waiting = |done: &dyn Fn() -> bool| {
+        while !done() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    // The run's thread writes its end, then clears the current run; the
+    // notifier then has the rest of the time.
+    waiting(&|| {
+        server
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+    });
+    waiting(&|| !server.job.store.load(&id).is_ok_and(|r| r.pending()));
 }
 
 /// Every path but /health needs the token, checked before anything else

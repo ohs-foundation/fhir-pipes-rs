@@ -126,7 +126,6 @@ mod tests {
     fn schedule(cron: &str, mode: Mode) -> Schedule {
         Schedule {
             cron: croner::Cron::new(cron).parse().unwrap(),
-            text: cron.into(),
             mode,
         }
     }

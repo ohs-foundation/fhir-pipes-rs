@@ -63,6 +63,8 @@ struct Cancel {
 #[derive(Default)]
 struct CancelState {
     cancelled: bool,
+    /// The stop came from serve stopping, not from a cancel.
+    interrupted: bool,
     /// The running attempt's process group, while its leader is not reaped:
     /// until then the id cannot be anyone else's.
     pgid: Option<i32>,
@@ -94,6 +96,21 @@ impl CancelToken {
 
     pub fn is_cancelled(&self) -> bool {
         self.lock().cancelled
+    }
+
+    /// Stop the run because serve is stopping: as `cancel`, but the run
+    /// ends `interrupted`.
+    pub fn interrupt(&self, grace: Duration) {
+        self.lock().interrupted = true;
+        self.cancel(grace);
+    }
+
+    fn stopped_status(&self) -> RunStatus {
+        if self.lock().interrupted {
+            RunStatus::Interrupted
+        } else {
+            RunStatus::Cancelled
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CancelState> {
@@ -414,7 +431,7 @@ pub fn run(job: &Job, record: RunRecord, cancel: &CancelToken) -> RunRecord {
     let mut n = 1;
     loop {
         if cancel.is_cancelled() {
-            rec.status = RunStatus::Cancelled;
+            rec.status = cancel.stopped_status();
             break;
         }
         let started_at = now();
@@ -443,7 +460,7 @@ pub fn run(job: &Job, record: RunRecord, cancel: &CancelToken) -> RunRecord {
                 rec.status = RunStatus::Waiting;
                 save(job, &rec);
                 if cancel.wait(job.cfg.retry_delay) {
-                    rec.status = RunStatus::Cancelled;
+                    rec.status = cancel.stopped_status();
                     rec.retry = Some("not retried: cancelled".into());
                     break;
                 }
@@ -454,7 +471,7 @@ pub fn run(job: &Job, record: RunRecord, cancel: &CancelToken) -> RunRecord {
             Err(why) => {
                 rec.retry = Some(why);
                 rec.status = if cancel.is_cancelled() {
-                    RunStatus::Cancelled
+                    cancel.stopped_status()
                 } else {
                     RunStatus::Failed
                 };
