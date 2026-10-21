@@ -435,4 +435,147 @@ mod tests {
         assert_eq!(features(&f).unwrap(), 2);
         assert!(features(&dir.path().join("missing.geojson")).is_err());
     }
+
+    /// A fake duckdb that writes one feature to the file its COPY names,
+    /// except for the lgas and settlements, which have none; and a fake
+    /// tippecanoe that logs its arguments to `tippecanoe.log` and writes
+    /// its output. Settings that use them, for the warehouse at `dir`.
+    #[cfg(unix)]
+    fn fake_tools(dir: &Path) -> Settings {
+        use std::os::unix::fs::PermissionsExt;
+        let duckdb = dir.join("duckdb");
+        fs::write(
+            &duckdb,
+            r#"#!/bin/sh
+file=$(printf '%s\n' "$2" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
+case "$2" in
+  *"admin_level = 2"*|*"type = 'settlement'"*|*"type = 'settlement-catchment'"*) : > "$file" ;;
+  *) echo '{"type":"Feature"}' > "$file" ;;
+esac
+"#,
+        )
+        .unwrap();
+        let tippecanoe = dir.join("tippecanoe");
+        fs::write(
+            &tippecanoe,
+            format!(
+                r#"#!/bin/sh
+echo "$*" >> '{}'
+while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done
+echo tiles > "$out"
+"#,
+                dir.join("tippecanoe.log").display()
+            ),
+        )
+        .unwrap();
+        for p in [&duckdb, &tippecanoe] {
+            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let file: super::super::config::File = toml::from_str(&format!(
+            "data = 'data'\n[tools]\nduckdb = '{}'\ntippecanoe = '{}'\n",
+            duckdb.display(),
+            tippecanoe.display()
+        ))
+        .unwrap();
+        super::super::config::settings(file, dir.to_path_buf(), Default::default()).unwrap()
+    }
+
+    /// A Location table with admin units, facilities and facility
+    /// catchments for `country`. The fake duckdb reads none of the files.
+    #[cfg(unix)]
+    fn locations(root: &Path, country: &str) {
+        let c = root.join(format!("country={country}"));
+        for d in [
+            "geom_type=polygon/type=admin-unit",
+            "geom_type=polygon/type=facility-catchment",
+            "geom_type=point/type=facility",
+        ] {
+            fs::create_dir_all(c.join(d)).unwrap();
+            fs::write(c.join(d).join("part-0.parquet"), "").unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn each_archive_is_built_from_its_layers_with_features() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = fake_tools(dir.path());
+        let loc = dir.path().join("locations");
+        locations(&loc, "SLE");
+        let out = dir.path().join("tiles");
+        build(&s, &loc, &out).unwrap();
+
+        let mut built: Vec<String> = fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        built.sort();
+        // No settlements: their layer is empty, so the archive is not built.
+        assert_eq!(
+            built,
+            ["admin.pmtiles", "catchments.pmtiles", "facilities.pmtiles"]
+        );
+        let log = fs::read_to_string(dir.path().join("tippecanoe.log")).unwrap();
+        let calls: Vec<&str> = log.lines().collect();
+        assert_eq!(calls.len(), 3, "{log}");
+        let call = |archive: &str| {
+            *calls
+                .iter()
+                .find(|c| c.contains(archive))
+                .unwrap_or_else(|| panic!("no call for {archive}: {log}"))
+        };
+        let layers = |c: &str| -> Vec<String> {
+            c.split(" -L ")
+                .skip(1)
+                .map(|l| l.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        // The empty lgas layer is left out of admin.pmtiles.
+        let admin = call("admin.pmtiles");
+        assert!(admin.starts_with("--force -o "), "{admin}");
+        assert!(admin.contains("--maximum-zoom=11"), "{admin}");
+        assert_eq!(layers(admin), ["country", "states"]);
+        // Points are never thinned.
+        let facilities = call("facilities.pmtiles");
+        assert!(facilities.contains("--drop-rate=1 --no-feature-limit"));
+        assert_eq!(layers(facilities), ["facilities"]);
+        assert_eq!(layers(call("catchments.pmtiles")), ["facility_catchments"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_admin_units_is_an_error_and_no_catchments_no_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = fake_tools(dir.path());
+        let loc = dir.path().join("locations");
+        locations(&loc, "SLE");
+        fs::remove_dir_all(loc.join("country=SLE/geom_type=polygon/type=facility-catchment"))
+            .unwrap();
+        let out = dir.path().join("tiles");
+        build(&s, &loc, &out).unwrap();
+        assert!(out.join("admin.pmtiles").is_file());
+        assert!(!out.join("catchments.pmtiles").exists());
+
+        fs::remove_dir_all(loc.join("country=SLE/geom_type=polygon/type=admin-unit")).unwrap();
+        let err = build(&s, &loc, &out).unwrap_err();
+        assert_eq!(err.to_string(), "no admin-unit polygons for SLE");
+    }
+
+    #[test]
+    fn countries_are_those_asked_for_or_every_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        for c in ["SLE", "NGA"] {
+            fs::create_dir_all(dir.path().join(format!("country={c}"))).unwrap();
+        }
+        fs::create_dir_all(dir.path().join("other")).unwrap();
+        assert_eq!(countries(dir.path(), &[]).unwrap(), ["NGA", "SLE"]);
+        assert_eq!(countries(dir.path(), &["SLE".into()]).unwrap(), ["SLE"]);
+        let err = countries(dir.path(), &["SLE".into(), "GIN".into(), "LBR".into()]).unwrap_err();
+        assert!(
+            err.to_string().starts_with("no locations for GIN, LBR in "),
+            "{err}"
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert!(countries(empty.path(), &[]).is_err());
+    }
 }
