@@ -134,7 +134,8 @@ impl Stage {
         recover(&stage.data, "", |name| DIRS.contains(&name))?;
         if unfinished {
             println!("   finishing the publish of a refresh that stopped part way");
-            stage.publish()?;
+            // Another run's publish: this run has published nothing yet.
+            stage.publish(&mut false)?;
         }
         for dir in [&stage.tables, &stage.files] {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -220,20 +221,23 @@ impl Stage {
     /// Swap the run's tables in, then views/ and tiles/, then its manifest
     /// and catalog. Returns the number of tables and the directories swapped
     /// in.
-    pub fn publish(&self) -> Result<(usize, Vec<String>)> {
+    /// `published` is set before the first live table, directory or file is
+    /// replaced, and stays set if the publish then fails part way.
+    pub fn publish(&self, published: &mut bool) -> Result<(usize, Vec<String>)> {
         let marker = self.files.join(PUBLISHING);
         crate::fs::atomic_write(&marker, "")
             .with_context(|| format!("writing {}", marker.display()))?;
-        self.swap_in()
+        self.swap_in(published)
             .context("publishing the warehouse stopped part way; the next refresh finishes it")
     }
 
-    fn swap_in(&self) -> Result<(usize, Vec<String>)> {
+    fn swap_in(&self, published: &mut bool) -> Result<(usize, Vec<String>)> {
         let mut tables = 0;
         for staged in entries(&self.tables)? {
             let live = self
                 .parquet
                 .join(staged.file_name().context("no file name")?);
+            *published = true;
             if staged.is_dir() {
                 partition::replace(&staged, &live)?;
                 tables += 1;
@@ -245,20 +249,22 @@ impl Stage {
         }
         let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
             entries(&self.files)?.into_iter().partition(|p| p.is_dir());
-        let mut published = Vec::new();
+        let mut swapped = Vec::new();
         for staged in dirs {
             let name = staged.file_name().context("no file name")?;
+            *published = true;
             partition::replace(&staged, &self.data.join(name))?;
-            published.push(name.to_string_lossy().into_owned());
+            swapped.push(name.to_string_lossy().into_owned());
         }
         for staged in files {
             let live = self.data.join(staged.file_name().context("no file name")?);
+            *published = true;
             fs::rename(&staged, &live)
                 .with_context(|| format!("renaming {} into place", staged.display()))?;
         }
         fs::remove_file(self.files.join(PUBLISHING))?;
         self.clear()?;
-        Ok((tables, published))
+        Ok((tables, swapped))
     }
 
     /// Whether the run staged anything to publish.
@@ -379,7 +385,7 @@ mod tests {
         assert_eq!(marker(&data.join("parquet/a")), "old a");
         assert!(!data.join("parquet/c").exists());
 
-        assert_eq!(s.publish().unwrap(), (2, vec![]));
+        assert_eq!(s.publish(&mut false).unwrap(), (2, vec![]));
         assert_eq!(marker(&data.join("parquet/a")), "new a");
         assert_eq!(marker(&data.join("parquet/b")), "old b");
         assert_eq!(marker(&data.join("parquet/c")), "new c");
@@ -390,6 +396,21 @@ mod tests {
         assert!(!data.join("parquet/.staging").exists());
         assert!(!data.join(".staging").exists());
         assert!(!data.join("parquet/.a.old").exists());
+    }
+
+    #[test]
+    fn the_publish_reports_a_live_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        let s = stage(data);
+        let mut published = false;
+        s.publish(&mut published).unwrap();
+        assert!(!published, "nothing was staged");
+        drop(s);
+        let s = stage(data);
+        fs::write(s.file("manifest.json"), "new").unwrap();
+        s.publish(&mut published).unwrap();
+        assert!(published);
     }
 
     #[test]
@@ -409,7 +430,10 @@ mod tests {
         assert_eq!(s.read_dir("tiles"), data.join("tiles"));
         assert!(data.join("views/IcrGone.json").exists());
 
-        assert_eq!(s.publish().unwrap(), (0, vec!["views".to_string()]));
+        assert_eq!(
+            s.publish(&mut false).unwrap(),
+            (0, vec!["views".to_string()])
+        );
         assert!(!data.join("views/IcrGone.json").exists());
         assert_eq!(
             fs::read_to_string(data.join("views/IcrObs.json")).unwrap(),

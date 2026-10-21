@@ -205,10 +205,6 @@ run = ["sh", "-c", "cp \"$DATA/manifest.json\" seen.json; exit 3"]
     assert_nothing_staged(&data);
 }
 
-fn last_run(data: &Path) -> Value {
-    serde_json::from_str(&fs::read_to_string(data.join("last-run.json")).unwrap()).unwrap()
-}
-
 /// A run that succeeds records it in last-run.json, and its hooks get
 /// STATUS; hooks with `on = "failure"` do not run.
 #[test]
@@ -371,59 +367,6 @@ run = ["sh", "-c", "echo \"$FAILED_STEP\" > on-failure.txt"]
     assert_eq!(last_run(&data)["status"], "succeeded");
 }
 
-/// The refresh binary as a plain child process, for tests that signal it.
-#[cfg(unix)]
-fn spawn_refresh(config: &Path, args: &[&str]) -> std::process::Child {
-    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("fhir-pipes"));
-    c.current_dir(config.parent().unwrap())
-        .env_remove("FHIR_PIPES_REUSE_RAW")
-        .env_remove("FHIR_PIPES_LOCK_TIMEOUT")
-        .arg("refresh")
-        .arg("--config")
-        .arg(config)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    c.spawn().unwrap()
-}
-
-#[cfg(unix)]
-fn sigterm(child: &std::process::Child) {
-    // SAFETY: kill(2) on a child this test started and has not reaped.
-    unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
-    }
-}
-
-/// Wait for `path` to exist, for up to 20 s.
-fn wait_for(path: &Path) {
-    let started = std::time::Instant::now();
-    while !path.exists() {
-        assert!(
-            started.elapsed().as_secs() < 20,
-            "{} never appeared",
-            path.display()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-/// Wait for a child with a deadline, returning its exit code.
-#[cfg(unix)]
-fn exit_within(child: &mut std::process::Child, secs: u64) -> Option<i32> {
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(s) = child.try_wait().unwrap() {
-            return s.code();
-        }
-        if started.elapsed().as_secs() >= secs {
-            let _ = child.kill();
-            panic!("refresh still running after {secs} s");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
 /// SIGTERM during a success hook stops the hook; the warehouse it ran after
 /// stays published.
 #[test]
@@ -436,7 +379,7 @@ name = "slow"
 run = ["sh", "-c", "touch started; sleep 30"]
 "#,
     );
-    let mut child = spawn_refresh(&config, &["--only", "views,hooks", "--reuse-raw"]);
+    let mut child = spawn_refresh(&config, &["--only", "views,hooks", "--reuse-raw"], &[]);
     wait_for(&dir.path().join("started"));
     sigterm(&child);
     assert_eq!(exit_within(&mut child, 15), Some(1));
@@ -448,11 +391,126 @@ run = ["sh", "-c", "touch started; sleep 30"]
         r["error"].as_str().unwrap().contains("stopped by signal"),
         "{r}"
     );
+    assert_eq!(r["published"], true);
+    assert_eq!(r["committed"], false);
     assert!(
         data.join("parquet/obs/country=SLE/part-0.parquet")
             .is_file()
     );
     assert_nothing_staged(&data);
+}
+
+/// SIGTERM while a download is under way stops at the next page: the
+/// previous warehouse stays as it was.
+#[test]
+#[cfg(unix)]
+fn sigterm_while_downloading_leaves_the_previous_warehouse() {
+    let (dir, config) = setup_with_raw("");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    let data = dir.path().join("data");
+    let before = warehouse(&data);
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Patient"))
+            .times(..)
+            .respond_with(status_code(200).body(bundle(vec![]))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/Observation"))
+            .times(..)
+            .respond_with(delay_and_then(
+                std::time::Duration::from_secs(4),
+                status_code(200).body(bundle(vec![])),
+            )),
+    );
+    let base = server.url_str("/fhir");
+    let mut child = spawn_refresh(
+        &config,
+        &["--only", "views", "--full", "--server", &base],
+        &[],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    sigterm(&child);
+    assert_eq!(exit_within(&mut child, 10), Some(1));
+    let r = last_run(&data);
+    assert_eq!(r["failed_step"], "views", "{r}");
+    assert!(
+        r["error"].as_str().unwrap().contains("stopped by signal"),
+        "{r}"
+    );
+    assert_eq!(r["committed"], false);
+    assert_eq!(r["published"], false);
+    assert!(warehouse(&data) == before, "the warehouse changed");
+    assert_nothing_staged(&data);
+}
+
+/// A stop that comes once the publish is under way is held back until the
+/// publish ends.
+#[test]
+#[cfg(unix)]
+fn sigterm_before_publish_finishes_the_publish() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    let mut child = spawn_refresh(
+        &config,
+        &["--only", "views", "--reuse-raw"],
+        &[("FHIR_PIPES_TEST_PAUSE", "before-publish")],
+    );
+    wait_for(&data.join(".paused"));
+    sigterm(&child);
+    assert_eq!(exit_within(&mut child, 15), Some(1));
+    let r = last_run(&data);
+    assert!(
+        r["error"].as_str().unwrap().contains("stopped by signal"),
+        "{r}"
+    );
+    assert_eq!(r["published"], true);
+    assert!(
+        data.join("parquet/obs/country=SLE/part-0.parquet")
+            .is_file()
+    );
+    assert_nothing_staged(&data);
+}
+
+/// A second signal does not wait for anything.
+#[test]
+#[cfg(unix)]
+fn a_second_sigterm_exits_at_once() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    let mut child = spawn_refresh(
+        &config,
+        &["--only", "views", "--reuse-raw"],
+        &[("FHIR_PIPES_TEST_PAUSE", "before-publish")],
+    );
+    wait_for(&data.join(".paused"));
+    sigterm(&child);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    sigterm(&child);
+    assert_eq!(exit_within(&mut child, 1), Some(1));
+}
+
+/// `published` covers the catalog files, not only tables: a catalog-only
+/// run whose catalog.duckdb fails has replaced catalog.sql.
+#[test]
+#[cfg(unix)]
+fn only_catalog_failing_at_catalog_duckdb_is_published() {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = tempfile::tempdir().unwrap();
+    let duckdb = tools.path().join("duckdb");
+    fs::write(&duckdb, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&duckdb, fs::Permissions::from_mode(0o755)).unwrap();
+    let (dir, config) = setup_with_raw(&format!(
+        "\n[tools]\nduckdb = '{}'\n\n[catalog]\nduckdb_file = true\n",
+        duckdb.display()
+    ));
+    cmd(&config).args(["--only", "catalog"]).assert().code(1);
+    let r = last_run(&dir.path().join("data"));
+    assert_eq!(r["published"], true, "{r}");
+    assert!(dir.path().join("data/catalog.sql").is_file());
 }
 
 /// A successful run leaves the files it always did, and nothing staged.

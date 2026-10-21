@@ -217,7 +217,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
         args.lock_timeout.map(Duration::from_secs),
         &mut ran,
         |ran, lock| {
-            ran.at("tools");
+            ran.at("tools")?;
             tools::require(&now.iter().map(|t| t.pair()).collect::<Vec<_>>())?;
             refresh(
                 &s,
@@ -245,7 +245,7 @@ fn locked(
     f: impl FnOnce(&mut Ran, &stage::Lock) -> Result<String>,
 ) -> Result<String> {
     let hooks = steps.contains(&Step::Hooks);
-    ran.at("lock");
+    ran.label("lock");
     let lock = match stage::Lock::acquire(&s.data, timeout) {
         Ok(lock) => lock,
         Err(e) => {
@@ -257,7 +257,13 @@ fn locked(
     };
     let result = status::Status::start(s, steps).and_then(|status| {
         let result = f(ran, &lock);
-        status.finish(&result, ran.current, &ran.timings);
+        status.finish(
+            &result,
+            ran.current,
+            &ran.timings,
+            ran.committed,
+            ran.published,
+        );
         result
     });
     if let Err(e) = &result
@@ -646,11 +652,24 @@ struct Ran {
     /// run fails: a step, or `lock`, `tools`, `start`, `files`, `publish`,
     /// `finish`.
     current: &'static str,
+    /// Whether the database step's commit happened.
+    committed: status::Committed,
+    /// Whether anything live in the warehouse has changed.
+    published: bool,
 }
 
 impl Ran {
-    /// The run is now in part `name`.
-    fn at(&mut self, name: &'static str) {
+    /// The run goes on to part `name`, unless a stop has been asked for
+    /// (stop.rs): then it fails as stopped in the part it was in.
+    fn at(&mut self, name: &'static str) -> Result<()> {
+        crate::stop::check()?;
+        self.label(name);
+        Ok(())
+    }
+
+    /// The run is in part `name`, whatever else: for naming the part an
+    /// error came from.
+    fn label(&mut self, name: &'static str) {
         self.current = name;
     }
 
@@ -662,7 +681,7 @@ impl Ran {
         step: Option<Step>,
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        self.at(name);
+        self.at(name)?;
         let t = Instant::now();
         let value = f()?;
         self.record(name, step, t.elapsed().as_secs_f64());
@@ -678,6 +697,21 @@ impl Ran {
     }
 }
 
+/// For the stop tests: with FHIR_PIPES_TEST_PAUSE set to `point`, write
+/// `<data>/.paused` and wait 3 s there, inside the commit window. Debug
+/// builds only.
+fn test_pause(s: &Settings, point: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var("FHIR_PIPES_TEST_PAUSE").is_ok_and(|p| p == point) {
+        let marker = s.data.join(".paused");
+        let _ = std::fs::write(&marker, point);
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = std::fs::remove_file(&marker);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (s, point);
+}
+
 /// `tiles_tools`: the tiles step's tools, when they are checked only once the
 /// step is known to run. Returns the run's `refreshed_at`.
 fn refresh(
@@ -688,7 +722,7 @@ fn refresh(
     lock: &stage::Lock,
 ) -> Result<String> {
     let started = Instant::now();
-    ran.at("start");
+    ran.at("start")?;
     // Whether the run downloaded anything from the server, for the server
     // the manifest records.
     let mut contacted = false;
@@ -711,7 +745,7 @@ fn refresh(
     }
 
     if steps.contains(&Step::Locations) {
-        ran.at("locations");
+        ran.at("locations")?;
         let t = Instant::now();
         let built = if s.reads_files() {
             files::locations(s, stage.tables_dir())?
@@ -735,7 +769,7 @@ fn refresh(
         println!("== tiles: there is no locations table; skipped");
     }
     if tiles_wanted {
-        ran.at("tiles");
+        ran.at("tiles")?;
         tools::require(tiles_tools)?;
     }
 
@@ -765,7 +799,7 @@ fn refresh(
     #[cfg(feature = "postgres")]
     let mut built = None;
     if let Some(v) = views {
-        ran.at("views");
+        ran.label("views");
         let (done, secs) = v.context("views")?;
         ran.record("views", Some(Step::Views), secs);
         contacted |= done.downloaded;
@@ -781,7 +815,7 @@ fn refresh(
     }
     let server = manifest::recorded_server(s, contacted);
     if let Some(t) = tiles {
-        ran.at("tiles");
+        ran.label("tiles");
         ran.record("tiles", Some(Step::Tiles), t.context("tiles")?);
     }
 
@@ -800,11 +834,19 @@ fn refresh(
         })?;
     }
 
+    // The commit window (stop.rs): from the database step, which may commit
+    // the new rows, to the end of the publish, a stop is held back so the
+    // files follow the database.
+    #[allow(unused_mut)]
+    let mut window: Option<crate::stop::Hold> = None;
     #[cfg(feature = "postgres")]
     if steps.contains(&Step::Database)
         && let Some(d) = &s.database
     {
-        ran.run_step("database", Some(Step::Database), || {
+        ran.at("database")?;
+        window = Some(crate::stop::hold());
+        let mut committed = status::Committed::No;
+        let loaded = ran.run_step("database", Some(Step::Database), || {
             let tables: Vec<database::Table> = database::view_tables(s, d)?
                 .into_iter()
                 .map(|v| database::Table {
@@ -815,17 +857,24 @@ fn refresh(
                     name: v.table,
                 })
                 .collect();
-            database::load(s, d, &tables, built.as_ref())
-        })?;
+            database::load(s, d, &tables, built.as_ref(), &mut committed)
+        });
+        ran.committed = committed;
+        loaded?;
+        test_pause(s, "database-committed");
     }
 
     // Everything above wrote to the staging directories; swap it all in now,
     // the tables first, then the manifest and catalog.sql.
     if !stage.is_empty()? {
+        ran.at("publish")?;
+        window.get_or_insert_with(crate::stop::hold);
+        test_pause(s, "before-publish");
         let catalog_ran = ran.steps.contains(&Step::Catalog);
-        ran.run_step("publish", None, || {
+        let mut published = false;
+        let swapped = ran.run_step("publish", None, || {
             println!("== publish");
-            let (n, dirs) = stage.publish()?;
+            let (n, dirs) = stage.publish(&mut published)?;
             let dirs: String = dirs.iter().map(|d| format!(", {d}/")).collect();
             println!("   {n} table(s){dirs}, then the manifest and catalog");
             // DuckDB reads each table's schema from its files when it creates
@@ -841,8 +890,11 @@ fn refresh(
                 catalog::build_duckdb(s, c)?;
             }
             Ok(())
-        })?;
+        });
+        ran.published |= published;
+        swapped?;
     }
+    drop(window);
 
     if steps.contains(&Step::Hooks) {
         let wanted: Vec<_> = s
@@ -866,7 +918,7 @@ fn refresh(
         ran.run_step("push", None, || push::push(s))?;
     }
 
-    ran.at("finish");
+    ran.at("finish")?;
     if let Some(written) = view_tables {
         let unwritten = unwritten_tables(s, written)?;
         if !unwritten.is_empty() {

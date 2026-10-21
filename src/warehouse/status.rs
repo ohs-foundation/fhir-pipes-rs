@@ -26,6 +26,26 @@ pub const FILE: &str = "last-run.json";
 /// ERROR, in characters; a longer one is cut there and ends with `…`.
 const MAX_ERROR: usize = 2000;
 
+/// Whether the database step's commit happened: `false`, `true`, or
+/// `"unknown"` when the commit was sent and its answer was lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Committed {
+    #[default]
+    No,
+    Yes,
+    Unknown,
+}
+
+impl Committed {
+    fn json(self) -> Value {
+        match self {
+            Committed::No => json!(false),
+            Committed::Yes => json!(true),
+            Committed::Unknown => json!("unknown"),
+        }
+    }
+}
+
 pub struct Status {
     path: PathBuf,
     record: Value,
@@ -54,11 +74,20 @@ impl Status {
     }
 
     /// Record how the run ended: `result` is its `refreshed_at` or its error,
-    /// `step` the part it was in, `timings` the parts that finished. A
-    /// failure to write is reported, not returned, so that it does not hide
-    /// how the run ended.
-    pub fn finish(mut self, result: &Result<String>, step: &str, timings: &[(&str, f64)]) {
+    /// `step` the part it was in, `timings` the parts that finished,
+    /// `committed` and `published` what it changed. A failure to write is
+    /// reported, not returned, so that it does not hide how the run ended.
+    pub fn finish(
+        mut self,
+        result: &Result<String>,
+        step: &str,
+        timings: &[(&str, f64)],
+        committed: Committed,
+        published: bool,
+    ) {
         let r = &mut self.record;
+        r["committed"] = committed.json();
+        r["published"] = json!(published);
         r["finished_at"] = json!(manifest::now());
         r["seconds"] = json!(self.started.elapsed().as_secs_f64());
         r["timings"] = timings

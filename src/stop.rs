@@ -10,9 +10,6 @@
 //!
 //! On Windows `install` does nothing, so Ctrl-C ends the process as before.
 
-// Used by the refresh steps from the next commits on; removed then.
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

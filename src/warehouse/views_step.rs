@@ -76,6 +76,7 @@ pub(super) fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone
 
     // Each type's views, run over one read of its file.
     let run_type = |rtype: &str, idx: &[usize]| -> Result<Vec<(usize, ViewResult)>> {
+        crate::stop::check()?;
         let t = Instant::now();
         let vs: Vec<&View> = idx.iter().map(|&i| &all[i]).collect();
         // A type the files lack gives its views empty tables.

@@ -193,7 +193,15 @@ pub fn view_tables(s: &Settings, d: &Database) -> Result<Vec<View>> {
 
 /// Load `tables` into the database `d` points at. `built`: what the views
 /// step wrote in this run, for upsert.
-pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>) -> Result<()> {
+/// `committed` is set to `Unknown` as the commit is sent and to `Yes` once it
+/// succeeds; a failure after it (an `ANALYZE`) leaves it `Yes`.
+pub fn load(
+    s: &Settings,
+    d: &Database,
+    tables: &[Table],
+    built: Option<&Built>,
+    committed: &mut super::status::Committed,
+) -> Result<()> {
     let upsert = d.mode == Mode::Upsert;
     if upsert {
         println!("== database ({}, upsert)", d.schema);
@@ -227,8 +235,15 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
     } else {
         None
     };
-    crate::runtime::block_on(write(&url, &d.schema, tables, &plans, upsert.as_ref()))
-        .context("starting the database runtime")??;
+    crate::runtime::block_on(write(
+        &url,
+        &d.schema,
+        tables,
+        &plans,
+        upsert.as_ref(),
+        committed,
+    ))
+    .context("starting the database runtime")??;
     if let Some(u) = &upsert {
         record_load(s, &u.next, &plans, built)?;
     }
@@ -532,6 +547,7 @@ async fn write(
     tables: &[Table],
     plans: &[Plan],
     upsert: Option<&Upsert<'_>>,
+    committed: &mut super::status::Committed,
 ) -> Result<()> {
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
@@ -605,7 +621,9 @@ async fn write(
     }
     let (loaded, emptied) = apply_loads(&mut tx, schema, plans, loads).await?;
     update_marks(&mut tx, schema, plans, &emptied, upsert, &records).await?;
+    *committed = super::status::Committed::Unknown;
     tx.commit().await.context("committing")?;
+    *committed = super::status::Committed::Yes;
     // Outside the load's transaction, so the lock it held is released and
     // readers see the new rows before this finishes.
     for name in loaded {

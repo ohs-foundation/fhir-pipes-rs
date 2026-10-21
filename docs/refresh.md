@@ -134,6 +134,39 @@ first to finish. With `--lock-timeout SECONDS` (or
 that retries a failed run can use it so that retries do not queue up behind
 a long run.
 
+### Stopping a run
+
+On Unix a refresh stops cleanly on SIGTERM or Ctrl-C (SIGINT), as
+`docker stop` and `kill` send. It stops the tools it is running (duckdb,
+tippecanoe, rclone, a hook) with SIGTERM, and with SIGKILL those still
+running 10 s later, and waits for them before it lets go of the warehouse.
+Where the stop takes effect depends on where the run is:
+
+- Before the database step (or the publish, without one), at the next
+  point the run can stop: between steps, between resource types in the
+  views step, between pages of a download. Staging is removed; the
+  warehouse and the database stay as they were.
+- From the start of the database step to the end of the publish, it waits
+  for the publish to end, so the files follow the rows the database may
+  already have.
+- After the publish (hooks, push), at once: the hook or push is stopped,
+  and the new warehouse stays published.
+
+The run then records `failed` with `stopped by signal` in
+`last-run.json`, runs its failure hooks and exits 1. A second signal stops
+the tools with SIGKILL and exits at once, without the failure hooks and
+without waiting for a publish. A run stopped that way after the
+database's commit and before the publish has started leaves the database
+with the new rows and the files with the previous run's, until the next
+run that succeeds; a run stopped during the publish is finished by the
+next run, as above.
+
+A process a shell hook starts in the background is not stopped with the
+hook unless the whole process group is signalled (as `fhir-pipes serve`
+does).
+
+On Windows, Ctrl-C ends a refresh at once, as before.
+
 ### How the last run went
 
 `last-run.json` in the warehouse directory says how the last run went, or
@@ -156,11 +189,22 @@ run that fails before it gets the lock (another run still holds it after
   "finished_at": "2026-10-21T02:04:12+00:00",
   "seconds": 252.3,
   "timings": {"locations": 31.0},
+  "committed": false,
+  "published": false,
   "failed_step": "views",
   "error": "views: exporting Observation: GET https://fhir.example.org/fhir/Observation: 503 Service Unavailable",
   "exit_code": 1
 }
 ```
+
+`committed` says whether the database step's commit happened: `true`,
+`false`, or `"unknown"` when the commit was sent and its answer was lost.
+It stays `true` when something after the commit failed (its `ANALYZE`).
+`published` is `true` once anything live in the warehouse has changed: a
+table, `views/` or `tiles/` swapped in, or `manifest.json`,
+`catalog.sql`, `catalog.spark.sql` or `catalog.duckdb` replaced, and stays
+`true` when the run fails afterwards. Together they say what a failed run
+left behind.
 
 `server` is redacted as in the manifest: without a user name, password or
 query string. `steps` are the steps the run was to take. `timings` are the parts that

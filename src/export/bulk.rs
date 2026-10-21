@@ -252,6 +252,7 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
     let mut backoff = POLL_FIRST;
     let mut progress: Option<String> = None;
     loop {
+        crate::stop::check()?;
         if Instant::now() >= deadline {
             return Ok(Polled::TimedOut);
         }
