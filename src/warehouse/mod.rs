@@ -872,4 +872,183 @@ mod tests {
         }
         assert!(steps_of(&["--only", "database"]).contains(&Step::Database));
     }
+
+    #[test]
+    fn push_is_asked_for_and_skip_has_the_last_word() {
+        let all = steps_of(&[]);
+        assert!(!all.contains(&Step::Push));
+        assert_eq!(all.len(), 7);
+        assert!(steps_of(&["--push"]).contains(&Step::Push));
+        let s = steps_of(&["--push", "--skip", "tiles,push,catalog"]);
+        assert!(!s.contains(&Step::Push));
+        assert!(!s.contains(&Step::Tiles));
+        assert!(!s.contains(&Step::Catalog));
+        // --skip takes out what --only brings in.
+        let s = steps_of(&["--only", "views", "--skip", "database"]);
+        assert_eq!(
+            s,
+            [Step::Views, Step::Manifest, Step::Catalog]
+                .into_iter()
+                .collect()
+        );
+        // Steps that write no data do not bring the manifest.
+        assert_eq!(
+            steps_of(&["--only", "hooks"]),
+            [Step::Hooks].into_iter().collect()
+        );
+    }
+
+    /// Settings from the config `text`, in `/cfg`.
+    fn settings(text: &str) -> Settings {
+        let file = toml::from_str(&format!("data = 'data'\nviews = 'views'\n{text}")).unwrap();
+        config::settings(file, PathBuf::from("/cfg"), Default::default()).unwrap()
+    }
+
+    /// (program, step, purpose) of each tool the steps need.
+    fn tools(s: &Settings, steps: &[Step]) -> Result<Vec<(String, Step, String)>> {
+        Ok(required_tools(s, &steps.iter().copied().collect())?
+            .into_iter()
+            .map(|t| (t.program, t.step, t.purpose))
+            .collect())
+    }
+
+    #[test]
+    fn each_step_needs_its_tools() {
+        let s = settings(
+            "[tools]\nduckdb = '/opt/duckdb'\n\
+             [push]\nremote = 'r'\nbucket = 'b'\n\
+             [[hooks]]\nname = 'build'\nrun = ['bin/build', '--all']\n\
+             [[hooks]]\nname = 'notify'\nrun = ['curl']\n",
+        );
+        let t =
+            |program: &str, step, purpose: &str| (program.to_string(), step, purpose.to_string());
+        assert_eq!(tools(&s, &[Step::Views, Step::Manifest]).unwrap(), []);
+        assert_eq!(
+            tools(&s, &[Step::Tiles, Step::Push, Step::Hooks]).unwrap(),
+            [
+                t("/opt/duckdb", Step::Tiles, "tiles"),
+                t("tippecanoe", Step::Tiles, "tiles"),
+                t("rclone", Step::Push, "push"),
+                // A program path is the config file's, a name is looked up.
+                t(
+                    &PathBuf::from("/cfg")
+                        .join("bin/build")
+                        .display()
+                        .to_string(),
+                    Step::Hooks,
+                    "hook build"
+                ),
+                t("curl", Step::Hooks, "hook notify"),
+            ]
+        );
+    }
+
+    #[test]
+    fn catalog_duckdb_is_built_at_publish_or_in_the_push() {
+        let local = settings("[catalog]\nduckdb_file = true\n");
+        assert_eq!(
+            tools(&local, &[Step::Catalog]).unwrap(),
+            [("duckdb".into(), Step::Catalog, "catalog.duckdb".into())]
+        );
+        let served = settings(
+            "[catalog]\nduckdb_file = true\nbase_url = 'https://x.example'\n\
+             [push]\nremote = 'r'\nbucket = 'b'\n",
+        );
+        assert_eq!(tools(&served, &[Step::Catalog]).unwrap(), []);
+        assert_eq!(
+            tools(&served, &[Step::Catalog, Step::Push]).unwrap(),
+            [
+                ("duckdb".into(), Step::Push, "catalog.duckdb".into()),
+                ("rclone".into(), Step::Push, "push".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn steps_without_their_settings_are_refused() {
+        let err = |s: &Settings, steps: &[Step]| tools(s, steps).unwrap_err().to_string();
+        assert!(err(&settings(""), &[Step::Push]).starts_with("--push needs a [push] section"));
+        assert_eq!(
+            err(
+                &settings("[[hooks]]\nname = 'h'\nrun = []\n"),
+                &[Step::Hooks]
+            ),
+            "hook h has an empty `run`"
+        );
+        let file = toml::from_str("data = 'data'").unwrap();
+        let no_views = config::settings(file, PathBuf::from("/cfg"), Default::default()).unwrap();
+        assert!(err(&no_views, &[Step::Views]).starts_with("no views directory"));
+        // Without the views step the views directory is not needed.
+        tools(&no_views, &[Step::Locations]).unwrap();
+    }
+
+    #[test]
+    fn the_partition_line_names_the_lookups() {
+        assert_eq!(
+            partition_line("country", &[]),
+            "country, no [[partition.lookup]] rules: view rows go to the null partition"
+        );
+        let s = settings(
+            "[[partition.lookup]]\nkey = 'location_id'\ntable = 'locations'\n\
+             [[partition.lookup]]\nkey = 'patient_id'\ntable = 'patients'\n",
+        );
+        assert_eq!(
+            partition_line("country", &s.lookups),
+            "country via location_id → locations, patient_id → patients"
+        );
+    }
+
+    #[test]
+    fn unwritten_tables_leave_out_locations_and_lookup_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = settings("[[partition.lookup]]\nkey = 'patient_id'\ntable = 'patients'\n");
+        s.data = dir.path().to_path_buf();
+        for t in ["obs", "old", "locations", "patients"] {
+            std::fs::create_dir_all(s.parquet_dir().join(t)).unwrap();
+        }
+        let written = ["obs".to_string()].into_iter().collect();
+        assert_eq!(unwritten_tables(&s, written).unwrap(), ["old"]);
+    }
+
+    #[test]
+    fn the_mismatch_report_lists_only_tables_with_mismatches() {
+        use fhir_pipes_sof::ColumnType;
+        use fhir_pipes_sof::output::ColumnSummary;
+        let summary = WriteSummary {
+            columns: vec![ColumnSummary {
+                name: "born".into(),
+                col_type: ColumnType::Date,
+                written_as_date: 2,
+                written_as_null: 1,
+            }],
+        };
+        let m = vec![
+            ("clean".to_string(), WriteSummary::default()),
+            ("patients".to_string(), summary),
+        ];
+        assert_eq!(
+            mismatch_report(&m),
+            json!({"patients": {"born": {
+                "type": "date", "written_as_date": 2, "written_as_null": 1
+            }}})
+        );
+        assert_eq!(mismatch_report(&[]), json!({}));
+    }
+
+    #[test]
+    fn a_step_counts_as_run_only_when_it_succeeds() {
+        let mut ran = Ran::default();
+        assert_eq!(
+            ran.run_step("views", Some(Step::Views), || Ok(3)).unwrap(),
+            3
+        );
+        assert!(
+            ran.run_step("tiles", Some(Step::Tiles), || -> Result<()> { bail!("no") })
+                .is_err()
+        );
+        ran.run_step("publish", None, || Ok(())).unwrap();
+        let names: Vec<&str> = ran.timings.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["views", "publish"]);
+        assert_eq!(ran.steps, [Step::Views].into_iter().collect());
+    }
 }

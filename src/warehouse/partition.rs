@@ -177,6 +177,11 @@ pub fn rule_for<'a>(result: &ViewResult, lookups: &'a [Lookup]) -> Option<(&'a L
     })
 }
 
+/// The most rows in a row group of a view table's file. Each file is written
+/// a row group at a time, so only one row group's arrays and encoded bytes
+/// are held beside the rows.
+const ROW_GROUP_ROWS: usize = 64 * 1024;
+
 /// Split `result` by partition value and write it to `table_dir`, replacing
 /// what was there only once every file is written. Returns the row count and
 /// the values that did not match their column's type.
@@ -206,7 +211,9 @@ pub fn write(
         .to_string_lossy();
     let staging = parent.join(format!(".{name}.new"));
     let _ = fs::remove_dir_all(&staging);
-    let writer = ParquetWriter::new().with_temporal(TemporalEncoding::Native);
+    let writer = ParquetWriter::new()
+        .with_temporal(TemporalEncoding::Native)
+        .with_row_group_size(ROW_GROUP_ROWS);
     let mut columns = result.columns;
     columns.push(ColumnInfo::new(column, ColumnType::String));
     let mut summary = WriteSummary::default();

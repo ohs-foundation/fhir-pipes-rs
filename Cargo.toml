@@ -20,9 +20,10 @@ postgres = ["fhir-pipes-sof/postgres", "dep:sqlx-postgres", "dep:sqlx-core"]
 fhir-packages = ["fhir-pipes-sof-lint/packages"]
 
 [dependencies]
-arrow-array = "59"
-arrow-schema = "59"
-parquet = { version = "59", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "geospatial"] }
+# From the workspace, so the binary and sof share one declaration; the geo
+# outputs add GeoParquet support.
+arrow = { workspace = true }
+parquet = { workspace = true, features = ["geospatial"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -55,7 +56,6 @@ anyhow = "1"
 toml = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tempfile = "3"
-arrow = { workspace = true }
 fhir-pipes-sof = { workspace = true, features = ["parquet"] }
 fhir-pipes-sof-lint = { workspace = true }
 # views (formerly the octofhir-sof command-line tool)

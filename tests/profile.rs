@@ -318,7 +318,7 @@ fn diff_refuses_undeclared_columns_whatever_their_value() {
     }
 
     // The same through the Parquet reader.
-    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use arrow::array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use std::sync::Arc;
     let batch = RecordBatch::try_from_iter([
         ("id", Arc::new(StringArray::from(vec!["kano"])) as ArrayRef),

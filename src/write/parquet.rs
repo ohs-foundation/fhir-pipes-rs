@@ -15,7 +15,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow_array::Array;
+use arrow::array::Array;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_writer::ArrowWriterOptions;
 use parquet::basic::{Compression, ZstdLevel};
@@ -23,7 +23,7 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 
 use crate::error::{PipesError, Result};
-use arrow_schema::SchemaRef;
+use arrow::datatypes::SchemaRef;
 
 use crate::write::schema::{BBOX_COLUMN, GEOMETRY_COLUMN, RowBatch};
 
@@ -110,15 +110,15 @@ impl PartitionWriter {
         let bbox = rb.column_by_name(BBOX_COLUMN).expect("schema has bbox");
         let bbox = bbox
             .as_any()
-            .downcast_ref::<arrow_array::StructArray>()
+            .downcast_ref::<arrow::array::StructArray>()
             .expect("bbox is a struct");
-        let bbox_cols: Vec<&arrow_array::Float64Array> = ["xmin", "ymin", "xmax", "ymax"]
+        let bbox_cols: Vec<&arrow::array::Float64Array> = ["xmin", "ymin", "xmax", "ymax"]
             .iter()
             .map(|name| {
                 bbox.column_by_name(name)
                     .expect("bbox field")
                     .as_any()
-                    .downcast_ref::<arrow_array::Float64Array>()
+                    .downcast_ref::<arrow::array::Float64Array>()
                     .expect("f64")
             })
             .collect();

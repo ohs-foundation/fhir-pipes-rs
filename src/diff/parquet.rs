@@ -5,10 +5,10 @@
 use std::fs::File;
 use std::path::Path;
 
-use arrow_array::cast::AsArray;
-use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
-use arrow_array::{Array, ArrayRef, RecordBatch};
-use arrow_schema::{DataType, Schema};
+use arrow::array::cast::AsArray;
+use arrow::array::types::{Float32Type, Float64Type, Int32Type, Int64Type};
+use arrow::array::{Array, ArrayRef, RecordBatch};
+use arrow::datatypes::{DataType, Schema};
 use geo_traits::to_geo::ToGeoGeometry;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::KeyValue;
@@ -212,9 +212,9 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    use arrow_array::builder::{ListBuilder, StringBuilder};
-    use arrow_array::{BinaryArray, Float64Array, RecordBatch, StringArray};
-    use arrow_schema::{Field, Schema};
+    use arrow::array::builder::{ListBuilder, StringBuilder};
+    use arrow::array::{BinaryArray, Float64Array, RecordBatch, StringArray};
+    use arrow::datatypes::{Field, Schema};
     use parquet::arrow::ArrowWriter;
     use parquet::file::metadata::KeyValue;
     use parquet::file::properties::WriterProperties;

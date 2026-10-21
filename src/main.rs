@@ -19,6 +19,8 @@ mod raster;
 mod redact;
 mod report;
 mod run;
+#[cfg(feature = "postgres")]
+mod runtime;
 mod snapshot;
 mod sync;
 mod terminology;

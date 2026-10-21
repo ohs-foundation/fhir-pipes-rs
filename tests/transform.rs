@@ -346,8 +346,8 @@ fn organization(id: &str, name: &str) -> String {
 
 /// Reads one string column of the facility partition into `id -> value`.
 fn column(out: &Path, name: &str) -> std::collections::HashMap<String, Option<String>> {
-    use arrow_array::Array;
-    use arrow_array::cast::AsArray;
+    use arrow::array::Array;
+    use arrow::array::cast::AsArray;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let file = std::fs::File::open(
         out.join("locations/country=NG/geom_type=point/type=facility/part-0.parquet"),
@@ -458,7 +458,7 @@ fn facility_rows_carry_their_organization() {
 /// Every row of the dataset under `out`, as (id, row) with the columns this
 /// file checks: geometry is null, and the text of a few others.
 fn read_rows(out: &Path) -> std::collections::BTreeMap<String, serde_json::Value> {
-    use arrow_array::Array;
+    use arrow::array::Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     fn files(dir: &Path, into: &mut Vec<std::path::PathBuf>) {
@@ -489,7 +489,7 @@ fn read_rows(out: &Path) -> std::collections::BTreeMap<String, serde_json::Value
                 }
                 let col = col
                     .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
+                    .downcast_ref::<arrow::array::StringArray>()
                     .unwrap();
                 col.value(r).into()
             };

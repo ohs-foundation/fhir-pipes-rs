@@ -1,8 +1,13 @@
 //! Running a view for non-async callers: on a thread of its own, or over
 //! blocks of resources on several OS threads, each thread with its own
-//! current-thread Tokio runtime.
+//! current-thread Tokio runtime. The runtimes are kept and reused, so a run
+//! over many chunks of resources builds them once rather than per chunk.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+use tokio::runtime::Runtime;
 
 use serde_json::Value;
 
@@ -23,15 +28,9 @@ use super::{CompiledView, execute};
 /// Same as [`execute`].
 pub fn execute_blocking(view: &ViewDefinition, resources: &[Value]) -> Result<ViewResult> {
     std::thread::scope(|s| {
-        s.spawn(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))?;
-            rt.block_on(execute(view, resources))
-        })
-        .join()
-        .map_err(|_| Error::FhirPath("evaluation thread panicked".to_string()))?
+        s.spawn(|| block_on(execute(view, resources))?)
+            .join()
+            .map_err(|_| thread_panicked())?
     })
 }
 
@@ -64,12 +63,32 @@ pub fn execute_parallel(
     CompiledView::compile_blocking(view)?.execute_parallel(resources, threads)
 }
 
-/// A current-thread Tokio runtime for one evaluation thread.
-fn thread_runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))
+/// Current-thread runtimes not in use. An evaluation thread takes one for
+/// as long as it runs and puts it back, so there are as many as threads
+/// have run at once. The FHIRPath engine spawns no tasks, so a runtime
+/// carries nothing from one use to the next.
+static RUNTIMES: Mutex<Vec<Runtime>> = Mutex::new(Vec::new());
+
+/// Run `future` to completion on this thread, on a current-thread runtime
+/// from [`RUNTIMES`] or a new one. Not for use inside an async runtime.
+fn block_on<F: Future>(future: F) -> Result<F::Output> {
+    let idle = RUNTIMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .pop();
+    let rt = match idle {
+        Some(rt) => rt,
+        None => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| Error::FhirPath(format!("building runtime: {e}")))?,
+    };
+    let out = rt.block_on(future);
+    RUNTIMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(rt);
+    Ok(out)
 }
 
 fn thread_panicked() -> Error {
@@ -86,7 +105,7 @@ impl CompiledView {
     /// Same as [`CompiledView::compile`].
     pub fn compile_blocking(view: &ViewDefinition) -> Result<Self> {
         std::thread::scope(|s| {
-            s.spawn(|| thread_runtime()?.block_on(Self::compile(view)))
+            s.spawn(|| block_on(Self::compile(view))?)
                 .join()
                 .map_err(|_| thread_panicked())?
         })
@@ -122,7 +141,7 @@ impl CompiledView {
             let workers: Vec<_> = (0..threads.min(blocks.len()))
                 .map(|_| {
                     s.spawn(move || -> Result<Vec<(usize, Result<Rows>)>> {
-                        thread_runtime()?.block_on(async {
+                        block_on(async {
                             let mut done = Vec::new();
                             while !failed.load(Ordering::Relaxed) {
                                 let i = next.fetch_add(1, Ordering::Relaxed);
@@ -133,7 +152,7 @@ impl CompiledView {
                                 }
                                 done.push((i, rows));
                             }
-                            Ok(done)
+                            done
                         })
                     })
                 })

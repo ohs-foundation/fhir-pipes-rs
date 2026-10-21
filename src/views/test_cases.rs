@@ -149,3 +149,140 @@ fn canonical_json(v: &serde_json::Value) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::{Value, json};
+
+    fn resources() -> Vec<Value> {
+        vec![
+            json!({"resourceType": "Patient", "id": "p1", "gender": "female"}),
+            json!({"resourceType": "Patient", "id": "p2", "gender": "male"}),
+        ]
+    }
+
+    fn view() -> Value {
+        json!({"resource": "Patient", "select": [{"column": [
+            {"name": "id", "path": "id"}, {"name": "gender", "path": "gender"}
+        ]}]})
+    }
+
+    fn case(expect: Value) -> Value {
+        let mut test = json!({"title": "t", "view": view()});
+        test.as_object_mut()
+            .unwrap()
+            .extend(expect.as_object().unwrap().clone());
+        test
+    }
+
+    #[test]
+    fn rows_are_compared_as_a_multiset_whatever_the_order() {
+        let ok = case(json!({"expect": [
+            {"gender": "male", "id": "p2"},
+            {"id": "p1", "gender": "female"}
+        ]}));
+        assert_eq!(run_one_test(&ok, &resources()), (true, String::new()));
+        let wrong = case(json!({"expect": [
+            {"id": "p1", "gender": "female"},
+            {"id": "p1", "gender": "female"}
+        ]}));
+        let (pass, detail) = run_one_test(&wrong, &resources());
+        assert!(!pass);
+        assert!(detail.starts_with("rows differ: got "), "{detail}");
+    }
+
+    #[test]
+    fn counts_and_columns_are_checked() {
+        assert!(run_one_test(&case(json!({"expectCount": 2})), &resources()).0);
+        assert_eq!(
+            run_one_test(&case(json!({"expectCount": 3})), &resources()),
+            (false, "want 3 rows, got 2".into())
+        );
+        assert!(
+            run_one_test(
+                &case(json!({"expectColumns": ["id", "gender"]})),
+                &resources()
+            )
+            .0
+        );
+        // Column order matters.
+        assert!(
+            !run_one_test(
+                &case(json!({"expectColumns": ["gender", "id"]})),
+                &resources()
+            )
+            .0
+        );
+        // No expectation: running is enough.
+        assert!(run_one_test(&case(json!({})), &resources()).0);
+    }
+
+    #[test]
+    fn an_expected_error_passes_only_when_there_is_one() {
+        let bad = json!({"title": "t", "view": {"select": []}, "expectError": true});
+        assert!(run_one_test(&bad, &resources()).0);
+        let unexpected = json!({"title": "t", "view": {"select": []}});
+        let (pass, detail) = run_one_test(&unexpected, &resources());
+        assert!(!pass);
+        assert!(detail.starts_with("parse error: "), "{detail}");
+        let none = case(json!({"expectError": true}));
+        assert_eq!(
+            run_one_test(&none, &resources()),
+            (false, "expected an error but execution succeeded".into())
+        );
+    }
+
+    #[test]
+    fn multisets_compare_counts_and_nested_values() {
+        let (a, b) = (json!({"x": [1, {"k": 1, "j": 2}]}), json!({"x": 2}));
+        let a_reordered = json!({"x": [1, {"j": 2, "k": 1}]});
+        assert!(multiset_eq(
+            &[a.clone(), b.clone()],
+            &[b.clone(), a_reordered]
+        ));
+        assert!(!multiset_eq(
+            &[a.clone(), a.clone(), b.clone()],
+            &[a.clone(), b.clone(), b.clone()]
+        ));
+        assert!(!multiset_eq(
+            std::slice::from_ref(&a),
+            &[a.clone(), a.clone()]
+        ));
+        // Array order is part of the value.
+        assert!(!multiset_eq(&[json!([1, 2])], &[json!([2, 1])]));
+    }
+
+    #[test]
+    fn a_directory_runs_every_json_file_and_fails_on_any_failed_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, tests: Value| {
+            let doc = json!({"resources": resources(), "tests": tests});
+            fs::write(dir.path().join(name), doc.to_string()).unwrap();
+        };
+        file(
+            "a.json",
+            json!([case(json!({"expectCount": 2})), case(json!({}))]),
+        );
+        fs::write(dir.path().join("notes.txt"), "not a test file").unwrap();
+        assert_eq!(
+            run_test_file(&dir.path().join("a.json"), false).unwrap(),
+            (2, 2)
+        );
+        run(dir.path(), false).unwrap();
+
+        file("b.json", json!([case(json!({"expectCount": 5}))]));
+        assert_eq!(
+            run_test_file(&dir.path().join("b.json"), false).unwrap(),
+            (0, 1)
+        );
+        let err = run(dir.path(), false).unwrap_err();
+        assert!(err.is::<Findings>(), "{err:#}");
+
+        // A file that is not JSON is the operator's to fix.
+        fs::write(dir.path().join("c.json"), "{").unwrap();
+        let err = run(&dir.path().join("c.json"), false).unwrap_err();
+        assert_eq!(crate::error::exit_code(&err), 2, "{err:#}");
+    }
+}

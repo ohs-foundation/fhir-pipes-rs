@@ -22,7 +22,7 @@ const EXCHANGE_BODY_LIMIT: u64 = 1 << 20;
 
 /// The most a 2xx body read whole may decode to: far more than a search
 /// page, a boundary or a package holds.
-pub(super) const DEFAULT_BODY_LIMIT: u64 = 1 << 30;
+pub const DEFAULT_BODY_LIMIT: u64 = 1 << 30;
 
 /// A response's body as it was sent, before `Content-Encoding: gzip`.
 /// `MultiGzDecoder` reads every member: concatenated gzip members are one

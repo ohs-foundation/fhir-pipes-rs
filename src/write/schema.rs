@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::builder::{
+use arrow::array::builder::{
     BinaryBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder, StructBuilder,
 };
-use arrow_array::{ArrayRef, RecordBatch};
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use arrow::array::{ArrayRef, RecordBatch};
+use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 
 use crate::index::ADMIN_COLUMNS;
 use crate::profile::Profile;
@@ -459,7 +459,7 @@ impl RowBatch {
         self.rows += 1;
     }
 
-    pub fn finish(&mut self) -> Result<RecordBatch, arrow_schema::ArrowError> {
+    pub fn finish(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let mut cols: Vec<ArrayRef> = vec![
             Arc::new(self.id.finish()),
             Arc::new(self.version_id.finish()),
@@ -521,7 +521,7 @@ impl RowBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::Array;
+    use arrow::array::Array;
 
     #[test]
     fn schema_has_the_documented_columns_in_order() {
@@ -607,7 +607,7 @@ mod tests {
             rb.column_by_name(name)
                 .unwrap()
                 .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
+                .downcast_ref::<arrow::array::StringArray>()
                 .unwrap()
                 .value(0)
                 .to_string()
@@ -617,7 +617,7 @@ mod tests {
         let ids = rb.column_by_name("id").unwrap();
         assert_eq!(
             ids.as_any()
-                .downcast_ref::<arrow_array::StringArray>()
+                .downcast_ref::<arrow::array::StringArray>()
                 .unwrap()
                 .value(0),
             "a"
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(
             level
                 .as_any()
-                .downcast_ref::<arrow_array::Int32Array>()
+                .downcast_ref::<arrow::array::Int32Array>()
                 .unwrap()
                 .value(0),
             1
@@ -634,19 +634,19 @@ mod tests {
         let idents = rb.column_by_name("identifier").unwrap();
         let idents = idents
             .as_any()
-            .downcast_ref::<arrow_array::ListArray>()
+            .downcast_ref::<arrow::array::ListArray>()
             .unwrap();
         assert_eq!(idents.value(0).len(), 2);
         let structs = idents.value(0);
         let structs = structs
             .as_any()
-            .downcast_ref::<arrow_array::StructArray>()
+            .downcast_ref::<arrow::array::StructArray>()
             .unwrap();
         let systems = structs
             .column_by_name("system")
             .unwrap()
             .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
+            .downcast_ref::<arrow::array::StringArray>()
             .unwrap();
         assert!(systems.is_null(1), "a missing identifier.system stays null");
         // A second push after finish works, and the reused StructBuilder
@@ -658,18 +658,18 @@ mod tests {
         let idents2 = rb2.column_by_name("identifier").unwrap();
         let idents2 = idents2
             .as_any()
-            .downcast_ref::<arrow_array::ListArray>()
+            .downcast_ref::<arrow::array::ListArray>()
             .unwrap();
         let structs2 = idents2.value(0);
         let structs2 = structs2
             .as_any()
-            .downcast_ref::<arrow_array::StructArray>()
+            .downcast_ref::<arrow::array::StructArray>()
             .unwrap();
         let systems2 = structs2
             .column_by_name("system")
             .unwrap()
             .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
+            .downcast_ref::<arrow::array::StringArray>()
             .unwrap();
         assert_eq!(systems2.value(0), "sys");
     }
@@ -744,13 +744,13 @@ mod tests {
             .column_by_name("bbox")
             .unwrap()
             .as_any()
-            .downcast_ref::<arrow_array::StructArray>()
+            .downcast_ref::<arrow::array::StructArray>()
             .unwrap();
         let field = |name: &str| {
             bbox.column_by_name(name)
                 .unwrap()
                 .as_any()
-                .downcast_ref::<arrow_array::Float64Array>()
+                .downcast_ref::<arrow::array::Float64Array>()
                 .unwrap()
                 .value(0)
         };

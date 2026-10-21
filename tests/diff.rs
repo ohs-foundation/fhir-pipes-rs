@@ -711,7 +711,7 @@ fn wkb_polygon(ring: &[(f64, f64)]) -> Vec<u8> {
 /// Copy `from` to `to`, replacing the geometry of the rows named in `set`,
 /// as a GIS edit of the transform output would.
 fn set_geometry(from: &Path, to: &Path, set: &[(&str, Vec<u8>)]) {
-    use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch, StringArray};
+    use arrow::array::{Array, ArrayRef, BinaryArray, RecordBatch, StringArray};
     use parquet::arrow::ArrowWriter;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::sync::Arc;
