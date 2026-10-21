@@ -19,8 +19,13 @@ use std::time::Duration;
 
 use crate::error::{PipesError, Result};
 
-/// How long a tool has after SIGTERM before it gets SIGKILL.
-const TOOL_GRACE: Duration = Duration::from_secs(10);
+/// How long a tool has after SIGTERM before it gets SIGKILL, in ms (10 s;
+/// shorter in the unit tests).
+static TOOL_GRACE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(10_000);
+
+fn tool_grace() -> Duration {
+    Duration::from_millis(TOOL_GRACE_MS.load(Ordering::SeqCst))
+}
 
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 static SIGNALS: AtomicUsize = AtomicUsize::new(0);
@@ -127,7 +132,7 @@ pub fn register(pid: u32) -> Registered {
     // A tool started after the stop reached the others gets it too, unless
     // it is one the stop allows (a failure hook).
     if tools_stopped() && EXEMPT.load(Ordering::SeqCst) == 0 {
-        signal(pid, Sig::Term);
+        terminate(pid);
     }
     Registered(pid)
 }
@@ -184,16 +189,22 @@ fn stop_tools() {
         return;
     }
     let pids: Vec<u32> = lock_tools().iter().copied().collect();
-    for pid in &pids {
-        signal(*pid, Sig::Term);
+    for pid in pids {
+        terminate(pid);
     }
-    // Only the tools the stop reached; a failure hook started since keeps
-    // running.
+}
+
+/// SIGTERM to `pid`, and SIGKILL once the grace period is over if it is
+/// still registered (a registration ends only once its tool is reaped, so
+/// the pid is still that tool's). Each tool the stop reaches gets its own
+/// timer, those registered after the stop included; a failure hook, which
+/// the stop does not reach, gets none.
+fn terminate(pid: u32) {
+    signal(pid, Sig::Term);
     std::thread::spawn(move || {
-        std::thread::sleep(TOOL_GRACE);
-        let running = lock_tools();
-        for pid in pids.iter().filter(|p| running.contains(p)) {
-            signal(*pid, Sig::Kill);
+        std::thread::sleep(tool_grace());
+        if lock_tools().contains(&pid) {
+            signal(pid, Sig::Kill);
         }
     });
 }
@@ -229,7 +240,13 @@ pub fn request_for_test() {
 }
 
 #[cfg(test)]
+pub fn set_grace_for_test(d: Duration) {
+    TOOL_GRACE_MS.store(d.as_millis() as u64, Ordering::SeqCst);
+}
+
+#[cfg(test)]
 pub fn reset_for_test() {
+    TOOL_GRACE_MS.store(10_000, Ordering::SeqCst);
     TEST_STOP.with(|s| s.set(false));
     REQUESTED.store(false, Ordering::SeqCst);
     SIGNALS.store(0, Ordering::SeqCst);
@@ -303,6 +320,33 @@ mod tests {
             "a failure hook was stopped"
         );
         drop(exempt);
+        reset_for_test();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tool_registered_after_the_stop_gets_sigkill_too() {
+        use std::os::unix::process::ExitStatusExt;
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        set_grace_for_test(Duration::from_millis(300));
+        request_for_test();
+        // Ignores SIGTERM, as a stuck tool might.
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let _r = register(child.id());
+        let started = Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            assert!(started.elapsed() < Duration::from_secs(3), "never killed");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.signal(), Some(9));
         reset_for_test();
     }
 
