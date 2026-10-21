@@ -2274,6 +2274,50 @@ mod tests {
     }
 
     #[test]
+    fn from_data_values_a_batch_counts_data_elements_and_every_level_shares_it() {
+        let periods = codes(&["202501", "202502", "202503", "2025Q1", "2025Q2", "202504"]);
+        let ranges = [DateRange::parse("2026-04-05:2026-05-20").unwrap()];
+        let ids = codes(&["a", "b", "c"]);
+        // "a" uses 3 data elements, the others 1: a chunk's elements add up.
+        let elements = |chunk: &[String]| chunk.iter().map(|i| if i == "a" { 3 } else { 1 }).sum();
+        // [a, b]: 4 elements × 5 org units = 20 rows a period, 2 fit in 40;
+        // [c]: 1 × 5 = 5, so 8 would fit.
+        let units = plan_all_levels(&[2, 3], 5, &periods, &ranges, &ids, 2, 40, &elements);
+        let batches: Vec<(Vec<u32>, Vec<String>, String, usize)> = units
+            .iter()
+            .map(|u| {
+                (
+                    u.levels.clone(),
+                    u.periods.clone(),
+                    u.when(),
+                    u.indicators.len(),
+                )
+            })
+            .collect();
+        let b = |p: &[&str], when: &str, n: usize| (vec![2, 3], codes(p), when.to_string(), n);
+        assert_eq!(
+            batches,
+            [
+                b(&["202501", "202502"], "202501…202502 (2 periods)", 2),
+                b(&["202503", "202504"], "202503…202504 (2 periods)", 2),
+                b(&["2025Q1", "2025Q2"], "2025Q1…2025Q2 (2 periods)", 2),
+                b(&[], "2026-04-05/2026-05-20", 2),
+                b(
+                    &["202501", "202502", "202503", "202504"],
+                    "202501…202504 (4 periods)",
+                    1
+                ),
+                b(&["2025Q1", "2025Q2"], "2025Q1…2025Q2 (2 periods)", 1),
+                b(&[], "2026-04-05/2026-05-20", 1),
+            ]
+        );
+        // No data elements and no org units still give one period a batch
+        // at most the budget.
+        let units = plan_all_levels(&[1], 0, &periods[..2], &[], &ids[..1], 1, 1, &|_| 0);
+        assert_eq!(units.len(), 2);
+    }
+
+    #[test]
     fn progress_reads_at_a_glance() {
         let unit = Unit {
             levels: vec![4],
