@@ -41,10 +41,10 @@ client credentials, through the gateway, in bundles of 25, was uneventful.
    rejects it as an unknown field and stops. Using `git show
    v0.6.0:examples/profiles/icr.toml` worked. Options: a `min_version` key in
    profiles with a clear message, unknown keys as warnings, or publishing each
-   release's profile next to the binary. The profile's comment says ICR's own
-   copy lives in `recodelabs/icr`, but no such file is there; a profile URL
-   (for example on icr.healthcampaigns.org) would let `--profile` point at
-   one place.
+   release's profile next to the binary. ICR's own copy,
+   `ig/fhir-pipes-profile.toml` in `recodelabs/icr`, does load in v0.6.0 and
+   is what the Uganda build uses now; the example's comment could say where it
+   is, and that the example may be ahead of the release.
 
 3. **No way to write more than one identifier per unit.** Each unit gets one
    identifier under `--code-system`. The Uganda units needed four: the P-code
@@ -72,14 +72,54 @@ client credentials, through the gateway, in bundles of 25, was uneventful.
    (Overture has region polygons) in the same run.
 
 7. **`load --dry-run` reports `create` for resources that already exist.**
-   After the load, a second dry run still listed all 151 as `create`. Without
-   a snapshot, `load` can't tell new from changed from unchanged. A cheap
+   After the load, a second dry run still listed all 151 as `create`. The
+   real run then updated them in place (version 2, still 151 resources), so
+   only the label is wrong. Without a snapshot, `load` can't tell new from
+   changed from unchanged. A cheap
    check (`_id` search, `_elements=id,meta`) would let the dry run say what
    will really happen, and a real run skip unchanged resources.
 
 8. **The `updateCreate` warning on every run against HAPI.** HAPI supports it
    but leaves the flag out, and the warning says so. If the server's
    CapabilityStatement says HAPI, the warning could be dropped or shown once.
+
+## Problems found publishing the Uganda SDI
+
+The same day, Uganda got its own Portolan catalog at
+`https://sdi.healthcampaigns.org/uga/`, built with `fhir-pipes refresh
+--only locations,tiles,hooks` against the Uganda server
+(`country/uganda/fhir-pipes.toml` and `sdi.sh` in `recodelabs/icr`).
+
+9. **Push can't target a folder of a bucket.** The catalog lives in the
+   `uga/` folder of the `icr` bucket, next to Nigeria's at the root.
+   `bucket = "icr/uga"` fails with "bucket icr/uga not found on rclone
+   remote r2", because the push checks that the bucket exists. A `prefix` in
+   `[push]` (or a bucket value with a path) would do; `sdi.sh` runs rclone
+   itself for now.
+
+10. **The tile layers are always named `states` and `lgas`.** Uganda's
+    `admin.pmtiles` has `country`, `states` (its regions) and `lgas` (its
+    districts). The names come from Nigeria. Naming them by admin level
+    (`admin0`…`admin2`) or from the profile would suit other countries, and
+    a style written for one country would work for the next.
+
+11. **DuckDB 2.0's agent banner reaches fhir-pipes' output.** With DuckDB
+    2.0 and `AI_AGENT` set (an agent running fhir-pipes), every `duckdb` call
+    in the tiles step prints "duckdb agent mode on …" to stderr, which
+    fhir-pipes passes through. Calling it with `-no-agent`, or setting
+    `DUCKDB_AGENT_MODE=0` for the child, keeps the output clean; `sdi.sh`
+    sets the variable.
+
+12. **`refresh --check` asks for a views directory when views won't run.**
+    Without `--only`, `--check` stops with "no views directory". A warehouse
+    of locations and tiles has no views; `--check` could say the views step
+    will be skipped instead.
+
+13. **`--only` leaves the hooks out without saying so.** `--only
+    locations,tiles` runs no hooks, so the catalog hook didn't run until
+    `hooks` was added to the list. A hook with `after = "locations"` is tied
+    to a step that did run, so it could run with it, or `--check` could list
+    the hooks that won't.
 
 ## Suggestion: an Overture importer
 
