@@ -2,7 +2,8 @@
 //! whole: `refresh`'s views step, its file source and `views run --input`
 //! all read NDJSON through this. A chunk's lines are parsed on several
 //! threads and come back in line order. A file whose name ends in `.gz` is
-//! read decompressed, every gzip member of it.
+//! read decompressed, every gzip member of it. The lines are found by
+//! `fhir::ndjson::Splitter`, as every NDJSON reader's are.
 
 use std::fs::File;
 use std::io::{BufRead, ErrorKind};
@@ -13,7 +14,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::error::usage;
-use crate::fhir::ndjson::{is_gz, read_text};
+use crate::fhir::ndjson::{Span, Splitter, is_gz, read_text};
 
 /// The most lines in one chunk. About 20 MB of text for ICR's MeasureReports,
 /// and ten times that once parsed.
@@ -25,13 +26,9 @@ pub const CHUNK_BYTES: usize = 64 << 20;
 
 /// The chunks of an NDJSON source.
 pub struct Lines<R> {
-    reader: R,
+    lines: Splitter<R>,
     /// The file's name in messages.
     name: Arc<str>,
-    /// Lines read so far, blank ones too.
-    line_no: usize,
-    /// Bytes read so far.
-    offset: u64,
     max_lines: usize,
     max_bytes: usize,
     done: bool,
@@ -44,18 +41,9 @@ pub struct Chunk {
     lines: Vec<Line>,
 }
 
-/// Where one line of a chunk is.
-#[derive(Debug, Clone, Copy)]
-pub struct Line {
-    /// Its 1-based number in the file.
-    pub number: usize,
-    /// Where its text starts in the file, in bytes, after any leading
-    /// whitespace.
-    pub offset: u64,
-    /// Its text in the chunk, without the whitespace around it.
-    start: usize,
-    end: usize,
-}
+/// Where one line of a chunk is: its number and offset in the file, and
+/// its text in the chunk.
+pub type Line = Span;
 
 /// The file at `path`, to be read a chunk at a time. Offsets into a gzip
 /// file are offsets into its decompressed text.
@@ -83,10 +71,8 @@ impl<R: BufRead> Lines<R> {
     /// `name` is the source's name in messages.
     pub fn new(reader: R, name: &str) -> Self {
         Self {
-            reader,
+            lines: Splitter::new(reader),
             name: name.into(),
-            line_no: 0,
-            offset: 0,
             max_lines: CHUNK_LINES,
             max_bytes: CHUNK_BYTES,
             done: false,
@@ -102,47 +88,33 @@ impl<R: BufRead> Lines<R> {
     }
 
     fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let mut text = String::new();
+        let mut text = Vec::new();
         let mut lines = Vec::new();
         while lines.len() < self.max_lines && text.len() < self.max_bytes {
-            let start = text.len();
-            let n = self.reader.read_line(&mut text).map_err(|e| {
+            let line = self.lines.next_into(&mut text).map_err(|e| {
                 read_error(
                     e,
-                    format!("reading {} line {}", self.name, self.line_no + 1),
+                    format!("reading {} line {}", self.name, self.lines.lines_read() + 1),
                 )
             })?;
-            if n == 0 {
+            let Some(line) = line else {
                 self.done = true;
                 break;
-            }
-            self.line_no += 1;
-            // A UTF-8 byte order mark before the first line is not part of
-            // it (fhir::ndjson skips it too).
-            let bom = if self.line_no == 1 && text[start..].starts_with('\u{feff}') {
-                '\u{feff}'.len_utf8()
-            } else {
-                0
             };
-            let line = &text[start + bom..];
-            if line.trim().is_empty() {
-                text.truncate(start);
-            } else {
-                // JSON's own whitespace only, so the text parses as the whole
-                // line would.
-                let json_ws: &[char] = &[' ', '\t', '\r', '\n'];
-                let lead = bom + line.len() - line.trim_start_matches(json_ws).len();
-                let kept = line.trim_matches(json_ws).len();
-                lines.push(Line {
-                    number: self.line_no,
-                    offset: self.offset + lead as u64,
-                    start: start + lead,
-                    end: start + lead + kept,
-                });
-            }
-            self.offset += n as u64;
+            lines.push(line);
         }
-        Ok((!lines.is_empty()).then(|| Chunk {
+        if lines.is_empty() {
+            return Ok(None);
+        }
+        // Checked once for the whole chunk; what is not UTF-8 is on a line,
+        // since what lies between them is whitespace.
+        let text = String::from_utf8(text).map_err(|e| {
+            let at = e.utf8_error().valid_up_to();
+            let line = &lines[lines.partition_point(|l| l.start <= at).saturating_sub(1)];
+            let e = std::io::Error::new(ErrorKind::InvalidData, e.utf8_error());
+            read_error(e, format!("reading {} line {}", self.name, line.number))
+        })?;
+        Ok(Some(Chunk {
             name: self.name.clone(),
             text,
             lines,

@@ -7,7 +7,6 @@
 //! same waits as a status poll: a server that runs one export at a time
 //! (Aidbox) answers 429 while another is running.
 
-use std::io::BufRead;
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
@@ -17,6 +16,7 @@ use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::{Exchange, FetchError, FhirClient};
+use crate::fhir::ndjson::Splitter;
 use crate::snapshot::instant::{format_utc, parse_instant};
 
 /// The longest failure text shown from a status response.
@@ -405,32 +405,18 @@ pub fn read_lines(
     // first is kept here and the download stopped with a placeholder.
     let mut failed: Option<PipesError> = None;
     let got = client.download(url, authorize, timeout, |body| {
-        let mut reader = std::io::BufReader::with_capacity(1 << 20, body);
+        // A line is read up to MAX_LINE: a file with no newline would
+        // otherwise be held whole.
+        let mut lines =
+            Splitter::new(std::io::BufReader::with_capacity(1 << 20, body)).with_max_len(MAX_LINE);
         let mut buf = Vec::new();
-        let mut first = true;
         loop {
             buf.clear();
-            // A line is read up to MAX_LINE: a file with no newline would
-            // otherwise be held whole.
-            let n = std::io::Read::take(&mut reader, MAX_LINE + 1).read_until(b'\n', &mut buf)?;
-            if n == 0 {
+            let Some(span) = lines.next_into(&mut buf)? else {
                 return Ok(());
-            }
-            if buf.len() as u64 > MAX_LINE {
-                return Err(std::io::Error::other(format!(
-                    "a line is longer than {} MB",
-                    MAX_LINE >> 20
-                )));
-            }
-            let text = std::str::from_utf8(&buf)
+            };
+            let line = std::str::from_utf8(&buf[span.start..span.end])
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let mut line = text.trim_end_matches('\n').trim_end_matches('\r');
-            if std::mem::take(&mut first) {
-                line = line.strip_prefix('\u{feff}').unwrap_or(line);
-            }
-            if line.trim().is_empty() {
-                continue;
-            }
             if let Err(e) = each(line) {
                 failed = Some(e);
                 return Err(std::io::Error::other("stopped"));

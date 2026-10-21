@@ -253,6 +253,30 @@ fn stdin_takes_formatted_json_and_ndjson_for_ndjson_output() {
         .stderr(contains("2 rows"));
 }
 
+/// A byte order mark before stdin's text is skipped, as it is in a file,
+/// whether the text is one JSON value or NDJSON.
+#[test]
+fn stdin_may_start_with_a_byte_order_mark() {
+    let view = fixtures().join("views/Binary-IcrPatient.json");
+    let formatted = "\u{feff}{\n  \"resourceType\": \"Patient\",\n  \"id\": \"p1\"\n}\n";
+    let ndjson = "\u{feff}{\"resourceType\": \"Patient\", \"id\": \"p1\"}\n\n{\"resourceType\": \"Patient\", \"id\": \"p2\"}\n";
+    for (input, ids) in [(formatted, vec!["p1"]), (ndjson, vec!["p1", "p2"])] {
+        for output in ["csv", "ndjson"] {
+            let a = views()
+                .arg("run")
+                .arg(&view)
+                .args(["--input", "-", "--output", output])
+                .write_stdin(input)
+                .assert()
+                .success();
+            let out = String::from_utf8_lossy(&a.get_output().stdout).into_owned();
+            for id in &ids {
+                assert!(out.contains(id), "{output}: {input}\n{out}");
+            }
+        }
+    }
+}
+
 #[test]
 #[cfg(not(feature = "postgres"))]
 fn db_says_how_to_get_postgres_support() {

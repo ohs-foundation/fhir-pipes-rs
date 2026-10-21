@@ -1,5 +1,8 @@
-//! Streaming NDJSON. `NdjsonReader` yields each line with its byte offset so
-//! pass two can seek straight back to it; `LineAccess` does that seek.
+//! Streaming NDJSON. `Splitter` finds the lines of NDJSON text, and every
+//! NDJSON reader in fhir-pipes goes through it: `NdjsonReader` yields each
+//! line with its byte offset so pass two can seek straight back to it;
+//! `LineAccess` does that seek; `views::ndjson::Lines` reads a chunk of
+//! lines at a time.
 //!
 //! A path ending in `.gz` is gzip: read through a decoder (any number of
 //! concatenated members), and written through an encoder by `Output`.
@@ -107,11 +110,123 @@ impl<W: Write> Write for Output<W> {
     }
 }
 
+/// JSON's own whitespace: what is trimmed from around a line, so the text
+/// parses as the whole line would. A line of nothing else is blank.
+fn is_json_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// Where `Splitter::next_into` put one non-blank line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// Its 1-based number in the text, blank lines counted.
+    pub number: usize,
+    /// Where its text starts in the text, in bytes, after any leading
+    /// whitespace (and the byte order mark before the first line).
+    pub offset: u64,
+    /// Its text in the buffer, without the whitespace around it.
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The non-blank lines of NDJSON text. A UTF-8 byte order mark before the
+/// first line is not part of it; one inside the text is the line's own.
+/// Lines are bytes here: what is not UTF-8 is for the caller to report,
+/// with the line's number.
+pub struct Splitter<R> {
+    reader: R,
+    /// Lines read so far, blank ones too.
+    number: usize,
+    /// Bytes read so far.
+    offset: u64,
+    /// The longest line read; `None` for no limit.
+    max_len: Option<u64>,
+}
+
+impl<R: BufRead> Splitter<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            number: 0,
+            offset: 0,
+            max_len: None,
+        }
+    }
+
+    /// A line longer than `max` bytes fails the read, instead of being held
+    /// whole: for text from the network, where a file with no newline
+    /// could be any size.
+    pub fn with_max_len(mut self, max: u64) -> Self {
+        self.max_len = Some(max);
+        self
+    }
+
+    /// Lines read so far, blank ones too: the number of the line a failed
+    /// read was on, less one.
+    pub fn lines_read(&self) -> usize {
+        self.number
+    }
+
+    /// What is left of the text, for a caller that reads the rest another
+    /// way.
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+
+    /// Appends the next non-blank line to `buf`, newline and all, and says
+    /// where its text is. Blank lines are read past and not kept. `None` at
+    /// the end of the text.
+    pub fn next_into(&mut self, buf: &mut Vec<u8>) -> std::io::Result<Option<Span>> {
+        loop {
+            let from = buf.len();
+            let n = match self.max_len {
+                Some(max) => (&mut self.reader).take(max + 1).read_until(b'\n', buf)?,
+                None => self.reader.read_until(b'\n', buf)?,
+            };
+            if n == 0 {
+                return Ok(None);
+            }
+            if let Some(max) = self.max_len
+                && n as u64 > max
+            {
+                buf.truncate(from);
+                return Err(std::io::Error::other(format!(
+                    "line {} is longer than {} MB",
+                    self.number + 1,
+                    max >> 20
+                )));
+            }
+            let start_offset = self.offset;
+            self.offset += n as u64;
+            self.number += 1;
+            let mut line = &buf[from..];
+            let mut skip = 0;
+            if self.number == 1 && line.starts_with(BOM) {
+                line = &line[BOM.len()..];
+                skip = BOM.len();
+            }
+            let Some(lead) = line.iter().position(|&b| !is_json_space(b)) else {
+                buf.truncate(from);
+                continue; // blank line
+            };
+            let end = line
+                .iter()
+                .rposition(|&b| !is_json_space(b))
+                .map_or(0, |p| p + 1);
+            let start = from + skip + lead;
+            return Ok(Some(Span {
+                number: self.number,
+                offset: start_offset + (skip + lead) as u64,
+                start,
+                end: from + skip + end,
+            }));
+        }
+    }
+}
+
 pub struct NdjsonReader {
     path: PathBuf,
-    reader: Box<dyn BufRead + Send>,
-    offset: u64,
-    number: usize,
+    lines: Splitter<Box<dyn BufRead + Send>>,
     buf: Vec<u8>,
 }
 
@@ -119,8 +234,8 @@ impl std::fmt::Debug for NdjsonReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NdjsonReader")
             .field("path", &self.path)
-            .field("offset", &self.offset)
-            .field("number", &self.number)
+            .field("offset", &self.lines.offset)
+            .field("number", &self.lines.number)
             .finish()
     }
 }
@@ -131,8 +246,9 @@ impl NdjsonReader {
     /// one clear message instead of an error per line. The peek is bounded to
     /// `HEAD_PEEK` bytes: pulling a whole line here would read a minified
     /// single-line JSON document entirely into memory before we could reject
-    /// it. A leading UTF-8 BOM is skipped and accounted for so every
-    /// downstream offset -- and `LineAccess::read_at` -- stays correct.
+    /// it. A leading UTF-8 BOM is skipped (by `Splitter`) and accounted for
+    /// so every downstream offset -- and `LineAccess::read_at` -- stays
+    /// correct.
     /// A `.gz` file is read decompressed; offsets are into its text.
     pub fn open(path: &Path) -> Result<Self> {
         let mut reader = open_text(path)?;
@@ -160,17 +276,9 @@ impl NdjsonReader {
             )));
         }
         // Start again from the top (a gzip stream cannot seek back).
-        let offset = if bom { BOM.len() as u64 } else { 0 };
-        let mut reader = open_text(path)?;
-        let mut skip = vec![0u8; offset as usize];
-        reader
-            .read_exact(&mut skip)
-            .map_err(|e| PipesError::io(path, e))?;
         Ok(Self {
             path: path.to_path_buf(),
-            reader,
-            offset,
-            number: 0,
+            lines: Splitter::new(open_text(path)?),
             buf: Vec::new(),
         })
     }
@@ -180,47 +288,27 @@ impl Iterator for NdjsonReader {
     type Item = Result<Line>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            self.buf.clear();
-            let start = self.offset;
-            let n = match self.reader.read_until(b'\n', &mut self.buf) {
-                Ok(n) => n,
-                Err(e) => return Some(Err(PipesError::io(&self.path, e))),
-            };
-            if n == 0 {
-                return None;
+        self.buf.clear();
+        let span = match self.lines.next_into(&mut self.buf) {
+            Ok(span) => span?,
+            Err(e) => return Some(Err(PipesError::io(&self.path, e))),
+        };
+        let text = match std::str::from_utf8(&self.buf[span.start..span.end]) {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                return Some(Err(PipesError::Usage(format!(
+                    "{}: line {}: {e}",
+                    self.path.display(),
+                    span.number
+                ))));
             }
-            self.offset += n as u64;
-            self.number += 1;
-            let trimmed_end = self
-                .buf
-                .iter()
-                .rposition(|b| !b.is_ascii_whitespace())
-                .map_or(0, |p| p + 1);
-            let leading = self.buf[..trimmed_end]
-                .iter()
-                .position(|b| !b.is_ascii_whitespace());
-            let Some(leading) = leading else {
-                continue; // blank line
-            };
-            let slice = &self.buf[leading..trimmed_end];
-            let text = match std::str::from_utf8(slice) {
-                Ok(s) => s.to_string(),
-                Err(e) => {
-                    return Some(Err(PipesError::Usage(format!(
-                        "{}: line {}: {e}",
-                        self.path.display(),
-                        self.number
-                    ))));
-                }
-            };
-            return Some(Ok(Line {
-                number: self.number,
-                offset: start + leading as u64,
-                len: slice.len(),
-                text,
-            }));
-        }
+        };
+        Some(Ok(Line {
+            number: span.number,
+            offset: span.offset,
+            len: span.end - span.start,
+            text,
+        }))
     }
 }
 
@@ -415,6 +503,37 @@ mod tests {
         let f = tmp("[{\"id\":\"a\"},{\"id\":\"b\"}]\n");
         let err = NdjsonReader::open(f.path()).unwrap_err();
         assert!(err.to_string().contains("not NDJSON"), "{err}");
+    }
+
+    #[test]
+    fn splitter_keeps_each_line_and_its_place() {
+        let text = b"\xEF\xBB\xBF {\"a\":1}\r\n \t\n\x0C\n{\"b\":2}";
+        let mut lines = Splitter::new(&text[..]);
+        let mut buf = Vec::new();
+        let mut found = Vec::new();
+        while let Some(span) = lines.next_into(&mut buf).unwrap() {
+            found.push((span, buf[span.start..span.end].to_vec()));
+        }
+        // Only JSON's whitespace is blank: a form feed is the line's text,
+        // for the JSON parser to reject.
+        let texts: Vec<&[u8]> = found.iter().map(|(_, t)| t.as_slice()).collect();
+        assert_eq!(texts, [&b"{\"a\":1}"[..], b"\x0C", b"{\"b\":2}"]);
+        let places: Vec<(usize, u64)> = found.iter().map(|(s, _)| (s.number, s.offset)).collect();
+        assert_eq!(places, [(1, 4), (3, 16), (4, 18)]);
+        for (span, t) in &found {
+            let at = span.offset as usize;
+            assert_eq!(&text[at..at + t.len()], t.as_slice());
+        }
+        assert_eq!(lines.lines_read(), 4);
+    }
+
+    #[test]
+    fn splitter_refuses_a_line_over_its_limit() {
+        let mut lines = Splitter::new(&b"{}\n{\"long\":1}\n"[..]).with_max_len(8);
+        let mut buf = Vec::new();
+        assert!(lines.next_into(&mut buf).unwrap().is_some());
+        let err = lines.next_into(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("line 2 is longer"), "{err}");
     }
 
     #[test]

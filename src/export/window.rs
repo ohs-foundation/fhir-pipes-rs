@@ -28,7 +28,7 @@
 //! its newer version.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
@@ -41,6 +41,7 @@ use crate::extract::client::FhirClient;
 use crate::extract::page::{
     PAGE_SIZE, PageNote, PageResult, ServerKind, count_matching, count_resources, page_search,
 };
+use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
 
@@ -456,10 +457,8 @@ fn join(files: &[PathBuf], paged: &[Paged], out: &Path) -> Result<Vec<PageNote>>
     let file = crate::fs::create_private(out).map_err(|e| PipesError::io(out, e))?;
     let mut writer = BufWriter::new(file);
     for (w, (path, p)) in files.iter().zip(paged).enumerate() {
-        let reader =
-            BufReader::new(std::fs::File::open(path).map_err(|e| PipesError::io(path, e))?);
-        for (n, line) in reader.lines().enumerate() {
-            let line = line.map_err(|e| PipesError::io(path, e))?;
+        for (n, line) in NdjsonReader::open(path)?.enumerate() {
+            let line = line?.text;
             let note = p.notes.get(n).ok_or_else(|| {
                 PipesError::Environment(format!(
                     "{}: more lines than resources paged",

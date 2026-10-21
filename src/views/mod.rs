@@ -26,7 +26,7 @@ use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_core, lint_shareable, validate_structure};
 
 use crate::error::usage;
-use crate::fhir::ndjson::{Output, is_gz, read_text};
+use crate::fhir::ndjson::{Output, Splitter, is_gz, read_text};
 use crate::warehouse::views::{ViewRows, discover, parse_view};
 
 #[derive(clap::Args, Debug)]
@@ -535,29 +535,26 @@ pub(crate) fn load_json_file(
     Ok(())
 }
 
-/// The next non-blank line of `reader` and its 1-based number, counting from
-/// `*line_no`. `name` is the input's name in messages.
+/// The next non-blank line of `lines` and its 1-based number. `name` is the
+/// input's name in messages.
 fn next_line(
-    reader: &mut dyn io::BufRead,
+    lines: &mut Splitter<Box<dyn io::BufRead>>,
     name: &str,
-    line_no: &mut usize,
 ) -> Result<Option<(usize, String)>> {
-    loop {
-        let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| ndjson::read_error(e, format!("reading {name} line {}", *line_no + 1)))?;
-        if n == 0 {
-            return Ok(None);
-        }
-        *line_no += 1;
-        if *line_no == 1 && line.starts_with('\u{feff}') {
-            line.drain(..'\u{feff}'.len_utf8());
-        }
-        if !line.trim().is_empty() {
-            return Ok(Some((*line_no, line)));
-        }
-    }
+    let mut buf = Vec::new();
+    let Some(span) = lines.next_into(&mut buf).map_err(|e| {
+        ndjson::read_error(e, format!("reading {name} line {}", lines.lines_read() + 1))
+    })?
+    else {
+        return Ok(None);
+    };
+    buf.truncate(span.end);
+    buf.drain(..span.start);
+    let line = String::from_utf8(buf).map_err(|e| {
+        let e = io::Error::new(io::ErrorKind::InvalidData, e.utf8_error());
+        ndjson::read_error(e, format!("reading {name} line {}", span.number))
+    })?;
+    Ok(Some((span.number, line)))
 }
 
 /// Stream NDJSON through one view, writing NDJSON rows as they are produced,
@@ -566,9 +563,8 @@ fn next_line(
 async fn stream_ndjson(
     view: &ViewDefinition,
     first: Option<(usize, String)>,
-    mut reader: Box<dyn io::BufRead>,
+    mut lines: Splitter<Box<dyn io::BufRead>>,
     name: &str,
-    mut line_no: usize,
     sink: &mut dyn Write,
 ) -> Result<usize> {
     let compiled = fhir_pipes_sof::CompiledView::compile(view)
@@ -598,7 +594,7 @@ async fn stream_ndjson(
                 total += 1;
             }
         }
-        next = next_line(reader.as_mut(), name, &mut line_no)?;
+        next = next_line(&mut lines, name)?;
     }
     Ok(total)
 }
@@ -656,17 +652,18 @@ fn parse_resource_text(
     out: &mut Vec<serde_json::Value>,
     keep_bundles: bool,
 ) -> Result<()> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+    let whole = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(whole) {
         push_resource(value, out, keep_bundles);
         return Ok(());
     }
-    for (i, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: serde_json::Value =
-            serde_json::from_str(line).with_context(|| format!("parsing line {}", i + 1))?;
+    let mut lines = Splitter::new(text.as_bytes());
+    let mut buf = Vec::new();
+    while let Some(span) = lines.next_into(&mut buf)? {
+        let value: serde_json::Value = serde_json::from_slice(&buf[span.start..span.end])
+            .with_context(|| format!("parsing line {}", span.number))?;
         push_resource(value, out, keep_bundles);
+        buf.clear();
     }
     Ok(())
 }
@@ -1006,7 +1003,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 } else {
                     path.display().to_string()
                 };
-                let mut reader: Box<dyn io::BufRead> = if stdin_in {
+                let reader: Box<dyn io::BufRead> = if stdin_in {
                     Box::new(io::BufReader::new(io::stdin()))
                 } else {
                     read_text(
@@ -1016,22 +1013,23 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                         is_gz(path),
                     )
                 };
-                let mut line_no = 0;
-                let first = next_line(reader.as_mut(), &name, &mut line_no)?;
+                let mut lines = Splitter::new(reader);
+                let first = next_line(&mut lines, &name)?;
                 let one_value_per_line = !stdin_in
                     || first.as_ref().is_none_or(|(_, l)| {
                         serde_json::from_str::<serde::de::IgnoredAny>(l).is_ok()
                     });
                 if one_value_per_line {
                     let mut sink = open_sink(out.as_ref())?;
-                    let n =
-                        stream_ndjson(&view_def, first, reader, &name, line_no, &mut sink).await?;
+                    let n = stream_ndjson(&view_def, first, lines, &name, &mut sink).await?;
                     close_sink(sink, out.as_ref())?;
                     eprintln!("{n} rows");
                     return Ok(());
                 }
-                let mut text = first.map(|(_, l)| l).unwrap_or_default();
-                reader
+                // The first line, trimmed, and the rest as they are.
+                let mut text = first.map(|(_, l)| l + "\n").unwrap_or_default();
+                lines
+                    .into_inner()
                     .read_to_string(&mut text)
                     .context("reading FHIR resources from stdin")?;
                 let mut resources = Vec::new();
