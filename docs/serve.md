@@ -33,7 +33,10 @@ warehouse fails at start. Run records and logs are kept in
 `.serve/runs/<run id>/`.
 
 Each run is a child `fhir-pipes refresh` in a process group of its own, so
-`serve` can stop it and everything it started. A run started by `serve`
+`serve` can stop it and everything it started. It is given the warehouse
+`serve` holds with `--data`, whichever of `--data`, `FHIR_PIPES_DATA` and the
+config named it. Its result file, which the refresh writes for `serve`, is
+removed once read; the run's record keeps a copy with the secrets hidden. A run started by `serve`
 leaves the same warehouse as the same refresh run from cron. Do not also
 run `refresh` from cron on a warehouse `serve` looks after: the two would
 take turns on the warehouse's lock, and a run of `serve`'s that finds it
@@ -53,6 +56,7 @@ held fails at `lock` (and is retried).
     volumes:
       - ./fhir-pipes:/config:ro
       - warehouse:/warehouse
+    init: true                   # reaps the processes a refresh's tools leave
     restart: unless-stopped
     stop_grace_period: 150s      # more than [serve] stop_grace (120 s)
     logging:
@@ -65,6 +69,11 @@ Keycloak client (`server.token_url`), or from HAPI's database with
 `fetch = "hapi-db"`. The `serve` API is not FHIR and does not go through the
 Info Gateway; callers reach it on the Compose network or through the site's
 reverse proxy, which also terminates TLS.
+
+`init: true` runs a small init process as the container's PID 1, with
+`serve` under it. A process a refresh's tool leaves behind, once `serve`
+has killed it, is a zombie that only PID 1 can reap; without an init, they
+pile up in a long-running container.
 
 `restart: unless-stopped` brings `serve` back if it is killed, for example
 by the out-of-memory killer: `serve` and its refreshes share the
@@ -110,12 +119,12 @@ Every path but `/health` needs the token. Responses are JSON, apart from
 
 | Request | What it does |
 |---|---|
-| `POST /run` | Start a run. The body is optional (at most 16 KB): `{"mode": "incremental" \| "full", "only": [steps], "skip": [steps], "push": true}`. An empty body is an incremental run of every step. Answers `202` with `{"id", "status_url"}` once the run's record is written; `409` with `{"current": id}` if a run is under way; `400` for an unknown field, step or mode; `503` when the record cannot be written. |
+| `POST /run` | Start a run. The body is optional (at most 16 KB): `{"mode": "incremental" \| "full", "only": [steps], "skip": [steps], "push": true}`. An empty body is an incremental run of every step. Answers `202` with `{"id", "status_url"}` once the run's record is written; `409` with `{"current": id}` if a run is under way; `400` for an unknown field, step or mode; `503` when the record cannot be written or `serve` is stopping. |
 | `GET /status` | `{"current": run or null, "last": the last finished run or null, "next_scheduled": time or null}` |
 | `GET /runs?limit=50` | Recent runs, newest first, without each attempt's result (up to 500) |
 | `GET /runs/{id}` | A run's record |
 | `GET /runs/{id}/log?tail=200` | A run's output as text; without `tail`, all of it (up to 10,000 lines with it) |
-| `POST /runs/{id}/cancel` | Stop a run: SIGTERM to its refresh, SIGKILL after `stop_grace`; a run waiting between attempts ends at once. `409` once the run has ended. |
+| `POST /runs/{id}/cancel` | Stop a run: SIGTERM to its refresh, which stops its tools and holds the stop through its publish, then SIGKILL to everything the run started after `stop_grace`; a run waiting between attempts ends at once. `409` once the run has ended. |
 | `GET /metrics` | Prometheus metrics |
 | `GET /health` | `ok` |
 
@@ -220,8 +229,10 @@ counted rather than holding up the refresh.
 
 ### Secrets
 
-`serve` replaces these values with `***` in logs, records and notify
-bodies: `FHIR_PIPES_TOKEN`, `FHIR_PIPES_CLIENT_SECRET`,
+`refresh` hides the same values in an error before it cuts it short (an
+HTTP error body at 500 characters, `last-run.json`'s `error` at 2,000), so
+a cut cannot leave part of one. `serve` replaces these values with `***`
+in logs, records and notify bodies: `FHIR_PIPES_TOKEN`, `FHIR_PIPES_CLIENT_SECRET`,
 `FHIR_PIPES_PASSWORD`, `FHIR_PIPES_HAPI_DATABASE_URL`, the variable the
 `[database]` section names, `FHIR_PIPES_SERVE_TOKEN`, each notify
 `value_env`, and each notify `url`. A value shorter than 4 characters is
@@ -251,8 +262,8 @@ warehouse that has stopped refreshing, whatever the reason.
 
 ## Stopping
 
-On SIGTERM or Ctrl-C, `serve` stops taking requests and sends SIGTERM to
-the running refresh, which stops as [refresh.md](refresh.md#stopping-a-run)
+On SIGTERM or Ctrl-C, `serve` accepts no new run (a request gets `503`)
+and sends SIGTERM to the running refresh, which stops as [refresh.md](refresh.md#stopping-a-run)
 describes: before the database step it leaves the previous warehouse;
 from the database step to the end of the publish it finishes the publish
 first. After `stop_grace` seconds `serve` sends SIGKILL to the refresh's
@@ -260,7 +271,9 @@ process group. The run is recorded as it ended, or `interrupted`, and its
 notify is sent in the time left; anything not sent goes at the next start.
 
 A `serve` that is killed (SIGKILL, out of memory) marks the runs it left
-unfinished as `interrupted` when it next starts, and sends their notify.
+unfinished as `interrupted` when it next starts, and sends their notify. If
+it cannot write that, it stops with an error naming the run rather than
+leave the run `running` and never notified.
 It does not stop processes an earlier `serve` left behind, since a process
 id in an old record says nothing about who has it now. In Docker a
 container restart has already stopped them. Outside a container, a refresh

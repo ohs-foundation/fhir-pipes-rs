@@ -109,8 +109,13 @@ pub(super) fn exchanged(resp: Response, limit: u64) -> std::result::Result<Excha
     })
 }
 
+/// The first ERROR_BODY_CAP characters, after any secret the body quotes is
+/// hidden: cut first, a secret could be left in part.
 fn cap(body: String) -> String {
-    body.chars().take(ERROR_BODY_CAP).collect()
+    crate::redact::known_secrets(&body)
+        .chars()
+        .take(ERROR_BODY_CAP)
+        .collect()
 }
 
 /// Read at most ERROR_BODY_READ_LIMIT bytes of an error response, then cap

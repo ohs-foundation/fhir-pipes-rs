@@ -51,7 +51,12 @@ fn serve_command(config: &Path, listen: &str, env: &[(&str, &str)]) -> Command {
 
 /// Start serve on a free loopback port and wait for the address it prints.
 fn start_serve(config: &Path, env: &[(&str, &str)]) -> Serve {
+    start_serve_with(config, env, &[])
+}
+
+fn start_serve_with(config: &Path, env: &[(&str, &str)], args: &[&str]) -> Serve {
     let mut child = serve_command(config, "127.0.0.1:0", env)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
@@ -84,13 +89,30 @@ fn client() -> reqwest::blocking::Client {
         .unwrap()
 }
 
-/// Run serve to its exit, as for a config error; (code, stderr).
+/// Run serve to its exit, as for a config error; (code, stderr). One still
+/// running after 20 s is killed, with no code.
 fn serve_fails(config: &Path, listen: &str, env: &[(&str, &str)]) -> (Option<i32>, String) {
-    let out = serve_command(config, listen, env).output().unwrap();
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+    use std::io::Read;
+    let mut child = serve_command(config, listen, env)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let code = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s.code();
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+    (code, stderr)
 }
 
 fn data(config: &Path) -> PathBuf {
@@ -751,4 +773,190 @@ fn sigterm_stops_the_child_and_exits() {
     .unwrap();
     assert_eq!(r["status"], "interrupted", "{r}");
     assert!(r["finished_at"].is_string(), "{r}");
+}
+
+// ---- Fixes from the final review ----
+
+/// --data wins over FHIR_PIPES_DATA for serve and for the refreshes it starts.
+#[test]
+fn data_flag_reaches_the_refreshes() {
+    let (dir, config) = setup_with_raw("");
+    let other = dir.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    let data = data(&config);
+    let s = start_serve_with(
+        &config,
+        &[
+            ("FHIR_PIPES_SERVE_TOKEN", TOKEN),
+            ("FHIR_PIPES_REUSE_RAW", "true"),
+            ("FHIR_PIPES_DATA", other.to_str().unwrap()),
+        ],
+        &["--data", data.to_str().unwrap()],
+    );
+    let id = s.start_run(r#"{"only": ["views"]}"#);
+    let r = s.finished(&id);
+    assert_eq!(r["status"], "succeeded", "{r}");
+    assert!(data.join(format!(".serve/runs/{id}")).is_dir());
+    assert!(
+        data.join("parquet/obs/country=SLE/part-0.parquet")
+            .is_file()
+    );
+    assert!(
+        !other.join("parquet").exists(),
+        "the refresh wrote FHIR_PIPES_DATA's warehouse"
+    );
+}
+
+/// Once serve is stopping it accepts no new run, even while it waits to
+/// send the last run's notify.
+#[test]
+fn no_run_is_accepted_once_serve_is_stopping() {
+    let notify = HttpServer::run();
+    notify.expect(
+        Expectation::matching(any())
+            .times(..)
+            .respond_with(delay_and_then(Duration::from_secs(30), status_code(200))),
+    );
+    let (dir, config) = setup_with_raw(&format!(
+        "\n[serve]\nstop_grace = 5\n\n[[hooks]]\nname = \"slow\"\nrun = [\"sh\", \"-c\", \"touch started; exec sleep 30\"]\n{}",
+        notify_config(&notify)
+    ));
+    let mut s = start_api(&config, &[]);
+    s.start_run(r#"{"only": ["views", "hooks"]}"#);
+    wait_for(&dir.path().join("started"));
+    // SAFETY: kill(2) on the serve this test started.
+    unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
+    let started = Instant::now();
+    while s.child.try_wait().unwrap().is_none() && started.elapsed() < Duration::from_secs(4) {
+        if let Ok(r) = client()
+            .post(format!("{}/run", s.url))
+            .bearer_auth(TOKEN)
+            .send()
+        {
+            assert_ne!(
+                r.status(),
+                202,
+                "a run was accepted while serve was stopping"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A stdout nobody reads does not keep serve from stopping its run and
+/// exiting.
+#[test]
+fn a_blocked_stdout_does_not_stop_the_shutdown() {
+    use std::io::Read;
+    let (dir, config) = setup_with_raw(
+        "\n[serve]\nstop_grace = 1\n\n[[hooks]]\nname = \"noisy\"\nrun = [\"sh\", \"-c\", \"yes 0123456789012345678901234567890123456789 | head -c 20000000; touch printed; exec sleep 30\"]\n",
+    );
+    let mut child = serve_command(
+        &config,
+        "127.0.0.1:0",
+        &[
+            ("FHIR_PIPES_SERVE_TOKEN", TOKEN),
+            ("FHIR_PIPES_REUSE_RAW", "true"),
+        ],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    // Read up to the address, then keep the pipe open and read no more.
+    let mut stdout = child.stdout.take().unwrap();
+    let mut seen = Vec::new();
+    let mut byte = [0u8; 1];
+    while !String::from_utf8_lossy(&seen).contains('\n') {
+        stdout.read_exact(&mut byte).unwrap();
+        seen.push(byte[0]);
+    }
+    let url = String::from_utf8_lossy(&seen)
+        .trim()
+        .strip_prefix("listening on ")
+        .unwrap()
+        .to_string();
+    let r = client()
+        .post(format!("{url}/run"))
+        .bearer_auth(TOKEN)
+        .header("content-type", "application/json")
+        .body(r#"{"only": ["views", "hooks"]}"#)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    wait_for(&dir.path().join("printed"));
+    // SAFETY: kill(2) on the serve this test started.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(15) {
+            let _ = child.kill();
+            panic!("serve did not stop");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(stdout);
+}
+
+/// A cancel reaches refresh, which holds it back through its publish: the
+/// catalog.duckdb build under way finishes.
+#[test]
+fn a_cancel_during_the_publish_lets_it_finish() {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = tempfile::tempdir().unwrap();
+    let duckdb = tools.path().join("duckdb");
+    fs::write(
+        &duckdb,
+        "#!/bin/sh\necho $$ > duckdb.pid\ncat > /dev/null\nsleep 2\n: > \"$1\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&duckdb, fs::Permissions::from_mode(0o755)).unwrap();
+    let (_dir, config) = setup_with_raw(&format!(
+        "\n[serve]\nstop_grace = 10\n\n[tools]\nduckdb = '{}'\n\n[catalog]\nduckdb_file = true\n",
+        duckdb.display()
+    ));
+    let s = start_api(&config, &[]);
+    let id = s.start_run(r#"{"only": ["views"]}"#);
+    let data = data(&config);
+    wait_for(&data.join("duckdb.pid"));
+    let (status, _) = s.post(&format!("/runs/{id}/cancel"), None);
+    assert_eq!(status, 200);
+    let r = s.finished(&id);
+    assert_eq!(r["status"], "cancelled", "{r}");
+    let result = &r["attempts"][0]["result"];
+    assert_eq!(result["published"], true, "{r}");
+    assert!(
+        data.join("catalog.duckdb").is_file(),
+        "the catalog build was stopped"
+    );
+}
+
+/// A run left unfinished whose end cannot be recorded stops serve at start,
+/// rather than being forgotten.
+#[test]
+fn an_unrecordable_recovery_stops_serve_at_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, config) = setup_with_raw("");
+    let run = data(&config).join(".serve/runs/20261021T020000Z-7f3a");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("run.json"),
+        json_record("20261021T020000Z-7f3a", "running"),
+    )
+    .unwrap();
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o500)).unwrap();
+    let (code, stderr) = serve_fails(&config, "127.0.0.1:0", &[("FHIR_PIPES_SERVE_TOKEN", TOKEN)]);
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("20261021T020000Z-7f3a"), "{stderr}");
+}
+
+fn json_record(id: &str, status: &str) -> String {
+    serde_json::json!({
+        "id": id, "trigger": "api",
+        "request": {"mode": "incremental", "only": [], "skip": [], "push": false},
+        "status": status, "accepted_at": "t", "started_at": "t", "finished_at": null,
+        "attempts": [], "retry": null, "notify": {},
+    })
+    .to_string()
 }

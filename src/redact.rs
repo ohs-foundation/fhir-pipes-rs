@@ -34,6 +34,41 @@ pub fn sql_strings(text: &str, sql: &str) -> String {
     out
 }
 
+/// The variables whose values refresh holds as secrets.
+const SECRET_VARS: [&str; 6] = [
+    "FHIR_PIPES_TOKEN",
+    "FHIR_PIPES_CLIENT_SECRET",
+    "FHIR_PIPES_PASSWORD",
+    "FHIR_PIPES_HAPI_DATABASE_URL",
+    "FHIR_PIPES_DATABASE_URL",
+    "FHIR_PIPES_SERVE_TOKEN",
+];
+
+/// `text` with the value of each secret variable in the environment (4
+/// characters or longer, a line at a time) replaced by `***`. Applied before
+/// text that may quote a secret is cut short, since a cut secret can no
+/// longer be found by whoever reads it later (fhir-pipes serve).
+pub fn known_secrets(text: &str) -> String {
+    let mut values: Vec<String> = SECRET_VARS
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .flat_map(|v| {
+            v.lines()
+                .map(str::trim_end)
+                .filter(|l| l.len() >= 4)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // The longest first, so a value inside another is not matched first.
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    let mut out = text.to_string();
+    for v in values {
+        out = out.replace(&v, "***");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

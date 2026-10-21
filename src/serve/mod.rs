@@ -60,7 +60,6 @@ struct App {
 /// The pieces of a serve that the API and the schedule share.
 fn server(
     inputs: &crate::warehouse::ServeInputs,
-    data_flag: Option<&PathBuf>,
     cfg: config::ServeConfig,
 ) -> Result<Arc<api::Server>> {
     let store = Arc::new(store::Store::open(inputs.data.join(".serve/runs"))?);
@@ -77,10 +76,10 @@ fn server(
         "--config".to_string(),
         inputs.config.display().to_string(),
     ];
-    if let Some(d) = data_flag {
-        base_args.extend(["--data".to_string(), d.display().to_string()]);
-    }
-    interrupt_unfinished(&store, &cfg);
+    // The warehouse serve locked, whichever of --data, FHIR_PIPES_DATA and
+    // the config named it, so the refreshes write the same one.
+    base_args.extend(["--data".to_string(), inputs.data.display().to_string()]);
+    interrupt_unfinished(&store, &cfg, &stdout)?;
     let notifier = notify::Notifier::start(
         store.clone(),
         cfg.notify.clone(),
@@ -105,6 +104,7 @@ fn server(
         data: inputs.data.clone(),
         current: std::sync::Mutex::new(None),
         clock: schedule::clock(),
+        stopping: Default::default(),
     }))
 }
 
@@ -126,13 +126,7 @@ pub fn run(args: &ServeArgs) -> Result<()> {
     let dir = inputs.data.join(".serve");
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let _lock = lock(&dir.join("serve.lock"))?;
-    // FHIR_PIPES_DATA reaches the refreshes through the environment; a
-    // --data flag is passed on.
-    let data_flag = args
-        .data
-        .as_ref()
-        .filter(|_| std::env::var_os("FHIR_PIPES_DATA").is_none());
-    let server = server(&inputs, data_flag, cfg)?;
+    let server = server(&inputs, cfg)?;
     if !server.job.cfg.schedule.is_empty() {
         let s = server.clone();
         std::thread::spawn(move || {
@@ -159,6 +153,7 @@ pub fn run(args: &ServeArgs) -> Result<()> {
                             eprintln!("fhir-pipes: error: a scheduled run was not started: {e}");
                             schedule::Fired::Refused
                         }
+                        Err(api::Refused::Stopping) => schedule::Fired::Refused,
                     }
                 },
                 None,
@@ -176,7 +171,14 @@ pub fn run(args: &ServeArgs) -> Result<()> {
             .await
             .with_context(|| format!("listening on {listen}"))?;
         let addr = listener.local_addr()?;
-        println!("listening on http://{addr}");
+        // Straight to stdout, before any run: a reader waits for it. A closed
+        // stdout is not an error.
+        {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "listening on http://{addr}");
+            let _ = out.flush();
+        }
         axum::serve(listener, router(app, server.clone()))
             .with_graceful_shutdown(shutdown(server))
             .await
@@ -195,15 +197,25 @@ fn router(app: App, server: Arc<api::Server>) -> Router {
 /// are marked interrupted with their destinations pending, so the notifier
 /// sends them. No process is signalled: a process group number in an old
 /// record says nothing about who owns it now.
-fn interrupt_unfinished(store: &store::Store, cfg: &config::ServeConfig) {
-    let runs = match store.unfinished() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("fhir-pipes: warning: {}", crate::error::message(&e));
-            return;
-        }
-    };
+///
+/// A run whose end cannot be written stops serve here, before any run is
+/// accepted: it would otherwise stay `running`, never notified.
+fn interrupt_unfinished(
+    store: &store::Store,
+    cfg: &config::ServeConfig,
+    out: &output::StdoutQueue,
+) -> Result<()> {
+    let runs = store.unfinished()?;
     for mut rec in runs {
+        // An attempt that was under way may have left its result file, which
+        // is the child's and not redacted.
+        if let Ok(entries) = std::fs::read_dir(store.run_dir(&rec.id)) {
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().starts_with("attempt-") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         rec.status = store::RunStatus::Interrupted;
         rec.finished_at = Some(runner::now());
         for d in &cfg.notify {
@@ -216,11 +228,18 @@ fn interrupt_unfinished(store: &store::Store, cfg: &config::ServeConfig) {
                 },
             );
         }
-        match store.save(&rec) {
-            Ok(()) => println!("{} interrupted: serve stopped during it", rec.id.as_str()),
-            Err(e) => eprintln!("fhir-pipes: warning: {}", crate::error::message(&e)),
-        }
+        store.save(&rec).with_context(|| {
+            format!(
+                "recording that run {} was interrupted by the last serve",
+                rec.id.as_str()
+            )
+        })?;
+        out.push(format!(
+            "{} interrupted: serve stopped during it",
+            rec.id.as_str()
+        ));
     }
+    Ok(())
 }
 
 /// Wait for SIGTERM or Ctrl-C, then stop: the current run is interrupted,
@@ -240,7 +259,12 @@ async fn shutdown(server: Arc<api::Server>) {
             let _ = tokio::signal::ctrl_c().await;
         }
     }
-    println!("stopping: no new runs");
+    // Before anything else, and without writing to stdout, which may be
+    // blocked: no run is accepted from now on.
+    server
+        .stopping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    server.job.stdout.push("stopping: no new runs".into());
     let _ = tokio::task::spawn_blocking(move || stop(&server)).await;
 }
 
@@ -256,7 +280,10 @@ fn stop(server: &api::Server) {
     let Some((id, token)) = current else {
         return;
     };
-    println!("{} interrupted: serve is stopping", id.as_str());
+    server
+        .job
+        .stdout
+        .push(format!("{} interrupted: serve is stopping", id.as_str()));
     token.interrupt(grace);
     let waiting = |done: &dyn Fn() -> bool| {
         while !done() && std::time::Instant::now() < deadline {

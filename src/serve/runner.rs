@@ -65,32 +65,56 @@ struct CancelState {
     cancelled: bool,
     /// The stop came from serve stopping, not from a cancel.
     interrupted: bool,
+    /// The grace period the stop gives, kept for an attempt that starts (or
+    /// registers its group) after it.
+    grace: Option<Duration>,
     /// The running attempt's process group, while its leader is not reaped:
     /// until then the id cannot be anyone else's.
     pgid: Option<i32>,
 }
 
 impl CancelToken {
-    /// Stop the run: SIGTERM to the running attempt's process group, then
-    /// SIGKILL after `grace` if it is still running; a run waiting between
-    /// attempts ends at once.
+    /// Stop the run: SIGTERM to the running attempt's refresh, which stops
+    /// its own tools (holding the stop through its commit window), then
+    /// SIGKILL to the whole group after `grace` if it is still running. A run
+    /// waiting between attempts ends at once.
     pub fn cancel(&self, grace: Duration) {
         let pgid = {
             let mut s = self.lock();
             s.cancelled = true;
+            s.grace = Some(grace);
             s.pgid
         };
         self.0.changed.notify_all();
         if let Some(pgid) = pgid {
-            self.signal_group(libc::SIGTERM);
-            let token = self.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(grace);
-                // Only the same attempt, if it is still not reaped.
-                if token.lock().pgid == Some(pgid) {
-                    token.signal_group(libc::SIGKILL);
-                }
-            });
+            self.stop_attempt(pgid, grace);
+        }
+    }
+
+    /// SIGTERM to the leader of group `pgid`, and SIGKILL to the group after
+    /// `grace` if it is still this attempt's.
+    fn stop_attempt(&self, pgid: i32, grace: Duration) {
+        self.signal_leader(libc::SIGTERM);
+        let token = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            if token.lock().pgid == Some(pgid) {
+                token.signal_group(libc::SIGKILL);
+            }
+        });
+    }
+
+    /// The attempt's group is `pgid` from now on. A stop that came before
+    /// the group was known reaches it now, with its grace period and its
+    /// SIGKILL.
+    fn register(&self, pgid: i32) {
+        let stopped = {
+            let mut s = self.lock();
+            s.pgid = Some(pgid);
+            s.cancelled.then_some(s.grace).flatten()
+        };
+        if let Some(grace) = stopped {
+            self.stop_attempt(pgid, grace);
         }
     }
 
@@ -115,6 +139,18 @@ impl CancelToken {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CancelState> {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Send `sig` to the running attempt's refresh, under the lock that keeps
+    /// it from being reaped meanwhile.
+    fn signal_leader(&self, sig: i32) {
+        let s = self.lock();
+        if let Some(pgid) = s.pgid {
+            // SAFETY: kill(2) on the group's leader, which is not yet reaped.
+            unsafe {
+                libc::kill(pgid, sig);
+            }
+        }
     }
 
     /// Send `sig` to the running attempt's group, under the lock that keeps
@@ -263,6 +299,21 @@ fn args(job: &Job, req: &RunRequest) -> Vec<String> {
     a
 }
 
+/// Whether a `/proc/<pid>/stat` line is of a live process in group `pgid`.
+/// A zombie is not: it holds nothing open, and only its parent can reap it
+/// (an init process, when serve is a container's PID 1).
+#[cfg(any(test, target_os = "linux"))]
+fn live_member(stat: &str, pgid: i32) -> bool {
+    // The fields after the last ')': state ppid pgrp …
+    let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+        return false;
+    };
+    let mut fields = rest.split_whitespace();
+    let state = fields.next();
+    let pgrp = fields.nth(1).and_then(|p| p.parse::<i32>().ok());
+    pgrp == Some(pgid) && state.is_some_and(|s| s != "Z")
+}
+
 /// The other members of process group `pgid`.
 #[cfg(target_os = "linux")]
 fn group_members(pgid: i32) -> Vec<i32> {
@@ -272,15 +323,8 @@ fn group_members(pgid: i32) -> Vec<i32> {
     dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|&pid| pid != pgid)
         .filter(|pid| {
-            // /proc/<pid>/stat: pid (comm) state ppid pgrp …; comm may hold
-            // spaces and parentheses, so the fields are read after the last ')'.
             std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .ok()
-                .and_then(|s| {
-                    let rest = &s[s.rfind(')')? + 1..];
-                    rest.split_whitespace().nth(2)?.parse::<i32>().ok()
-                })
-                == Some(pgid)
+                .is_ok_and(|s| live_member(&s, pgid))
         })
         .collect()
 }
@@ -372,14 +416,7 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         rec.id.as_str().to_string(),
     );
     let pid = child.id() as i32;
-    let cancelled = {
-        let mut s = cancel.lock();
-        s.pgid = Some(pid);
-        s.cancelled
-    };
-    if cancelled {
-        cancel.signal_group(libc::SIGTERM);
-    }
+    cancel.register(pid);
     wait_exited(pid);
     // The leader has exited and is not reaped, so the group id is still
     // this attempt's: whatever it left running is stopped before the
@@ -411,6 +448,8 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
     let exit = status.map(ExitKind::from).unwrap_or(ExitKind::Code(1));
     let mut result = result_of(exit, &result_file, &stderr_tail);
     job.redactor.redact_json(&mut result);
+    // The record keeps the redacted copy; the child's own file goes.
+    let _ = std::fs::remove_file(&result_file);
     (exit, result)
 }
 
@@ -519,6 +558,16 @@ mod tests {
 
     fn failed(step: &str, code: i32) -> Value {
         json!({"status": "failed", "failed_step": step, "exit_code": code})
+    }
+
+    #[test]
+    fn a_zombie_is_not_a_live_member_of_the_group() {
+        // pid (comm) state ppid pgrp …; comm may hold spaces and parentheses.
+        assert!(live_member("42 (sleep) S 7 7 7 0", 7));
+        assert!(live_member("42 (a b (c)) R 7 7 7 0", 7));
+        assert!(!live_member("42 (sleep) Z 1 7 7 0", 7), "a zombie");
+        assert!(!live_member("42 (sleep) S 7 8 8 0", 7), "another group");
+        assert!(!live_member("garbage", 7));
     }
 
     #[test]
@@ -746,6 +795,63 @@ mod tests {
         assert_eq!(r.status, RunStatus::Cancelled);
         assert_eq!(r.attempts.len(), 1);
         assert!(!alive(&pid), "the tool outlived the cancel");
+    }
+
+    /// A cancel that comes before the attempt's group is registered still
+    /// ends in SIGKILL after the grace period.
+    #[test]
+    fn a_cancel_before_the_group_is_registered_still_kills() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        // Ignores SIGTERM, and says so once it does.
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!("trap '' TERM; touch {}; sleep 30", ready.display()),
+            ])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        while !ready.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let cancel = CancelToken::default();
+        cancel.cancel(Duration::from_millis(300));
+        cancel.register(child.id() as i32);
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break s;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "never killed");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.signal(), Some(9));
+    }
+
+    /// The child's own result file is removed once read: the record keeps
+    /// its redacted copy.
+    #[test]
+    fn the_result_file_is_removed_once_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = job(
+            dir.path(),
+            r#"echo '{"status":"failed","failed_step":"views","exit_code":1}' > "$FHIR_PIPES_RESULT_FILE"; exit 1"#,
+            1,
+        );
+        let r = run(&job, start(&job), &CancelToken::default());
+        assert_eq!(r.attempts.len(), 2);
+        assert_eq!(
+            r.attempts[1].result.as_ref().unwrap()["failed_step"],
+            "views"
+        );
+        let left: Vec<String> = std::fs::read_dir(job.store.run_dir(&r.id))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("attempt-"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]

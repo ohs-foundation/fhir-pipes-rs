@@ -46,6 +46,8 @@ pub struct Server {
     pub current: Mutex<Option<(RunId, CancelToken)>>,
     /// The schedule's clock, for `next_scheduled`.
     pub clock: Arc<dyn super::schedule::Clock>,
+    /// Set once serve has been told to stop: no run is accepted after.
+    pub stopping: std::sync::atomic::AtomicBool,
 }
 
 /// Why a run was not started.
@@ -54,6 +56,8 @@ pub enum Refused {
     Busy(RunId),
     /// Its record could not be written.
     Unrecorded(String),
+    /// serve is stopping.
+    Stopping,
 }
 
 impl Server {
@@ -68,6 +72,11 @@ impl Server {
         request: RunRequest,
     ) -> Result<RunId, Refused> {
         let mut current = self.lock_current();
+        // Read under the lock that shutdown takes after setting it, so a run
+        // is either accepted before shutdown looks for it, or refused.
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(Refused::Stopping);
+        }
         if let Some((id, _)) = current.as_ref() {
             return Err(Refused::Busy(id.clone()));
         }
@@ -174,6 +183,7 @@ async fn start_run(State(server): State<Arc<Server>>, body: Bytes) -> Response {
         )
             .into_response(),
         Ok(Err(Refused::Unrecorded(e))) => error(StatusCode::SERVICE_UNAVAILABLE, e),
+        Ok(Err(Refused::Stopping)) => error(StatusCode::SERVICE_UNAVAILABLE, "serve is stopping"),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -352,6 +362,7 @@ mod tests {
             data: dir.to_path_buf(),
             current: Mutex::new(None),
             clock: Arc::new(super::super::schedule::SystemClock),
+            stopping: Default::default(),
         })
     }
 
