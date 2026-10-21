@@ -37,8 +37,8 @@ use serde_json::Value;
 
 use crate::error::{PipesError, Result};
 use crate::extract::page::{
-    PAGE_SIZE, PageNote, PageResult, ServerKind, count_matching, count_resources, page_search,
-    server_url,
+    PAGE_SIZE, PageNote, PageResult, Search, ServerKind, count_matching, count_resources,
+    page_search, server_url,
 };
 use crate::fhir::ndjson::NdjsonReader;
 use crate::http::FhirClient;
@@ -389,13 +389,12 @@ fn page_window(
         let mut report = Report::default();
         let paged = page_search(
             client,
-            o.server,
-            o.kind,
-            t,
-            &window.params(),
+            &Search {
+                params: &window.params(),
+                ..Search::new(o.server, o.kind, t)
+            },
             file,
             &mut report,
-            &[],
             &mut |_| true,
         )?
         .expect("paging stops early only when told to");

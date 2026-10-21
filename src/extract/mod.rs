@@ -11,7 +11,7 @@ use crate::cli::ExtractArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::boundary::{FetchOptions, fetch_boundaries};
 use crate::extract::cache::Cache;
-use crate::extract::page::{CountCheck, check_count, page_locations, page_resources};
+use crate::extract::page::{CountCheck, Search, check_count, page_resources};
 use crate::http::FhirClient;
 use crate::report::{Report, write_report};
 use crate::snapshot::instant::{capped_watermark, format_utc, parse_instant};
@@ -142,14 +142,15 @@ fn run_phases(
     .for_server(&args.server);
     let mut report = Report::default();
 
-    let paged = page_locations(
+    let paged = page_resources(
         &client,
-        &args.server,
-        args.server_kind,
+        &Search {
+            boundary_extensions,
+            ..Search::new(&args.server, args.server_kind, "Location")
+        },
         since,
         &snap.incoming(),
         &mut report,
-        boundary_extensions,
     )?;
     // Reported here rather than inside the pager so every phase summary is
     // printed by the orchestrator; the pager returns the moment it is done,
@@ -238,13 +239,10 @@ fn run_phases(
     // snapshot behind, with the state file untouched until both succeed.
     let org_paged = page_resources(
         &client,
-        &args.server,
-        args.server_kind,
-        "Organization",
+        &Search::new(&args.server, args.server_kind, "Organization"),
         org_since,
         &snap.incoming_organizations(),
         &mut report,
-        &[],
     )?;
     eprintln!(
         "paged {} organizations over {} page(s)",

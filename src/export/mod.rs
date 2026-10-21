@@ -49,8 +49,8 @@ use serde_json::Value;
 use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::page::{
-    CountCheck, PageResult, ServerKind, check_count, count_resources, next_link, page_resources,
-    page_search,
+    CountCheck, PageResult, Search, ServerKind, check_count, count_resources, next_link,
+    page_resources, page_search,
 };
 use crate::fhir::valid_type;
 use crate::http::FhirClient;
@@ -292,13 +292,10 @@ fn export_changes(
     let incoming = incoming_path(&args.out, resource_type);
     let paged = match page_resources(
         client,
-        &args.server,
-        args.server_kind,
-        resource_type,
+        &Search::new(&args.server, args.server_kind, resource_type),
         Some(since),
         &incoming,
         report,
-        &[],
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -485,13 +482,9 @@ fn download_all(
     let mut issues = Report::default();
     let stream = page_search(
         client,
-        &args.server,
-        kind,
-        resource_type,
-        &[],
+        &Search::new(&args.server, kind, resource_type),
         tmp,
         &mut issues,
-        &[],
         &mut |first| {
             if !(side_by_side || kind.max_window().is_some()) || next_link(first).is_none() {
                 return true;
@@ -526,13 +519,10 @@ fn download_all(
             println!("{resource_type}: {why}; paging it as one stream");
             let paged = page_resources(
                 client,
-                &args.server,
-                kind,
-                resource_type,
+                &Search::new(&args.server, kind, resource_type),
                 None,
                 tmp,
                 report,
-                &[],
             )?;
             Ok((paged, None))
         }
