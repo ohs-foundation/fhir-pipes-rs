@@ -15,13 +15,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
+use super::Instance;
 use super::api::{Dhis2, ServerInfo, in_filter};
-use super::{Instance, write_ndjson};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
 use crate::error::{PipesError, Result};
+use crate::fhir::ndjson::write_ndjson;
 use crate::fs::check_out;
-use crate::report::Report;
-use crate::transform::write_report;
+use crate::report::{Report, write_report};
 
 pub const MEASURE_SCORING_SYSTEM: &str = "http://terminology.hl7.org/CodeSystem/measure-scoring";
 pub const MEASURE_POPULATION_SYSTEM: &str =

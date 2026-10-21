@@ -41,7 +41,9 @@ fn icrs_profile_matches_its_ig() {
         out.contains("nga-nhfr-code (the IG's Organization profiles slice no identifier systems)"),
         "{out}"
     );
-    assert!(out.contains("StructureDefinition/catchment-of"), "{out}");
+    // Read as [location] catchment_extension.
+    assert!(!out.contains("StructureDefinition/catchment-of"), "{out}");
+    assert!(out.contains("StructureDefinition/building-count"), "{out}");
     assert!(out.contains("0 error(s), 3 warning(s)"), "{out}");
 }
 
@@ -74,6 +76,15 @@ facility_type = "clinic"
     )
     .unwrap();
     let a = check(&old).code(1);
+    let stderr = String::from_utf8_lossy(&a.get_output().stderr).to_string();
+    let errors = lines(&a, "error");
+    assert_eq!(
+        stderr,
+        format!(
+            "fhir-pipes: the profile does not match the IG: {} error(s)\n",
+            errors.len()
+        )
+    );
     let errors = lines(&a, "error").join("\n");
     for want in [
         "overlays-admin-unit is not an extension in the IG",

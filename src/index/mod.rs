@@ -1,4 +1,5 @@
 pub mod build;
+pub mod command;
 pub mod hierarchy;
 pub mod hilbert;
 pub mod partition;

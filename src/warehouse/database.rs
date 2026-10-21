@@ -455,7 +455,7 @@ async fn write(
     let upsert = marks.is_some();
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
-    crate::extract::client::ensure_crypto_provider();
+    crate::http::ensure_crypto_provider();
     let mut conn = PgConnection::connect(url)
         .await
         .context("connecting to the database")?;

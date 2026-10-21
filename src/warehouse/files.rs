@@ -44,7 +44,7 @@ pub fn expand(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
     let mut seen = std::collections::HashSet::new();
     files.retain(|f| seen.insert(f.clone()));
-    crate::views::check_no_gz_copies(&files)?;
+    crate::fhir::input::check_no_gz_copies(&files)?;
     Ok(files)
 }
 
@@ -57,7 +57,7 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
                 input.display()
             )));
         }
-        return crate::views::resource_files(input);
+        return crate::fhir::input::resource_files(input);
     }
     // Hidden files are skipped here as in a directory.
     let options = glob::MatchOptions {
@@ -78,8 +78,8 @@ fn expand_one(input: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for m in matches {
         if m.is_dir() {
-            files.extend(crate::views::resource_files(&m)?);
-        } else if crate::views::is_resource_file(&m) {
+            files.extend(crate::fhir::input::resource_files(&m)?);
+        } else if crate::fhir::input::is_resource_file(&m) {
             files.push(m);
         }
     }
@@ -137,7 +137,7 @@ struct Index {
 
 impl Index {
     fn add(&mut self, rtype: Option<String>, id: Option<String>, slot: Slot) {
-        match rtype.filter(|t| crate::export::valid_type(t)) {
+        match rtype.filter(|t| crate::fhir::valid_type(t)) {
             Some(t) => self.types.entry(t).or_default().add(id, slot),
             None => self.skipped += 1,
         }
@@ -147,7 +147,7 @@ impl Index {
     fn spill(&mut self, r: Value, sources: &mut Sources) -> Result<()> {
         let s = |p: &str| r.pointer(p).and_then(Value::as_str).map(str::to_string);
         let (rtype, id) = (s("/resourceType"), s("/id"));
-        if !rtype.as_deref().is_some_and(crate::export::valid_type) {
+        if !rtype.as_deref().is_some_and(crate::fhir::valid_type) {
             self.skipped += 1;
             return Ok(());
         }
@@ -308,12 +308,12 @@ pub fn split(s: &Settings) -> Result<()> {
     let keep_bundles = s
         .views
         .as_ref()
-        .and_then(|d| super::views::discover(d, &s.strip_prefix).ok())
+        .and_then(|d| crate::views::run::discover(d, &s.strip_prefix).ok())
         .is_some_and(|views| views.iter().any(|v| v.resource == "Bundle"));
     for file in &files {
-        if !crate::views::is_ndjson(file) {
+        if !crate::fhir::input::is_ndjson(file) {
             let mut batch = Vec::new();
-            crate::views::load_json_file(file, &mut batch, keep_bundles)?;
+            crate::fhir::input::load_json_file(file, &mut batch, keep_bundles)?;
             for r in batch {
                 index.spill(r, &mut sources)?;
             }
@@ -322,7 +322,7 @@ pub fn split(s: &Settings) -> Result<()> {
         // A gzip file is read once; its lines are copied to the spill file.
         let gz = is_gz(file);
         let source = if gz { 0 } else { sources.add_input(file)? };
-        for chunk in crate::views::ndjson::open(file)? {
+        for chunk in crate::fhir::chunks::open(file)? {
             let chunk = chunk?;
             let reads = chunk.parse(s.threads, |line| {
                 Ok(match Head::parse(line)? {
@@ -331,7 +331,7 @@ pub fn split(s: &Settings) -> Result<()> {
                     }
                     _ => {
                         let mut out = Vec::new();
-                        crate::views::push_resource(
+                        crate::fhir::input::push_resource(
                             serde_json::from_str(line)?,
                             &mut out,
                             keep_bundles,
@@ -456,7 +456,7 @@ fn raw_types(dir: &Path) -> Result<Vec<String>> {
             continue;
         }
         if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy())
-            && crate::export::valid_type(&stem)
+            && crate::fhir::valid_type(&stem)
         {
             types.push(stem.into_owned());
         }
@@ -536,7 +536,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
 /// non-blank lines, counted a chunk at a time.
 fn copy_into(from: &Path, tmp: &Path, to: &Path) -> Result<usize> {
     let mut count = 0;
-    for chunk in crate::views::ndjson::open(from)? {
+    for chunk in crate::fhir::chunks::open(from)? {
         count += chunk?.len();
     }
     // Removes the copy if it fails part of the way.
@@ -594,7 +594,7 @@ mod tests {
             if f.extension().is_some_and(|x| x == "ndjson") {
                 for line in fs::read_to_string(f).unwrap().lines() {
                     if !line.trim().is_empty() {
-                        crate::views::push_resource(
+                        crate::fhir::input::push_resource(
                             serde_json::from_str(line).unwrap(),
                             &mut all,
                             false,
@@ -602,7 +602,7 @@ mod tests {
                     }
                 }
             } else {
-                crate::views::load_json_file(f, &mut all, false).unwrap();
+                crate::fhir::input::load_json_file(f, &mut all, false).unwrap();
             }
         }
         let mut types: BTreeMap<String, (Vec<Value>, HashMap<String, usize>)> = BTreeMap::new();
@@ -615,7 +615,7 @@ mod tests {
             let Some(t) = r
                 .get("resourceType")
                 .and_then(Value::as_str)
-                .filter(|t| crate::export::valid_type(t))
+                .filter(|t| crate::fhir::valid_type(t))
             else {
                 continue;
             };

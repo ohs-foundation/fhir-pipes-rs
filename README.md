@@ -782,18 +782,19 @@ src/
   main.rs, cli.rs, error.rs
   fs.rs, work.rs, report.rs
                   whole-file writes, the parallel work queue, data-quality issues
-  warehouse/      refresh: config, views, partitioning, manifest, tiles, hooks, push
-  views/          views: run, sql, validate, lint, test
+  http.rs, http/  the HTTP client: retry, OAuth, Google credentials
+  warehouse/      refresh: config, partitioning, manifest, tiles, hooks, push
+  views/          views: run, sql, validate, lint, test; running views in memory (run.rs)
   export/         export: search paging, Bulk Data $export (bulk.rs), HAPI database (hapi_db.rs)
-  extract/        FHIR client with retry and OAuth, paging, boundary fetch and cache
+  extract/        paging, boundary fetch and cache
   snapshot/       state.json, merge by id
   load/           parents-first ordering, transaction bundles with ifMatch
   sync/           sync: copy an export directory to a second FHIR server
-  fhir/           resource parsing, NDJSON reading and writing, FHIR packages
+  fhir/           resource parsing, reading resource files, NDJSON reading and writing, FHIR packages
   transform.rs, index/, geometry/, write/, inspect.rs, run.rs
-                  the locations transform: hierarchy, geometry, GeoParquet
+                  the locations transform: hierarchy, geometry, GeoParquet;
+                  index/command.rs is the index command (spatial index cells)
   diff/           edits back to FHIR resources
-  cells.rs        index: spatial index identifiers
   raster/, population.rs
                   population Groups from a raster
   dhis2/          DHIS2 import

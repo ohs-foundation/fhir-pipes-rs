@@ -21,10 +21,10 @@ use serde::de::{Deserialize, Deserializer, IgnoredAny, MapAccess, SeqAccess, Vis
 use serde_json::Value;
 
 use super::{LocationSitesArgs, Shape, Site, TypeConcept, slugify, split_pair};
-use crate::dhis2::NdjsonWriter;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
+use crate::fhir::ndjson::NdjsonWriter;
 use crate::fhir::spatial::{compute_cell, extension_json, parse_scheme_level};
 use crate::profile::Profile;
 use crate::report::Report;
@@ -772,7 +772,7 @@ pub fn run(args: &LocationSitesArgs, profile: &Profile) -> Result<()> {
     );
     println!("{}", report.summary());
     if let Some(path) = &args.report {
-        crate::transform::write_report(path, &report)?;
+        crate::report::write_report(path, &report)?;
     }
     Ok(())
 }

@@ -65,6 +65,9 @@ pub struct LocationProfile {
     pub boundary_extensions: Vec<String>,
     /// valueReference list of admin units an operational area overlaps.
     pub overlays_extension: Option<String>,
+    /// valueReference to what a catchment area is the catchment of: the
+    /// `catchment_of` of `refresh`'s catchment tiles.
+    pub catchment_extension: Option<String>,
     /// The spatial index extension (quadkey, geohash, h3 cells).
     pub spatial_index_extension: Option<String>,
     /// The Location type code of an administrative unit.
@@ -498,8 +501,8 @@ fn fetch(url: &str) -> Result<String> {
 /// The body of `url`, unauthenticated, with the usual retries; an error
 /// names `flag`, the option the URL came from.
 pub(crate) fn fetch_bytes(url: &str, flag: &str, timeout: Duration) -> Result<Vec<u8>> {
-    let client = crate::extract::client::FhirClient::new(
-        crate::extract::client::Auth::None,
+    let client = crate::http::FhirClient::new(
+        crate::http::Auth::None,
         crate::cli::DEFAULT_RETRIES,
         timeout,
     )?;

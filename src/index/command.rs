@@ -19,13 +19,12 @@ use crate::fs::AtomicFile;
 use crate::report::Report;
 use crate::snapshot::LOCATIONS_FILE;
 
-pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
+pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> anyhow::Result<()> {
     let ndjson = args.snapshot.join(LOCATIONS_FILE);
     if !ndjson.is_file() {
-        return Err(PipesError::Usage(format!(
-            "snapshot file not found: {}",
-            ndjson.display()
-        )));
+        return Err(
+            PipesError::Usage(format!("snapshot file not found: {}", ndjson.display())).into(),
+        );
     }
     crate::fs::check_out(&args.out)?;
     // The cells go in the profile's spatial index extension.
@@ -111,7 +110,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
         report.counts().get("no_position").copied().unwrap_or(0)
     );
     if let Some(path) = &args.report {
-        crate::transform::write_report(path, &report)?;
+        crate::report::write_report(path, &report)?;
     }
     Ok(())
 }

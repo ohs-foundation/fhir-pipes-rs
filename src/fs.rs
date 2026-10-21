@@ -351,6 +351,30 @@ impl Drop for AtomicFile {
     }
 }
 
+/// `files` one after another into `out`: the first renamed, the rest
+/// appended to it, each removed once copied.
+pub fn concatenate(files: &[PathBuf], out: &Path) -> Result<()> {
+    let Some((first, rest)) = files.split_first() else {
+        create_private(out).map_err(|e| PipesError::io(out, e))?;
+        return Ok(());
+    };
+    std::fs::rename(first, out).map_err(|e| PipesError::io(out, e))?;
+    if rest.is_empty() {
+        return Ok(());
+    }
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(out)
+        .map_err(|e| PipesError::io(out, e))?;
+    for path in rest {
+        let mut reader = std::fs::File::open(path).map_err(|e| PipesError::io(path, e))?;
+        std::io::copy(&mut reader, &mut writer).map_err(|e| PipesError::io(out, e))?;
+        drop(reader);
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

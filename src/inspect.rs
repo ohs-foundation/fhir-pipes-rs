@@ -185,7 +185,7 @@ pub fn format_summary(s: &Summary) -> String {
     lines.join("\n")
 }
 
-pub fn run_inspect(args: &InspectArgs) -> Result<()> {
+pub fn run_inspect(args: &InspectArgs) -> anyhow::Result<()> {
     let summary = summarize(&args.out)?;
     println!("{}", format_summary(&summary));
     Ok(())

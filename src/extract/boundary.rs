@@ -17,7 +17,7 @@ use base64::Engine;
 
 use crate::error::{PipesError, Result};
 use crate::extract::cache::Cache;
-use crate::extract::client::FhirClient;
+use crate::http::FhirClient;
 use crate::report::Report;
 use crate::work::InOrder;
 
@@ -220,7 +220,7 @@ pub fn fetch_boundaries(
 mod tests {
     use super::*;
     use crate::extract::cache::Cache;
-    use crate::extract::client::{Auth, FhirClient};
+    use crate::http::{Auth, FhirClient};
     use crate::report::Report;
     use httptest::{Expectation, Server, matchers::*, responders::*};
 

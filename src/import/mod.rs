@@ -172,13 +172,14 @@ pub struct LocationSitesArgs {
     pub report: Option<PathBuf>,
 }
 
-pub fn run(cmd: &ImportCommand, profile: Option<&str>) -> Result<()> {
+pub fn run(cmd: &ImportCommand, profile: Option<&str>) -> anyhow::Result<()> {
     let profile = Profile::load(profile)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
     match cmd {
-        ImportCommand::LocationBoundaries(args) => location_boundaries::run(args, &profile),
-        ImportCommand::LocationSites(args) => location_sites::run(args, &profile),
+        ImportCommand::LocationBoundaries(args) => location_boundaries::run(args, &profile)?,
+        ImportCommand::LocationSites(args) => location_sites::run(args, &profile)?,
     }
+    Ok(())
 }
 
 /// Lower case, accents folded to ASCII (NFKD), each run of anything but a

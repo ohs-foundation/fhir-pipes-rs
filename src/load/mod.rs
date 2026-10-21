@@ -27,17 +27,17 @@ pub mod order;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::cli::LoadArgs;
 use crate::error::{PipesError, Result};
-use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::head::Head;
 use crate::fhir::ndjson::{Line, NdjsonReader};
 use crate::fs::Stamp;
+use crate::http::{FetchError, FhirClient};
 use crate::load::bundle::{Bundle, dependencies, depends_on, describe_put, put_bundle};
 use crate::load::capability::check_update_create;
 use crate::load::order::{Node, parents_first, reference_key};
@@ -164,7 +164,7 @@ pub fn read_plan(path: &Path) -> Result<LoadPlan> {
             return Err(not_a_resource());
         }
         // Both go into request URLs (`Type/id`, and the conflict check's GET).
-        if !crate::export::valid_type(&resource_type) || !crate::fhir::group::is_valid_id(&id) {
+        if !crate::fhir::valid_type(&resource_type) || !crate::fhir::group::is_valid_id(&id) {
             return Err(PipesError::Usage(format!(
                 "{}: line {}: {resource_type}/{id} is not a FHIR resource type and id",
                 path.display(),
@@ -452,13 +452,13 @@ where
     let mut i = 0usize;
     let mut make = next;
     let take = || {
-        if i >= count || state.0.lock().unwrap().1 {
+        if i >= count || state.0.lock().unwrap_or_else(PoisonError::into_inner).1 {
             return None;
         }
         let made = make(i);
         if made.is_err() {
             // Before the next worker can make another.
-            state.0.lock().unwrap().1 = true;
+            state.0.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
         }
         i += 1;
         Some((i - 1, made))
@@ -477,9 +477,9 @@ where
             let bundle = bundle.borrow();
             {
                 let (lock, changed) = &state;
-                let mut st = lock.lock().unwrap();
+                let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 while !st.1 && deps.iter().any(|&j| !st.0[j]) {
-                    st = changed.wait(st).unwrap();
+                    st = changed.wait(st).unwrap_or_else(PoisonError::into_inner);
                 }
                 // Stopped while a bundle it references is not committed: it
                 // can never be. A bundle taken before the failure whose
@@ -492,7 +492,7 @@ where
             // Recorded before the next bundle is taken, so one worker
             // stops right after a failure, as a sequential load does.
             {
-                let mut st = state.0.lock().unwrap();
+                let mut st = state.0.lock().unwrap_or_else(PoisonError::into_inner);
                 match r {
                     Ok(()) => st.0[i] = true,
                     Err(_) => st.1 = true,
@@ -517,7 +517,11 @@ where
             true
         },
     );
-    let committed = state.0.into_inner().unwrap().0;
+    let committed = state
+        .0
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .0;
     Posted { committed, failure }
 }
 
@@ -550,18 +554,15 @@ pub fn preflight(client: &FhirClient, base: &str, creates: &[String]) -> Result<
     Ok(())
 }
 
-pub fn run_load(args: &LoadArgs) -> Result<()> {
+pub fn run_load(args: &LoadArgs) -> anyhow::Result<()> {
     if args.batch_size == 0 {
-        return Err(PipesError::Usage("--batch-size must be at least 1".into()));
+        return Err(PipesError::Usage("--batch-size must be at least 1".into()).into());
     }
     if args.concurrency == 0 {
-        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()).into());
     }
     if !args.input.is_file() {
-        return Err(PipesError::Usage(format!(
-            "--in {}: not a file",
-            args.input.display()
-        )));
+        return Err(PipesError::Usage(format!("--in {}: not a file", args.input.display())).into());
     }
     let resources = read_plan(&args.input)?;
     if resources.is_empty() {
@@ -626,7 +627,7 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
         &post,
     );
     if let Some(e) = posted.failure {
-        return Err(e);
+        return Err(e.into());
     }
     println!("Loaded {total} resources in {count} bundle(s) to {base}");
     Ok(())
@@ -704,12 +705,7 @@ mod tests {
 
     #[test]
     fn a_bundle_that_cannot_be_made_stops_the_stream() {
-        let client = FhirClient::new(
-            crate::extract::client::Auth::None,
-            1,
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let client = FhirClient::new(crate::http::Auth::None, 1, Duration::from_secs(1)).unwrap();
         let made = Mutex::new(Vec::new());
         let posted = post_stream(
             &client,

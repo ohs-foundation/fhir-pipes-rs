@@ -1,8 +1,11 @@
 //! Data-quality issues found during a run. Never aborts; callers keep going.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
 
 /// One kind can fire once per row; at 100k rows that is a report larger than
 /// the dataset. Keep this many per kind; counts stay exact regardless.
@@ -107,6 +110,18 @@ impl Report {
         }
         out
     }
+}
+
+/// `report` as JSON at `path`, written whole or not at all.
+pub fn write_report(path: &Path, report: &Report) -> Result<()> {
+    write_json(path, &report.to_json())
+}
+
+/// `value` as pretty JSON at `path`, written whole or not at all.
+pub fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let mut text = serde_json::to_string_pretty(value)?;
+    text.push('\n');
+    crate::fs::atomic_write(path, text)
 }
 
 #[cfg(test)]

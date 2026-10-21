@@ -98,6 +98,28 @@ impl<R> InOrder<R> {
     }
 }
 
+/// `f` over `items` on up to `workers` threads; the results in item order.
+pub fn parallel<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let mut results: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    run(
+        workers.clamp(1, items.len().max(1)),
+        indices(0, items.len()),
+        |i| (i, f(&items[i])),
+        |(i, r)| {
+            results[i] = Some(r);
+            true
+        },
+    );
+    results
+        .into_iter()
+        .map(|r| r.expect("every item was run"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

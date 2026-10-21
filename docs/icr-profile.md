@@ -347,7 +347,9 @@ identifiers also appear in the `identifier` list column. In this data:
 - The settlement's GRID3 identifiers (`grid3-globalid`,
   `grid3-settlement-id`) appear only in `identifier`.
 - The catchment's `catchment-of` reference and its `building-count`
-  extensions are in `fhir_json` only.
+  extensions are in `fhir_json` only. (`catchment_extension` names
+  `catchment-of` for the catchment tiles `refresh` builds, not for a
+  column.)
 - `gers_id` is declared but empty: none of these Locations has an Overture
   GERS identifier.
 
@@ -466,6 +468,7 @@ the profile has to change with it.
 | `ownership`, `ownership_text` | CodeSystem `icr-ownership-cs` |
 | `nhfr_code`, `nhfr_uid` | Identifier systems `…/identifiers/nga-nhfr-code`, `…/identifiers/nga-nhfr-uid` |
 | `spatial_index_extension` | Extension `spatial-index` |
+| `catchment_extension` | Extension `catchment-of` |
 | `boundary_extensions` | Extension `location-boundary-geojson` |
 | `[dhis2]`, `[population]` | The ICR profiles, CodeSystems and extensions named there |
 
@@ -474,8 +477,9 @@ Some things the IG has are not in the profile on purpose:
 - **`delivery-strategy`:** an extension on PlanDefinition, ActivityDefinition
   and Task, not Location. The IG keeps a site's delivery strategy in each
   campaign's Tasks.
-- **`catchment-of` and `building-count`:** structured extensions that do not
-  reduce to one code. They stay in `fhir_json`.
+- **`catchment-of` and `building-count`:** a reference and structured
+  extensions, not one code. They stay in `fhir_json`; `catchment-of` is also
+  `catchment_extension`, for the catchment tiles.
 
 `fhir-pipes profile check` compares the profile with the IG and reports an
 entry that no longer matches. See

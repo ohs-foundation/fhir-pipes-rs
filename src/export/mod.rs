@@ -49,16 +49,16 @@ use serde_json::Value;
 
 use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
-use crate::extract::client::FhirClient;
 use crate::extract::page::{
     CountCheck, PageNote, PageResult, ServerKind, check_count, count_resources, next_link,
     page_resources, page_search,
 };
-use crate::report::Report;
+use crate::fhir::valid_type;
+use crate::http::FhirClient;
+use crate::report::{Report, write_report};
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
 use crate::snapshot::merge::{MergeFiles, MergeOptions, MergeStats, id_and_updated, merge_file};
 use crate::snapshot::same_server;
-use crate::transform::write_report;
 
 pub(crate) const STATE_FILE: &str = ".export-state.json";
 
@@ -118,27 +118,21 @@ impl ExportState {
     }
 }
 
-/// A FHIR resource type name: an upper-case letter, then letters. It becomes
-/// a file name, so nothing else is accepted.
-pub(crate) fn valid_type(t: &str) -> bool {
-    let mut chars = t.chars();
-    chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_alphabetic())
-}
-
-pub fn run_export(args: &ExportArgs) -> Result<()> {
+pub fn run_export(args: &ExportArgs) -> anyhow::Result<()> {
     let mut types: Vec<&str> = Vec::new();
     for t in &args.types {
         if !valid_type(t) {
             return Err(PipesError::Usage(format!(
                 "--type {t}: not a FHIR resource type name (e.g. MeasureReport)"
-            )));
+            ))
+            .into());
         }
         if !types.contains(&t.as_str()) {
             types.push(t);
         }
     }
     if args.concurrency == 0 {
-        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()).into());
     }
     std::fs::create_dir_all(&args.out)
         .map_err(|e| PipesError::Usage(format!("--out {}: {e}", args.out.display())))?;
@@ -961,7 +955,7 @@ fn download_job(
     let timeout = Duration::from_secs(args.bulk_timeout);
     let failed = AtomicBool::new(false);
     let indexes: Vec<usize> = (0..files.len()).collect();
-    let results = window::parallel(&indexes, args.concurrency, |&i| {
+    let results = crate::work::parallel(&indexes, args.concurrency, |&i| {
         if failed.load(Ordering::Relaxed) {
             return Ok(None);
         }
@@ -984,7 +978,7 @@ fn download_job(
     for t in &job.types {
         let mine: Vec<usize> = (0..files.len()).filter(|&i| files[i].0 == t).collect();
         let paths: Vec<PathBuf> = mine.iter().map(|&i| parts.0[i].clone()).collect();
-        window::concatenate(&paths, &incoming_path(&args.out, t))?;
+        crate::fs::concatenate(&paths, &incoming_path(&args.out, t))?;
         let mut d = Downloaded {
             notes: Vec::new(),
             files: mine.len(),
@@ -1093,15 +1087,5 @@ mod tests {
             let state = ExportState::read(dir.path());
             assert!(state.server.is_empty() && state.types.is_empty());
         }
-    }
-
-    #[test]
-    fn type_names_are_plain_words() {
-        assert!(valid_type("MeasureReport"));
-        assert!(valid_type("Location"));
-        assert!(!valid_type(""));
-        assert!(!valid_type("measureReport"));
-        assert!(!valid_type("../Location"));
-        assert!(!valid_type("Location?_count=1"));
     }
 }

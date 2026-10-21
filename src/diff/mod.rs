@@ -28,10 +28,10 @@ use crate::fhir::location::strip_reference;
 use crate::fhir::ndjson::{LineAccess, Output, is_gz};
 use crate::fs::AtomicFile;
 use crate::profile::Profile;
-use crate::report::Report;
+use crate::report::{Report, write_report};
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::snapshot::index::index_by_id;
-use crate::transform::{SNAPSHOT_FILE, write_report};
+use crate::transform::SNAPSHOT_FILE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
@@ -260,20 +260,16 @@ fn finish(out: Output<AtomicFile>, tmp: &Path) -> Result<()> {
     out.finish().map_err(|e| PipesError::io(tmp, e))?.commit()
 }
 
-pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
+pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> anyhow::Result<()> {
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
-        return Err(PipesError::Usage(format!(
-            "snapshot file not found: {}",
-            ndjson.display()
-        )));
+        return Err(
+            PipesError::Usage(format!("snapshot file not found: {}", ndjson.display())).into(),
+        );
     }
     let format = InputFormat::from_path(&args.input)?;
     if !args.input.is_file() {
-        return Err(PipesError::Usage(format!(
-            "--in {}: not a file",
-            args.input.display()
-        )));
+        return Err(PipesError::Usage(format!("--in {}: not a file", args.input.display())).into());
     }
     crate::fs::check_out(&args.out)?;
 

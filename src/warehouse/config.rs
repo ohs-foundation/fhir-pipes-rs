@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
-use crate::extract::client::TokenAuth;
-use crate::extract::google::{self, Credentials};
+use crate::cli::{
+    AuthArgs, AuthError, AuthKind, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY,
+};
 use crate::extract::page::ServerKind;
+use crate::http::TokenAuth;
+use crate::http::google::{self, Credentials};
 
 use super::Step;
 
@@ -508,53 +510,43 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     let auth = if !files.is_empty() {
         AuthArgs::none()
     } else {
-        let username = o.username.or(file.server.username);
-        let google_auth = o.google_auth.or(file.server.google_auth).unwrap_or(false);
-        let kinds: Vec<&str> = [
-            (o.token.is_some(), "a token (FHIR_PIPES_TOKEN)"),
-            (o.client_id.is_some(), "a client id (FHIR_PIPES_CLIENT_ID)"),
-            (username.is_some(), "a username (FHIR_PIPES_USERNAME)"),
-            (
-                google_auth,
-                "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(set, what)| set.then_some(what))
-        .collect();
-        if kinds.len() > 1 {
-            bail!("use one way to authenticate, not {}", kinds.join(" and "));
+        let auth = AuthArgs {
+            token: o.token,
+            client_id: o.client_id,
+            client_secret: o.client_secret,
+            token_url: o.token_url.or(file.server.token_url),
+            token_auth: o.token_auth.or(file.server.token_auth),
+            scope: o.scope.or(file.server.scope),
+            username: o.username.or(file.server.username),
+            password: o.password,
+            google_auth: o.google_auth.or(file.server.google_auth).unwrap_or(false),
+        };
+        if let Err(e) = auth.validate() {
+            bail!(match e {
+                AuthError::Several(kinds) => format!(
+                    "use one way to authenticate, not {}",
+                    kinds
+                        .iter()
+                        .map(|k| match k {
+                            AuthKind::Token => "a token (FHIR_PIPES_TOKEN)",
+                            AuthKind::ClientCredentials => "a client id (FHIR_PIPES_CLIENT_ID)",
+                            AuthKind::Basic => "a username (FHIR_PIPES_USERNAME)",
+                            AuthKind::Google =>
+                                "Google credentials (FHIR_PIPES_GOOGLE_AUTH or server.google_auth)",
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ),
+                AuthError::NoClientSecret =>
+                    "set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID".into(),
+                AuthError::NoTokenUrl => "FHIR_PIPES_CLIENT_ID is set but no token URL: \
+                                          pass --token-url or set server.token_url"
+                    .into(),
+                AuthError::NoPassword =>
+                    "a username is set but no password: set FHIR_PIPES_PASSWORD".into(),
+            });
         }
-        let none = AuthArgs::none();
-        match (o.client_id, o.client_secret, username, o.password) {
-            _ if google_auth => AuthArgs {
-                google_auth: true,
-                ..none
-            },
-            (Some(id), Some(secret), _, _) => AuthArgs {
-                client_id: Some(id),
-                client_secret: Some(secret),
-                token_url: Some(o.token_url.or(file.server.token_url).context(
-                    "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url",
-                )?),
-                token_auth: o.token_auth.or(file.server.token_auth),
-                scope: o.scope.or(file.server.scope),
-                ..none
-            },
-            (Some(_), None, _, _) => bail!("set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"),
-            (None, _, Some(user), Some(password)) => AuthArgs {
-                username: Some(user),
-                password: Some(password),
-                ..none
-            },
-            (None, _, Some(_), None) => {
-                bail!("a username is set but no password: set FHIR_PIPES_PASSWORD")
-            }
-            _ => AuthArgs {
-                token: o.token,
-                ..none
-            },
-        }
+        auth
     };
     let threads = o.threads.unwrap_or_else(crate::work::default_threads);
     let countries = if o.countries.is_empty() {
@@ -799,6 +791,49 @@ mod tests {
         assert!(
             err.to_string().contains("use one way to authenticate"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn auth_errors_name_the_settings_to_fix() {
+        let err = |o: Overrides| {
+            let file: File = toml::from_str("data = \"d\"").unwrap();
+            settings(file, PathBuf::from("/b"), o)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            err(Overrides {
+                client_id: Some("c".into()),
+                ..Default::default()
+            }),
+            "set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID"
+        );
+        assert_eq!(
+            err(Overrides {
+                client_id: Some("c".into()),
+                client_secret: Some("s".into()),
+                ..Default::default()
+            }),
+            "FHIR_PIPES_CLIENT_ID is set but no token URL: pass --token-url or set server.token_url"
+        );
+        assert_eq!(
+            err(Overrides {
+                username: Some("u".into()),
+                ..Default::default()
+            }),
+            "a username is set but no password: set FHIR_PIPES_PASSWORD"
+        );
+        assert_eq!(
+            err(Overrides {
+                token: Some("t".into()),
+                client_id: Some("c".into()),
+                google_auth: Some(true),
+                ..Default::default()
+            }),
+            "use one way to authenticate, not a token (FHIR_PIPES_TOKEN) and a client id \
+             (FHIR_PIPES_CLIENT_ID) and Google credentials (FHIR_PIPES_GOOGLE_AUTH or \
+             server.google_auth)"
         );
     }
 

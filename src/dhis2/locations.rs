@@ -11,17 +11,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::api::{Dhis2, under};
-use super::{Instance, NdjsonWriter, valid_name};
+use super::{Instance, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::fhir::location::{
     LocationKey, NewLocation, PhysicalType, boundary_extension, identifier,
 };
+use crate::fhir::ndjson::NdjsonWriter;
 use crate::fhir::organization::{NewOrganization, OrganizationKey};
 use crate::fs::check_out;
-use crate::report::Report;
-use crate::transform::write_report;
+use crate::report::{Report, write_report};
 
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
