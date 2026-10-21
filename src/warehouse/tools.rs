@@ -54,12 +54,19 @@ pub fn require(tools: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// Run a command, letting its output through, and fail if it fails.
+/// Run a command, letting its output through, and fail if it fails. A stop
+/// (stop.rs) reaches it while it runs; it then fails as stopped.
 pub fn run(cmd: &mut Command) -> Result<()> {
     let shown = show(cmd);
-    let status = cmd.status().with_context(|| format!("starting {shown}"))?;
+    let mut child = cmd.spawn().with_context(|| format!("starting {shown}"))?;
+    let status = {
+        let _registered = crate::stop::register(child.id());
+        child
+            .wait()
+            .with_context(|| format!("waiting for {shown}"))?
+    };
     if !status.success() {
-        bail!("{shown} failed ({status})");
+        return Err(failed(&shown, status));
     }
     Ok(())
 }
@@ -67,14 +74,30 @@ pub fn run(cmd: &mut Command) -> Result<()> {
 /// Run a command and return its standard output; standard error passes through.
 pub fn output(cmd: &mut Command) -> Result<String> {
     let shown = show(cmd);
-    let out = cmd
+    let child = cmd
+        .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .output()
+        .spawn()
         .with_context(|| format!("starting {shown}"))?;
+    let out = {
+        let _registered = crate::stop::register(child.id());
+        child
+            .wait_with_output()
+            .with_context(|| format!("waiting for {shown}"))?
+    };
     if !out.status.success() {
-        bail!("{shown} failed ({})", out.status);
+        return Err(failed(&shown, out.status));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The error for a tool that failed: stopped, when a stop ended it.
+fn failed(shown: &str, status: std::process::ExitStatus) -> anyhow::Error {
+    if crate::stop::requested() {
+        anyhow::Error::from(crate::error::PipesError::Stopped).context(shown.to_string())
+    } else {
+        anyhow::anyhow!("{shown} failed ({status})")
+    }
 }
 
 /// Run a duckdb SQL script, discarding its result table.

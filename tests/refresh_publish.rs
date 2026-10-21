@@ -371,6 +371,90 @@ run = ["sh", "-c", "echo \"$FAILED_STEP\" > on-failure.txt"]
     assert_eq!(last_run(&data)["status"], "succeeded");
 }
 
+/// The refresh binary as a plain child process, for tests that signal it.
+#[cfg(unix)]
+fn spawn_refresh(config: &Path, args: &[&str]) -> std::process::Child {
+    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("fhir-pipes"));
+    c.current_dir(config.parent().unwrap())
+        .env_remove("FHIR_PIPES_REUSE_RAW")
+        .env_remove("FHIR_PIPES_LOCK_TIMEOUT")
+        .arg("refresh")
+        .arg("--config")
+        .arg(config)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c.spawn().unwrap()
+}
+
+#[cfg(unix)]
+fn sigterm(child: &std::process::Child) {
+    // SAFETY: kill(2) on a child this test started and has not reaped.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+/// Wait for `path` to exist, for up to 20 s.
+fn wait_for(path: &Path) {
+    let started = std::time::Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed().as_secs() < 20,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Wait for a child with a deadline, returning its exit code.
+#[cfg(unix)]
+fn exit_within(child: &mut std::process::Child, secs: u64) -> Option<i32> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return s.code();
+        }
+        if started.elapsed().as_secs() >= secs {
+            let _ = child.kill();
+            panic!("refresh still running after {secs} s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// SIGTERM during a success hook stops the hook; the warehouse it ran after
+/// stays published.
+#[test]
+#[cfg(unix)]
+fn sigterm_stops_a_running_hook_and_keeps_the_new_warehouse() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "slow"
+run = ["sh", "-c", "touch started; sleep 30"]
+"#,
+    );
+    let mut child = spawn_refresh(&config, &["--only", "views,hooks", "--reuse-raw"]);
+    wait_for(&dir.path().join("started"));
+    sigterm(&child);
+    assert_eq!(exit_within(&mut child, 15), Some(1));
+    let data = dir.path().join("data");
+    let r = last_run(&data);
+    assert_eq!(r["status"], "failed");
+    assert_eq!(r["failed_step"], "hooks");
+    assert!(
+        r["error"].as_str().unwrap().contains("stopped by signal"),
+        "{r}"
+    );
+    assert!(
+        data.join("parquet/obs/country=SLE/part-0.parquet")
+            .is_file()
+    );
+    assert_nothing_staged(&data);
+}
+
 /// A successful run leaves the files it always did, and nothing staged.
 #[test]
 fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {

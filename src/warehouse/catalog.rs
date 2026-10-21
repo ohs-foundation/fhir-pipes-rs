@@ -147,7 +147,10 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
         .context("duckdb stdin")?
         .write_all(format!("{setup}\n{sql}").as_bytes())
         .context("writing to duckdb")?;
-    let out = child.wait_with_output().context("running duckdb")?;
+    let out = {
+        let _registered = crate::stop::register(child.id());
+        child.wait_with_output().context("running duckdb")?
+    };
     // The duckdb shell carries on past a failed statement and still exits 0,
     // so its error output is the failure signal.
     let err = String::from_utf8_lossy(&out.stderr);
