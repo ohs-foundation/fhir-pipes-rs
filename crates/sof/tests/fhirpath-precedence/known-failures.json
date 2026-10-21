@@ -1,0 +1,12 @@
+{
+  "false implies true implies false": {
+    "cause": "engine",
+    "note": "`implies` is parsed as right-associative (pratt.rs: `right(1)`); the spec grammar makes it left-associative.",
+    "got": "expected [false] (as (false implies true) implies false), got [true]"
+  },
+  "true or true xor true": {
+    "cause": "engine",
+    "note": "`xor` is parsed above `or` (pratt.rs: `left(3)` and `left(2)`); the spec puts them at one level.",
+    "got": "expected [false] (as (true or true) xor true), got [true]"
+  }
+}

@@ -1,6 +1,6 @@
-//! What the FHIRPath test suites (`fhirpath_hl7.rs`, `fhirpath_js.rs`) share:
-//! running an expression the way fhir-pipes runs any FHIRPath, and the list of
-//! known failures with the cause of each.
+//! What the FHIRPath test suites (`fhirpath_hl7.rs`, `fhirpath_js.rs`,
+//! `fhirpath_precedence.rs`) share: running an expression the way fhir-pipes
+//! runs any FHIRPath, and the list of known failures with the cause of each.
 
 use std::collections::BTreeMap;
 use std::path::Path;
