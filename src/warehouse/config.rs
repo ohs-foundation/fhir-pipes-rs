@@ -10,9 +10,9 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::cli::{AuthArgs, DEFAULT_BULK_TIMEOUT_SECS, DEFAULT_EXPORT_CONCURRENCY};
-use crate::extract::client::TokenAuth;
-use crate::extract::google::{self, Credentials};
 use crate::extract::page::ServerKind;
+use crate::http::TokenAuth;
+use crate::http::google::{self, Credentials};
 
 use super::Step;
 

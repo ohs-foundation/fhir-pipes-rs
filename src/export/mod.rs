@@ -49,11 +49,11 @@ use serde_json::Value;
 
 use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
-use crate::extract::client::FhirClient;
 use crate::extract::page::{
     CountCheck, PageNote, PageResult, ServerKind, check_count, count_resources, next_link,
     page_resources, page_search,
 };
+use crate::http::FhirClient;
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
 use crate::snapshot::merge::{MergeFiles, MergeOptions, MergeStats, id_and_updated, merge_file};

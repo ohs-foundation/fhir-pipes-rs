@@ -36,12 +36,12 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::Value;
 
 use crate::error::{PipesError, Result};
-use crate::extract::client::FhirClient;
 use crate::extract::page::{
     PAGE_SIZE, PageNote, PageResult, ServerKind, count_matching, count_resources, page_search,
     server_url,
 };
 use crate::fhir::ndjson::NdjsonReader;
+use crate::http::FhirClient;
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
 
@@ -522,7 +522,7 @@ pub(super) fn parallel<T: Sync, R: Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::client::Auth;
+    use crate::http::Auth;
     use httptest::bytes::Bytes;
     use httptest::http;
     use httptest::responders::Responder;

@@ -15,9 +15,9 @@ use serde_json::Value;
 use url::Url;
 
 use crate::error::{PipesError, Result};
-use crate::extract::client::{Exchange, FetchError, FhirClient};
 use crate::extract::page::{server_path, server_url};
 use crate::fhir::ndjson::Splitter;
+use crate::http::{Exchange, FetchError, FhirClient};
 use crate::snapshot::instant::{format_utc, parse_instant};
 
 /// The longest failure text shown from a status response.
@@ -532,12 +532,7 @@ mod tests {
             Expectation::matching(request::method_path("GET", "/f.ndjson"))
                 .respond_with(status_code(200).body("\u{feff}{\"id\":\"a\"}\r\n\n{\"id\":\"b\"}")),
         );
-        let client = FhirClient::new(
-            crate::extract::client::Auth::None,
-            1,
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        let client = FhirClient::new(crate::http::Auth::None, 1, Duration::from_secs(5)).unwrap();
         let mut lines = Vec::new();
         read_lines(
             &client,
@@ -687,12 +682,7 @@ mod tests {
             .times(1)
             .respond_with(status_code(202).insert_header("Retry-After", "1e300")),
         );
-        let client = FhirClient::new(
-            crate::extract::client::Auth::None,
-            1,
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        let client = FhirClient::new(crate::http::Auth::None, 1, Duration::from_secs(5)).unwrap();
         let started = Instant::now();
         let got = wait(
             &client,

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::cli::Dhis2Conn;
 use crate::error::{PipesError, Result};
-use crate::extract::client::{Auth, FetchError, FhirClient};
+use crate::http::{Auth, FetchError, FhirClient};
 
 const PAGE_SIZE: usize = 500;
 

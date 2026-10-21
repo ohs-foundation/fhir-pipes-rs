@@ -9,8 +9,8 @@ use serde_json::Value;
 use url::Url;
 
 use crate::error::{PipesError, Result};
-use crate::extract::client::FhirClient;
 use crate::fhir::location::is_boundary_extension;
+use crate::http::FhirClient;
 use crate::report::Report;
 
 pub const PAGE_SIZE: usize = 1000;
@@ -439,7 +439,7 @@ pub fn count_matching(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extract::client::{Auth, FhirClient};
+    use crate::http::{Auth, FhirClient};
 
     #[test]
     fn count_resources_reads_the_bundle_total_or_gives_up() {

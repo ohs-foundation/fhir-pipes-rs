@@ -527,7 +527,7 @@ async fn export_all(
 ) -> Result<()> {
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
-    crate::extract::client::ensure_crypto_provider();
+    crate::http::ensure_crypto_provider();
     if let Some(warning) = tls_warning(url) {
         eprintln!("{warning}");
     }

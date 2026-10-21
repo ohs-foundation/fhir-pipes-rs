@@ -56,8 +56,8 @@ use serde_json::json;
 use config::Settings;
 
 use crate::error::usage;
-use crate::extract::client::TokenAuth;
 use crate::extract::page::ServerKind;
+use crate::http::TokenAuth;
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct RefreshArgs {

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::error::{PipesError, Result};
-use crate::extract::client::{Auth, TokenAuth};
-use crate::extract::google::{Credentials, parse_server};
 use crate::extract::page::ServerKind;
+use crate::http::google::{Credentials, parse_server};
+use crate::http::{Auth, TokenAuth};
 
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
 pub const DEFAULT_PARTITION_BY: &str = "country,geom_type,type";

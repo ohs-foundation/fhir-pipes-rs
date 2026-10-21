@@ -45,10 +45,10 @@ use super::rerun::{
 use super::{Instance, NdjsonWriter};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::error::{PipesError, Result};
-use crate::extract::client::FetchError;
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
 use crate::fs::check_out;
+use crate::http::FetchError;
 use crate::report::Report;
 use crate::snapshot::instant::format_utc;
 use crate::transform::write_report;

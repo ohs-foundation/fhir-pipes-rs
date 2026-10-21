@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::error::{PipesError, Result};
 use crate::extract::cache::Cache;
-use crate::extract::client::{Auth, FhirClient};
+use crate::http::{Auth, FhirClient};
 
 /// Classic and BigTIFF headers, both byte orders.
 const TIFF_MAGIC: [&[u8; 4]; 4] = [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"];

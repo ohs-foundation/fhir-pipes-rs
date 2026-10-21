@@ -9,6 +9,7 @@ mod extract;
 mod fhir;
 mod fs;
 mod geometry;
+mod http;
 mod import;
 mod index;
 mod inspect;

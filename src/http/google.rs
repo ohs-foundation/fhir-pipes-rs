@@ -20,7 +20,7 @@
 //! 3. the metadata server of Compute Engine, Cloud Run and GKE
 //!    (`$GCE_METADATA_HOST`, else `metadata.google.internal`).
 //!
-//! The FHIR client (`client.rs`) requests and renews the tokens. Nothing here
+//! The FHIR client (`http.rs`) requests and renews the tokens. Nothing here
 //! prints a token, a refresh token or key material: `describe` names the
 //! source only.
 

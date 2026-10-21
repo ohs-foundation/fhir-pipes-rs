@@ -215,7 +215,7 @@ enum Source {
 
 #[cfg(feature = "postgres")]
 async fn connect(db: &str) -> Result<Source> {
-    crate::extract::client::ensure_crypto_provider();
+    crate::http::ensure_crypto_provider();
     let pool = sqlx_postgres::PgPool::connect(db)
         .await
         .context("connecting to the database")?;

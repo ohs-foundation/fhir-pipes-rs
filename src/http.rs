@@ -10,7 +10,7 @@
 //!
 //! The bearer token is either fixed (`--token`), obtained with the OAuth
 //! client-credentials grant (`--client-id`), or obtained from Google
-//! Application Default Credentials (`--google-auth`, see `google.rs`). In the
+//! Application Default Credentials (`--google-auth`, see `http/google.rs`). In the
 //! last two cases the client gets a new token shortly before the current one
 //! expires, so a run can outlast any one token. The client id and secret go
 //! in the token request's form body (`client_secret_post`) or, with
@@ -35,6 +35,8 @@
 //! `export --bulk` uses it for the Bulk Data kick-off, the status URL (whose
 //! 202 and 429 the caller reads itself) and the output files.
 
+pub mod google;
+
 use std::io::Read;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -47,7 +49,7 @@ use reqwest::header::{
 };
 use serde_json::Value;
 
-use super::google::{self, Credentials};
+use self::google::Credentials;
 use crate::error::{PipesError, Result};
 
 const RETRY_BASE: f64 = 0.5;

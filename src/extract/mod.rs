@@ -2,8 +2,6 @@
 
 pub mod boundary;
 pub mod cache;
-pub mod client;
-pub mod google;
 pub mod page;
 
 use std::collections::HashMap;
@@ -13,8 +11,8 @@ use crate::cli::ExtractArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::boundary::{FetchOptions, fetch_boundaries};
 use crate::extract::cache::Cache;
-use crate::extract::client::FhirClient;
 use crate::extract::page::{CountCheck, check_count, page_locations, page_resources};
+use crate::http::FhirClient;
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, parse_instant};
 use crate::snapshot::merge::{MergeFiles, MergeOptions, merge, merge_file};

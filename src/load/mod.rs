@@ -34,10 +34,10 @@ use serde_json::Value;
 
 use crate::cli::LoadArgs;
 use crate::error::{PipesError, Result};
-use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::head::Head;
 use crate::fhir::ndjson::{Line, NdjsonReader};
 use crate::fs::Stamp;
+use crate::http::{FetchError, FhirClient};
 use crate::load::bundle::{Bundle, dependencies, depends_on, describe_put, put_bundle};
 use crate::load::capability::check_update_create;
 use crate::load::order::{Node, parents_first, reference_key};
@@ -704,12 +704,7 @@ mod tests {
 
     #[test]
     fn a_bundle_that_cannot_be_made_stops_the_stream() {
-        let client = FhirClient::new(
-            crate::extract::client::Auth::None,
-            1,
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let client = FhirClient::new(crate::http::Auth::None, 1, Duration::from_secs(1)).unwrap();
         let made = Mutex::new(Vec::new());
         let posted = post_stream(
             &client,

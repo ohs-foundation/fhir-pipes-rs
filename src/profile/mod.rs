@@ -498,8 +498,8 @@ fn fetch(url: &str) -> Result<String> {
 /// The body of `url`, unauthenticated, with the usual retries; an error
 /// names `flag`, the option the URL came from.
 pub(crate) fn fetch_bytes(url: &str, flag: &str, timeout: Duration) -> Result<Vec<u8>> {
-    let client = crate::extract::client::FhirClient::new(
-        crate::extract::client::Auth::None,
+    let client = crate::http::FhirClient::new(
+        crate::http::Auth::None,
         crate::cli::DEFAULT_RETRIES,
         timeout,
     )?;
