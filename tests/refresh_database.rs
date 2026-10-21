@@ -711,6 +711,50 @@ mod database {
         sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
     }
 
+    /// A table dropped or altered since the last load is made again from the
+    /// Parquet and loaded in full, though the change log lists no change.
+    #[test]
+    fn a_dropped_or_altered_table_is_loaded_in_full() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("recreated");
+        let (dir, config) = setup(NOWHERE, &upsert(&s));
+        let views = people_view(
+            dir.path(),
+            r#"{"name": "born", "path": "birthDate", "type": "date"}"#,
+        );
+        write_patients(
+            dir.path(),
+            &[json!({"resourceType": "Patient", "id": "p1", "birthDate": "2020-01-01"})],
+        );
+        from_files(&config, &views).assert().success();
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!("people → {s}.people (unchanged)")));
+        sql(&[&format!("DROP TABLE \"{s}\".people")]);
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "people → {s}.people (1 rows, in full: a new table)"
+            )));
+        sql(&[&format!("ALTER TABLE \"{s}\".people ADD COLUMN extra text")]);
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "people → {s}.people (1 rows, in full: its columns changed)"
+            )));
+        assert_eq!(one(&format!("SELECT id FROM \"{s}\".people")), "p1");
+        from_files(&config, &views)
+            .assert()
+            .success()
+            .stdout(has(format!("people → {s}.people (unchanged)")));
+        sql(&[&format!("DROP SCHEMA \"{s}\" CASCADE")]);
+    }
+
     /// A view that calls now() can give other rows from the same resources:
     /// its table is loaded in full every run, however the call is written.
     #[test]
