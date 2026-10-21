@@ -18,7 +18,7 @@
 //!   database   the view tables into PostgreSQL; only with [database] and a
 //!              build with the postgres feature. With mode = "upsert", only
 //!              the rows of the resources that changed, from the change log
-//!              raw/<server>/.changes.json (`begin_changes`)
+//!              raw/<server>/.changes.json (`Changes::begin`)
 //!   hooks      commands from the config (e.g. a catalog build)
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 //!
@@ -55,6 +55,7 @@ use serde_json::json;
 use config::Settings;
 
 use crate::error::usage;
+use crate::export::changes::Changes;
 use crate::extract::page::ServerKind;
 use crate::http::TokenAuth;
 use crate::views::run::{View, ViewRows};
@@ -589,7 +590,13 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     std::fs::create_dir_all(s.raw_dir())?;
     std::fs::create_dir_all(s.parquet_dir())?;
     let stage = stage::Stage::new(s)?;
-    begin_changes(s)?;
+    // The change log of an upsert run (export/changes.rs), which the
+    // exports and the file source add to; in any other mode it is removed.
+    if s.upsert() {
+        Changes::begin(&s.raw_dir(), s.full)?;
+    } else {
+        Changes::remove(&s.raw_dir())?;
+    }
 
     // A file source is split by type into raw/ first, as a download would
     // be; --reuse-raw reruns on the last split.
@@ -787,61 +794,8 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         s.raw_dir().join("last-refresh.json"),
         serde_json::to_string_pretty(&report)?,
     )?;
-    finish_changes(s)?;
-    Ok(())
-}
-
-/// Start the change log of an upsert run (export/changes.rs), which the
-/// exports and the file source add to. A log still marked running is from a
-/// refresh that did not finish: what it lists may not match what the
-/// database holds, so the next load is in full, as with `--full` and when
-/// there is no log. In any other mode the log is removed, so that a later
-/// upsert run starts with a full load.
-fn begin_changes(s: &Settings) -> Result<()> {
-    use crate::export::changes::{Changes, FILE};
-    let raw = s.raw_dir();
-    if !s.upsert() {
-        let path = raw.join(FILE);
-        if path.exists() {
-            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        }
-        return Ok(());
-    }
-    let mut log = match Changes::read(&raw) {
-        Ok(Some(log)) => log,
-        Ok(None) => Changes {
-            reload: Some("no record of the last load".into()),
-            ..Changes::default()
-        },
-        Err(why) => Changes {
-            reload: Some(why),
-            ..Changes::default()
-        },
-    };
-    if log.running && log.reload.is_none() {
-        log.reload = Some("the last refresh did not finish".into());
-    }
-    if s.full {
-        log.reload = Some("--full".into());
-    }
-    if log.reload.is_some() {
-        log.types.clear();
-    }
-    log.running = true;
-    log.write(&raw)?;
-    Ok(())
-}
-
-/// The end of a refresh that finished: its change log is no longer running.
-fn finish_changes(s: &Settings) -> Result<()> {
-    use crate::export::changes::Changes;
-    if !s.upsert() {
-        return Ok(());
-    }
-    let raw = s.raw_dir();
-    if let Ok(Some(mut log)) = Changes::read(&raw) {
-        log.running = false;
-        log.write(&raw)?;
+    if s.upsert() {
+        Changes::finish(&s.raw_dir())?;
     }
     Ok(())
 }

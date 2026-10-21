@@ -107,6 +107,58 @@ impl Changes {
         let text = serde_json::to_string_pretty(self)? + "\n";
         crate::fs::atomic_write(&dir.join(FILE), text)
     }
+
+    /// Start the change log in `raw` for an upsert run, which the exports
+    /// and the file source add to. A log still marked running is from a
+    /// refresh that did not finish: what it lists may not match what the
+    /// database holds, so the next load is in full, as with `--full`
+    /// (`full`) and when there is no log.
+    pub fn begin(raw: &Path, full: bool) -> anyhow::Result<()> {
+        let mut log = match Changes::read(raw) {
+            Ok(Some(log)) => log,
+            Ok(None) => Changes {
+                reload: Some("no record of the last load".into()),
+                ..Changes::default()
+            },
+            Err(why) => Changes {
+                reload: Some(why),
+                ..Changes::default()
+            },
+        };
+        if log.running && log.reload.is_none() {
+            log.reload = Some("the last refresh did not finish".into());
+        }
+        if full {
+            log.reload = Some("--full".into());
+        }
+        if log.reload.is_some() {
+            log.types.clear();
+        }
+        log.running = true;
+        log.write(raw)?;
+        Ok(())
+    }
+
+    /// Remove the change log in `raw`, at the start of a run in any mode but
+    /// upsert, so that a later upsert run starts with a full load.
+    pub fn remove(raw: &Path) -> anyhow::Result<()> {
+        use anyhow::Context;
+        let path = raw.join(FILE);
+        if path.exists() {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// The end of an upsert refresh that finished: its change log in `raw`
+    /// is no longer running.
+    pub fn finish(raw: &Path) -> Result<()> {
+        if let Ok(Some(mut log)) = Changes::read(raw) {
+            log.running = false;
+            log.write(raw)?;
+        }
+        Ok(())
+    }
 }
 
 /// Whether ids are being recorded in `dir`.
