@@ -191,6 +191,56 @@ impl Step {
     }
 }
 
+/// What `fhir-pipes serve` needs from the refresh config.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub struct ServeInputs {
+    /// The config file, as an absolute path, for the refreshes it starts.
+    pub config: PathBuf,
+    /// The warehouse directory, absolute.
+    pub data: PathBuf,
+    /// The `[serve]` section.
+    pub serve: Option<toml::Table>,
+    /// The variable holding the `[database]` connection string, if there is
+    /// a `[database]` section.
+    pub database_url_env: Option<String>,
+}
+
+/// The config file `serve` was given, or the one `refresh` would find, read
+/// as `refresh` reads it; `data` is `--data` or FHIR_PIPES_DATA.
+#[cfg(unix)]
+pub fn serve_inputs(
+    config: Option<&std::path::Path>,
+    data: Option<PathBuf>,
+) -> Result<ServeInputs> {
+    let path = match config {
+        Some(p) => p.to_path_buf(),
+        None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+            .context("no config file: pass --config or set FHIR_PIPES_CONFIG")?,
+    };
+    let (file, base) = config::load(Some(&path))?;
+    let data = match (data, &file.data) {
+        (Some(p), _) => p,
+        (None, Some(p)) => base.join(p),
+        (None, None) => bail!(
+            "no warehouse directory: pass --data, set FHIR_PIPES_DATA, or set `data` in the config"
+        ),
+    };
+    Ok(ServeInputs {
+        config: std::path::absolute(&path)?,
+        data: std::path::absolute(&data)?,
+        database_url_env: file.database.as_ref().map(|d| {
+            d.url_env
+                .clone()
+                .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into())
+        }),
+        serve: file.serve,
+    })
+}
+
 fn env_secret(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }

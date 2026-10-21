@@ -47,6 +47,8 @@ pub struct File {
     pub database: Option<DatabaseFile>,
     #[serde(default)]
     pub hooks: Vec<Hook>,
+    /// `fhir-pipes serve`'s section (src/serve/config.rs); refresh ignores it.
+    pub serve: Option<toml::Table>,
 }
 
 /// `[source]`: where the resources come from when not from the server.
