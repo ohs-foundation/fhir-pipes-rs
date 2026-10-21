@@ -640,6 +640,14 @@ pub fn check(profile: &Profile, ig: &Ig) -> CheckResult {
             Expect::Reference,
         );
     }
+    if let Some(url) = &loc.catchment_extension {
+        c.extension(
+            "[location] catchment_extension",
+            url,
+            &["Location"],
+            Expect::Reference,
+        );
+    }
     if let Some(url) = &loc.spatial_index_extension {
         c.extension(
             "[location] spatial_index_extension",
@@ -796,6 +804,7 @@ fn not_read(profile: &Profile, ig: &Ig) -> Vec<(String, Vec<String>)> {
         .boundary_extensions
         .iter()
         .chain(&loc.overlays_extension)
+        .chain(&loc.catchment_extension)
         .chain(&loc.spatial_index_extension)
         .map(String::as_str)
         .collect();

@@ -71,11 +71,15 @@ example `profile: icr (examples/profiles/icr.toml)`.
 | `population` | Refuses: it needs `[population]`. | Writes Groups with that section's profile and extensions. |
 | `dhis2 …` | Refuses: it needs `[dhis2]`. | Mints systems under its base and writes its profiles and extensions. |
 | `import location-boundaries`, `import location-sites` | Refuses: it needs the Location type system (and, for boundaries, `admin_unit_type`). | Writes the profile's type codes, `meta.profile`, boundary and spatial index extensions, and admin code system. |
-| `refresh` | As `run` for the locations step. | As `run` for the locations step. Views and tiles do not use the profile. |
+| `refresh` | As `run` for the locations step. | As `run` for the locations step. The tiles carry the profile's columns. Views do not use the profile. |
 | `extract`, `export`, `load`, `views` | Not used. | Not used. |
 
-The tiles step of `refresh` expects ICR-shaped columns (`pcode`,
-`facility_level_text` and so on) and ICR type codes. With another profile, use
+The tiles step of `refresh` takes its columns from the profile: the admin
+code column on the admin polygons; on the points the identifier columns, the
+type codes (as the Organization's type text when the profile reads one under
+the same system), the extension codes and the other Organization columns; and
+`catchment_of` from `catchment_extension`. It expects ICR's type codes
+(`admin-unit`, `facility`, `settlement`, `*-catchment`); with others, use
 `--skip tiles`.
 
 ## The file
@@ -93,6 +97,7 @@ name = "my-ig"            # shown in messages
 |---|---|---|
 | `boundary_extensions` | extract, run, refresh, transform, diff, dhis2, import | Boundary attachment extensions to read before the HL7 one. `extract` fetches and inlines an attachment `url` under them as it does under the HL7 one. A new boundary written by `diff`, `dhis2` or `import` goes under the first. Any extension whose URL ends in `/StructureDefinition/location-boundary-geojson` is read anyway. |
 | `overlays_extension` | transform | A `valueReference` extension listing admin units an area overlaps: the read-only `overlays_admin_unit_ids` column. ICR's IG has none. |
+| `catchment_extension` | refresh | A `valueReference` extension naming the Location a catchment area is the catchment of: `catchment_of` in the catchment tiles. Absent: the tiles have no `catchment_of`. |
 | `spatial_index_extension` | transform, diff, index, import | The spatial index extension (`system`, `level`, `cell` sub-extensions): the `quadkey` and `quadkey_level` columns, `index`, and the cells `diff` recomputes after a position edit. |
 | `admin_unit_type` | transform, population, dhis2, import | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
 | `type_systems` | population, import | Code systems of the Location type codes. `population --type CODE` selects Locations with that code under any of these, wherever the coding sits in `type`. Empty or absent: a code under any system. `import` writes type codes under the first (else under `[dhis2] location_type_system`). |
@@ -342,7 +347,6 @@ not checked:
   https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid (the IG's Organization profiles slice no identifier systems)
 in the IG's Location profiles but not read by the profile:
   https://icr.healthcampaigns.org/StructureDefinition/building-count
-  https://icr.healthcampaigns.org/StructureDefinition/catchment-of
   urn:iso:std:iso:3166
   urn:iso:std:iso:3166:-2
 0 error(s), 3 warning(s)

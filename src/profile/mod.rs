@@ -65,6 +65,9 @@ pub struct LocationProfile {
     pub boundary_extensions: Vec<String>,
     /// valueReference list of admin units an operational area overlaps.
     pub overlays_extension: Option<String>,
+    /// valueReference to what a catchment area is the catchment of: the
+    /// `catchment_of` of `refresh`'s catchment tiles.
+    pub catchment_extension: Option<String>,
     /// The spatial index extension (quadkey, geohash, h3 cells).
     pub spatial_index_extension: Option<String>,
     /// The Location type code of an administrative unit.

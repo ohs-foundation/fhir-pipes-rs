@@ -41,7 +41,9 @@ fn icrs_profile_matches_its_ig() {
         out.contains("nga-nhfr-code (the IG's Organization profiles slice no identifier systems)"),
         "{out}"
     );
-    assert!(out.contains("StructureDefinition/catchment-of"), "{out}");
+    // Read as [location] catchment_extension.
+    assert!(!out.contains("StructureDefinition/catchment-of"), "{out}");
+    assert!(out.contains("StructureDefinition/building-count"), "{out}");
     assert!(out.contains("0 error(s), 3 warning(s)"), "{out}");
 }
 

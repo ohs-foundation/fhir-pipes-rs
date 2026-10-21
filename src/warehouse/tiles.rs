@@ -2,11 +2,14 @@
 //! GeoJSON) and tippecanoe.
 //!
 //! - admin.pmtiles: polygons `country` (admin_level 0), `states` (1), `lgas` (2),
-//!   each with id, name, admin_level, admin1_name, admin2_name, path, pcode.
+//!   each with id, name, admin_level, admin1_name, admin2_name, path and the
+//!   profile's admin code column (ICR: pcode).
 //! - facilities.pmtiles, settlements.pmtiles: every point, never thinned
-//!   (--drop-rate=1 --no-feature-limit --no-tile-size-limit).
+//!   (--drop-rate=1 --no-feature-limit --no-tile-size-limit), with the
+//!   profile's columns (`point_columns`).
 //! - catchments.pmtiles: `facility_catchments`, `settlement_catchments`, where
-//!   the registry has catchment areas; each carries `catchment_of` and `part_of`.
+//!   the registry has catchment areas; each carries `part_of`, and
+//!   `catchment_of` when the profile names its catchment extension.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,13 +18,81 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::config::Settings;
-use super::sql::sql_path;
+use super::sql::{sql_path, sql_str};
 use super::tools;
+use crate::profile::{Kind, Profile};
 
-const POINT_COLS: &str = "id, name, type, status, admin1_name, admin2_name, admin3_name, pcode, gers_id, nhfr_code, nhfr_uid,
-    replace(facility_level_text, chr(160), ' ') AS facility_level, ownership_text AS ownership, settlement_type,
-    managing_organization, part_of, last_updated,
-    round(position_longitude, 5) AS lon, round(position_latitude, 5) AS lat";
+/// The point layers' columns, `profile`'s between the built-in ones: its
+/// identifier columns (Location, then Organization); its Location type
+/// columns, a type code shown as the Organization's type text under the
+/// same system when the profile reads one (ICR's facility_level and
+/// ownership); its Location extension codes; then any other Organization
+/// columns. Type text has its non-breaking spaces made plain.
+fn point_columns(profile: &Profile) -> String {
+    let loc = &profile.location.columns;
+    let org = &profile.organization.columns;
+    let text = |name: &str| format!("replace({name}, chr(160), ' ')");
+    let mut cols: Vec<String> = ["id", "name", "type", "status"]
+        .into_iter()
+        .chain(["admin1_name", "admin2_name", "admin3_name"])
+        .map(str::to_string)
+        .collect();
+    let mut shown = Vec::new();
+    for c in loc.iter().chain(org).filter(|c| c.kind == Kind::Identifier) {
+        cols.push(c.name.clone());
+    }
+    for c in loc {
+        match c.kind {
+            Kind::TypeCoding => {
+                let mirror = org
+                    .iter()
+                    .find(|o| o.kind == Kind::TypeText && o.system == c.system);
+                cols.push(match mirror {
+                    Some(o) => {
+                        shown.push(o.name.as_str());
+                        format!("{} AS {}", text(&o.name), c.name)
+                    }
+                    None => c.name.clone(),
+                });
+            }
+            Kind::TypeText => cols.push(format!("{} AS {}", text(&c.name), c.name)),
+            _ => {}
+        }
+    }
+    for c in loc.iter().filter(|c| c.kind == Kind::ExtensionCode) {
+        cols.push(c.name.clone());
+    }
+    for c in org {
+        if c.kind != Kind::Identifier && !shown.contains(&c.name.as_str()) {
+            cols.push(match c.kind {
+                Kind::TypeText => format!("{} AS {}", text(&c.name), c.name),
+                _ => c.name.clone(),
+            });
+        }
+    }
+    cols.extend(
+        [
+            "managing_organization",
+            "part_of",
+            "last_updated",
+            "round(position_longitude, 5) AS lon",
+            "round(position_latitude, 5) AS lat",
+        ]
+        .map(str::to_string),
+    );
+    cols.join(", ")
+}
+
+/// The catchment layers' `catchment_of`: the reference in the profile's
+/// catchment extension.
+fn catchment_of(profile: &Profile) -> Option<String> {
+    let url = profile.location.catchment_extension.as_deref()?;
+    Some(format!(
+        "json_extract_string(list_filter(json_extract(fhir_json, '$.extension[*]'), \
+         e -> json_extract_string(e, '$.url') = {})[1], '$.valueReference.reference') AS catchment_of",
+        sql_str(url)
+    ))
+}
 
 /// Build the archives from the Location table at `locations` (the one this
 /// run wrote, else the live one) into `out`, the run's staged tiles/, which
@@ -29,6 +100,13 @@ const POINT_COLS: &str = "id, name, type, status, admin1_name, admin2_name, admi
 pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
     let countries = countries(locations, &s.tile_countries)?;
     println!("== tiles ({})", countries.join(", "));
+    let profile = Profile::load(s.profile.as_deref())?;
+    let point_cols = point_columns(&profile);
+    let admin_code = profile
+        .location
+        .admin_code_column
+        .as_deref()
+        .map_or(String::new(), |c| format!(", {c}"));
     fs::create_dir_all(out)?;
     let tmp = tempfile::tempdir()?;
     let t = tmp.path();
@@ -68,7 +146,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
             &s.duckdb,
             &format!(
                 "LOAD spatial; SET geometry_always_xy = true;
-             COPY (SELECT id, name, admin_level, admin1_name, admin2_name, path, pcode, geometry
+             COPY (SELECT id, name, admin_level, admin1_name, admin2_name, path{admin_code}, geometry
                    FROM read_parquet({poly}, union_by_name=true) WHERE admin_level = {level})
              TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSON');",
                 sql_path(&file)
@@ -121,7 +199,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
             &s.duckdb,
             &format!(
                 "LOAD spatial; SET geometry_always_xy = true;
-             COPY (SELECT {POINT_COLS}, geometry
+             COPY (SELECT {point_cols}, geometry
                    FROM read_parquet({points}, hive_partitioning=true, union_by_name=true)
                    WHERE type = '{kind}' AND geometry IS NOT NULL)
              TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSONSeq');",
@@ -155,14 +233,14 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         println!("   catchments: none in the registry, not built");
     } else {
         let catch = list(&catchment_globs);
+        let catchment_of = catchment_of(&profile).map_or(String::new(), |c| format!("{c},\n"));
         let mut layers = Vec::new();
         for kind in ["facility", "settlement"] {
             let file = t.join(format!("{kind}_catchments.geojson"));
             tools::duckdb(&s.duckdb, &format!(
                 "LOAD spatial; SET geometry_always_xy = true;
                  COPY (SELECT id, name, type, status, admin1_name, admin2_name, admin3_name, path, part_of,
-                              json_extract_string(fhir_json, '$.extension[*].valueReference.reference')[1] AS catchment_of,
-                              last_updated, geometry
+                              {catchment_of}last_updated, geometry
                        FROM read_parquet({catch}, hive_partitioning=true, union_by_name=true)
                        WHERE type = '{kind}-catchment' AND geometry IS NOT NULL)
                  TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSONSeq');",
@@ -301,6 +379,37 @@ fn matching(dir: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The columns the tiles had before they came from the profile.
+    #[test]
+    fn the_icr_profile_gives_the_icr_columns() {
+        let icr = crate::profile::icr_example();
+        assert_eq!(
+            point_columns(&icr),
+            "id, name, type, status, admin1_name, admin2_name, admin3_name, pcode, gers_id, \
+             nhfr_code, nhfr_uid, replace(facility_level_text, chr(160), ' ') AS facility_level, \
+             replace(ownership_text, chr(160), ' ') AS ownership, settlement_type, \
+             managing_organization, part_of, last_updated, \
+             round(position_longitude, 5) AS lon, round(position_latitude, 5) AS lat"
+        );
+        assert!(
+            catchment_of(&icr)
+                .unwrap()
+                .contains("= 'https://icr.healthcampaigns.org/StructureDefinition/catchment-of')")
+        );
+    }
+
+    #[test]
+    fn without_a_profile_only_the_built_in_columns() {
+        let base = Profile::base();
+        assert_eq!(
+            point_columns(&base),
+            "id, name, type, status, admin1_name, admin2_name, admin3_name, \
+             managing_organization, part_of, last_updated, \
+             round(position_longitude, 5) AS lon, round(position_latitude, 5) AS lat"
+        );
+        assert_eq!(catchment_of(&base), None);
+    }
 
     #[test]
     fn a_directory_name_is_not_a_pattern() {
