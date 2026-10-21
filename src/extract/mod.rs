@@ -14,7 +14,7 @@ use crate::error::{PipesError, Result};
 use crate::extract::boundary::{FetchOptions, fetch_boundaries};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
-use crate::extract::page::{count_resources, page_locations, page_resources};
+use crate::extract::page::{CountCheck, check_count, page_locations, page_resources};
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, parse_instant};
 use crate::snapshot::merge::{MergeFiles, MergeOptions, merge, merge_file};
@@ -282,11 +282,14 @@ fn run_phases(
         if !incremental && !suspicious {
             continue;
         }
-        match count_resources(&client, &args.server, resource_type) {
-            Some(server_total) if args.server_kind.count_is_estimate(server_total) => eprintln!(
-                "count check unavailable for {resource_type}: the server's count ({server_total}) is an estimate"
-            ),
-            Some(server_total) if server_total as usize != snapshot_total => {
+        match check_count(
+            &client,
+            &args.server,
+            args.server_kind,
+            resource_type,
+            snapshot_total,
+        ) {
+            CountCheck::Differs(server_total) => {
                 let detail = if incremental {
                     format!(
                         "the server has {server_total} {resource_type} resources but the snapshot has {snapshot_total}; \
@@ -302,10 +305,10 @@ fn run_phases(
                 };
                 report.add("count_mismatch", resource_type, &detail)
             }
-            Some(_) => {}
-            None => eprintln!(
-                "count check unavailable for {resource_type}: the server returned no total"
-            ),
+            CountCheck::Same => {}
+            CountCheck::Unavailable(why) => {
+                eprintln!("count check unavailable for {resource_type}: {why}")
+            }
         }
     }
 

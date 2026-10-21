@@ -211,9 +211,7 @@ pub fn page_search(
     boundary_extensions: &[String],
     after_first: &mut dyn FnMut(&Value) -> bool,
 ) -> Result<Option<PageResult>> {
-    let base = server.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/{resource_type}"))
-        .map_err(|_| PipesError::Usage(format!("--server is not a valid URL: {server}")))?;
+    let mut url = server_url(server, resource_type)?;
     {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("_count", &PAGE_SIZE.to_string());
@@ -378,6 +376,47 @@ pub fn count_resources(client: &FhirClient, server: &str, resource_type: &str) -
     count_matching(client, server, resource_type, &[])
 }
 
+/// `<server>/<path>`, one `/` between them: `path` is a resource type (its
+/// search) or an operation (`$export`) or a reference (`Binary/1`).
+pub fn server_path(server: &str, path: &str) -> String {
+    format!("{}/{path}", server.trim_end_matches('/'))
+}
+
+/// `server_path`, parsed: an error names `--server`.
+pub fn server_url(server: &str, path: &str) -> Result<Url> {
+    Url::parse(&server_path(server, path))
+        .map_err(|_| PipesError::Usage(format!("--server is not a valid URL: {server}")))
+}
+
+/// The server's count of a type set against the count fhir-pipes has.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CountCheck {
+    Same,
+    /// The server has this many.
+    Differs(u64),
+    /// No count to go by, and why not: no total, or a count that differs
+    /// but may be an estimate.
+    Unavailable(String),
+}
+
+/// `count_resources` of `resource_type`, set against `total`.
+pub fn check_count(
+    client: &FhirClient,
+    server: &str,
+    kind: ServerKind,
+    resource_type: &str,
+    total: usize,
+) -> CountCheck {
+    match count_resources(client, server, resource_type) {
+        Some(n) if n as usize == total => CountCheck::Same,
+        Some(n) if kind.count_is_estimate(n) => {
+            CountCheck::Unavailable(format!("the server's count ({n}) is an estimate"))
+        }
+        Some(n) => CountCheck::Differs(n),
+        None => CountCheck::Unavailable("the server returned no total".to_string()),
+    }
+}
+
 /// `count_resources` for a search with `params`.
 pub fn count_matching(
     client: &FhirClient,
@@ -385,8 +424,7 @@ pub fn count_matching(
     resource_type: &str,
     params: &[(&str, String)],
 ) -> Option<u64> {
-    let base = server.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/{resource_type}")).ok()?;
+    let mut url = server_url(server, resource_type).ok()?;
     url.query_pairs_mut().extend_pairs(params);
     let total = |extra: &[(&str, &str)]| -> Option<u64> {
         let mut url = url.clone();
@@ -455,6 +493,34 @@ mod tests {
 
     use crate::report::Report;
     use httptest::{Expectation, Server, matchers::*, responders::*};
+
+    #[test]
+    fn a_count_is_checked_and_an_estimate_matters_only_when_it_differs() {
+        let server = Server::run();
+        let big = MEDPLUM_EXACT_COUNT_BELOW;
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Location"))
+                .times(4)
+                .respond_with(status_code(200).body(format!(
+                    r#"{{"resourceType":"Bundle","type":"searchset","total":{big}}}"#
+                ))),
+        );
+        let client = FhirClient::new(Auth::None, 1, std::time::Duration::from_secs(5)).unwrap();
+        let base = server.url("/fhir").to_string();
+        let check = |kind, total| check_count(&client, &base, kind, "Location", total);
+        assert_eq!(check(ServerKind::Medplum, big as usize), CountCheck::Same);
+        assert!(matches!(
+            check(ServerKind::Medplum, 3),
+            CountCheck::Unavailable(why) if why.contains("estimate")
+        ));
+        assert_eq!(check(ServerKind::Generic, 3), CountCheck::Differs(big));
+        assert_eq!(check(ServerKind::Generic, big as usize), CountCheck::Same);
+        assert_eq!(
+            server_path("http://h/fhir/", "$export"),
+            "http://h/fhir/$export"
+        );
+        assert!(server_url("not a url", "Patient").is_err());
+    }
 
     #[test]
     fn page_resources_walks_the_named_type() {

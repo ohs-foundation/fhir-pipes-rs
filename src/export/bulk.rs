@@ -16,6 +16,7 @@ use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::{Exchange, FetchError, FhirClient};
+use crate::extract::page::{server_path, server_url};
 use crate::fhir::ndjson::Splitter;
 use crate::snapshot::instant::{format_utc, parse_instant};
 
@@ -107,9 +108,7 @@ pub enum Polled {
 
 /// `[base]/$export?_type=…`, with `_since` for an incremental export.
 pub fn kick_off_url(server: &str, types: &[String], since: Option<&str>) -> Result<Url> {
-    let base = server.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/$export"))
-        .map_err(|_| PipesError::Usage(format!("--server is not a valid URL: {server}")))?;
+    let mut url = server_url(server, "$export")?;
     {
         let mut qp = url.query_pairs_mut();
         qp.append_pair("_type", &types.join(","));
@@ -364,7 +363,6 @@ pub fn read_references_from(m: &mut Manifest, server: &str) {
     if files().next().is_none() || !files().all(|f| f.reference.is_some()) {
         return;
     }
-    let base = server.trim_end_matches('/');
     for f in m
         .output
         .iter_mut()
@@ -372,7 +370,7 @@ pub fn read_references_from(m: &mut Manifest, server: &str) {
         .chain(&mut m.error)
     {
         if let Some(r) = &f.reference {
-            f.url = format!("{base}/{r}");
+            f.url = server_path(server, r);
         }
     }
     m.requires_access_token = true;

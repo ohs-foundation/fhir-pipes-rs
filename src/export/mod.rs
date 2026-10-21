@@ -51,7 +51,8 @@ use crate::cli::ExportArgs;
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{
-    PageNote, PageResult, ServerKind, count_resources, next_link, page_resources, page_search,
+    CountCheck, PageNote, PageResult, ServerKind, check_count, count_resources, next_link,
+    page_resources, page_search,
 };
 use crate::report::Report;
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
@@ -367,18 +368,8 @@ fn merged_count_differs(
     out: &Path,
     report: &mut Report,
 ) -> bool {
-    match count_resources(client, server, resource_type) {
-        Some(server_total)
-            if server_total as usize != total && kind.count_is_estimate(server_total) =>
-        {
-            eprintln!(
-                "count check unavailable for {resource_type}: the server's count ({server_total}) is an estimate, \
-                 so resources deleted on the server stay in {}",
-                out.display()
-            );
-            false
-        }
-        Some(server_total) if server_total as usize != total => {
+    match check_count(client, server, kind, resource_type, total) {
+        CountCheck::Differs(server_total) => {
             println!(
                 "{resource_type}: the server has {server_total} resources and the merged file {total}; \
                  downloading in full (a resource was deleted, or the file had drifted)"
@@ -392,10 +383,10 @@ fn merged_count_differs(
             );
             true
         }
-        Some(_) => false,
-        None => {
+        CountCheck::Same => false,
+        CountCheck::Unavailable(why) => {
             eprintln!(
-                "count check unavailable for {resource_type}: the server returned no total, \
+                "count check unavailable for {resource_type}: {why}, \
                  so resources deleted on the server stay in {}",
                 out.display()
             );
@@ -435,11 +426,14 @@ fn export_all(
     // the server stopped paging early, so only then is the count worth a
     // request (a count over a large table is not free).
     if paged.last_page_full {
-        match count_resources(client, &args.server, resource_type) {
-            Some(server_total) if args.server_kind.count_is_estimate(server_total) => eprintln!(
-                "count check unavailable for {resource_type}: the server's count ({server_total}) is an estimate"
-            ),
-            Some(server_total) if server_total as usize != total => report.add(
+        match check_count(
+            client,
+            &args.server,
+            args.server_kind,
+            resource_type,
+            total,
+        ) {
+            CountCheck::Differs(server_total) => report.add(
                 "count_mismatch",
                 resource_type,
                 &format!(
@@ -447,10 +441,10 @@ fn export_all(
                      the server stopped paging early (no next link) or its count is stale"
                 ),
             ),
-            Some(_) => {}
-            None => eprintln!(
-                "count check unavailable for {resource_type}: the server returned no total"
-            ),
+            CountCheck::Same => {}
+            CountCheck::Unavailable(why) => {
+                eprintln!("count check unavailable for {resource_type}: {why}")
+            }
         }
     }
     match windows {

@@ -34,12 +34,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde_json::Value;
-use url::Url;
 
 use crate::error::{PipesError, Result};
 use crate::extract::client::FhirClient;
 use crate::extract::page::{
     PAGE_SIZE, PageNote, PageResult, ServerKind, count_matching, count_resources, page_search,
+    server_url,
 };
 use crate::fhir::ndjson::NdjsonReader;
 use crate::report::Report;
@@ -323,9 +323,7 @@ fn probe(
     resource_type: &str,
 ) -> std::result::Result<(i64, i64, Option<String>), String> {
     let first = |sort: &str| -> std::result::Result<(i64, Option<String>), String> {
-        let base = server.trim_end_matches('/');
-        let mut url = Url::parse(&format!("{base}/{resource_type}"))
-            .map_err(|_| format!("--server is not a valid URL: {server}"))?;
+        let mut url = server_url(server, resource_type).map_err(|e| e.to_string())?;
         url.query_pairs_mut()
             .append_pair("_sort", sort)
             .append_pair("_count", "1")
