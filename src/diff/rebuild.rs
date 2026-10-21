@@ -3,22 +3,21 @@
 //! snapshot had it, which is what makes the round trip lossless.
 
 use geo::{CoordsIter, Geometry};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::diff::compare::{round_coord, round_geometry, wkb_key};
 use crate::diff::input::{ColumnValue, IDENTIFIER_COLUMN, Identifier, InputRow, out_of_range};
-use crate::fhir::location::{
-    self, HL7_BOUNDARY_EXTENSION_URL, coding_code_by_system, is_boundary_extension, position_of,
+use crate::fhir::edit::{
+    Object, array_mut, identifier_system_of, set_concept_text, set_first_type_code,
+    set_physical_type, set_reference, set_string, upsert_extension_code, upsert_identifier,
+    upsert_type_coding, write_position,
 };
-use crate::fhir::organization::NewOrganization;
+use crate::fhir::location::{self, HL7_BOUNDARY_EXTENSION_URL, is_boundary_extension, position_of};
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
 use crate::fhir::{Boundary, Location};
 use crate::geometry::{kind_name, parse_boundary, to_geojson_bytes, validity};
-use crate::import::ORGANIZATION_KEYS;
 use crate::profile::{Column, Kind, Profile};
 use crate::report::Report;
-
-type Object = Map<String, Value>;
 
 /// The resource as it should now be. `base` is the raw snapshot line, or
 /// `{"resourceType":"Location","id":..}` for a create; `snapshot` is its
@@ -69,7 +68,7 @@ pub fn rebuild(
     Value::Object(obj)
 }
 
-fn text_of(v: &ColumnValue) -> Option<&str> {
+pub(super) fn text_of(v: &ColumnValue) -> Option<&str> {
     match v {
         ColumnValue::Text(s) => Some(s.as_str()),
         _ => None,
@@ -100,7 +99,7 @@ fn apply_column(obj: &mut Object, name: &str, value: &ColumnValue) {
 }
 
 /// Write one profile column's value back where the column reads it from.
-fn apply_profile_column(
+pub(super) fn apply_profile_column(
     obj: &mut Object,
     column: &Column,
     value: Option<&str>,
@@ -132,145 +131,7 @@ fn apply_profile_column(
     }
 }
 
-/// `obj[key]` as an array, creating one (or replacing a non-array) first.
-fn array_mut<'a>(obj: &'a mut Object, key: &str) -> &'a mut Vec<Value> {
-    if !matches!(obj.get(key), Some(Value::Array(_))) {
-        obj.insert(key.to_string(), Value::Array(Vec::new()));
-    }
-    obj.get_mut(key)
-        .and_then(Value::as_array_mut)
-        .expect("ensured above")
-}
-
-/// `obj[key]` as an object, creating one (or replacing a non-object) first.
-fn object_mut<'a>(obj: &'a mut Object, key: &str) -> &'a mut Object {
-    if !matches!(obj.get(key), Some(Value::Object(_))) {
-        obj.insert(key.to_string(), Value::Object(Object::new()));
-    }
-    obj.get_mut(key)
-        .and_then(Value::as_object_mut)
-        .expect("ensured above")
-}
-
-/// `arr[0]` as an object, inserting an empty one at the front if needed.
-fn first_object_mut(arr: &mut Vec<Value>) -> &mut Object {
-    if !matches!(arr.first(), Some(Value::Object(_))) {
-        arr.insert(0, Value::Object(Object::new()));
-    }
-    arr[0].as_object_mut().expect("ensured above")
-}
-
-fn set_string(obj: &mut Object, key: &str, v: Option<&str>) {
-    match v {
-        Some(s) => {
-            obj.insert(key.to_string(), Value::String(s.to_string()));
-        }
-        None => {
-            obj.remove(key);
-        }
-    }
-}
-
-/// `type` edits the code of the first coding of the first concept and keeps
-/// its system. Clearing removes that one coding only: the facility level
-/// and ownership concepts share the list.
-fn set_first_type_code(obj: &mut Object, code: Option<&str>) {
-    let Some(code) = code else {
-        if let Some(Value::Array(types)) = obj.get_mut("type") {
-            if let Some(Value::Object(first)) = types.first_mut() {
-                let now_empty = match first.get_mut("coding").and_then(Value::as_array_mut) {
-                    Some(codings) => {
-                        if !codings.is_empty() {
-                            codings.remove(0);
-                        }
-                        codings.is_empty()
-                    }
-                    None => false,
-                };
-                if now_empty {
-                    first.remove("coding");
-                }
-                if first.is_empty() {
-                    types.remove(0);
-                }
-            }
-            if types.is_empty() {
-                obj.remove("type");
-            }
-        }
-        return;
-    };
-    let types = array_mut(obj, "type");
-    let first = first_object_mut(types);
-    let codings = array_mut(first, "coding");
-    let coding = first_object_mut(codings);
-    coding.insert("code".into(), Value::String(code.to_string()));
-}
-
-fn set_physical_type(obj: &mut Object, code: Option<&str>) {
-    let Some(code) = code else {
-        obj.remove("physicalType");
-        return;
-    };
-    let concept = object_mut(obj, "physicalType");
-    let coding = first_object_mut(array_mut(concept, "coding"));
-    coding.insert("code".into(), Value::String(code.to_string()));
-}
-
-/// Replace the last path segment of an existing reference, so `Location/x`,
-/// `http://host/fhir/Location/x` keep their shape; with no usable existing
-/// reference the type is prefixed. Other fields (`display`) are kept.
-fn set_reference(obj: &mut Object, key: &str, default_type: &str, id: Option<&str>) {
-    let Some(id) = id else {
-        obj.remove(key);
-        return;
-    };
-    let prefix = obj
-        .get(key)
-        .and_then(|r| r.get("reference"))
-        .and_then(Value::as_str)
-        .and_then(|r| r.rfind('/').map(|i| r[..=i].to_string()));
-    let reference = match prefix {
-        Some(p) => format!("{p}{id}"),
-        None => format!("{default_type}/{id}"),
-    };
-    object_mut(obj, key).insert("reference".into(), Value::String(reference));
-}
-
-/// The system an identifier column's value was read from, so an edit goes
-/// back to the same entry: the first of `systems` the resource has, else the
-/// first of `systems`.
-fn identifier_system_of(obj: &Object, systems: &[String]) -> String {
-    let list = obj.get("identifier").and_then(Value::as_array);
-    systems
-        .iter()
-        .find(|system| list.is_some_and(|l| l.iter().any(|i| system_is(i, system))))
-        .or(systems.first())
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn system_is(entry: &Value, system: &str) -> bool {
-    entry.get("system").and_then(Value::as_str) == Some(system)
-}
-
-fn upsert_identifier(obj: &mut Object, system: &str, value: Option<&str>) {
-    let list = array_mut(obj, "identifier");
-    match value {
-        Some(v) => match list.iter_mut().find(|i| system_is(i, system)) {
-            Some(Value::Object(i)) => {
-                i.insert("value".into(), Value::String(v.to_string()));
-            }
-            _ => list.push(json!({"system": system, "value": v})),
-        },
-        None => list.retain(|i| !system_is(i, system)),
-    }
-    if list.is_empty() {
-        obj.remove("identifier");
-    }
-}
-
-fn apply_identifier_list(obj: &mut Object, value: &ColumnValue) {
+pub(super) fn apply_identifier_list(obj: &mut Object, value: &ColumnValue) {
     match value {
         ColumnValue::Identifiers(items) => {
             let list: Vec<Value> = items.iter().map(identifier_json).collect();
@@ -292,153 +153,6 @@ fn identifier_json(i: &Identifier) -> Value {
         o.insert("value".into(), json!(v));
     }
     Value::Object(o)
-}
-
-fn url_is(entry: &Value, url: &str) -> bool {
-    entry.get("url").and_then(Value::as_str) == Some(url)
-}
-
-/// Set the extension's `valueCode`, or with `system` the coding under
-/// `system` in its `valueCodeableConcept`. An unchanged value leaves the
-/// extension as it is, so a round trip of unedited rows keeps displays, text
-/// and other systems' codings. A changed code keeps the concept's other
-/// codings and drops what described the old code (its display and the
-/// concept text). Clearing removes the coding, and the extension once
-/// nothing is left in it.
-fn upsert_extension_code(obj: &mut Object, url: &str, system: Option<&str>, code: Option<&str>) {
-    let current = obj
-        .get("extension")
-        .and_then(Value::as_array)
-        .and_then(|exts| exts.iter().find(|e| url_is(e, url)))
-        .and_then(|ext| match system {
-            Some(s) => coding_code_by_system(ext.get("valueCodeableConcept"), s),
-            None => ext
-                .get("valueCode")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        });
-    if current.as_deref() == code {
-        return;
-    }
-    let exts = array_mut(obj, "extension");
-    let pos = exts.iter().position(|e| url_is(e, url));
-    match (code, system) {
-        (Some(c), None) => match pos.and_then(|i| exts[i].as_object_mut()) {
-            Some(e) => {
-                e.retain(|k, _| !k.starts_with("value"));
-                e.insert("valueCode".into(), Value::String(c.to_string()));
-            }
-            None => exts.push(json!({"url": url, "valueCode": c})),
-        },
-        (Some(c), Some(s)) => {
-            let coding = json!({"system": s, "code": c});
-            let concept = pos
-                .and_then(|i| exts[i].as_object_mut())
-                .and_then(|e| e.get_mut("valueCodeableConcept"))
-                .and_then(Value::as_object_mut);
-            match concept {
-                Some(cc) => {
-                    cc.remove("text");
-                    let codings = cc
-                        .entry("coding")
-                        .or_insert_with(|| Value::Array(Vec::new()));
-                    if !codings.is_array() {
-                        *codings = Value::Array(Vec::new());
-                    }
-                    let codings = codings.as_array_mut().expect("an array");
-                    match codings.iter().position(|x| system_is(x, s)) {
-                        Some(i) => codings[i] = coding,
-                        None => codings.push(coding),
-                    }
-                }
-                None => match pos.and_then(|i| exts[i].as_object_mut()) {
-                    Some(e) => {
-                        e.retain(|k, _| !k.starts_with("value"));
-                        e.insert("valueCodeableConcept".into(), json!({"coding": [coding]}));
-                    }
-                    None => {
-                        exts.push(json!({"url": url, "valueCodeableConcept": {"coding": [coding]}}))
-                    }
-                },
-            }
-        }
-        (None, None) => exts.retain(|e| !url_is(e, url)),
-        (None, Some(s)) => {
-            if let Some(i) = pos {
-                let left = exts[i]
-                    .get_mut("valueCodeableConcept")
-                    .and_then(|cc| cc.get_mut("coding"))
-                    .and_then(Value::as_array_mut)
-                    .map(|codings| {
-                        codings.retain(|x| !system_is(x, s));
-                        codings.len()
-                    })
-                    .unwrap_or(0);
-                if left == 0 {
-                    exts.remove(i);
-                }
-            }
-        }
-    }
-    if exts.is_empty() {
-        obj.remove("extension");
-    }
-}
-
-/// A coding under `system` anywhere in `Location.type`: set its code
-/// (dropping the display if the code changes), or add a concept holding it;
-/// clearing removes those codings and any concept left empty.
-fn upsert_type_coding(obj: &mut Object, system: &str, code: Option<&str>) {
-    let types = array_mut(obj, "type");
-    match code {
-        Some(c) => {
-            let found = types
-                .iter_mut()
-                .filter_map(Value::as_object_mut)
-                .flat_map(|concept| {
-                    concept
-                        .get_mut("coding")
-                        .and_then(Value::as_array_mut)
-                        .into_iter()
-                        .flatten()
-                })
-                .find(|coding| system_is(coding, system));
-            match found {
-                Some(Value::Object(coding)) => {
-                    // A display belongs to the old code.
-                    if coding.get("code").and_then(Value::as_str) != Some(c) {
-                        coding.remove("display");
-                    }
-                    coding.insert("code".into(), Value::String(c.to_string()));
-                }
-                _ => types.push(json!({"coding": [{"system": system, "code": c}]})),
-            }
-        }
-        None => {
-            for concept in types.iter_mut().filter_map(Value::as_object_mut) {
-                let now_empty = match concept.get_mut("coding").and_then(Value::as_array_mut) {
-                    Some(codings) => {
-                        codings.retain(|coding| !system_is(coding, system));
-                        codings.is_empty()
-                    }
-                    None => false,
-                };
-                if now_empty {
-                    concept.remove("coding");
-                }
-            }
-            types.retain(|concept| concept.as_object().is_some_and(|o| !o.is_empty()));
-        }
-    }
-    if types.is_empty() {
-        obj.remove("type");
-    }
-}
-
-fn write_position(obj: &mut Object, lon: f64, lat: f64) {
-    let pos = object_mut(obj, "position");
-    pos.insert("longitude".into(), json!(lon));
-    pos.insert("latitude".into(), json!(lat));
 }
 
 /// Writes the rounded position unless it rounds to what is already there,
@@ -608,134 +322,10 @@ fn apply_geometry(
     write_position(obj, x, y);
 }
 
-/// True when the row carries `column` with a value different from what
-/// the snapshot Location has. An unedited export repeats every column;
-/// only a real edit may reach the Organization, so drift between the two
-/// resources is never "corrected" by accident.
-fn edited(row: &InputRow, column: &str, current: Option<&str>) -> bool {
-    match row.columns.get(column) {
-        None => false,
-        Some(ColumnValue::Null) => current.is_some(),
-        Some(ColumnValue::Text(t)) => Some(t.as_str()) != current,
-        Some(_) => false,
-    }
-}
-
-/// `text` on the concept in `type` that holds a coding under `system`.
-fn set_concept_text(
-    obj: &mut Object,
-    system: &str,
-    text: Option<&str>,
-    id: &str,
-    column: &str,
-    report: &mut Report,
-) {
-    let resource = obj
-        .get("resourceType")
-        .and_then(Value::as_str)
-        .unwrap_or("resource")
-        .to_string();
-    let concept = obj
-        .get_mut("type")
-        .and_then(Value::as_array_mut)
-        .and_then(|types| {
-            types.iter_mut().filter_map(Value::as_object_mut).find(|c| {
-                c.get("coding")
-                    .and_then(Value::as_array)
-                    .is_some_and(|cs| cs.iter().any(|x| system_is(x, system)))
-            })
-        });
-    match (concept, text) {
-        (Some(c), Some(t)) => {
-            c.insert("text".into(), Value::String(t.to_string()));
-        }
-        (Some(c), None) => {
-            c.remove("text");
-        }
-        (None, Some(_)) => report.add(
-            "input_column_type",
-            id,
-            &format!("{column}: the {resource} has no coding under {system} to label; ignored"),
-        ),
-        (None, None) => {}
-    }
-}
-
-/// The Organization half of a facility row. `name`, `status` and the
-/// profile's `mirror_to_organization` columns mirror from the Location when
-/// edited (or always, for a create); the profile's Organization columns and
-/// the whole `organization_identifier` list are Organization-only and apply
-/// as given.
-pub fn rebuild_organization(
-    base: &Value,
-    row: &InputRow,
-    snapshot: Option<&Location>,
-    profile: &Profile,
-    report: &mut Report,
-) -> Value {
-    let mut obj = base.as_object().cloned().unwrap_or_default();
-    let id = obj
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("<unknown>")
-        .to_string();
-    let mirror =
-        |column: &str, current: Option<&str>| snapshot.is_none() || edited(row, column, current);
-    if let Some(v) = row.columns.get("organization_identifier") {
-        apply_identifier_list(&mut obj, v);
-    }
-    for (name, value) in &row.columns {
-        let t = text_of(value);
-        match name.as_str() {
-            "name" if mirror("name", snapshot.and_then(|l| l.name.as_deref())) => {
-                set_string(&mut obj, "name", t)
-            }
-            "status" if mirror("status", snapshot.and_then(|l| l.status.as_deref())) => {
-                if let Some(s) = t {
-                    obj.insert("active".into(), Value::Bool(s == "active"));
-                }
-            }
-            _ => {}
-        }
-    }
-    for (i, column) in profile.location.columns.iter().enumerate() {
-        let Some(value) = row.columns.get(&column.name) else {
-            continue;
-        };
-        let current = snapshot.and_then(|l| l.columns.get(i)?.as_deref());
-        if column.mirror_to_organization && mirror(&column.name, current) {
-            apply_profile_column(&mut obj, column, text_of(value), &id, report);
-        }
-    }
-    for column in &profile.organization.columns {
-        if let Some(value) = row.columns.get(&column.name) {
-            apply_profile_column(&mut obj, column, text_of(value), &id, report);
-        }
-    }
-    Value::Object(obj)
-}
-
-/// The Organization for a new facility row: the pairing shape `import location-sites --paired-org` writes,
-/// then the row's columns on top.
-pub fn new_organization(
-    org_id: &str,
-    row: &InputRow,
-    profile: &Profile,
-    report: &mut Report,
-) -> Value {
-    let base = NewOrganization {
-        id: org_id,
-        active: true,
-        ..Default::default()
-    }
-    .into_json(&ORGANIZATION_KEYS);
-    rebuild_organization(&base, row, None, profile, report)
-}
-
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::fhir::organization::ORGANIZATION_TYPE_SYSTEM;
+
     use base64::Engine;
     use geo::{line_string, polygon};
     use serde_json::json;
@@ -744,146 +334,35 @@ mod tests {
     // the example ICR profile.
     const BOUNDARY_EXTENSION_URL: &str =
         "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
+
     const PCODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/pcode";
+
     const GERS_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/overture-gers";
-    const NHFR_CODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code";
-    const NHFR_UID_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid";
-    const FACILITY_TYPE_SYSTEM: &str =
+
+    pub(crate) const NHFR_CODE_SYSTEM: &str =
+        "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code";
+
+    pub(crate) const NHFR_UID_SYSTEM: &str =
+        "https://icr.healthcampaigns.org/identifiers/nga-nhfr-uid";
+
+    pub(crate) const FACILITY_TYPE_SYSTEM: &str =
         "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs";
+
     const OWNERSHIP_SYSTEM: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs";
+
     const SETTLEMENT_TYPE_EXTENSION_URL: &str =
         "https://icr.healthcampaigns.org/StructureDefinition/settlement-type";
+
     const SETTLEMENT_TYPE_SYSTEM: &str =
         "https://icr.healthcampaigns.org/CodeSystem/icr-settlement-type-cs";
+
     const DELIVERY_STRATEGY_EXTENSION_URL: &str = crate::profile::TEST_DELIVERY_STRATEGY_EXTENSION;
 
-    fn icr() -> Profile {
+    pub(crate) fn icr() -> Profile {
         crate::profile::test_profile()
     }
 
-    fn org_base() -> Value {
-        json!({"resourceType":"Organization","id":"org-a","active":true,"name":"A","meta":{"versionId":"9"},
-            "identifier":[{"system":NHFR_CODE_SYSTEM,"value":"05/08/1"}],
-            "type":[{"coding":[{"system":ORGANIZATION_TYPE_SYSTEM,"code":"prov"}]},
-                    {"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"primary"}],"text":"Health Post"}]})
-    }
-
-    fn snapshot_location() -> Location {
-        Location::parse(
-            &json!({"resourceType":"Location","id":"a","name":"A","status":"active","managingOrganization":{"reference":"Organization/org-a"}}),
-            &icr(),
-            &mut Report::default(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn mirrored_columns_reach_the_organization_only_when_edited() {
-        let mut report = Report::default();
-        let loc = snapshot_location();
-        // Unedited name and status, and a facility level the Location never had: no change.
-        let same = row(&[
-            ("name", text("A")),
-            ("status", text("active")),
-            ("facility_level", ColumnValue::Null),
-        ]);
-        assert_eq!(
-            rebuild_organization(&org_base(), &same, Some(&loc), &icr(), &mut report),
-            org_base()
-        );
-        // Edited name and status.
-        let edited = row(&[("name", text("B")), ("status", text("inactive"))]);
-        let out = rebuild_organization(&org_base(), &edited, Some(&loc), &icr(), &mut report);
-        assert_eq!(out["name"], "B");
-        assert_eq!(out["active"], false);
-        assert_eq!(out["meta"]["versionId"], "9");
-        // Facility level edited on the row: the Organization's coding follows.
-        let out = rebuild_organization(
-            &org_base(),
-            &row(&[("facility_level", text("secondary"))]),
-            Some(&loc),
-            &icr(),
-            &mut report,
-        );
-        assert_eq!(out["type"][1]["coding"][0]["code"], "secondary");
-        assert_eq!(
-            out["type"][1]["text"], "Health Post",
-            "the label is untouched"
-        );
-    }
-
-    #[test]
-    fn organization_only_columns_apply_directly() {
-        let mut report = Report::default();
-        let loc = snapshot_location();
-        let r = row(&[
-            ("nhfr_code", text("05/08/2")),
-            ("nhfr_uid", text("999")),
-            ("facility_level_text", text("Clinic")),
-            ("ownership_text", text("Private")),
-        ]);
-        let out = rebuild_organization(&org_base(), &r, Some(&loc), &icr(), &mut report);
-        assert_eq!(
-            out["identifier"],
-            json!([{"system":NHFR_CODE_SYSTEM,"value":"05/08/2"},{"system":NHFR_UID_SYSTEM,"value":"999"}])
-        );
-        assert_eq!(out["type"][1]["text"], "Clinic");
-        assert_eq!(
-            report.count("input_column_type"),
-            1,
-            "no ownership coding to label"
-        );
-        let out = rebuild_organization(
-            &org_base(),
-            &row(&[("facility_level_text", ColumnValue::Null)]),
-            Some(&loc),
-            &icr(),
-            &mut report,
-        );
-        assert!(out["type"][1].get("text").is_none());
-        let out = rebuild_organization(
-            &org_base(),
-            &row(&[(
-                "organization_identifier",
-                ColumnValue::Identifiers(vec![Identifier {
-                    system: Some("s".into()),
-                    value: Some("v".into()),
-                }]),
-            )]),
-            Some(&loc),
-            &icr(),
-            &mut report,
-        );
-        assert_eq!(out["identifier"], json!([{"system":"s","value":"v"}]));
-    }
-
-    #[test]
-    fn a_new_organization_carries_the_pairing_shape() {
-        let mut report = Report::default();
-        let r = row(&[
-            ("name", text("New Site")),
-            ("facility_level", text("primary")),
-            ("facility_level_text", text("Health Post")),
-            ("nhfr_code", text("05/09")),
-        ]);
-        let out = new_organization("org-new", &r, &icr(), &mut report);
-        assert_eq!(out["resourceType"], "Organization");
-        assert_eq!(out["id"], "org-new");
-        assert_eq!(out["active"], true);
-        assert_eq!(out["name"], "New Site");
-        assert_eq!(out["type"][0]["coding"][0]["code"], "prov");
-        assert_eq!(
-            out["type"][1],
-            json!({"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"primary"}],"text":"Health Post"})
-        );
-        assert_eq!(
-            out["identifier"],
-            json!([{"system":NHFR_CODE_SYSTEM,"value":"05/09"}])
-        );
-        assert!(out.get("meta").is_none());
-    }
-
-    fn row(cols: &[(&str, ColumnValue)]) -> InputRow {
+    pub(crate) fn row(cols: &[(&str, ColumnValue)]) -> InputRow {
         InputRow {
             id: Some("a".into()),
             columns: cols
@@ -896,7 +375,7 @@ mod tests {
         }
     }
 
-    fn text(s: &str) -> ColumnValue {
+    pub(crate) fn text(s: &str) -> ColumnValue {
         ColumnValue::Text(s.into())
     }
 
