@@ -137,7 +137,7 @@ struct Index {
 
 impl Index {
     fn add(&mut self, rtype: Option<String>, id: Option<String>, slot: Slot) {
-        match rtype.filter(|t| crate::export::valid_type(t)) {
+        match rtype.filter(|t| crate::fhir::valid_type(t)) {
             Some(t) => self.types.entry(t).or_default().add(id, slot),
             None => self.skipped += 1,
         }
@@ -147,7 +147,7 @@ impl Index {
     fn spill(&mut self, r: Value, sources: &mut Sources) -> Result<()> {
         let s = |p: &str| r.pointer(p).and_then(Value::as_str).map(str::to_string);
         let (rtype, id) = (s("/resourceType"), s("/id"));
-        if !rtype.as_deref().is_some_and(crate::export::valid_type) {
+        if !rtype.as_deref().is_some_and(crate::fhir::valid_type) {
             self.skipped += 1;
             return Ok(());
         }
@@ -456,7 +456,7 @@ fn raw_types(dir: &Path) -> Result<Vec<String>> {
             continue;
         }
         if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy())
-            && crate::export::valid_type(&stem)
+            && crate::fhir::valid_type(&stem)
         {
             types.push(stem.into_owned());
         }
@@ -615,7 +615,7 @@ mod tests {
             let Some(t) = r
                 .get("resourceType")
                 .and_then(Value::as_str)
-                .filter(|t| crate::export::valid_type(t))
+                .filter(|t| crate::fhir::valid_type(t))
             else {
                 continue;
             };

@@ -31,10 +31,10 @@ use serde_json::Value;
 
 use crate::cli::SyncArgs;
 use crate::error::{PipesError, Result};
-use crate::export::valid_type;
 use crate::fhir::group::is_valid_id;
 use crate::fhir::head::Head;
 use crate::fhir::ndjson::NdjsonReader;
+use crate::fhir::valid_type;
 use crate::http::FhirClient;
 use crate::load::bundle::{Bundle, plan, plan_deletes};
 use crate::load::order::{depths, reference_key};

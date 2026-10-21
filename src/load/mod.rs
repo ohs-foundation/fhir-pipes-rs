@@ -164,7 +164,7 @@ pub fn read_plan(path: &Path) -> Result<LoadPlan> {
             return Err(not_a_resource());
         }
         // Both go into request URLs (`Type/id`, and the conflict check's GET).
-        if !crate::export::valid_type(&resource_type) || !crate::fhir::group::is_valid_id(&id) {
+        if !crate::fhir::valid_type(&resource_type) || !crate::fhir::group::is_valid_id(&id) {
             return Err(PipesError::Usage(format!(
                 "{}: line {}: {resource_type}/{id} is not a FHIR resource type and id",
                 path.display(),

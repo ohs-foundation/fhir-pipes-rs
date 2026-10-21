@@ -53,6 +53,7 @@ use crate::extract::page::{
     CountCheck, PageNote, PageResult, ServerKind, check_count, count_resources, next_link,
     page_resources, page_search,
 };
+use crate::fhir::valid_type;
 use crate::http::FhirClient;
 use crate::report::{Report, write_report};
 use crate::snapshot::instant::{capped_watermark, format_utc, later, parse_instant};
@@ -115,13 +116,6 @@ impl ExportState {
         let text = serde_json::to_string_pretty(self)? + "\n";
         crate::fs::atomic_write(&dir.join(STATE_FILE), text)
     }
-}
-
-/// A FHIR resource type name: an upper-case letter, then letters. It becomes
-/// a file name, so nothing else is accepted.
-pub(crate) fn valid_type(t: &str) -> bool {
-    let mut chars = t.chars();
-    chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_alphabetic())
 }
 
 pub fn run_export(args: &ExportArgs) -> Result<()> {
@@ -1092,15 +1086,5 @@ mod tests {
             let state = ExportState::read(dir.path());
             assert!(state.server.is_empty() && state.types.is_empty());
         }
-    }
-
-    #[test]
-    fn type_names_are_plain_words() {
-        assert!(valid_type("MeasureReport"));
-        assert!(valid_type("Location"));
-        assert!(!valid_type(""));
-        assert!(!valid_type("measureReport"));
-        assert!(!valid_type("../Location"));
-        assert!(!valid_type("Location?_count=1"));
     }
 }
