@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -1719,7 +1719,7 @@ fn fetch_and_write(
     // Stops the workers, including any waiting for the window to move.
     let halt = || {
         // Set under the lock so a worker about to wait sees it.
-        let guard = written.0.lock().unwrap();
+        let guard = written.0.lock().unwrap_or_else(PoisonError::into_inner);
         stop.store(true, Ordering::Relaxed);
         drop(guard);
         written.1.notify_all();
@@ -1730,9 +1730,9 @@ fn fetch_and_write(
         |i| {
             {
                 let (lock, ready) = &written;
-                let mut done = lock.lock().unwrap();
+                let mut done = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 while i >= *done + window && !stop.load(Ordering::Relaxed) {
-                    done = ready.wait(done).unwrap();
+                    done = ready.wait(done).unwrap_or_else(PoisonError::into_inner);
                 }
             }
             if stop.load(Ordering::Relaxed) {
@@ -1779,7 +1779,7 @@ fn fetch_and_write(
                     }
                 }
                 cursor += 1;
-                *written.0.lock().unwrap() = cursor;
+                *written.0.lock().unwrap_or_else(PoisonError::into_inner) = cursor;
                 written.1.notify_all();
             }
             true

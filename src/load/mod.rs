@@ -27,7 +27,7 @@ pub mod order;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -452,13 +452,13 @@ where
     let mut i = 0usize;
     let mut make = next;
     let take = || {
-        if i >= count || state.0.lock().unwrap().1 {
+        if i >= count || state.0.lock().unwrap_or_else(PoisonError::into_inner).1 {
             return None;
         }
         let made = make(i);
         if made.is_err() {
             // Before the next worker can make another.
-            state.0.lock().unwrap().1 = true;
+            state.0.lock().unwrap_or_else(PoisonError::into_inner).1 = true;
         }
         i += 1;
         Some((i - 1, made))
@@ -477,9 +477,9 @@ where
             let bundle = bundle.borrow();
             {
                 let (lock, changed) = &state;
-                let mut st = lock.lock().unwrap();
+                let mut st = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 while !st.1 && deps.iter().any(|&j| !st.0[j]) {
-                    st = changed.wait(st).unwrap();
+                    st = changed.wait(st).unwrap_or_else(PoisonError::into_inner);
                 }
                 // Stopped while a bundle it references is not committed: it
                 // can never be. A bundle taken before the failure whose
@@ -492,7 +492,7 @@ where
             // Recorded before the next bundle is taken, so one worker
             // stops right after a failure, as a sequential load does.
             {
-                let mut st = state.0.lock().unwrap();
+                let mut st = state.0.lock().unwrap_or_else(PoisonError::into_inner);
                 match r {
                     Ok(()) => st.0[i] = true,
                     Err(_) => st.1 = true,
@@ -517,7 +517,11 @@ where
             true
         },
     );
-    let committed = state.0.into_inner().unwrap().0;
+    let committed = state
+        .0
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .0;
     Posted { committed, failure }
 }
 
