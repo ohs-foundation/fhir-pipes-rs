@@ -33,6 +33,8 @@ const MAX_ERROR: usize = 2000;
 /// Whether the database step's commit happened: `false`, `true`, or
 /// `"unknown"` when the commit was sent and its answer was lost.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+// Only the database step, built with the postgres feature, commits.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
 pub enum Committed {
     #[default]
     No,
