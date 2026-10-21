@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod runner;
 pub mod store;
 
 use std::fs;
