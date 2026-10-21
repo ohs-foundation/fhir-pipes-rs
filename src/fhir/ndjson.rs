@@ -1,7 +1,7 @@
 //! Streaming NDJSON. `Splitter` finds the lines of NDJSON text, and every
 //! NDJSON reader in fhir-pipes goes through it: `NdjsonReader` yields each
 //! line with its byte offset so pass two can seek straight back to it;
-//! `LineAccess` does that seek; `views::ndjson::Lines` reads a chunk of
+//! `LineAccess` does that seek; `fhir::chunks::Lines` reads a chunk of
 //! lines at a time. `NdjsonWriter` writes NDJSON output that a failed run
 //! does not leave half-written, and that `dhis2 reports --resume` can carry
 //! on with.

@@ -9,7 +9,7 @@ use fhir_pipes_sof::{CompiledView, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Severity, validate_structure};
 use serde_json::Value;
 
-use crate::views::ndjson;
+use crate::fhir::chunks;
 
 /// A ViewDefinition found in the views directory.
 #[derive(Debug, Clone)]
@@ -235,12 +235,12 @@ fn compiled<'c>(
 /// on `threads` threads. Returns the number of resources read and each
 /// view's rows, in file order.
 pub fn run_file(views: &[&View], path: &Path, threads: usize) -> Result<(usize, Vec<ViewResult>)> {
-    run_lines(views, ndjson::open(path)?, threads)
+    run_lines(views, chunks::open(path)?, threads)
 }
 
 fn run_lines<R: std::io::BufRead>(
     views: &[&View],
-    lines: ndjson::Lines<R>,
+    lines: chunks::Lines<R>,
     threads: usize,
 ) -> Result<(usize, Vec<ViewResult>)> {
     let mut rows = ViewRows::new(
@@ -391,7 +391,7 @@ mod tests {
             .map(|v| fhir_pipes_sof::execute_parallel(&v.definition, &resources, 1).unwrap())
             .collect();
         for (lines, threads) in [(1, 1), (7, 3), (50, 8), (1000, 2)] {
-            let source = ndjson::Lines::new(text.as_bytes(), "x").with_limits(lines, usize::MAX);
+            let source = chunks::Lines::new(text.as_bytes(), "x").with_limits(lines, usize::MAX);
             let (n, chunked) = run_lines(&views, source, threads).unwrap();
             assert_eq!(n, 103);
             for (a, b) in chunked.iter().zip(&whole) {
@@ -410,11 +410,11 @@ mod tests {
             "Patient",
             serde_json::json!([{"column": [{"name": "id", "path": "id"}, {"name": "n", "path": "1"}]}]),
         );
-        let (n, r) = run_lines(&[&ids], ndjson::Lines::new(&b"\n"[..], "x"), 2).unwrap();
+        let (n, r) = run_lines(&[&ids], chunks::Lines::new(&b"\n"[..], "x"), 2).unwrap();
         assert_eq!(n, 0);
         assert_eq!(r[0].columns.len(), 2);
         assert!(r[0].data.is_empty());
-        let source = ndjson::Lines::new(&b"{}\n{oops\n"[..], "x.ndjson");
+        let source = chunks::Lines::new(&b"{}\n{oops\n"[..], "x.ndjson");
         let err = format!("{:#}", run_lines(&[&ids], source, 2).err().unwrap());
         assert!(err.contains("x.ndjson line 2"), "{err}");
     }

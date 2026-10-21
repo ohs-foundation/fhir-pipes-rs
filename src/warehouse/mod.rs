@@ -40,7 +40,6 @@ mod sql;
 mod stage;
 mod tiles;
 mod tools;
-pub(crate) mod views;
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -58,6 +57,7 @@ use config::Settings;
 use crate::error::usage;
 use crate::extract::page::ServerKind;
 use crate::http::TokenAuth;
+use crate::views::run::{View, ViewRows};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct RefreshArgs {
@@ -519,7 +519,7 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
         println!("tool:       {program} ({purpose}): {found}");
     }
     if let Some(dir) = &s.views {
-        match views::discover(dir, &s.strip_prefix)
+        match crate::views::run::discover(dir, &s.strip_prefix)
             .and_then(|vs| unwritten_tables(s, vs.into_iter().map(|v| v.table).collect()))
         {
             Ok(t) if t.is_empty() => {}
@@ -897,13 +897,13 @@ fn mismatch_report(m: &[(String, WriteSummary)]) -> serde_json::Value {
 /// or those of the tables `tables` names, in its order, each of which must
 /// be a view's.
 #[cfg(feature = "postgres")]
-fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<views::View>> {
+fn database_tables(s: &Settings, d: &config::Database) -> Result<Vec<View>> {
     let dir = s
         .views
         .as_ref()
         .context("[database] loads the view tables, so it needs the views directory")
         .map_err(usage)?;
-    let mut all: BTreeMap<String, views::View> = views::discover(dir, &s.strip_prefix)
+    let mut all: BTreeMap<String, View> = crate::views::run::discover(dir, &s.strip_prefix)
         .map_err(usage)?
         .into_iter()
         .map(|v| (v.table.clone(), v))
@@ -952,14 +952,14 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
         .map_err(usage)?;
     println!("== views ({})", dir.display());
     // A missing, unreadable or invalid ViewDefinition is the operator's to fix.
-    let all = views::discover(dir, &s.strip_prefix).map_err(usage)?;
+    let all = crate::views::run::discover(dir, &s.strip_prefix).map_err(usage)?;
     if all.is_empty() {
         return Err(usage(anyhow::anyhow!(
             "no ViewDefinitions in {}",
             dir.display()
         )));
     }
-    views::save(&all, &stage.dir("views"))?;
+    crate::views::run::save(&all, &stage.dir("views"))?;
 
     let mut by_type: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, v) in all.iter().enumerate() {
@@ -983,18 +983,18 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
     // Each type's views, run over one read of its file.
     let run_type = |rtype: &str, idx: &[usize]| -> Result<Vec<(usize, ViewResult)>> {
         let t = Instant::now();
-        let vs: Vec<&views::View> = idx.iter().map(|&i| &all[i]).collect();
+        let vs: Vec<&View> = idx.iter().map(|&i| &all[i]).collect();
         // A type the files lack gives its views empty tables.
         let (n, results) = if s.reads_files() && !ndjson(rtype).exists() {
             println!("   {rtype}: none in the files; its views write empty tables");
-            let rows = views::ViewRows::new(
+            let rows = ViewRows::new(
                 vs.iter()
                     .map(|v| (v.name.as_str(), &v.definition))
                     .collect(),
             );
             (0, rows.finish(s.threads)?)
         } else {
-            views::run_file(&vs, &ndjson(rtype), s.threads)?
+            crate::views::run::run_file(&vs, &ndjson(rtype), s.threads)?
         };
         println!(
             "   {rtype}: {n} resources, {} view(s), {:.1}s",
@@ -1055,7 +1055,7 @@ fn views_step(s: &Settings, stage: &stage::Stage) -> Result<ViewsDone> {
 /// keys and values), and the fhir-pipes version, whose views engine could
 /// give other rows. When it differs from the last load's, the table is
 /// loaded in full.
-fn fingerprint(v: &views::View, partition_column: &str, lookup: &str) -> String {
+fn fingerprint(v: &View, partition_column: &str, lookup: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     for part in [
@@ -1103,7 +1103,7 @@ struct TableWriter<'a> {
 
 impl TableWriter<'_> {
     /// Write view `i`'s table from its rows.
-    fn write(&mut self, i: usize, v: &views::View, result: ViewResult) -> Result<()> {
+    fn write(&mut self, i: usize, v: &View, result: ViewResult) -> Result<()> {
         let (s, stage) = (self.s, self.stage);
         // The partition column is added to every row; a view column of the
         // same name would be lost beside it.
