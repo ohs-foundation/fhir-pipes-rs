@@ -53,7 +53,9 @@ pub fn validate_structure(view: &ViewDefinition) -> Vec<Finding> {
         }
     }
 
-    walk(&view.select, &mut out);
+    for select in view.selects() {
+        check_select(select, &mut out);
+    }
 
     // The ordered output column names, with `unionAll` branches contributing
     // once (and flagged when their shapes disagree).
@@ -82,30 +84,24 @@ pub fn validate_structure(view: &ViewDefinition) -> Vec<Finding> {
 
 /// Per-select invariants: SQL-safe column names and the `sql-expressions`
 /// invariant (at most one of forEach / forEachOrNull / repeat).
-fn walk(selects: &[SelectColumn], out: &mut Vec<Finding>) {
-    for select in selects {
-        let iterations = [
-            select.for_each.is_some(),
-            select.for_each_or_null.is_some(),
-            !select.repeat.is_empty(),
-        ]
-        .into_iter()
-        .filter(|x| *x)
-        .count();
-        if iterations > 1 {
-            out.push(err(
-                "FH07",
-                "a select may use at most one of forEach, forEachOrNull or repeat",
-            ));
-        }
-        if let Some(columns) = &select.column {
-            for col in columns {
-                check_name(col, out);
-            }
-        }
-        walk(&select.select, out);
-        if let Some(branches) = &select.union_all {
-            walk(branches, out);
+fn check_select(select: &SelectColumn, out: &mut Vec<Finding>) {
+    let iterations = [
+        select.for_each.is_some(),
+        select.for_each_or_null.is_some(),
+        !select.repeat.is_empty(),
+    ]
+    .into_iter()
+    .filter(|x| *x)
+    .count();
+    if iterations > 1 {
+        out.push(err(
+            "FH07",
+            "a select may use at most one of forEach, forEachOrNull or repeat",
+        ));
+    }
+    if let Some(columns) = &select.column {
+        for col in columns {
+            check_name(col, out);
         }
     }
 }

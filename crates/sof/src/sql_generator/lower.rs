@@ -251,21 +251,11 @@ impl Lower {
         let path = self.substitute(&col.path)?;
         let ast = parse_ast(&path).map_err(|e| Error::FhirPath(e.to_string()))?;
         let coll = self.coll(&ast, ctx)?;
-        let collection = col.collection.unwrap_or(false);
-        // An `ansi/type` tag explicitly overrides the inferred column type.
-        let ty = if let Some(ansi) = crate::eval::ansi_type_tag(col) {
-            ColumnType::from_ansi_type(ansi)
+        let col_type = crate::eval::column_type(col);
+        let expr = if col.collection.unwrap_or(false) {
+            coll
         } else {
-            col.col_type
-                .as_deref()
-                .map(ColumnType::from_fhir_type)
-                .unwrap_or(ColumnType::String)
-        };
-
-        let (expr, col_type) = if collection {
-            (coll, ColumnType::Json)
-        } else {
-            (self.scalar_col(&coll, ty), ty)
+            self.scalar_col(&coll, col_type)
         };
         Ok(PlanColumn {
             name: col.name.clone(),

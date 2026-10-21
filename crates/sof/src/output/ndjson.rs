@@ -22,12 +22,13 @@ impl NdjsonWriter {
         Self
     }
 
-    /// Convert a row to a JSON object.
-    fn row_to_object(columns: &[ColumnInfo], row: &[Value]) -> Value {
+    /// A row as the JSON object of one NDJSON line: each column's value by
+    /// its name, nulls left out.
+    pub fn row_to_object(columns: &[ColumnInfo], row: impl IntoIterator<Item = Value>) -> Value {
         let mut obj = serde_json::Map::new();
-        for (col, value) in columns.iter().zip(row.iter()) {
+        for (col, value) in columns.iter().zip(row) {
             if !value.is_null() {
-                obj.insert(col.name.clone(), value.clone());
+                obj.insert(col.name.clone(), value);
             }
         }
         Value::Object(obj)
@@ -37,7 +38,7 @@ impl NdjsonWriter {
 impl OutputWriter for NdjsonWriter {
     fn write(&self, result: &ViewResult, output: &mut dyn Write) -> Result<()> {
         for row in &result.data {
-            let obj = Self::row_to_object(&result.columns, row);
+            let obj = Self::row_to_object(&result.columns, row.iter().cloned());
 
             let line = serde_json::to_string(&obj).map_err(|e| Error::Output(e.to_string()))?;
 

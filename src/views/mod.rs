@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use fhir_pipes_sof::output::{
-    OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
+    NdjsonWriter, OutputWriter, ParquetWriter, TemporalEncoding, WriteSummary, get_writer,
 };
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_core, lint_shareable, validate_structure};
@@ -590,7 +590,6 @@ async fn stream_ndjson(
         .await
         .context("compiling view")
         .map_err(usage)?;
-    let names: Vec<String> = compiled.columns().iter().map(|c| c.name.clone()).collect();
     let mut total = 0;
     let mut next = first;
     while let Some((number, line)) = next {
@@ -602,14 +601,8 @@ async fn stream_ndjson(
         push_resource(value, &mut resources, view.resource == "Bundle");
         for resource in &resources {
             for row in compiled.execute_resource(resource).await? {
-                let obj: serde_json::Map<String, serde_json::Value> = names
-                    .iter()
-                    .cloned()
-                    .zip(row)
-                    .filter(|(_, v)| !v.is_null())
-                    .collect();
-                writeln!(sink, "{}", serde_json::Value::Object(obj))
-                    .context("writing NDJSON row")?;
+                let obj = NdjsonWriter::row_to_object(compiled.columns(), row);
+                writeln!(sink, "{obj}").context("writing NDJSON row")?;
                 total += 1;
             }
         }
