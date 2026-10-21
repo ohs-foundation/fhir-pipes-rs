@@ -15,10 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use super::api::{Dhis2, ServerInfo};
-use super::{Instance, check_out, write_ndjson};
+use super::api::{Dhis2, ServerInfo, in_filter};
+use super::{Instance, write_ndjson};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
 use crate::error::{PipesError, Result};
+use crate::fs::check_out;
 use crate::report::Report;
 use crate::transform::write_report;
 
@@ -356,10 +357,6 @@ fn topics(ind: &Indicator, instance: &Instance) -> Vec<Value> {
 /// A DHIS2 analytics item (`uid`, `uid.REPORTING_RATE`) as a FHIR id part.
 pub fn fhir_key(dx: &str) -> String {
     dx.replace('_', "-")
-}
-
-fn in_filter(field: &str, ids: &[String]) -> String {
-    format!("{field}:in:[{}]", ids.join(","))
 }
 
 /// One kind of DHIS2 metadata a Measure can be made from, and where to find it.

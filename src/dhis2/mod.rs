@@ -180,16 +180,6 @@ impl Instance {
     }
 }
 
-pub fn check_out(out: &Path) -> Result<()> {
-    if out.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--out {}: is a directory",
-            out.display()
-        )));
-    }
-    Ok(())
-}
-
 /// One resource per line, written to a temporary file and renamed into
 /// place, so a failed run never leaves a half-written file behind.
 pub fn write_ndjson<'a>(

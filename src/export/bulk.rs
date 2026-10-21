@@ -82,6 +82,20 @@ pub struct Manifest {
     pub error: Vec<ManifestFile>,
 }
 
+impl Manifest {
+    /// Every file the manifest lists: `output`, `deleted`, then `error`.
+    pub fn files(&self) -> impl Iterator<Item = &ManifestFile> {
+        self.output.iter().chain(&self.deleted).chain(&self.error)
+    }
+
+    fn files_mut(&mut self) -> impl Iterator<Item = &mut ManifestFile> {
+        self.output
+            .iter_mut()
+            .chain(&mut self.deleted)
+            .chain(&mut self.error)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ManifestFile {
     #[serde(rename = "type")]
@@ -331,12 +345,7 @@ fn manifest(got: &Exchange, status_url: &str) -> Result<Manifest> {
     })?;
     let base = Url::parse(status_url)
         .map_err(|_| PipesError::Environment(format!("{status_url} is not a URL")))?;
-    for f in m
-        .output
-        .iter_mut()
-        .chain(&mut m.deleted)
-        .chain(&mut m.error)
-    {
+    for f in m.files_mut() {
         if is_reference(&f.url) {
             f.reference = Some(f.url.clone());
         }
@@ -359,16 +368,10 @@ fn is_reference(url: &str) -> bool {
 /// token, although the manifest says `requiresAccessToken: false`. When every
 /// file is such a reference, they are read from `server` with the token.
 pub fn read_references_from(m: &mut Manifest, server: &str) {
-    let files = || m.output.iter().chain(&m.deleted).chain(&m.error);
-    if files().next().is_none() || !files().all(|f| f.reference.is_some()) {
+    if m.files().next().is_none() || !m.files().all(|f| f.reference.is_some()) {
         return;
     }
-    for f in m
-        .output
-        .iter_mut()
-        .chain(&mut m.deleted)
-        .chain(&mut m.error)
-    {
+    for f in m.files_mut() {
         if let Some(r) = &f.reference {
             f.url = server_path(server, r);
         }

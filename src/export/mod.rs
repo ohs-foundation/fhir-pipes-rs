@@ -775,7 +775,7 @@ fn run_job(
     let deleted = deleted_ids(client, &manifest, &job.types, timeout, report)?;
 
     // Removed by the merges that read them, and on any failure.
-    let _incoming = window::Remove(
+    let _incoming = crate::fs::RemoveOnDrop(
         job.types
             .iter()
             .map(|t| incoming_path(&args.out, t))
@@ -951,7 +951,7 @@ fn download_job(
         .filter(|f| job.types.contains(&f.resource_type))
         .map(|f| (f.resource_type.as_str(), f.url.as_str()))
         .collect();
-    let parts = window::Remove(
+    let parts = crate::fs::RemoveOnDrop(
         files
             .iter()
             .enumerate()

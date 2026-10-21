@@ -82,6 +82,19 @@ pub fn epoch_seconds(ts: &str) -> Option<i64> {
     Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
 }
 
+/// A metadata filter for the objects whose `field` is one of `ids`:
+/// `id:in:[a,b]`.
+pub fn in_filter<S: AsRef<str>>(field: &str, ids: impl IntoIterator<Item = S>) -> String {
+    let ids: Vec<S> = ids.into_iter().collect();
+    let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+    format!("{field}:in:[{}]", ids.join(","))
+}
+
+/// A metadata filter for the org units under `root`, itself included.
+pub fn under(root: &str) -> String {
+    format!("path:like:{root}")
+}
+
 /// `--max-analytics-age`: `7d`, `36h`, `2w`.
 pub fn parse_age(s: &str) -> std::result::Result<Duration, String> {
     let s = s.trim();
@@ -254,6 +267,16 @@ impl Dhis2 {
         }
     }
 
+    /// The metadata object `{kind}/{uid}.json` with `fields`, or `None` when
+    /// DHIS2 has none by that uid (404).
+    pub fn get_one(&self, kind: &str, uid: &str, fields: &str) -> Result<Option<Value>> {
+        match self.try_get(&format!("{kind}/{uid}.json"), &[("fields", fields.into())])? {
+            Ok(v) => Ok(Some(v)),
+            Err(FetchError::Status { status: 404, .. }) => Ok(None),
+            Err(e) => Err(self.error(kind, e)),
+        }
+    }
+
     pub fn error(&self, path: &str, e: FetchError) -> PipesError {
         match e {
             FetchError::Status { status: 401, .. } | FetchError::Status { status: 403, .. } => {
@@ -365,6 +388,16 @@ mod tests {
         assert_eq!(epoch_seconds("nonsense"), None);
         assert_eq!(epoch_seconds("2026-13-01"), None);
         assert_eq!(epoch_seconds("2026-02-31"), None);
+    }
+
+    #[test]
+    fn metadata_filters() {
+        assert_eq!(in_filter("id", ["a", "b"]), "id:in:[a,b]");
+        assert_eq!(
+            in_filter("id", std::collections::BTreeSet::from(["x".to_string()])),
+            "id:in:[x]"
+        );
+        assert_eq!(under("ImspTQPwCqd"), "path:like:ImspTQPwCqd");
     }
 
     #[test]

@@ -258,7 +258,7 @@ pub fn download(
         .filter(|(i, (_, c))| *c > 0 || *i == last)
         .map(|(_, job)| job)
         .collect();
-    let files = Remove(
+    let files = crate::fs::RemoveOnDrop(
         (0..jobs.len())
             .map(|i| {
                 o.dir
@@ -517,17 +517,6 @@ pub(super) fn parallel<T: Sync, R: Send>(
         .into_iter()
         .map(|r| r.expect("every item was run"))
         .collect()
-}
-
-/// Files removed when dropped, whether the download worked or not.
-pub(super) struct Remove(pub(super) Vec<PathBuf>);
-
-impl Drop for Remove {
-    fn drop(&mut self) {
-        for path in &self.0 {
-            let _ = std::fs::remove_file(path);
-        }
-    }
 }
 
 #[cfg(test)]

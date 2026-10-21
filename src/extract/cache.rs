@@ -18,11 +18,7 @@ use crate::snapshot::instant::format_utc;
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn cache_key(url: &str) -> String {
-    hex(&Sha256::digest(url.as_bytes()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::fs::hex(&Sha256::digest(url.as_bytes()))
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +57,7 @@ impl Cache {
             .as_str()
             .ok_or_else(|| format!("{}: no sha256", meta.display()))?;
         let bytes = std::fs::read(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
-        let actual = hex(&Sha256::digest(&bytes));
+        let actual = crate::fs::hex(&Sha256::digest(&bytes));
         if actual != expected {
             return Err(format!(
                 "{}: sha256 mismatch (entry corrupt or truncated)",
@@ -82,7 +78,7 @@ impl Cache {
         let meta_json = serde_json::json!({
             "url": url,
             "fetched_at": format_utc(std::time::SystemTime::now()),
-            "sha256": hex(&Sha256::digest(bytes)),
+            "sha256": crate::fs::hex(&Sha256::digest(bytes)),
         });
         atomic_write(&meta, meta_json.to_string().as_bytes())
     }

@@ -592,7 +592,7 @@ fn dissolve<'a>(parts: impl Iterator<Item = &'a Polygon>) -> Option<Vec<u8>> {
 }
 
 pub fn run(args: &LocationBoundariesArgs, profile: &Profile) -> Result<()> {
-    crate::dhis2::check_out(&args.out)?;
+    crate::fs::check_out(&args.out)?;
     let shape = Shape::new(profile, "location-boundaries")?;
     if shape.admin_unit_type.is_none() {
         return Err(PipesError::Usage(format!(

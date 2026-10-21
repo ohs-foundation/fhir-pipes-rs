@@ -70,6 +70,42 @@ pub fn recover_swap(target: &Path, backup: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Files removed when dropped, however the work that made them ends.
+pub struct RemoveOnDrop(pub Vec<PathBuf>);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// A file's length and modification time, to tell whether it changed while
+/// it was read.
+pub type Stamp = (u64, std::time::SystemTime);
+
+pub fn stamp(path: &Path) -> std::io::Result<Stamp> {
+    let m = std::fs::metadata(path)?;
+    Ok((m.len(), m.modified()?))
+}
+
+/// `bytes` in lowercase hex: a content hash, or a file name made of one.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// An error for an `--out` file that is a directory.
+pub fn check_out(out: &Path) -> Result<()> {
+    if out.is_dir() {
+        return Err(PipesError::Usage(format!(
+            "--out {}: is a directory",
+            out.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Why a state file could not be read.
 #[derive(Debug)]
 pub enum StateError {

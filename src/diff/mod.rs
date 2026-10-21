@@ -275,12 +275,7 @@ pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
             args.input.display()
         )));
     }
-    if args.out.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--out {}: is a directory",
-            args.out.display()
-        )));
-    }
+    crate::fs::check_out(&args.out)?;
 
     let profile = Profile::for_snapshot(profile, &args.snapshot)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);

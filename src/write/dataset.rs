@@ -332,12 +332,7 @@ fn write_partitions(
 
             match &geom {
                 Some(geom) => {
-                    let type_name = match &geom.geometry {
-                        geo::Geometry::Point(_) => "Point",
-                        geo::Geometry::Polygon(_) => "Polygon",
-                        geo::Geometry::MultiPolygon(_) => "MultiPolygon",
-                        _ => "Geometry",
-                    };
+                    let type_name = crate::geometry::kind_name(&geom.geometry);
                     if !geometry_types.iter().any(|t| t == type_name) {
                         geometry_types.push(type_name.to_string());
                     }

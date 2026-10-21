@@ -677,7 +677,7 @@ fn csv_error(path: &Path, e: csv::Error) -> PipesError {
 }
 
 pub fn run(args: &LocationSitesArgs, profile: &Profile) -> Result<()> {
-    crate::dhis2::check_out(&args.out)?;
+    crate::fs::check_out(&args.out)?;
     let shape = Shape::new(profile, "location-sites")?;
     let spatial_indexes: Vec<(String, u32)> = args
         .spatial_indexes

@@ -197,12 +197,7 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
             ndjson.display()
         )));
     }
-    if args.out.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--out {}: is a directory",
-            args.out.display()
-        )));
-    }
+    crate::fs::check_out(&args.out)?;
     if !valid_source_code(&args.source) {
         return Err(PipesError::Usage(format!(
             "--source must be a code of letters, digits and hyphens, got {:?}",

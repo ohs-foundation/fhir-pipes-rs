@@ -27,12 +27,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
             ndjson.display()
         )));
     }
-    if args.out.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--out {}: is a directory",
-            args.out.display()
-        )));
-    }
+    crate::fs::check_out(&args.out)?;
     // The cells go in the profile's spatial index extension.
     let profile = crate::profile::Profile::for_snapshot(profile, &args.snapshot)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
@@ -76,7 +71,7 @@ pub fn run_index(args: &IndexArgs, profile: Option<&str>) -> Result<()> {
             .and_then(Value::as_str)
             .unwrap_or("<no id>")
             .to_string();
-        let Some((lon, lat)) = crate::diff::rebuild::position_of(obj) else {
+        let Some((lon, lat)) = crate::fhir::location::position_of(obj) else {
             report.add("no_position", &id, "no position; nothing to index");
             continue;
         };

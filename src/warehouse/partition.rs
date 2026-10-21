@@ -96,6 +96,14 @@ fn collect_parquet(dir: &Path, entries: Entries, out: &mut Vec<PathBuf>) -> Resu
     Ok(())
 }
 
+/// A Parquet file of the warehouse, opened to read: its metadata and schema
+/// are read, and an error names the file.
+pub fn open_parquet(path: &Path) -> Result<ParquetRecordBatchReaderBuilder<fs::File>> {
+    let file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("reading {}", path.display()))
+}
+
 /// key → partition value, read from a warehouse table. Where a key has several
 /// values the first one read wins. The value is the table's own first-level
 /// partition (`partition_key`, `column` by default), which need not be named
@@ -107,9 +115,7 @@ pub fn read_lookup(table_dir: &Path, key: &str, column: &str) -> Result<HashMap<
     let mut map = HashMap::new();
     for file in table_files(table_dir, column) {
         let from_path = partition_value_in_path(&file, table_dir, column);
-        let f = fs::File::open(&file).with_context(|| format!("opening {}", file.display()))?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(f)
-            .with_context(|| format!("reading {}", file.display()))?;
+        let builder = open_parquet(&file)?;
         let has = |c: &str| builder.schema().column_with_name(c).is_some();
         if !has(key) {
             continue;

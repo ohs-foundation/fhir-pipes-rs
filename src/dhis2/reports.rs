@@ -36,18 +36,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use super::api::{Dhis2, ServerInfo, check_analytics_age};
+use super::api::{Dhis2, ServerInfo, check_analytics_age, under};
 use super::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fetch_indicators, fhir_key};
 use super::raw::{RawSource, Span, load_parents, prepare};
 use super::rerun::{
     Change, Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines,
 };
-use super::{Instance, NdjsonWriter, check_out};
+use super::{Instance, NdjsonWriter};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::error::{PipesError, Result};
 use crate::extract::client::FetchError;
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
+use crate::fs::check_out;
 use crate::report::Report;
 use crate::snapshot::instant::format_utc;
 use crate::transform::write_report;
@@ -644,7 +645,7 @@ fn org_unit_ids(api: &Dhis2, level: u32, root: Option<&str>) -> Result<Vec<Strin
         ("fields", "id".into()),
     ];
     if let Some(root) = root {
-        query.push(("filter", format!("path:like:{root}")));
+        query.push(("filter", under(root)));
     }
     Ok(api
         .paged("organisationUnits.json", "organisationUnits", &query)?
@@ -661,7 +662,7 @@ fn org_unit_count(api: &Dhis2, level: u32, root: Option<&str>) -> Result<u64> {
         ("pageSize", "1".into()),
     ];
     if let Some(root) = root {
-        query.push(("filter", format!("path:like:{root}")));
+        query.push(("filter", under(root)));
     }
     api.get("organisationUnits.json", &query)?
         .pointer("/pager/total")
