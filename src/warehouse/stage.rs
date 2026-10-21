@@ -62,41 +62,44 @@ impl Lock {
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         let locking = || format!("locking {}", path.display());
-        match lock.try_lock() {
-            Ok(()) => return Ok(Lock(lock)),
-            Err(fs::TryLockError::WouldBlock) => {}
-            Err(fs::TryLockError::Error(e)) => return Err(e).with_context(locking),
-        }
-        let Some(timeout) = timeout else {
-            println!(
-                "   waiting for another refresh of {} to finish",
-                data.display()
-            );
-            lock.lock().with_context(locking)?;
-            return Ok(Lock(lock));
-        };
-        println!(
-            "   waiting up to {} s for another refresh of {} to finish",
-            timeout.as_secs(),
-            data.display()
-        );
-        let deadline = Instant::now() + timeout;
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let mut said = false;
         loop {
             match lock.try_lock() {
                 Ok(()) => return Ok(Lock(lock)),
                 Err(fs::TryLockError::WouldBlock) => {}
                 Err(fs::TryLockError::Error(e)) => return Err(e).with_context(locking),
             }
-            let now = Instant::now();
-            if now >= deadline {
-                bail!(
-                    "another refresh of {} still holds {} after {} s (--lock-timeout)",
-                    data.display(),
-                    LOCK,
-                    timeout.as_secs()
-                );
+            // A stop ends the wait (stop.rs).
+            crate::stop::check()?;
+            if !said {
+                match timeout {
+                    Some(t) => println!(
+                        "   waiting up to {} s for another refresh of {} to finish",
+                        t.as_secs(),
+                        data.display()
+                    ),
+                    None => println!(
+                        "   waiting for another refresh of {} to finish",
+                        data.display()
+                    ),
+                }
+                said = true;
             }
-            std::thread::sleep(LOCK_RETRY.min(deadline - now));
+            let now = Instant::now();
+            if let (Some(deadline), Some(timeout)) = (deadline, timeout) {
+                if now >= deadline {
+                    bail!(
+                        "another refresh of {} still holds {} after {} s (--lock-timeout)",
+                        data.display(),
+                        LOCK,
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(LOCK_RETRY.min(deadline - now));
+            } else {
+                std::thread::sleep(LOCK_RETRY);
+            }
         }
     }
 }
@@ -237,14 +240,14 @@ impl Stage {
             let live = self
                 .parquet
                 .join(staged.file_name().context("no file name")?);
-            *published = true;
             if staged.is_dir() {
-                partition::replace(&staged, &live)?;
+                replace_dir(&staged, &live, published)?;
                 tables += 1;
             } else {
                 // The Location transform's _report.json.
                 fs::rename(&staged, &live)
                     .with_context(|| format!("renaming {} into place", staged.display()))?;
+                *published = true;
             }
         }
         let (dirs, files): (Vec<PathBuf>, Vec<PathBuf>) =
@@ -252,15 +255,14 @@ impl Stage {
         let mut swapped = Vec::new();
         for staged in dirs {
             let name = staged.file_name().context("no file name")?;
-            *published = true;
-            partition::replace(&staged, &self.data.join(name))?;
+            replace_dir(&staged, &self.data.join(name), published)?;
             swapped.push(name.to_string_lossy().into_owned());
         }
         for staged in files {
             let live = self.data.join(staged.file_name().context("no file name")?);
-            *published = true;
             fs::rename(&staged, &live)
                 .with_context(|| format!("renaming {} into place", staged.display()))?;
+            *published = true;
         }
         fs::remove_file(self.files.join(PUBLISHING))?;
         self.clear()?;
@@ -282,6 +284,18 @@ impl Drop for Stage {
             let _ = self.clear();
         }
     }
+}
+
+/// Replace the live directory `live` with `staged`, setting `published` once
+/// the live one has changed: when the replacement succeeds, or when it fails
+/// after the live directory was moved aside.
+fn replace_dir(staged: &Path, live: &Path, published: &mut bool) -> Result<()> {
+    let existed = live.exists();
+    let replaced = partition::replace(staged, live);
+    if replaced.is_ok() || (existed && !live.exists()) {
+        *published = true;
+    }
+    replaced
 }
 
 /// The entries of `dir` other than dot-files, sorted.

@@ -263,17 +263,32 @@ fn locked(
             return result;
         }
     };
-    let result = status::Status::start(s, steps).and_then(|status| {
-        let result = f(ran, &lock);
-        status.finish(
-            &result,
-            ran.current,
-            &ran.timings,
-            ran.committed,
-            ran.published,
-        );
-        result
-    });
+    let result = match status::Status::start(s, steps) {
+        Ok(status) => {
+            let result = f(ran, &lock);
+            status.finish(
+                &result,
+                ran.current,
+                &ran.timings,
+                ran.committed,
+                ran.published,
+            );
+            result
+        }
+        // last-run.json cannot be written; a supervisor still gets the
+        // failure in its result file.
+        Err(e) => {
+            let result = Err(e);
+            status::Status::unlocked(s, steps).finish(
+                &result,
+                ran.current,
+                &ran.timings,
+                ran.committed,
+                ran.published,
+            );
+            result
+        }
+    };
     if let Err(e) = &result
         && hooks
     {
@@ -289,6 +304,7 @@ fn locked(
 fn failure_hooks(s: &Settings, step: &str, err: &anyhow::Error) {
     // A supervisor (fhir-pipes serve) that alerts once per run turns them
     // off for its attempts.
+    let _exempt = crate::stop::exempt();
     if std::env::var("FHIR_PIPES_FAILURE_HOOKS").is_ok_and(|v| v == "off") {
         if s.hooks.iter().any(|h| h.on.on_failure()) {
             println!("   failure hooks are off (FHIR_PIPES_FAILURE_HOOKS=off)");
@@ -860,7 +876,7 @@ fn refresh(
         && let Some(d) = &s.database
     {
         ran.at("database")?;
-        window = Some(crate::stop::hold());
+        window = Some(crate::stop::hold()?);
         let mut committed = status::Committed::No;
         let loaded = ran.run_step("database", Some(Step::Database), || {
             let tables: Vec<database::Table> = database::view_tables(s, d)?
@@ -884,7 +900,9 @@ fn refresh(
     // the tables first, then the manifest and catalog.sql.
     if !stage.is_empty()? {
         ran.at("publish")?;
-        window.get_or_insert_with(crate::stop::hold);
+        if window.is_none() {
+            window = Some(crate::stop::hold()?);
+        }
         test_pause(s, "before-publish");
         let catalog_ran = ran.steps.contains(&Step::Catalog);
         let mut published = false;
@@ -931,7 +949,10 @@ fn refresh(
     }
 
     if steps.contains(&Step::Push) {
-        ran.run_step("push", None, || push::push(s))?;
+        let mut published = false;
+        let pushed = ran.run_step("push", None, || push::push(s, &mut published));
+        ran.published |= published;
+        pushed?;
     }
 
     ran.at("finish")?;

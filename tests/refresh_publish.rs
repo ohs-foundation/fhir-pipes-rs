@@ -635,6 +635,190 @@ run = ["sh", "-c", "echo \"[$RUN_ID]\" > id.txt"]
     );
 }
 
+#[cfg(unix)]
+fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// An rclone stand-in that lists bucket `b`, then runs `body`.
+#[cfg(unix)]
+fn rclone(dir: &Path, body: &str) -> PathBuf {
+    script(
+        dir,
+        "rclone",
+        &format!(
+            "if [ \"$1\" = lsd ]; then echo \"          -1 2026-01-01 00:00:00        -1 b\"; exit 0; fi\n{body}"
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn alive(pid: &str) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid.trim().parse().unwrap(), 0) == 0 }
+}
+
+/// A push config with a catalog.duckdb built during the push from a bucket
+/// URL; `duckdb` and `rclone` are the tools to use, `extra` extra SQL.
+#[cfg(unix)]
+fn push_config(duckdb: &Path, rclone: &Path, extra: &str) -> String {
+    format!(
+        "\n[tools]\nduckdb = '{}'\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"b\"\n\n[catalog]\nbase_url = \"https://data.example.org/w\"\nduckdb_file = true\n{extra}",
+        duckdb.display(),
+        rclone.display()
+    )
+}
+
+/// The catalog.duckdb build is registered before its input is written: a
+/// stop reaches a duckdb that never reads it.
+#[test]
+#[cfg(unix)]
+fn sigterm_stops_a_catalog_duckdb_that_does_not_read_its_input() {
+    let tools = tempfile::tempdir().unwrap();
+    let duckdb = script(
+        tools.path(),
+        "duckdb",
+        "echo $$ > duckdb.pid; exec sleep 30",
+    );
+    let rclone = rclone(tools.path(), "exit 0");
+    let (dir, config) = setup_with_raw(&push_config(&duckdb, &rclone, "extra = \"big.sql\"\n"));
+    fs::write(dir.path().join("big.sql"), "-- padding\n".repeat(300_000)).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    let data = dir.path().join("data");
+    let mut child = spawn_refresh(&config, &["--only", "push"], &[]);
+    wait_for(&data.join("duckdb.pid"));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    sigterm(&child);
+    assert_eq!(exit_within(&mut child, 15), Some(1));
+    let pid = fs::read_to_string(data.join("duckdb.pid")).unwrap();
+    assert!(!alive(&pid), "duckdb {pid} outlived the run");
+}
+
+/// Failure hooks run after a stop: they are the alert.
+#[test]
+#[cfg(unix)]
+fn failure_hooks_run_after_a_stop() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "slow"
+run = ["sh", "-c", "touch started; sleep 30"]
+
+[[hooks]]
+name = "alert"
+on = "failure"
+run = ["sh", "-c", "sleep 1; touch alerted"]
+"#,
+    );
+    let mut child = spawn_refresh(&config, &["--only", "views,hooks", "--reuse-raw"], &[]);
+    wait_for(&dir.path().join("started"));
+    sigterm(&child);
+    assert_eq!(exit_within(&mut child, 15), Some(1));
+    assert!(
+        dir.path().join("alerted").exists(),
+        "the alert hook was stopped"
+    );
+}
+
+/// A stop reaches a run waiting for the warehouse's lock, with or without a
+/// --lock-timeout; the run reports through its result file and leaves
+/// last-run.json to the run that holds the lock.
+#[test]
+#[cfg(unix)]
+fn sigterm_while_waiting_for_the_lock_stops() {
+    for extra in [&[][..], &["--lock-timeout", "60"][..]] {
+        let (dir, config) = setup_with_raw("");
+        let data = dir.path().join("data");
+        let held = fs::File::create(data.join(".refresh.lock")).unwrap();
+        held.lock().unwrap();
+        fs::write(data.join("last-run.json"), r#"{"status": "running"}"#).unwrap();
+        let result = dir.path().join("result.json");
+        let mut args = vec!["--only", "views", "--reuse-raw"];
+        args.extend_from_slice(extra);
+        let mut child = spawn_refresh(
+            &config,
+            &args,
+            &[("FHIR_PIPES_RESULT_FILE", result.to_str().unwrap())],
+        );
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        sigterm(&child);
+        assert_eq!(exit_within(&mut child, 5), Some(1), "{extra:?}");
+        let r = read_json(&result);
+        assert_eq!(r["failed_step"], "lock", "{extra:?} {r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("stopped by signal"),
+            "{r}"
+        );
+        assert_eq!(last_run(&data), json!({"status": "running"}));
+        drop(held);
+    }
+}
+
+/// A push that replaces catalog.duckdb has published, even when the upload
+/// after it fails.
+#[test]
+#[cfg(unix)]
+fn a_push_that_replaces_catalog_duckdb_is_published() {
+    let tools = tempfile::tempdir().unwrap();
+    let duckdb = script(tools.path(), "duckdb", "cat > /dev/null; : > \"$1\"");
+    let rclone = rclone(
+        tools.path(),
+        "case \"$*\" in *catalog.duckdb*) exit 1;; esac; exit 0",
+    );
+    let (dir, config) = setup_with_raw(&push_config(&duckdb, &rclone, ""));
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .assert()
+        .success();
+    cmd(&config).args(["--only", "push"]).assert().code(1);
+    let data = dir.path().join("data");
+    let r = last_run(&data);
+    assert!(data.join("catalog.duckdb").is_file(), "{r}");
+    assert_eq!(r["failed_step"], "push", "{r}");
+    assert_eq!(r["published"], true, "{r}");
+}
+
+/// A publish whose first replacement fails has changed nothing live.
+#[test]
+#[cfg(unix)]
+fn a_failed_first_replacement_is_not_published() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    fs::create_dir_all(data.join("manifest.json/x")).unwrap();
+    cmd(&config).args(["--only", "manifest"]).assert().code(1);
+    let r = last_run(&data);
+    assert_eq!(r["failed_step"], "publish", "{r}");
+    assert_eq!(r["published"], false, "{r}");
+}
+
+/// A run that cannot write last-run.json at its start still reports to its
+/// supervisor.
+#[test]
+fn the_result_file_is_written_when_last_run_cannot_be() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    fs::create_dir_all(data.join("last-run.json/x")).unwrap();
+    let result = dir.path().join("result.json");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .env("FHIR_PIPES_RESULT_FILE", &result)
+        .assert()
+        .code(1);
+    let r = read_json(&result);
+    assert_eq!(r["status"], "failed", "{r}");
+    assert!(
+        r["error"].as_str().unwrap().contains("last-run.json"),
+        "{r}"
+    );
+}
+
 /// A successful run leaves the files it always did, and nothing staged.
 #[test]
 fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {

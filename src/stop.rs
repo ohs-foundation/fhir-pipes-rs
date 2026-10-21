@@ -6,7 +6,9 @@
 //! those still running 10 s later. While a `Hold` is alive (the commit
 //! window, from the database step to the end of the publish) `check` returns
 //! `Ok` and the tools are left alone; the stop takes effect when the last
-//! hold ends. A second signal kills the tools and exits at once, held or not.
+//! hold ends; a hold asked for after the stop is refused. The failure hooks
+//! run under `exempt`, so the stop does not reach them. A second signal
+//! kills every tool and exits at once, held or not.
 //!
 //! On Windows `install` does nothing, so Ctrl-C ends the process as before.
 
@@ -23,6 +25,9 @@ const TOOL_GRACE: Duration = Duration::from_secs(10);
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 static SIGNALS: AtomicUsize = AtomicUsize::new(0);
 static HOLDS: AtomicUsize = AtomicUsize::new(0);
+/// While above 0, tools started after the stop (the failure hooks) are not
+/// sent it; a second signal still kills them.
+static EXEMPT: AtomicUsize = AtomicUsize::new(0);
 /// Whether the registered tools have been sent SIGTERM for this stop.
 static TOOLS_STOPPED: AtomicBool = AtomicBool::new(false);
 static TOOLS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
@@ -48,9 +53,32 @@ pub fn install() {
     }
 }
 
+// The unit tests ask for a stop on their own thread only, so that the other
+// tests in the binary, which run beside them, never see it.
+#[cfg(test)]
+thread_local! {
+    static TEST_STOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn test_stop() -> bool {
+    TEST_STOP.with(|s| s.get())
+}
+
+#[cfg(not(test))]
+fn test_stop() -> bool {
+    false
+}
+
 /// Whether a stop has been asked for.
 pub fn requested() -> bool {
-    REQUESTED.load(Ordering::SeqCst)
+    REQUESTED.load(Ordering::SeqCst) || test_stop()
+}
+
+/// Whether the stop has reached the tools (as seen from this thread, in the
+/// unit tests).
+fn tools_stopped() -> bool {
+    TOOLS_STOPPED.load(Ordering::SeqCst) && (cfg!(not(test)) || test_stop())
 }
 
 /// `Err(Stopped)` when a stop has been asked for and nothing holds it back.
@@ -65,9 +93,21 @@ pub fn check() -> Result<()> {
 /// Holds a stop back while alive.
 pub struct Hold(());
 
-pub fn hold() -> Hold {
+/// Hold a stop back from now on, or `Err(Stopped)` when a stop came first:
+/// the window must not open once the stop has been decided. The count goes
+/// up before the stop flag is read, and the signal thread sets the flag
+/// before it reads the count, so one of the two always sees the other.
+pub fn hold() -> Result<Hold> {
     HOLDS.fetch_add(1, Ordering::SeqCst);
-    Hold(())
+    if requested() {
+        // The signal thread may have seen this hold and left the tools to
+        // it: they get the stop now.
+        if HOLDS.fetch_sub(1, Ordering::SeqCst) == 1 {
+            stop_tools();
+        }
+        return Err(PipesError::Stopped);
+    }
+    Ok(Hold(()))
 }
 
 impl Drop for Hold {
@@ -84,11 +124,27 @@ pub struct Registered(u32);
 
 pub fn register(pid: u32) -> Registered {
     lock_tools().insert(pid);
-    // A tool started after the stop reached the others gets it too.
-    if TOOLS_STOPPED.load(Ordering::SeqCst) {
+    // A tool started after the stop reached the others gets it too, unless
+    // it is one the stop allows (a failure hook).
+    if tools_stopped() && EXEMPT.load(Ordering::SeqCst) == 0 {
         signal(pid, Sig::Term);
     }
     Registered(pid)
+}
+
+/// While alive, tools started after a stop run: the failure hooks, which
+/// report the stop.
+pub struct Exempt(());
+
+pub fn exempt() -> Exempt {
+    EXEMPT.fetch_add(1, Ordering::SeqCst);
+    Exempt(())
+}
+
+impl Drop for Exempt {
+    fn drop(&mut self) {
+        EXEMPT.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Drop for Registered {
@@ -131,9 +187,12 @@ fn stop_tools() {
     for pid in &pids {
         signal(*pid, Sig::Term);
     }
-    std::thread::spawn(|| {
+    // Only the tools the stop reached; a failure hook started since keeps
+    // running.
+    std::thread::spawn(move || {
         std::thread::sleep(TOOL_GRACE);
-        for pid in lock_tools().iter() {
+        let running = lock_tools();
+        for pid in pids.iter().filter(|p| running.contains(p)) {
             signal(*pid, Sig::Kill);
         }
     });
@@ -163,15 +222,19 @@ fn signal(_pid: u32, _sig: Sig) {}
 
 #[cfg(test)]
 pub fn request_for_test() {
-    SIGNALS.fetch_add(1, Ordering::SeqCst);
-    request();
+    TEST_STOP.with(|s| s.set(true));
+    if HOLDS.load(Ordering::SeqCst) == 0 {
+        stop_tools();
+    }
 }
 
 #[cfg(test)]
 pub fn reset_for_test() {
+    TEST_STOP.with(|s| s.set(false));
     REQUESTED.store(false, Ordering::SeqCst);
     SIGNALS.store(0, Ordering::SeqCst);
     HOLDS.store(0, Ordering::SeqCst);
+    EXEMPT.store(0, Ordering::SeqCst);
     TOOLS_STOPPED.store(false, Ordering::SeqCst);
     lock_tools().clear();
 }
@@ -201,14 +264,45 @@ mod tests {
     fn a_hold_defers_the_stop_until_dropped() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
-        let held = hold();
-        let inner = hold();
+        let held = hold().unwrap();
+        let inner = hold().unwrap();
         request_for_test();
         check().unwrap();
         drop(inner);
         check().unwrap();
         drop(held);
         assert!(matches!(check(), Err(PipesError::Stopped)));
+        reset_for_test();
+    }
+
+    #[test]
+    fn a_hold_after_a_stop_is_refused() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        request_for_test();
+        assert!(matches!(hold(), Err(PipesError::Stopped)));
+        // Refused holds do not count: nothing is held back.
+        assert!(matches!(check(), Err(PipesError::Stopped)));
+        reset_for_test();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tools_started_after_a_stop_under_exempt_are_left_running() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        request_for_test();
+        let exempt = exempt();
+        let mut child = std::process::Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+        let _r = register(child.id());
+        assert!(
+            child.wait().unwrap().success(),
+            "a failure hook was stopped"
+        );
+        drop(exempt);
         reset_for_test();
     }
 
@@ -254,7 +348,7 @@ mod tests {
             .spawn()
             .unwrap();
         let _r = register(child.id());
-        let held = hold();
+        let held = hold().unwrap();
         request_for_test();
         std::thread::sleep(Duration::from_millis(200));
         assert!(child.try_wait().unwrap().is_none(), "signalled while held");

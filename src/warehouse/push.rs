@@ -9,7 +9,8 @@ use super::catalog;
 use super::config::{Hook, Settings};
 use super::tools;
 
-pub fn push(s: &Settings) -> Result<()> {
+/// `published` is set once the push has replaced the live catalog.duckdb.
+pub fn push(s: &Settings, published: &mut bool) -> Result<()> {
     let p = s
         .push
         .as_ref()
@@ -96,6 +97,7 @@ pub fn push(s: &Settings) -> Result<()> {
         if c.duckdb_file {
             if c.base_url.is_some() && !s.dry_run {
                 catalog::build_duckdb(s, c)?;
+                *published = true;
             }
             files.push(catalog::DUCKDB_FILE);
         }
