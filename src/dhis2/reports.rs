@@ -36,17 +36,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
+use super::Instance;
 use super::api::{Dhis2, ServerInfo, check_analytics_age, under};
 use super::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fetch_indicators, fhir_key};
 use super::raw::{RawSource, Span, load_parents, prepare};
 use super::rerun::{
     Change, Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines,
 };
-use super::{Instance, NdjsonWriter};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
+use crate::fhir::ndjson::NdjsonWriter;
 use crate::fs::check_out;
 use crate::http::FetchError;
 use crate::report::Report;

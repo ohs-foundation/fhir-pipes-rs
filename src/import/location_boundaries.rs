@@ -25,9 +25,9 @@ use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess,
 use serde_json::Value;
 
 use super::{LocationBoundariesArgs, Shape, slugify, split_pair, text_of};
-use crate::dhis2::NdjsonWriter;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
+use crate::fhir::ndjson::NdjsonWriter;
 use crate::geometry::{convert_value, to_geojson_bytes};
 use crate::profile::Profile;
 use crate::report::Report;

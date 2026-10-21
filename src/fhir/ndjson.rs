@@ -2,14 +2,16 @@
 //! NDJSON reader in fhir-pipes goes through it: `NdjsonReader` yields each
 //! line with its byte offset so pass two can seek straight back to it;
 //! `LineAccess` does that seek; `views::ndjson::Lines` reads a chunk of
-//! lines at a time.
+//! lines at a time. `NdjsonWriter` writes NDJSON output that a failed run
+//! does not leave half-written, and that `dhis2 reports --resume` can carry
+//! on with.
 //!
 //! A path ending in `.gz` is gzip: read through a decoder (any number of
 //! concatenated members), and written through an encoder by `Output`.
 //! Offsets into a gzip file are offsets into its decompressed text, so
 //! `LineAccess` refuses one.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -17,7 +19,10 @@ use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 
+use serde_json::Value;
+
 use crate::error::{PipesError, Result};
+use crate::fs::AtomicFile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -352,9 +357,176 @@ impl LineAccess {
     }
 }
 
+/// One resource per line, written to a temporary file and renamed into
+/// place, so a failed run never leaves a half-written file behind.
+pub fn write_ndjson<'a>(
+    out: &Path,
+    resources: impl IntoIterator<Item = &'a Value>,
+) -> Result<usize> {
+    let mut w = NdjsonWriter::create(out)?;
+    for r in resources {
+        w.write(r)?;
+    }
+    w.finish()
+}
+
+/// NDJSON written as it is produced: lines go to `<out>.tmp`, which
+/// `finish` renames into place. Dropped unfinished (a failed run), the
+/// temporary file is removed, unless `keep_partial` asked to keep it for a
+/// later run to continue.
+///
+/// When `out` ends in `.gz` the file is gzip, written as one gzip member
+/// per `sync` (a batch of reports). The members concatenated are one valid
+/// gzip file, and the length after each is a place an interrupted run can
+/// be cut back to, which the middle of a member is not.
+pub struct NdjsonWriter {
+    tmp: PathBuf,
+    file: Option<BufWriter<AtomicFile>>,
+    /// The gzip member being written, holding the file meanwhile.
+    member: Option<GzEncoder<BufWriter<AtomicFile>>>,
+    gz: bool,
+    n: usize,
+    /// Length of the file up to the last line written (plain), or the last
+    /// member finished (gzip).
+    bytes: u64,
+}
+
+impl NdjsonWriter {
+    pub fn tmp_path(out: &Path) -> PathBuf {
+        with_suffix(out, ".tmp")
+    }
+
+    pub fn create(out: &Path) -> Result<Self> {
+        let file = AtomicFile::create_at(out, Self::tmp_path(out))?;
+        Ok(Self::new(out, file, 0))
+    }
+
+    /// Carries on with the temporary file of an interrupted run: cut back
+    /// to `bytes`, the length last synced, dropping anything half-written
+    /// after it, then appended to.
+    pub fn resume(out: &Path, bytes: u64) -> Result<Self> {
+        let tmp = Self::tmp_path(out);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| PipesError::io(&tmp, e))?;
+        let len = file.metadata().map_err(|e| PipesError::io(&tmp, e))?.len();
+        if len < bytes {
+            return Err(PipesError::Usage(format!(
+                "{}: {len} bytes, shorter than the {bytes} recorded; run without --resume to start over",
+                tmp.display()
+            )));
+        }
+        file.set_len(bytes).map_err(|e| PipesError::io(&tmp, e))?;
+        file.seek(SeekFrom::End(0))
+            .map_err(|e| PipesError::io(&tmp, e))?;
+        Ok(Self::new(out, AtomicFile::with_file(out, tmp, file), bytes))
+    }
+
+    fn new(out: &Path, file: AtomicFile, bytes: u64) -> Self {
+        Self {
+            tmp: file.tmp().to_path_buf(),
+            file: Some(BufWriter::with_capacity(1 << 20, file)),
+            member: None,
+            gz: is_gz(out),
+            n: 0,
+            bytes,
+        }
+    }
+
+    /// Keep the temporary file if the run fails.
+    /// Set on the `AtomicFile` itself, so the file survives however the
+    /// writer is dropped, a failed `finish` included.
+    pub fn keep_partial(mut self) -> Self {
+        if let Some(m) = self.member.as_mut() {
+            m.get_mut().get_mut().keep_on_drop(true);
+        }
+        if let Some(f) = self.file.as_mut() {
+            f.get_mut().keep_on_drop(true);
+        }
+        self
+    }
+
+    pub fn tmp(&self) -> &Path {
+        &self.tmp
+    }
+
+    /// The text written up to the last sync, decompressed.
+    pub fn read_back(&self) -> Result<Box<dyn std::io::BufRead + Send>> {
+        let file = File::open(&self.tmp).map_err(|e| PipesError::io(&self.tmp, e))?;
+        Ok(read_text(file.take(self.bytes), self.gz))
+    }
+
+    pub fn write(&mut self, r: &Value) -> Result<()> {
+        let mut line = serde_json::to_vec(r)?;
+        line.push(b'\n');
+        self.write_line(&line)
+    }
+
+    /// One line already serialised, ending in a newline.
+    pub fn write_line(&mut self, line: &[u8]) -> Result<()> {
+        let written = if self.gz {
+            if self.member.is_none() {
+                let file = self.file.take().expect("written after finish");
+                self.member = Some(GzEncoder::new(file, Compression::default()));
+            }
+            self.member.as_mut().map(|m| m.write_all(line))
+        } else {
+            self.bytes += line.len() as u64;
+            self.file.as_mut().map(|f| f.write_all(line))
+        };
+        written
+            .expect("written after finish")
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
+        self.n += 1;
+        Ok(())
+    }
+
+    /// Ends the gzip member being written, if any.
+    fn end_member(&mut self) -> std::io::Result<()> {
+        if let Some(m) = self.member.take() {
+            let mut file = m.finish()?;
+            self.bytes = file.stream_position()?;
+            self.file = Some(file);
+        }
+        Ok(())
+    }
+
+    /// Flushes everything written to disk; returns the file's length.
+    pub fn sync(&mut self) -> Result<u64> {
+        self.end_member()
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
+        let f = self.file.as_mut().expect("synced after finish");
+        f.flush().map_err(|e| PipesError::io(&self.tmp, e))?;
+        f.get_ref()
+            .file()
+            .sync_data()
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
+        Ok(self.bytes)
+    }
+
+    /// Renames the file into place; returns the lines this writer wrote.
+    pub fn finish(mut self) -> Result<usize> {
+        self.end_member()
+            .map_err(|e| PipesError::io(&self.tmp, e))?;
+        let mut f = self.file.take().expect("finished once");
+        // An empty gzip file is not valid gzip; an empty member is.
+        if self.gz && self.bytes == 0 {
+            f = GzEncoder::new(f, Compression::default())
+                .finish()
+                .map_err(|e| PipesError::io(&self.tmp, e))?;
+        }
+        f.into_inner()
+            .map_err(|e| PipesError::io(&self.tmp, e.into_error()))?
+            .commit()?;
+        Ok(self.n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::Write;
 
     fn tmp(content: &str) -> tempfile::NamedTempFile {
@@ -546,5 +718,43 @@ mod tests {
         let mut reader = NdjsonReader::open(f.path()).unwrap();
         let err = reader.next().unwrap().unwrap_err();
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn keep_partial_keeps_the_file_when_finish_fails() {
+        for name in ["out.ndjson", "out.ndjson.gz"] {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join(name);
+            // A directory with a file in it: the rename onto it fails.
+            std::fs::create_dir(&out).unwrap();
+            std::fs::write(out.join("x"), "x").unwrap();
+            let mut w = NdjsonWriter::create(&out).unwrap().keep_partial();
+            w.write(&json!({"id": "a"})).unwrap();
+            let bytes = w.sync().unwrap();
+            w.write(&json!({"id": "b"})).unwrap();
+            assert!(w.finish().is_err(), "{name}");
+            let tmp = NdjsonWriter::tmp_path(&out);
+            assert!(tmp.is_file(), "{name}: the partial output is kept");
+            let resumed = NdjsonWriter::resume(&out, bytes).unwrap();
+            let mut text = String::new();
+            resumed
+                .read_back()
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert_eq!(text, "{\"id\":\"a\"}\n", "{name}");
+        }
+    }
+
+    #[test]
+    fn without_keep_partial_a_failed_finish_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.ndjson");
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("x"), "x").unwrap();
+        let mut w = NdjsonWriter::create(&out).unwrap();
+        w.write(&json!({"id": "a"})).unwrap();
+        assert!(w.finish().is_err());
+        assert!(!NdjsonWriter::tmp_path(&out).exists());
     }
 }
