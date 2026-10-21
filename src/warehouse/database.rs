@@ -21,7 +21,7 @@
 //! from the table's Parquet files. `<key>` is the view's column with the path
 //! `getResourceKey()` (`key_column`). The tables still go in one
 //! transaction. A table is loaded in full instead, as in replace, when the
-//! log cannot vouch for what the database holds (`upsert_loads`, `write`);
+//! log cannot vouch for what the database holds (`decide_loads`);
 //! only those tables are analyzed after the commit.
 //!
 //! Each upsert load records a mark of its own (a UUID) for every table it
@@ -36,7 +36,7 @@
 //! DELETE) for either mode; the key column's index is made only by the
 //! table's owner.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -191,20 +191,20 @@ pub fn load(s: &Settings, d: &Database, tables: &[Table], built: Option<&Built>)
         }
         plans.push(p);
     }
-    let (loads, marks) = if upsert {
-        let (loads, last) = upsert_loads(s, tables, &plans, built)?;
-        let next = uuid::Uuid::new_v4().to_string();
-        (loads, Some((last, next)))
+    let upsert = if upsert {
+        let u = Upsert::read(s, built);
+        check_keys(tables, &plans)?;
+        Some(u)
     } else {
-        (plans.iter().map(|_| Load::Full(None)).collect(), None)
+        None
     };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("starting the database runtime")?;
-    rt.block_on(write(&url, &d.schema, &plans, loads, marks.as_ref()))?;
-    if let Some((_, next)) = &marks {
-        record_load(s, next, &plans, built)?;
+    rt.block_on(write(&url, &d.schema, tables, &plans, upsert.as_ref()))?;
+    if let Some(u) = &upsert {
+        record_load(s, &u.next, &plans, built)?;
     }
     Ok(())
 }
@@ -250,37 +250,55 @@ enum Load {
     Unchanged,
 }
 
-/// How upsert loads each table, and the last load's mark, if the log has
-/// one. Every table in full when the change log cannot vouch for the
-/// database: there is none, a refresh did not finish, `--full` asked for it,
-/// or the views step did not run in this refresh (the Parquet may predate
-/// what the log lists). A table in full when its view depends on the time,
-/// what its rows are built from changed, or its type is marked `full`. Its
-/// ids otherwise; `write` finds a table that is new, whose columns changed,
-/// or that another load wrote last.
-fn upsert_loads(
-    s: &Settings,
-    tables: &[Table],
-    plans: &[Plan],
-    built: Option<&Built>,
-) -> Result<(Vec<Load>, Option<String>)> {
-    let log = Changes::read(&s.raw_dir());
-    let last = log
-        .as_ref()
-        .ok()
-        .and_then(Option::as_ref)
-        .and_then(|c| c.load.clone());
-    let all = match (&log, built) {
-        (Err(why), _) => Some(why.clone()),
-        (Ok(None), _) => Some("no record of the last load".to_string()),
-        (Ok(Some(c)), _) if c.reload.is_some() => c.reload.clone(),
-        (_, None) => Some("the views step did not run in this refresh".to_string()),
-        _ => None,
-    };
-    if let Some(why) = &all {
-        println!("   every table in full: {why}");
+/// What upsert knows before it connects: the change log, when it can vouch
+/// for the database, and the marks of the last load and of this one.
+struct Upsert<'a> {
+    /// The log, and what the views step wrote in this run. None when every
+    /// table is loaded in full: there is no log, a refresh did not finish,
+    /// `--full` asked for it, or the views step did not run in this refresh
+    /// (the Parquet may predate what the log lists).
+    vouched: Option<(Changes, &'a Built)>,
+    /// The last load's mark, if the log has one.
+    last: Option<String>,
+    /// This load's mark.
+    next: String,
+}
+
+impl<'a> Upsert<'a> {
+    /// Reads the change log, saying so when it cannot vouch for the
+    /// database.
+    fn read(s: &Settings, built: Option<&'a Built>) -> Self {
+        let log = Changes::read(&s.raw_dir());
+        let last = log
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .and_then(|c| c.load.clone());
+        let all = match (&log, built) {
+            (Err(why), _) => Some(why.clone()),
+            (Ok(None), _) => Some("no record of the last load".to_string()),
+            (Ok(Some(c)), _) if c.reload.is_some() => c.reload.clone(),
+            (_, None) => Some("the views step did not run in this refresh".to_string()),
+            _ => None,
+        };
+        if let Some(why) = &all {
+            println!("   every table in full: {why}");
+        }
+        let vouched = match (log, all, built) {
+            (Ok(Some(c)), None, Some(built)) => Some((c, built)),
+            _ => None,
+        };
+        Self {
+            vouched,
+            last,
+            next: uuid::Uuid::new_v4().to_string(),
+        }
     }
-    let mut loads = Vec::new();
+}
+
+/// Every table needs its view's `getResourceKey()` column in upsert, as
+/// text in the Parquet files.
+fn check_keys(tables: &[Table], plans: &[Plan]) -> Result<()> {
     for (t, p) in tables.iter().zip(plans) {
         let key = t
             .key
@@ -298,48 +316,80 @@ fn upsert_loads(
                 t.name
             ),
         }
-        let (Ok(Some(c)), None, Some(built)) = (&log, &all, built) else {
-            loads.push(Load::Full(None));
-            continue;
-        };
-        if t.time_dependent {
-            loads.push(Load::Full(Some(
-                "its view calls now(), today() or timeOfDay()".to_string(),
-            )));
-            continue;
-        }
-        let last = c.tables.get(&t.name);
-        if last.is_none() || last != built.get(&t.name) {
-            loads.push(Load::Full(Some(
-                if last.is_none() {
-                    "not in the last load"
-                } else {
-                    "its view, its partition lookup or fhir-pipes changed"
-                }
-                .to_string(),
-            )));
-            continue;
-        }
-        loads.push(match c.types.get(&t.resource) {
-            None => Load::Unchanged,
-            Some(tc) if tc.full => Load::Full(Some(format!(
-                "every {} is reloaded (read without an old file to compare, or most changed)",
-                t.resource
-            ))),
-            Some(tc) => {
-                let ids: HashSet<String> = tc.ids().into_iter().map(str::to_string).collect();
-                if ids.is_empty() {
-                    Load::Unchanged
-                } else {
-                    Load::Ids {
-                        key,
-                        ids: Arc::new(ids),
-                    }
+    }
+    Ok(())
+}
+
+/// How each table is loaded. In replace, every table in full. In upsert,
+/// every table in full when the log cannot vouch for the database
+/// (`Upsert::vouched`), else a table in full, with the first of these
+/// reasons that holds:
+///
+/// - its view depends on the time;
+/// - it was not in the last load, or what its rows are built from changed;
+/// - its type is marked `full` in the log;
+/// - it is new in the database, or its columns changed (`recreated`);
+/// - another load wrote it last (`written`, the marks in the records
+///   table).
+///
+/// Otherwise the ids the log lists for its type, or none.
+fn decide_loads(
+    tables: &[Table],
+    plans: &[Plan],
+    upsert: Option<&Upsert>,
+    recreated: &[Option<&str>],
+    written: Option<&HashMap<String, String>>,
+) -> Vec<Load> {
+    let full = |why: &str| Load::Full(Some(why.to_string()));
+    tables
+        .iter()
+        .zip(plans)
+        .zip(recreated)
+        .map(|((t, p), recreated)| {
+            let Some(u) = upsert else {
+                return Load::Full(None);
+            };
+            let Some((c, built)) = &u.vouched else {
+                return Load::Full(None);
+            };
+            if t.time_dependent {
+                return full("its view calls now(), today() or timeOfDay()");
+            }
+            let last = c.tables.get(&t.name);
+            if last.is_none() {
+                return full("not in the last load");
+            }
+            if last != built.get(&t.name) {
+                return full("its view, its partition lookup or fhir-pipes changed");
+            }
+            let types = c.types.get(&t.resource);
+            if types.is_some_and(|tc| tc.full) {
+                return Load::Full(Some(format!(
+                    "every {} is reloaded (read without an old file to compare, or most changed)",
+                    t.resource
+                )));
+            }
+            if let Some(why) = recreated {
+                return full(why);
+            }
+            if !p.files.is_empty()
+                && (u.last.is_none() || written.and_then(|w| w.get(&p.table)) != u.last.as_ref())
+            {
+                return full("the database's copy was not last loaded from this warehouse");
+            }
+            let ids: HashSet<String> = types
+                .map(|tc| tc.ids().into_iter().map(str::to_string).collect())
+                .unwrap_or_default();
+            if ids.is_empty() {
+                Load::Unchanged
+            } else {
+                Load::Ids {
+                    key: t.key.clone().expect("checked by check_keys"),
+                    ids: Arc::new(ids),
                 }
             }
-        });
-    }
-    Ok((loads, last))
+        })
+        .collect()
 }
 
 /// After an upsert's commit: the change log now starts from this load, and
@@ -443,16 +493,20 @@ fn pg_type(t: &DataType) -> Option<&'static str> {
     })
 }
 
-/// `marks`, in upsert: the last load's mark as the log has it, and this
-/// load's.
+/// `schema.table`, quoted.
+fn qualified(schema: &str, table: &str) -> String {
+    format!("{}.{}", ident(schema), ident(table))
+}
+
+/// Load `plans` into `schema` in one transaction, then analyze the tables
+/// loaded.
 async fn write(
     url: &str,
     schema: &str,
+    tables: &[Table],
     plans: &[Plan],
-    mut loads: Vec<Load>,
-    marks: Option<&(Option<String>, String)>,
+    upsert: Option<&Upsert<'_>>,
 ) -> Result<()> {
-    let upsert = marks.is_some();
     // TLS (sslmode=require and up) uses rustls with the same provider as the
     // FHIR client.
     crate::http::ensure_crypto_provider();
@@ -479,126 +533,13 @@ async fn write(
     if exists.is_none() {
         exec(&mut tx, &format!("CREATE SCHEMA {}", ident(schema))).await?;
     }
-    let name = |p: &Plan| format!("{}.{}", ident(schema), ident(&p.table));
-    let loads_table = format!("{}.{}", ident(schema), ident(LOADS));
-    // Upsert's records table; a relation of its name that is not it is
-    // never written to. Upsert stops; replace, which does not need it,
-    // leaves it alone and says so. The records table is locked (ROW
-    // EXCLUSIVE, which INSERT, UPDATE or DELETE on it allows, and which a
-    // RENAME, DROP or ALTER waits for until this transaction ends) and
-    // checked again under the lock, so the table written below is the one
-    // checked.
-    let mut records = classify_records(&mut tx, &loads_table).await?;
-    if matches!(records, Records::Ours) {
-        let grant = if upsert {
-            "SELECT, INSERT, UPDATE, DELETE ON"
-        } else {
-            "SELECT, DELETE ON"
-        };
-        exec(
-            &mut tx,
-            &format!("LOCK TABLE {loads_table} IN ROW EXCLUSIVE MODE"),
-        )
-        .await
-        .with_context(|| loads_grant(schema, grant, &loads_table))?;
-        records = classify_records(&mut tx, &loads_table).await?;
-    }
-    if let Records::Other(what) = &records {
-        if upsert {
-            return Err(usage(anyhow::anyhow!(
-                "{schema}.{LOADS} is {what}, not the table where [database] mode = \"upsert\" \
-                 records its loads; rename it, load into another schema, or use mode = \"replace\""
-            )));
-        }
-        println!("   note: {schema}.{LOADS} is {what}, not fhir-pipes' load records; left alone");
-    }
-    // First every table, so that indexes, which PostgreSQL names to avoid
-    // the relations that exist, cannot take a name a table of this load needs.
-    let mut created = Vec::new();
-    // The tables this load fills or empties, analyzed after the commit.
-    let mut loaded = Vec::new();
-    for (i, p) in plans
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| !p.files.is_empty())
-    {
-        let existing = existing_columns(&mut tx, schema, &p.table).await?;
-        let wanted: Vec<(String, String)> = p
-            .columns
-            .iter()
-            .map(|(n, t)| (n.clone(), (*t).to_string()))
-            .collect();
-        if existing == wanted {
-            continue;
-        }
-        // A table already loaded in full keeps the reason said for all.
-        if upsert && !matches!(loads[i], Load::Full(_)) {
-            let why = if existing.is_empty() {
-                "a new table"
-            } else {
-                "its columns changed"
-            };
-            loads[i] = Load::Full(Some(why.to_string()));
-        }
-        if !existing.is_empty() {
-            exec(&mut tx, &format!("DROP TABLE {}", name(p)))
-                .await
-                .with_context(|| {
-                    format!(
-                        "{} changed columns and must be recreated; drop what depends on it (views) first",
-                        p.table
-                    )
-                })?;
-        }
-        let cols: Vec<String> = p
-            .columns
-            .iter()
-            .map(|(n, t)| format!("{} {t}", ident(n)))
-            .collect();
-        exec(
-            &mut tx,
-            &format!("CREATE TABLE {} ({})", name(p), cols.join(", ")),
-        )
-        .await?;
-        created.push(i);
-    }
-    // Then their indexes: unnamed, made with the table, so later runs find
-    // them in place. Upsert also needs one on the key column, which a table
-    // made by replace may lack.
-    for &i in &created {
-        let p = &plans[i];
-        if p.columns.iter().any(|(n, _)| n == "id") {
-            exec(&mut tx, &format!("CREATE INDEX ON {} (id)", name(p))).await?;
-        }
-    }
-    if upsert {
-        for p in plans.iter().filter(|p| !p.files.is_empty()) {
-            if let Some(key) = p.key.as_deref()
-                && !has_index(&mut tx, &name(p), key).await?
-            {
-                // Only the owner can index a table; without the index the
-                // deletes scan the table, which is slower, not wrong.
-                if owns(&mut tx, &name(p)).await? {
-                    exec(
-                        &mut tx,
-                        &format!("CREATE INDEX ON {} ({})", name(p), ident(key)),
-                    )
-                    .await?;
-                } else {
-                    println!(
-                        "   {}: no index on {key}, and only the table's owner can make one; \
-                         upsert's deletes scan the table until the owner runs CREATE INDEX ON {} ({})",
-                        p.table,
-                        name(p),
-                        ident(key)
-                    );
-                }
-            }
-        }
-    }
+    let mut records = prepare_records(&mut tx, schema, upsert.is_some()).await?;
+    let (created, recreated) = reconcile_tables(&mut tx, schema, plans).await?;
+    ensure_indexes(&mut tx, schema, plans, &created, upsert.is_some()).await?;
+    let loads_table = qualified(schema, LOADS);
     // Made the first time after the view tables and their indexes, so that
     // its primary key's index cannot take a name one of them needs.
-    if upsert && matches!(records, Records::Absent) {
+    if upsert.is_some() && matches!(records, Records::Absent) {
         exec(
             &mut tx,
             &format!(
@@ -615,23 +556,11 @@ async fn write(
         records = Records::Ours;
     }
     // A table the last load of this log did not write may hold anything.
-    if let Some((last, _)) = marks {
-        let written = marks_of(&mut tx, &loads_table, schema).await?;
-        for (i, p) in plans
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.files.is_empty())
-        {
-            if matches!(loads[i], Load::Full(_)) {
-                continue;
-            }
-            if last.is_none() || written.get(&p.table) != last.as_ref() {
-                loads[i] = Load::Full(Some(
-                    "the database's copy was not last loaded from this warehouse".to_string(),
-                ));
-            }
-        }
-    }
+    let written = match upsert {
+        Some(_) => Some(marks_of(&mut tx, &loads_table, schema).await?),
+        None => None,
+    };
+    let mut loads = decide_loads(tables, plans, upsert, &recreated, written.as_ref());
     // Rows without a key are not named by any id: rewritten whenever the
     // files or the table have any.
     for (i, p) in plans
@@ -640,7 +569,7 @@ async fn write(
         .filter(|(_, p)| !p.files.is_empty())
     {
         if let (Load::Unchanged, Some(key)) = (&loads[i], &p.key)
-            && (p.key_nulls || has_null_keys(&mut tx, &name(p), key).await?)
+            && (p.key_nulls || has_null_keys(&mut tx, &qualified(schema, &p.table), key).await?)
         {
             loads[i] = Load::Ids {
                 key: key.clone(),
@@ -648,15 +577,167 @@ async fn write(
             };
         }
     }
-    // The tables emptied for want of files, whose marks are removed.
+    let (loaded, emptied) = apply_loads(&mut tx, schema, plans, loads).await?;
+    update_marks(&mut tx, schema, plans, &emptied, upsert, &records).await?;
+    tx.commit().await.context("committing")?;
+    // Outside the load's transaction, so the lock it held is released and
+    // readers see the new rows before this finishes.
+    for name in loaded {
+        exec(&mut conn, &format!("ANALYZE {name}")).await?;
+    }
+    Ok(())
+}
+
+/// What the relation named like upsert's records table is. A relation of
+/// its name that is not it is never written to: upsert stops; replace,
+/// which does not need it, leaves it alone and says so. The records table
+/// is locked (ROW EXCLUSIVE, which INSERT, UPDATE or DELETE on it allows,
+/// and which a RENAME, DROP or ALTER waits for until this transaction ends)
+/// and checked again under the lock, so the table written later is the one
+/// checked.
+async fn prepare_records(conn: &mut PgConnection, schema: &str, upsert: bool) -> Result<Records> {
+    let loads_table = qualified(schema, LOADS);
+    let mut records = classify_records(conn, &loads_table).await?;
+    if matches!(records, Records::Ours) {
+        let grant = if upsert {
+            "SELECT, INSERT, UPDATE, DELETE ON"
+        } else {
+            "SELECT, DELETE ON"
+        };
+        exec(
+            conn,
+            &format!("LOCK TABLE {loads_table} IN ROW EXCLUSIVE MODE"),
+        )
+        .await
+        .with_context(|| loads_grant(schema, grant, &loads_table))?;
+        records = classify_records(conn, &loads_table).await?;
+    }
+    if let Records::Other(what) = &records {
+        if upsert {
+            return Err(usage(anyhow::anyhow!(
+                "{schema}.{LOADS} is {what}, not the table where [database] mode = \"upsert\" \
+                 records its loads; rename it, load into another schema, or use mode = \"replace\""
+            )));
+        }
+        println!("   note: {schema}.{LOADS} is {what}, not fhir-pipes' load records; left alone");
+    }
+    Ok(records)
+}
+
+/// Creates each table with files that is missing, and recreates each whose
+/// columns differ from its files'. Returns the tables created, by index,
+/// and for each table why it was, if it was.
+async fn reconcile_tables(
+    conn: &mut PgConnection,
+    schema: &str,
+    plans: &[Plan],
+) -> Result<(Vec<usize>, Vec<Option<&'static str>>)> {
+    // First every table, so that indexes, which PostgreSQL names to avoid
+    // the relations that exist, cannot take a name a table of this load needs.
+    let mut created = Vec::new();
+    let mut recreated = vec![None; plans.len()];
+    for (i, p) in plans
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.files.is_empty())
+    {
+        let existing = existing_columns(conn, schema, &p.table).await?;
+        let wanted: Vec<(String, String)> = p
+            .columns
+            .iter()
+            .map(|(n, t)| (n.clone(), (*t).to_string()))
+            .collect();
+        if existing == wanted {
+            continue;
+        }
+        recreated[i] = Some(if existing.is_empty() {
+            "a new table"
+        } else {
+            "its columns changed"
+        });
+        let name = qualified(schema, &p.table);
+        if !existing.is_empty() {
+            exec(conn, &format!("DROP TABLE {name}"))
+                .await
+                .with_context(|| {
+                    format!(
+                        "{} changed columns and must be recreated; drop what depends on it (views) first",
+                        p.table
+                    )
+                })?;
+        }
+        let cols: Vec<String> = p
+            .columns
+            .iter()
+            .map(|(n, t)| format!("{} {t}", ident(n)))
+            .collect();
+        exec(conn, &format!("CREATE TABLE {name} ({})", cols.join(", "))).await?;
+        created.push(i);
+    }
+    Ok((created, recreated))
+}
+
+/// The indexes of the tables just `created`: unnamed, made with the table,
+/// so later runs find them in place. Upsert also needs one on the key
+/// column, which a table made by replace may lack.
+async fn ensure_indexes(
+    conn: &mut PgConnection,
+    schema: &str,
+    plans: &[Plan],
+    created: &[usize],
+    upsert: bool,
+) -> Result<()> {
+    for &i in created {
+        let p = &plans[i];
+        if p.columns.iter().any(|(n, _)| n == "id") {
+            let name = qualified(schema, &p.table);
+            exec(conn, &format!("CREATE INDEX ON {name} (id)")).await?;
+        }
+    }
+    if !upsert {
+        return Ok(());
+    }
+    for p in plans.iter().filter(|p| !p.files.is_empty()) {
+        let name = qualified(schema, &p.table);
+        if let Some(key) = p.key.as_deref()
+            && !has_index(conn, &name, key).await?
+        {
+            // Only the owner can index a table; without the index the
+            // deletes scan the table, which is slower, not wrong.
+            if owns(conn, &name).await? {
+                exec(conn, &format!("CREATE INDEX ON {name} ({})", ident(key))).await?;
+            } else {
+                println!(
+                    "   {}: no index on {key}, and only the table's owner can make one; \
+                     upsert's deletes scan the table until the owner runs CREATE INDEX ON {} ({})",
+                    p.table,
+                    name,
+                    ident(key)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Loads each table as `loads` says, and empties each table with no files
+/// that exists. Returns the tables filled or emptied, to analyze after the
+/// commit, and the tables emptied, whose marks are removed.
+async fn apply_loads(
+    conn: &mut PgConnection,
+    schema: &str,
+    plans: &[Plan],
+    loads: Vec<Load>,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut loaded = Vec::new();
     let mut emptied = Vec::new();
     for (p, load) in plans.iter().zip(loads) {
-        let name = name(p);
+        let name = qualified(schema, &p.table);
         if p.files.is_empty() {
             // A table written before empty results got an empty file has no
             // columns to create it from: empty it if it exists.
-            if table_exists(&mut tx, schema, &p.table).await? {
-                exec(&mut tx, &format!("DELETE FROM {name}")).await?;
+            if table_exists(conn, schema, &p.table).await? {
+                exec(conn, &format!("DELETE FROM {name}")).await?;
                 println!("   {} → {schema}.{} (0 rows)", p.table, p.table);
                 loaded.push(name);
                 emptied.push(p.table.clone());
@@ -670,8 +751,8 @@ async fn write(
         }
         match load {
             Load::Full(why) => {
-                exec(&mut tx, &format!("DELETE FROM {name}")).await?;
-                let rows = copy(&mut tx, &name, p, None).await?;
+                exec(conn, &format!("DELETE FROM {name}")).await?;
+                let rows = copy(conn, &name, p, None).await?;
                 match why {
                     None => println!("   {} → {schema}.{} ({rows} rows)", p.table, p.table),
                     Some(why) => println!(
@@ -682,8 +763,8 @@ async fn write(
                 loaded.push(name);
             }
             Load::Ids { key, ids } => {
-                let deleted = delete_ids(&mut tx, &name, &key, &ids).await?;
-                let rows = copy(&mut tx, &name, p, Some((&key, &ids))).await?;
+                let deleted = delete_ids(conn, &name, &key, &ids).await?;
+                let rows = copy(conn, &name, p, Some((&key, &ids))).await?;
                 if ids.is_empty() {
                     println!(
                         "   {} → {schema}.{} (rows without an id: {deleted} deleted, {rows} copied)",
@@ -701,24 +782,36 @@ async fn write(
             Load::Unchanged => println!("   {} → {schema}.{} (unchanged)", p.table, p.table),
         }
     }
-    // The marks: in upsert, this load's for each table it loaded and none
-    // for one it emptied; in replace, none for any table it touched, so
-    // that upsert knows the rows are not its own. Without the records table
-    // (no upsert has loaded this schema) a replace does nothing here.
+    Ok((loaded, emptied))
+}
+
+/// The marks: in upsert, this load's for each table it loaded and none for
+/// one it `emptied`; in replace, none for any table it touched, so that
+/// upsert knows the rows are not its own. Without the records table (no
+/// upsert has loaded this schema) a replace does nothing here.
+async fn update_marks(
+    conn: &mut PgConnection,
+    schema: &str,
+    plans: &[Plan],
+    emptied: &[String],
+    upsert: Option<&Upsert<'_>>,
+    records: &Records,
+) -> Result<()> {
+    let loads_table = qualified(schema, LOADS);
     let filled: Vec<&str> = plans
         .iter()
         .filter(|p| !p.files.is_empty())
         .map(|p| p.table.as_str())
         .collect();
-    match marks {
-        Some((_, next)) => {
-            set_marks(&mut tx, &loads_table, &filled, next)
+    match upsert {
+        Some(u) => {
+            set_marks(conn, &loads_table, &filled, &u.next)
                 .await
                 .with_context(|| {
                     loads_grant(schema, "SELECT, INSERT, UPDATE, DELETE ON", &loads_table)
                 })?;
             let emptied: Vec<&str> = emptied.iter().map(String::as_str).collect();
-            remove_marks(&mut tx, &loads_table, &emptied)
+            remove_marks(conn, &loads_table, &emptied)
                 .await
                 .with_context(|| {
                     loads_grant(schema, "SELECT, INSERT, UPDATE, DELETE ON", &loads_table)
@@ -730,17 +823,11 @@ async fn write(
                 .copied()
                 .chain(emptied.iter().map(String::as_str))
                 .collect();
-            remove_marks(&mut tx, &loads_table, &touched)
+            remove_marks(conn, &loads_table, &touched)
                 .await
                 .with_context(|| loads_grant(schema, "SELECT, DELETE ON", &loads_table))?;
         }
         None => {}
-    }
-    tx.commit().await.context("committing")?;
-    // Outside the load's transaction, so the lock it held is released and
-    // readers see the new rows before this finishes.
-    for name in loaded {
-        exec(&mut conn, &format!("ANALYZE {name}")).await?;
     }
     Ok(())
 }
@@ -792,7 +879,7 @@ async fn marks_of(
     conn: &mut PgConnection,
     loads: &str,
     schema: &str,
-) -> Result<std::collections::HashMap<String, String>> {
+) -> Result<HashMap<String, String>> {
     let sql = format!("SELECT table_name, mark FROM {loads}");
     let rows = sqlx_core::query::query(AssertSqlSafe(sql.clone()))
         .fetch_all(&mut *conn)
@@ -1107,6 +1194,114 @@ mod tests {
     use arrow::datatypes::{Field, Schema};
 
     use super::*;
+
+    /// Each table's load and, for a full one, the first reason that holds.
+    #[test]
+    fn a_load_in_full_says_the_first_reason_that_holds() {
+        use crate::export::changes::TypeChanges;
+        let table = |name: &str, resource: &str, time_dependent: bool| Table {
+            name: name.into(),
+            dir: PathBuf::new(),
+            resource: resource.into(),
+            key: Some("id".into()),
+            time_dependent,
+        };
+        let plan = |name: &str| Plan {
+            table: name.into(),
+            columns: vec![("id".into(), "text")],
+            files: vec![PathBuf::from("part-0.parquet")],
+            key: Some("id".into()),
+            key_nulls: false,
+        };
+        let names = [
+            "now", "new", "patients", "built", "every", "dropped", "other", "ids", "same",
+        ];
+        let tables = [
+            table("now", "Patient", true),
+            table("new", "Patient", false),
+            table("patients", "Patient", false),
+            table("built", "Patient", false),
+            table("every", "Encounter", false),
+            table("dropped", "Patient", false),
+            table("other", "Patient", false),
+            table("ids", "Patient", false),
+            table("same", "Location", false),
+        ];
+        let plans: Vec<Plan> = names.iter().map(|n| plan(n)).collect();
+        let mut log = Changes::default();
+        let mut built = Built::new();
+        for n in names.iter().filter(|n| **n != "new") {
+            log.tables.insert(n.to_string(), "f1".into());
+            built.insert(n.to_string(), "f1".into());
+        }
+        built.insert("built".into(), "f2".into());
+        built.insert("new".into(), "f1".into());
+        log.types.insert(
+            "Encounter".into(),
+            TypeChanges {
+                full: true,
+                ..TypeChanges::default()
+            },
+        );
+        log.types.insert(
+            "Patient".into(),
+            TypeChanges {
+                changed: ["p1".to_string()].into(),
+                ..TypeChanges::default()
+            },
+        );
+        let upsert = Upsert {
+            vouched: Some((log, &built)),
+            last: Some("m1".into()),
+            next: "m2".into(),
+        };
+        let mut recreated = vec![None; names.len()];
+        // A new table's reason comes after those from the log.
+        recreated[0] = Some("a new table");
+        recreated[5] = Some("a new table");
+        let written: HashMap<String, String> = names
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    if *n == "other" { "m0" } else { "m1" }.to_string(),
+                )
+            })
+            .collect();
+        let loads = decide_loads(&tables, &plans, Some(&upsert), &recreated, Some(&written));
+        let got: Vec<String> = loads
+            .iter()
+            .map(|l| match l {
+                Load::Full(why) => format!("full: {}", why.as_deref().unwrap_or("")),
+                Load::Ids { ids, .. } => format!("{} ids", ids.len()),
+                Load::Unchanged => "unchanged".into(),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "full: its view calls now(), today() or timeOfDay()",
+                "full: not in the last load",
+                "1 ids",
+                "full: its view, its partition lookup or fhir-pipes changed",
+                "full: every Encounter is reloaded (read without an old file to compare, or most changed)",
+                "full: a new table",
+                "full: the database's copy was not last loaded from this warehouse",
+                "1 ids",
+                "unchanged",
+            ]
+        );
+        // Without a log that vouches for the database, and in replace,
+        // every table in full with no reason of its own.
+        let unvouched = Upsert {
+            vouched: None,
+            ..upsert
+        };
+        for upsert in [Some(&unvouched), None] {
+            let loads = decide_loads(&tables, &plans, upsert, &recreated, Some(&written));
+            assert!(loads.iter().all(|l| matches!(l, Load::Full(None))));
+        }
+    }
 
     #[test]
     fn csv_quotes_strings_and_leaves_nulls_empty() {
