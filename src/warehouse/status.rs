@@ -41,7 +41,8 @@ impl Status {
                 "status": "running",
                 "pid": std::process::id(),
                 "started_at": manifest::now(),
-                "server": s.server_used(),
+                // Redacted as the manifest's is: a query string can carry a key.
+                "server": s.server_used().map(crate::redact::url),
                 "server_name": s.server_name,
                 "full": s.full,
                 "steps": steps.iter().map(|s| s.name()).collect::<Vec<_>>(),

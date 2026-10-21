@@ -162,7 +162,8 @@ run that fails before it gets the lock (another run still holds it after
 }
 ```
 
-`steps` are the steps the run was to take. `timings` are the parts that
+`server` is redacted as in the manifest: without a user name, password or
+query string. `steps` are the steps the run was to take. `timings` are the parts that
 finished, in seconds. A run that succeeded has `refreshed_at` (the
 manifest's time) and `exit_code` 0. A run that failed has `failed_step`,
 `error` (cut to 2,000 characters) and `exit_code`, 1 or 2 as above.
@@ -857,11 +858,19 @@ directory as an absolute path), `FHIR_BASE` (empty with a file source) and
 - `on = "failure"`: after a run that failed, at any step or before the
   first, once `last-run.json` records the failure, with `STATUS=failed`,
   `FAILED_STEP`, `ERROR` and `EXIT_CODE` as in
-  [How the last run went](#how-the-last-run-went). A failure hook that
-  fails is printed as a warning; the run still fails with its own error and
-  exit status.
+  [How the last run went](#how-the-last-run-went). They run before the run
+  lets go of the warehouse's lock, so the `last-run.json` they read is this
+  run's. A failure hook that fails, or whose program cannot be found, is
+  printed as a warning; the run still fails with its own error and exit
+  status. Its program is not checked before the run, so a missing alert
+  command never stops a run that would succeed.
 - `on = "always"`: both. A run whose success hook fails therefore runs an
   `always` hook twice, once in the `hooks` step and once after the failure.
+
+A run that fails at `lock` (another refresh still held the warehouse after
+`--lock-timeout`) never wrote `last-run.json`: the file there is the other
+run's. Its failure hooks get `FAILED_STEP=lock` and should report from the
+environment, not the file.
 
 Failure hooks run only in a run that has the `hooks` step, as success hooks
 do: `--only views` or `--skip hooks` runs neither. A config error that stops

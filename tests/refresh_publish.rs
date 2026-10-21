@@ -224,8 +224,14 @@ run = ["sh", "-c", "echo \"$STATUS $REFRESHED_AT\" > ok.txt"]
 name = "on-failure"
 on = "failure"
 run = ["sh", "-c", "touch on-failure.txt"]
+
+[[hooks]]
+name = "missing"
+on = "failure"
+run = ["/no/such/alert"]
 "#,
     );
+    // A failure hook's program is not needed for a run that succeeds.
     cmd(&config)
         .args(["--only", "views,hooks", "--reuse-raw"])
         .assert()
@@ -262,12 +268,17 @@ run = ["sh", "-c", "touch on-success.txt"]
 [[hooks]]
 name = "on-failure"
 on = "failure"
-run = ["sh", "-c", "echo \"$STATUS|$FAILED_STEP|$EXIT_CODE|$ERROR\" > on-failure.txt"]
+run = ["sh", "-c", "echo \"$STATUS|$FAILED_STEP|$EXIT_CODE|$ERROR\" > on-failure.txt; cp \"$DATA/last-run.json\" seen.json"]
 
 [[hooks]]
 name = "broken"
 on = "failure"
 run = ["sh", "-c", "exit 4"]
+
+[[hooks]]
+name = "missing"
+on = "failure"
+run = ["/no/such/alert"]
 
 [[hooks]]
 name = "always"
@@ -280,6 +291,7 @@ run = ["sh", "-c", "echo \"$STATUS\" > always.txt"]
         .assert()
         .code(1)
         .stderr(has("warning: hook broken"))
+        .stderr(has("warning: hook missing"))
         .stderr(has("fhir-pipes: views"));
     let r = last_run(&dir.path().join("data"));
     assert_eq!(r["status"], "failed");
@@ -289,6 +301,11 @@ run = ["sh", "-c", "echo \"$STATUS\" > always.txt"]
     assert!(error.starts_with("views: "), "{error}");
     let seen = fs::read_to_string(dir.path().join("on-failure.txt")).unwrap();
     assert_eq!(seen.trim(), format!("failed|views|1|{error}"));
+    // The hook ran while the run still held the lock, so the record it read
+    // was this run's.
+    let copied: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("seen.json")).unwrap()).unwrap();
+    assert_eq!(copied, r);
     assert_eq!(
         fs::read_to_string(dir.path().join("always.txt"))
             .unwrap()
@@ -297,6 +314,17 @@ run = ["sh", "-c", "echo \"$STATUS\" > always.txt"]
     );
     assert!(!dir.path().join("on-success.txt").exists());
     assert_nothing_staged(&dir.path().join("data"));
+}
+
+/// last-run.json names the server as the manifest does, without a query
+/// string that could carry a key.
+#[test]
+fn last_run_redacts_the_server_url() {
+    let (dir, config) = setup(&format!("{NOWHERE}?api_key=secret"), "");
+    cmd(&config).args(["--only", "hooks"]).assert().success();
+    let text = fs::read_to_string(dir.path().join("data/last-run.json")).unwrap();
+    assert!(!text.contains("secret"), "{text}");
+    assert_eq!(last_run(&dir.path().join("data"))["status"], "succeeded");
 }
 
 /// With --lock-timeout, a run that cannot get the warehouse's lock fails,

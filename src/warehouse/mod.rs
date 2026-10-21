@@ -210,7 +210,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
         .iter()
         .partition(|t| s.reads_files() && t.step == Step::Tiles);
     let mut ran = Ran::default();
-    let result = locked(
+    locked(
         &s,
         &steps,
         args.lock_timeout.map(Duration::from_secs),
@@ -226,18 +226,16 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
                 lock,
             )
         },
-    );
-    if let Err(e) = &result
-        && steps.contains(&Step::Hooks)
-    {
-        failure_hooks(&s, ran.current, e);
-    }
-    result.map(|_| ())
+    )
+    .map(|_| ())
 }
 
 /// Run `f` under the warehouse's lock, with `last-run.json` saying the run
-/// is running until it ends, then how it ended. A run that cannot get the
-/// lock writes nothing there, since the run that holds it owns the file.
+/// is running until it ends, then how it ended. When it fails, the failure
+/// hooks run (with the hooks step) before the lock is released, so the
+/// last-run.json they read is this run's. A run that cannot get the lock
+/// writes nothing there, since the run that holds it owns the file; its
+/// failure hooks run without the lock.
 fn locked(
     s: &Settings,
     steps: &BTreeSet<Step>,
@@ -245,11 +243,27 @@ fn locked(
     ran: &mut Ran,
     f: impl FnOnce(&mut Ran, &stage::Lock) -> Result<String>,
 ) -> Result<String> {
+    let hooks = steps.contains(&Step::Hooks);
     ran.at("lock");
-    let lock = stage::Lock::acquire(&s.data, timeout)?;
-    let status = status::Status::start(s, steps)?;
-    let result = f(ran, &lock);
-    status.finish(&result, ran.current, &ran.timings);
+    let lock = match stage::Lock::acquire(&s.data, timeout) {
+        Ok(lock) => lock,
+        Err(e) => {
+            if hooks {
+                failure_hooks(s, ran.current, &e);
+            }
+            return Err(e);
+        }
+    };
+    let result = status::Status::start(s, steps).and_then(|status| {
+        let result = f(ran, &lock);
+        status.finish(&result, ran.current, &ran.timings);
+        result
+    });
+    if let Err(e) = &result
+        && hooks
+    {
+        failure_hooks(s, ran.current, e);
+    }
     drop(lock);
     result
 }
@@ -456,6 +470,11 @@ fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Tools> {
             let Some(program) = h.run.first() else {
                 bail!("hook {} has an empty `run`", h.name);
             };
+            // A failure hook's program is not needed for the run to succeed:
+            // one that cannot be started is a warning once the run fails.
+            if !h.on.on_success() {
+                continue;
+            }
             need(
                 &hook_program(s, program),
                 Step::Hooks,
