@@ -2,8 +2,9 @@
 
 **Date:** 2026-10-21
 **Status:** Design, not yet built. Revised after a builder check and two
-design reviews by Codex on 2026-10-21. The first review's findings are
-referred to as R1–R11, the second's as F1–F10.
+design reviews by Codex on 2026-10-21, and checked a third time. The
+first review's findings are referred to as R1–R11, the second's as F1–F10,
+the third's as G1–G3.
 **Builds on:** PR #136 (`last-run.json`, hooks with `on = "failure"`,
 `--lock-timeout`).
 
@@ -139,8 +140,11 @@ hooks and the wait: tools are killed and the run exits at once.
 can tell what a failed run left behind. `committed` is `true` once the
 database step's commit has succeeded (a later failure there, such as its
 `ANALYZE`, keeps it `true`), `"unknown"` when the commit's answer was
-lost, `false` otherwise. `published` is `true` once any table has been
-swapped in.
+lost, `false` otherwise. `published` is `true` once anything live in the
+warehouse has changed: a table, `views/` or `tiles/` swapped in, or
+`manifest.json`, `catalog.sql`, `catalog.spark.sql` or `catalog.duckdb`
+replaced (G3). It stays `true` when the run fails afterwards, part way
+through a publish included.
 
 A forced stop inside the commit window (SIGKILL, or a second signal) that
 comes after the database's commit and before the publish marker leaves the
@@ -226,6 +230,19 @@ run apart from separate runs (R2).
 A refresh from outside `serve` (cron, by hand) that holds the warehouse
 makes the attempt fail at once at `lock`.
 
+**Nothing of an attempt outlives it (G1).** However the child ends (it
+exits, it is killed by the out-of-memory killer, it aborts), `serve` sees
+the exit with `waitid(…, WNOWAIT)`, before collecting the child. While the
+child is not collected its process group id cannot be given to anyone
+else, so `serve` then sends SIGKILL to the group, waits until the child is
+its only member left, and only then collects it and treats the attempt as
+over. A tool that outlived `refresh` is therefore stopped before another
+attempt can start. Between the death of `refresh` (which lets go of
+`.refresh.lock`) and that SIGKILL there is a short window in which a
+refresh from outside `serve` could take the lock while the tool still
+runs; `docs/serve.md` says not to run `refresh` from cron on a warehouse
+`serve` looks after.
+
 ### The attempt's result (R3)
 
 The child's exit status is authoritative: exit 0 is success, whatever the
@@ -282,10 +299,11 @@ left `accepted`, `running` or `waiting` as `interrupted`, with its
 destinations `pending`, and sends its notify. It does not restart them and
 does not signal any process: a process group number in an old record says
 nothing reliable about who owns that number now. In Docker a container
-restart has already stopped the old children. Elsewhere, a child that
-outlived the old `serve` still holds `.refresh.lock`, so a new attempt
-fails at `lock` (and is retried) until it ends; it finishes as a normal
-refresh would.
+restart has already stopped the old children. Outside a container, a
+`refresh` that outlived the old `serve` still holds `.refresh.lock`, so a
+new attempt fails at `lock` (and is retried) until it ends; but a tool
+whose `refresh` also died is not found or stopped. This is a limit of
+running `serve` outside a container, and `docs/serve.md` says so.
 
 Retention keeps the last `keep_runs` finished runs. A run that is not
 finished, or has a destination still `pending`, is never removed (R6,
@@ -387,17 +405,20 @@ is not run later.
 ### Logs (R8, R11, F8, F10)
 
 Each attempt's stdout and stderr are read line by line. A line longer than
-64 KB is cut: `serve` reads up to 64 KB plus the length of the longest
-secret, redacts that, keeps the first 64 KB, and drops the rest of the line
-with a note of how much it dropped. A secret that starts in the kept part
-is therefore always whole in what was redacted, and never shows in part.
+64 KB is cut at 64 KB of the child's output, counted in the child's bytes,
+not in the redacted text (G2). To cut it, `serve` reads 64 KB plus the
+length of the longest secret, finds every whole secret in that, and writes
+the first 64 KB of the child's bytes with each secret that starts there
+replaced by `***` (whole, even where it runs past 64 KB). A secret that
+starts after 64 KB is dropped with the rest of the line, with a note of how
+much was dropped. A secret is therefore never shown in part.
 Each line, once redacted, goes to the run's `log` file and to `serve`'s
 stdout prefixed with the run id, so `docker logs` shows it.
 
 The child's pipes are always read as fast as the child writes. Neither a
 slow HTTP client reading a log nor a slow consumer of `serve`'s stdout can
-stall a refresh: lines for stdout go through a queue of 10,000 lines, and
-when it is full lines are dropped and counted, with a line saying how many
+stall a refresh: lines for stdout go through a queue of at most 10,000
+lines and 8 MB, and when it is full lines are dropped and counted, with a line saying how many
 once there is room. A run's `log` stops growing at `max_log_bytes`, with a
 line saying how much was dropped. `serve`'s own events (run accepted,
 attempt ended, retry, notify delivered or failed, schedule skipped) go to
@@ -516,11 +537,15 @@ hook, not a five-field cron every second).
 - Cancel stops a running child, the tools it runs side by side, and a
   shell hook's delayed child writer; SIGKILL of the child's group after
   the grace period reaches a tool even when `refresh` ignores the stop.
+- SIGKILL of `refresh` alone, with a delayed tool writer running: the
+  writer is gone before the attempt is over, and before the next attempt
+  starts.
 - `serve` killed while its child runs: the next start marks the run
   `interrupted`, sends its notify, and signals nothing; a new attempt
   fails at `lock` while the old child still runs.
 - Logs: a newline-free output is cut at 64 KB lines; a secret placed at
-  every offset around the cut never appears, whole or in part; a run's log
+  every offset around the cut never appears, whole or in part, including
+  after earlier secrets on the line have been replaced; a run's log
   stops at `max_log_bytes`; a slow log client and a blocked stdout do not
   slow the refresh, and the dropped lines are counted.
 - Secrets listed above do not appear in records, the served log, stdout,
@@ -533,7 +558,9 @@ hook, not a five-field cron every second).
   database and records `committed: false, published: false`; SIGTERM in
   the database step finishes the publish, then records
   `committed: true, published: true`; a failure of `ANALYZE` after the
-  commit records `committed: true`; SIGTERM during a hook stops it and
+  commit records `committed: true`; `--only catalog` failing at
+  `catalog.duckdb` after `catalog.sql` was replaced records
+  `published: true`; SIGTERM during a hook stops it and
   leaves the new warehouse; tools run side by side are all stopped and
   reaped before the lock is released; a second signal exits at once.
 - `FHIR_PIPES_RESULT_FILE` is written for a run that succeeds, fails at a
