@@ -22,6 +22,10 @@ use super::{Step, manifest};
 
 pub const FILE: &str = "last-run.json";
 
+/// Where a supervisor (`fhir-pipes serve`) wants the run's final record as
+/// well, written whether or not the run got the lock.
+pub const RESULT_FILE_ENV: &str = "FHIR_PIPES_RESULT_FILE";
+
 /// The longest error message written to last-run.json and given to a hook as
 /// ERROR, in characters; a longer one is cut there and ends with `…`.
 const MAX_ERROR: usize = 2000;
@@ -50,12 +54,26 @@ pub struct Status {
     path: PathBuf,
     record: Value,
     started: Instant,
+    /// Whether this run holds the lock and so writes last-run.json.
+    owns_last_run: bool,
 }
 
 impl Status {
     /// Record that a run of `steps` has started.
     pub fn start(s: &Settings, steps: &BTreeSet<Step>) -> Result<Status> {
-        let status = Status {
+        let status = Status::new(s, steps, true);
+        status.write()?;
+        Ok(status)
+    }
+
+    /// The record of a run that did not get the lock: `finish` writes only
+    /// the result file, since last-run.json belongs to the run that has it.
+    pub fn unlocked(s: &Settings, steps: &BTreeSet<Step>) -> Status {
+        Status::new(s, steps, false)
+    }
+
+    fn new(s: &Settings, steps: &BTreeSet<Step>, owns_last_run: bool) -> Status {
+        Status {
             path: s.data.join(FILE),
             record: json!({
                 "status": "running",
@@ -68,9 +86,8 @@ impl Status {
                 "steps": steps.iter().map(|s| s.name()).collect::<Vec<_>>(),
             }),
             started: Instant::now(),
-        };
-        status.write()?;
-        Ok(status)
+            owns_last_run,
+        }
     }
 
     /// Record how the run ended: `result` is its `refreshed_at` or its error,
@@ -108,7 +125,22 @@ impl Status {
                 r["exit_code"] = json!(crate::error::exit_code(e));
             }
         }
-        if let Err(e) = self.write() {
+        // The result file first: a supervisor reads it once the run exits.
+        if let Some(path) = std::env::var_os(RESULT_FILE_ENV).filter(|p| !p.is_empty()) {
+            let path = PathBuf::from(path);
+            let written = serde_json::to_string_pretty(&self.record)
+                .map_err(anyhow::Error::from)
+                .and_then(|text| Ok(crate::fs::atomic_write(&path, text)?));
+            if let Err(e) = written {
+                eprintln!(
+                    "fhir-pipes: warning: {}",
+                    crate::error::message(&e.context(format!("writing {}", path.display())))
+                );
+            }
+        }
+        if self.owns_last_run
+            && let Err(e) = self.write()
+        {
             eprintln!(
                 "fhir-pipes: warning: {}",
                 crate::error::message(&e.context(format!("writing {FILE}")))

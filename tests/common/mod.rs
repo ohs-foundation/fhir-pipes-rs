@@ -113,6 +113,9 @@ const CLEARED: &[&str] = &[
     "FHIR_PIPES_PROFILE",
     "FHIR_PIPES_LOCK_TIMEOUT",
     "FHIR_PIPES_TEST_PAUSE",
+    "FHIR_PIPES_RESULT_FILE",
+    "FHIR_PIPES_FAILURE_HOOKS",
+    "FHIR_PIPES_RUN_ID",
 ];
 
 pub fn cmd(config: &Path) -> Command {

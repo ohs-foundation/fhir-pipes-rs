@@ -513,6 +513,128 @@ fn only_catalog_failing_at_catalog_duckdb_is_published() {
     assert!(dir.path().join("data/catalog.sql").is_file());
 }
 
+fn read_json(path: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// FHIR_PIPES_RESULT_FILE gets the run's final record, whether it succeeded,
+/// failed at a step, or failed at the lock (which leaves last-run.json to
+/// the run that holds it).
+#[test]
+fn the_result_file_is_written_on_success_failure_and_lock() {
+    let (dir, config) = setup_with_raw("");
+    let data = dir.path().join("data");
+    let ok = dir.path().join("ok.json");
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw"])
+        .env("FHIR_PIPES_RESULT_FILE", &ok)
+        .assert()
+        .success();
+    let r = read_json(&ok);
+    assert_eq!(r["status"], "succeeded");
+    assert_eq!(r["exit_code"], 0);
+    assert_eq!(r, last_run(&data));
+
+    let failed = dir.path().join("failed.json");
+    cmd(&config)
+        .args(["--only", "views", "--server", NOWHERE])
+        .env("FHIR_PIPES_RESULT_FILE", &failed)
+        .assert()
+        .code(1);
+    let r = read_json(&failed);
+    assert_eq!(r["status"], "failed");
+    assert_eq!(r["failed_step"], "views");
+    assert_eq!(r["exit_code"], 1);
+
+    let locked = dir.path().join("locked.json");
+    let held = fs::File::create(data.join(".refresh.lock")).unwrap();
+    held.lock().unwrap();
+    fs::write(data.join("last-run.json"), r#"{"status": "running"}"#).unwrap();
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--lock-timeout", "0"])
+        .env("FHIR_PIPES_RESULT_FILE", &locked)
+        .assert()
+        .code(1);
+    let r = read_json(&locked);
+    assert_eq!(r["status"], "failed");
+    assert_eq!(r["failed_step"], "lock");
+    assert_eq!(r["exit_code"], 1);
+    assert_eq!(last_run(&data), json!({"status": "running"}));
+}
+
+/// FHIR_PIPES_FAILURE_HOOKS=off: no hook runs after a failure; success
+/// hooks are as before.
+#[test]
+#[cfg(unix)]
+fn failure_hooks_off_runs_no_hook_after_a_failure() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "ok"
+run = ["sh", "-c", "touch ok.txt"]
+
+[[hooks]]
+name = "on-failure"
+on = "failure"
+run = ["sh", "-c", "touch on-failure.txt"]
+
+[[hooks]]
+name = "always"
+on = "always"
+run = ["sh", "-c", "touch always.txt"]
+"#,
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks", "--server", NOWHERE])
+        .env("FHIR_PIPES_FAILURE_HOOKS", "off")
+        .assert()
+        .code(1)
+        .stdout(has("failure hooks are off (FHIR_PIPES_FAILURE_HOOKS=off)"));
+    assert!(!dir.path().join("on-failure.txt").exists());
+    assert!(!dir.path().join("always.txt").exists());
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw"])
+        .env("FHIR_PIPES_FAILURE_HOOKS", "off")
+        .assert()
+        .success();
+    assert!(dir.path().join("ok.txt").exists());
+    assert!(dir.path().join("always.txt").exists());
+}
+
+/// Hooks get RUN_ID from FHIR_PIPES_RUN_ID, empty without it.
+#[test]
+#[cfg(unix)]
+fn hooks_get_run_id() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "id"
+run = ["sh", "-c", "echo \"[$RUN_ID]\" > id.txt"]
+"#,
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw"])
+        .env("FHIR_PIPES_RUN_ID", "20261021T020000Z-7f3a")
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("id.txt"))
+            .unwrap()
+            .trim(),
+        "[20261021T020000Z-7f3a]"
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("id.txt"))
+            .unwrap()
+            .trim(),
+        "[]"
+    );
+}
+
 /// A successful run leaves the files it always did, and nothing staged.
 #[test]
 fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {

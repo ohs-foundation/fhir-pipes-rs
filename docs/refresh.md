@@ -930,6 +930,24 @@ A failure hook can tell someone, or another system, that the refresh failed:
 for example post `last-run.json` to a chat webhook, or to an OpenFn webhook
 trigger that handles the alert.
 
+### Running under a supervisor
+
+Three environment variables let a program that runs refreshes for you,
+such as `fhir-pipes serve`, follow each one:
+
+- `FHIR_PIPES_RESULT_FILE=<path>`: the run also writes its final record,
+  the same as `last-run.json`'s, to that path, with an fsync before and
+  after the rename. It is written whether or not the run got the
+  warehouse's lock, so a run that fails at `lock` or `tools` reports too.
+- `FHIR_PIPES_FAILURE_HOOKS=off`: no hook runs after a failure (`on =
+  "failure"` or `"always"`); the run prints that they are off. Success
+  hooks and `always` hooks in a run that succeeds are unchanged. A
+  supervisor that sends its own alert once per run, rather than once per
+  attempt, sets it.
+- `FHIR_PIPES_RUN_ID=<id>`: given to every hook as `RUN_ID` (empty
+  without it), so an integration can tell the attempts of one run from
+  separate runs.
+
 ### last-refresh.json
 
 Each run that finishes writes its step timings to

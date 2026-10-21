@@ -249,10 +249,18 @@ fn locked(
     let lock = match stage::Lock::acquire(&s.data, timeout) {
         Ok(lock) => lock,
         Err(e) => {
-            if hooks {
-                failure_hooks(s, ran.current, &e);
+            let result = Err(e);
+            status::Status::unlocked(s, steps).finish(
+                &result,
+                ran.current,
+                &ran.timings,
+                ran.committed,
+                ran.published,
+            );
+            if hooks && let Err(e) = &result {
+                failure_hooks(s, ran.current, e);
             }
-            return Err(e);
+            return result;
         }
     };
     let result = status::Status::start(s, steps).and_then(|status| {
@@ -279,6 +287,14 @@ fn locked(
 /// at `step` with `err`. A hook that fails is reported; the run's error and
 /// exit status stay the run's own.
 fn failure_hooks(s: &Settings, step: &str, err: &anyhow::Error) {
+    // A supervisor (fhir-pipes serve) that alerts once per run turns them
+    // off for its attempts.
+    if std::env::var("FHIR_PIPES_FAILURE_HOOKS").is_ok_and(|v| v == "off") {
+        if s.hooks.iter().any(|h| h.on.on_failure()) {
+            println!("   failure hooks are off (FHIR_PIPES_FAILURE_HOOKS=off)");
+        }
+        return;
+    }
     let message = status::short(&crate::error::message(err));
     let code = crate::error::exit_code(err).to_string();
     for h in s.hooks.iter().filter(|h| h.on.on_failure()) {
