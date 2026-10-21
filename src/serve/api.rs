@@ -356,6 +356,7 @@ mod tests {
                 redactor: Arc::default(),
                 stdout,
                 write_failing: Arc::default(),
+                child_env: vec![],
             }),
             notifier,
             metrics: Arc::default(),

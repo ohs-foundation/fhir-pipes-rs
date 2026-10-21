@@ -231,7 +231,8 @@ counted rather than holding up the refresh.
 
 `refresh` hides the same values in an error before it cuts it short (an
 HTTP error body at 500 characters, `last-run.json`'s `error` at 2,000), so
-a cut cannot leave part of one. `serve` replaces these values with `***`
+a cut cannot leave part of one: `serve` names the ones from its config to
+each refresh in `FHIR_PIPES_SECRET_VARS`. `serve` replaces these values with `***`
 in logs, records and notify bodies: `FHIR_PIPES_TOKEN`, `FHIR_PIPES_CLIENT_SECRET`,
 `FHIR_PIPES_PASSWORD`, `FHIR_PIPES_HAPI_DATABASE_URL`, the variable the
 `[database]` section names, `FHIR_PIPES_SERVE_TOKEN`, each notify

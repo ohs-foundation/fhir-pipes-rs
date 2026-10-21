@@ -960,3 +960,38 @@ fn json_record(id: &str, status: &str) -> String {
     })
     .to_string()
 }
+
+/// Secrets the config names (a [database] url_env, a notify value_env) are
+/// hidden by the refresh too, before it cuts an error short.
+#[test]
+fn configured_secrets_are_hidden_across_the_error_cut() {
+    const SECRET: &str = "cfg-secret-0123456789abcdefghijk";
+    for (extra, var) in [
+        ("\n[database]\nurl_env = \"WAREHOUSE_DB\"\n", "WAREHOUSE_DB"),
+        (
+            "\n[[serve.notify]]\nname = \"n\"\nurl = \"http://127.0.0.1:9/i\"\nheader = \"x-api-key\"\nvalue_env = \"WEBHOOK_KEY\"\n",
+            "WEBHOOK_KEY",
+        ),
+    ] {
+        let fhir = HttpServer::run();
+        fhir.expect(
+            Expectation::matching(any())
+                .times(..)
+                .respond_with(status_code(401).body(format!("{}{SECRET}", "e".repeat(469)))),
+        );
+        let (_dir, config) = setup(
+            &fhir.url_str("/fhir"),
+            &format!("\n[serve]\nretries = 0\n{extra}"),
+        );
+        let s = start_serve(&config, &[("FHIR_PIPES_SERVE_TOKEN", TOKEN), (var, SECRET)]);
+        let id = s.start_run(r#"{"only": ["views"]}"#);
+        s.finished(&id);
+        let (_, record) = s.get(&format!("/runs/{id}"));
+        for n in 4..=SECRET.len() {
+            assert!(
+                !record.contains(&SECRET[..n]),
+                "{var}: {n} characters shown: {record}"
+            );
+        }
+    }
+}

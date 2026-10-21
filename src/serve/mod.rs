@@ -88,6 +88,23 @@ fn server(
         stdout.clone(),
         Some(metrics.clone()),
     );
+    // The secrets the config names, for the refreshes to hide before they
+    // cut an error short; a notify URL is given to them in a variable of
+    // its own.
+    let mut child_env = Vec::new();
+    let mut secret_vars: Vec<String> = inputs.database_url_env.iter().cloned().collect();
+    for (i, d) in cfg.notify.iter().enumerate() {
+        if let Some((_, env)) = &d.header {
+            secret_vars.push(env.clone());
+        }
+        let name = format!("FHIR_PIPES_SERVE_NOTIFY_URL_{i}");
+        child_env.push((name.clone(), d.url.to_string()));
+        secret_vars.push(name);
+    }
+    child_env.push((
+        crate::redact::SECRET_VARS_ENV.to_string(),
+        secret_vars.join(","),
+    ));
     let job = Arc::new(runner::Job {
         program: std::env::current_exe().context("finding the fhir-pipes binary")?,
         base_args,
@@ -96,6 +113,7 @@ fn server(
         redactor,
         stdout,
         write_failing: Arc::default(),
+        child_env,
     });
     Ok(Arc::new(api::Server {
         job,

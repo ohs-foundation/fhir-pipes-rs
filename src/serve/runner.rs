@@ -48,6 +48,9 @@ pub struct Job {
     /// Set while the end of a run cannot be written: no run is accepted
     /// meanwhile.
     pub write_failing: Arc<std::sync::atomic::AtomicBool>,
+    /// More environment for each attempt: the secrets serve knows of from
+    /// its config, named so the refresh hides them too.
+    pub child_env: Vec<(String, String)>,
 }
 
 /// Asks a run to stop. Shared between the run and whoever cancels it.
@@ -391,6 +394,7 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         .env("FHIR_PIPES_RESULT_FILE", &result_file)
         .env("FHIR_PIPES_FAILURE_HOOKS", "off")
         .env("FHIR_PIPES_RUN_ID", rec.id.as_str())
+        .envs(job.child_env.iter().map(|(k, v)| (k, v)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -650,6 +654,7 @@ mod tests {
             redactor: Arc::default(),
             stdout: crate::serve::output::StdoutQueue::start(Box::new(std::io::sink())),
             write_failing: Arc::default(),
+            child_env: vec![],
         }
     }
 
