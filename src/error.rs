@@ -20,7 +20,7 @@ pub enum PipesError {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("arrow: {0}")]
-    Arrow(#[from] arrow_schema::ArrowError),
+    Arrow(#[from] arrow::error::ArrowError),
     #[error("parquet: {0}")]
     Parquet(#[from] parquet::errors::ParquetError),
     #[error("{path}: {source}")]

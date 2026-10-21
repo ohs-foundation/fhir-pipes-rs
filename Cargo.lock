@@ -1206,8 +1206,6 @@ dependencies = [
  "annotate-snippets",
  "anyhow",
  "arrow",
- "arrow-array",
- "arrow-schema",
  "assert_cmd",
  "base64 0.23.1",
  "chrono",

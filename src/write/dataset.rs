@@ -664,7 +664,7 @@ mod tests {
             let col = batch.column_by_name("id").unwrap();
             let col = col
                 .as_any()
-                .downcast_ref::<arrow_array::StringArray>()
+                .downcast_ref::<arrow::array::StringArray>()
                 .unwrap();
             ids.extend(col.iter().map(|v| v.unwrap().to_string()));
         }
