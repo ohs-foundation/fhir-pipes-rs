@@ -42,6 +42,9 @@ pub struct Job {
     pub base_args: Vec<String>,
     pub cfg: ServeConfig,
     pub store: Arc<Store>,
+    pub redactor: Arc<super::secrets::Redactor>,
+    /// serve's stdout, where every attempt's output also goes.
+    pub stdout: Arc<super::output::StdoutQueue>,
 }
 
 /// Asks a run to stop. Shared between the run and whoever cancels it.
@@ -240,21 +243,6 @@ fn args(job: &Job, req: &RunRequest) -> Vec<String> {
     a
 }
 
-/// The last `n` lines of the file at `path`, reading at most its last 64 KB.
-fn last_lines(path: &Path, n: usize) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return String::new();
-    };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let _ = f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)));
-    let mut buf = Vec::new();
-    let _ = f.read_to_end(&mut buf);
-    let text = String::from_utf8_lossy(&buf);
-    let lines: Vec<&str> = text.lines().collect();
-    lines[lines.len().saturating_sub(n)..].join("\n")
-}
-
 /// The other members of process group `pgid`.
 #[cfg(target_os = "linux")]
 fn group_members(pgid: i32) -> Vec<i32> {
@@ -324,23 +312,26 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
     use std::os::unix::process::CommandExt;
     let dir = job.store.run_dir(&rec.id);
     let result_file = dir.join(format!("attempt-{n}.json"));
-    let log_path = dir.join("log");
-    let started = (|| -> std::io::Result<std::process::Child> {
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        std::process::Command::new(&job.program)
-            .args(args(job, &rec.request))
-            .env("FHIR_PIPES_RESULT_FILE", &result_file)
-            .env("FHIR_PIPES_FAILURE_HOOKS", "off")
-            .env("FHIR_PIPES_RUN_ID", rec.id.as_str())
-            .stdin(std::process::Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log)
-            .process_group(0)
-            .spawn()
-    })();
+    let log = match super::output::RunLog::open(&dir.join("log"), job.cfg.max_log_bytes) {
+        Ok(log) => Arc::new(Mutex::new(log)),
+        Err(e) => {
+            return (
+                ExitKind::Code(1),
+                json!({"status": "failed", "failed_step": "unknown", "exit_code": 1,
+                       "error": format!("opening the run's log: {e}")}),
+            );
+        }
+    };
+    let started = std::process::Command::new(&job.program)
+        .args(args(job, &rec.request))
+        .env("FHIR_PIPES_RESULT_FILE", &result_file)
+        .env("FHIR_PIPES_FAILURE_HOOKS", "off")
+        .env("FHIR_PIPES_RUN_ID", rec.id.as_str())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn();
     let mut child = match started {
         Ok(c) => c,
         Err(e) => {
@@ -352,6 +343,14 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
             );
         }
     };
+    let capture = super::output::Capture::start(
+        child.stdout.take().expect("piped stdout"),
+        child.stderr.take().expect("piped stderr"),
+        log.clone(),
+        job.stdout.clone(),
+        job.redactor.clone(),
+        rec.id.as_str().to_string(),
+    );
     let pid = child.id() as i32;
     let cancelled = {
         let mut s = cancel.lock();
@@ -386,8 +385,12 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         s.pgid = None;
         status
     };
+    // Every process that held the pipes is gone, so both streams end.
+    let stderr_tail = capture.finish();
+    log.lock().unwrap_or_else(|e| e.into_inner()).close();
     let exit = status.map(ExitKind::from).unwrap_or(ExitKind::Code(1));
-    let result = result_of(exit, &result_file, &last_lines(&log_path, 50));
+    let mut result = result_of(exit, &result_file, &stderr_tail);
+    job.redactor.redact_json(&mut result);
     (exit, result)
 }
 
@@ -571,6 +574,8 @@ mod tests {
             base_args: vec![],
             cfg,
             store: Arc::new(Store::open(dir.join("runs")).unwrap()),
+            redactor: Arc::default(),
+            stdout: crate::serve::output::StdoutQueue::start(Box::new(std::io::sink())),
         }
     }
 
