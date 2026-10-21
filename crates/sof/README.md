@@ -152,26 +152,30 @@ says what fhir-pipes does and why.
 
 ### FHIRPath
 
-Two FHIRPath test suites run through the in-memory evaluator, each expression
-as a ViewDefinition column:
+Three FHIRPath test suites run through the in-memory evaluator, each
+expression as a ViewDefinition column:
 
 - `tests/fhirpath_hl7.rs`: the official HL7 suite for R4 (`tests/fhirpath/`,
   from FHIR/fhir-test-cases). fhir-pipes passes 970 of 1,001.
 - `tests/fhirpath_js.rs`: fhirpath.js's tests (`tests/fhirpath-js/`), which
   cover the spec section by section and include the HL7 R5 suite. fhir-pipes
   passes 2,068 of the 2,681 it runs.
+- `tests/fhirpath_precedence.rs`: the spec's operator-precedence table. For
+  each pair of operators it builds an expression whose result depends on the
+  grouping and compares it with the same expression in parentheses
+  (`tests/fhirpath-precedence/`). fhir-pipes passes 357 of 359.
 
 Each suite lists the tests fhir-pipes fails in its `known-failures.json`, with
 a cause and a note for each, and its test fails if the list goes out of date
 in either direction or a failure has no cause. The causes:
 
-| Cause | HL7 | fhirpath.js | |
-| --- | ---: | ---: | --- |
-| `type-checker` | 23 | 0 | The spec wants an error from the types before evaluation; octofhir-fhirpath has no type checker |
-| `engine` | 4 | 458 | octofhir-fhirpath gives a wrong result or error |
-| `not-supported` | 3 | 144 | octofhir-fhirpath lacks the function or feature |
-| `fhir-pipes` | 1 | 4 | fhir-pipes' own handling |
-| `suite` | 0 | 7 | The test expects something specific to fhirpath.js, or that the spec leaves open |
+| Cause | HL7 | fhirpath.js | Precedence | |
+| --- | ---: | ---: | ---: | --- |
+| `type-checker` | 23 | 0 | 0 | The spec wants an error from the types before evaluation; octofhir-fhirpath has no type checker |
+| `engine` | 4 | 458 | 2 | octofhir-fhirpath gives a wrong result or error |
+| `not-supported` | 3 | 144 | 0 | octofhir-fhirpath lacks the function or feature |
+| `fhir-pipes` | 1 | 4 | 0 | fhir-pipes' own handling |
+| `suite` | 0 | 7 | 0 | The test expects something specific to fhirpath.js, or that the spec leaves open |
 
 Most of the fhirpath.js `engine` failures fall in a few areas: Quantity
 arithmetic and UCUM conversion (136), primitives that have only an id or
@@ -207,6 +211,11 @@ The 4 fhirpath.js failures that are fhir-pipes' own are the same
 `birthDate`: fhir-pipes gives dates the FHIRPath type String so a column keeps
 their form (see [FHIR model](#fhir-model)), and octofhir does no date arithmetic on a
 String.
+
+The 2 precedence failures are octofhir-fhirpath parser bugs: it puts `xor`
+above `or`, where the spec has them at one level, so `true or true xor true`
+gives `true`; and it reads `implies` as right-associative, so
+`false implies true implies false` gives `true`. Both should give `false`.
 
 `SOURCE.md` in each suite's folder says where its data comes from and how to
 refresh it.
