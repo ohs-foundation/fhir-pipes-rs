@@ -7,6 +7,7 @@
 pub mod compare;
 pub mod geojson;
 pub mod input;
+pub mod organization;
 pub mod parquet;
 pub mod rebuild;
 
@@ -20,8 +21,9 @@ use crate::cli::DiffArgs;
 use crate::diff::compare::differs;
 use crate::diff::geojson::{feature_to_row, read_feature_collection, read_feature_lines};
 use crate::diff::input::{ColumnValue, InputRow};
+use crate::diff::organization::{new_organization, rebuild_organization};
 use crate::diff::parquet::read_geoparquet;
-use crate::diff::rebuild::{new_organization, rebuild, rebuild_organization};
+use crate::diff::rebuild::rebuild;
 use crate::error::{PipesError, Result};
 use crate::fhir::Location;
 use crate::fhir::location::strip_reference;

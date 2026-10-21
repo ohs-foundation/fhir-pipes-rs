@@ -145,72 +145,70 @@ pub fn boundary_url(resource: &Value, extra: &[String]) -> Option<String> {
     None
 }
 
-pub fn page_locations(
-    client: &FhirClient,
-    server: &str,
-    kind: ServerKind,
-    since: Option<&str>,
-    incoming: &Path,
-    report: &mut Report,
-    boundary_extensions: &[String],
-) -> Result<PageResult> {
-    page_resources(
-        client,
-        server,
-        kind,
-        "Location",
-        since,
-        incoming,
-        report,
-        boundary_extensions,
-    )
+/// One search to page: the server and its kind, the resource type, any
+/// search parameters, and the profile's boundary extensions, recognized
+/// beside the HL7 one.
+#[derive(Clone, Copy)]
+pub struct Search<'a> {
+    pub server: &'a str,
+    pub kind: ServerKind,
+    pub resource_type: &'a str,
+    /// Search parameters; `_count` and the server kind's are added.
+    pub params: &'a [(&'a str, String)],
+    pub boundary_extensions: &'a [String],
 }
 
-/// Walk `<server>/<resource_type>` with `_count` paging, appending every
-/// resource to `incoming` and noting what the merge needs. Boundary URLs
-/// are noted for any type; only Locations carry them. `boundary_extensions`
-/// is the profile's, recognized beside the HL7 one.
-#[allow(clippy::too_many_arguments)]
+impl<'a> Search<'a> {
+    /// Every `resource_type` on `server`, with no boundary extensions of
+    /// the profile's.
+    pub fn new(server: &'a str, kind: ServerKind, resource_type: &'a str) -> Self {
+        Self {
+            server,
+            kind,
+            resource_type,
+            params: &[],
+            boundary_extensions: &[],
+        }
+    }
+}
+
+/// Walk `search` with `_count` paging, appending every resource to
+/// `incoming` and noting what the merge needs; with `since`, only what was
+/// updated from then on. Boundary URLs are noted for any type; only
+/// Locations carry them.
 pub fn page_resources(
     client: &FhirClient,
-    server: &str,
-    kind: ServerKind,
-    resource_type: &str,
+    search: &Search,
     since: Option<&str>,
     incoming: &Path,
     report: &mut Report,
-    boundary_extensions: &[String],
 ) -> Result<PageResult> {
-    let since = since.map(|s| ("_lastUpdated", format!("ge{s}")));
-    let paged = page_search(
-        client,
-        server,
-        kind,
-        resource_type,
-        since.as_slice(),
-        incoming,
-        report,
-        boundary_extensions,
-        &mut |_| true,
-    )?;
+    let mut params = search.params.to_vec();
+    params.extend(since.map(|s| ("_lastUpdated", format!("ge{s}"))));
+    let search = Search {
+        params: &params,
+        ..*search
+    };
+    let paged = page_search(client, &search, incoming, report, &mut |_| true)?;
     Ok(paged.expect("paging stops early only when told to"))
 }
 
-/// `page_resources` with any search parameters (`_count` and the server
-/// kind's are added), and a look at the first page: when `after_first`
+/// `page_resources` with a look at the first page: when `after_first`
 /// returns false, paging stops there and the result is `None`.
-#[allow(clippy::too_many_arguments)]
 pub fn page_search(
     client: &FhirClient,
-    server: &str,
-    kind: ServerKind,
-    resource_type: &str,
-    params: &[(&str, String)],
+    search: &Search,
     incoming: &Path,
     report: &mut Report,
-    boundary_extensions: &[String],
     after_first: &mut dyn FnMut(&Value) -> bool,
 ) -> Result<Option<PageResult>> {
+    let Search {
+        server,
+        kind,
+        resource_type,
+        params,
+        boundary_extensions,
+    } = *search;
     let mut url = server_url(server, resource_type)?;
     {
         let mut qp = url.query_pairs_mut();
@@ -539,13 +537,14 @@ mod tests {
         let mut report = Report::default();
         let got = page_resources(
             &client,
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
-            "Organization",
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Organization",
+            ),
             None,
             &incoming,
             &mut report,
-            &[],
         )
         .unwrap();
         assert_eq!(got.notes.len(), 1);
@@ -594,13 +593,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
-            "Organization",
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Organization",
+            ),
             None,
             &dir.path().join("inc.ndjson"),
             &mut Report::default(),
-            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("is not on"), "{err}");
@@ -632,13 +632,14 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let got = page_resources(
                 &client(),
-                &server.url("/fhir").to_string(),
-                ServerKind::Generic,
-                "Organization",
+                &Search::new(
+                    &server.url("/fhir").to_string(),
+                    ServerKind::Generic,
+                    "Organization",
+                ),
                 None,
                 &dir.path().join("inc.ndjson"),
                 &mut Report::default(),
-                &[],
             )
             .unwrap();
             assert_eq!(got.pages, 2);
@@ -678,14 +679,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join(".incoming.ndjson");
         let mut report = Report::default();
-        let res = page_locations(
+        let res = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &out,
             &mut report,
-            &[],
         )
         .unwrap();
         assert_eq!(res.pages, 2);
@@ -729,14 +732,16 @@ mod tests {
             .respond_with(status_code(200).body(bundle(&[], None))),
         );
         let dir = tempfile::tempdir().unwrap();
-        let res = page_locations(
+        let res = page_resources(
             &client(),
-            &server.url("/fhir/").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir/").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             Some("2026-01-01T00:00:00Z"),
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap();
         assert_eq!(res.notes.len(), 0);
@@ -776,14 +781,16 @@ mod tests {
                 .respond_with(status_code(200).body(bundle(&[], Some(&me)))),
         );
         let dir = tempfile::tempdir().unwrap();
-        let err = page_locations(
+        let err = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("cyclic"), "{err}");
@@ -798,14 +805,16 @@ mod tests {
                 .respond_with(status_code(401).body("nope")),
         );
         let dir = tempfile::tempdir().unwrap();
-        let err = page_locations(
+        let err = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 1);
@@ -820,14 +829,16 @@ mod tests {
                 .respond_with(status_code(200).body("<html>")),
         );
         let dir = tempfile::tempdir().unwrap();
-        let err = page_locations(
+        let err = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("not JSON"), "{err}");
@@ -843,14 +854,16 @@ mod tests {
             ),
         );
         let dir = tempfile::tempdir().unwrap();
-        let err = page_locations(
+        let err = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap_err();
         assert!(err.to_string().contains("expected a Bundle"), "{err}");
@@ -871,14 +884,16 @@ mod tests {
             .respond_with(status_code(200).body(bundle(&[], None))),
         );
         let dir = tempfile::tempdir().unwrap();
-        page_locations(
+        page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             Some("2026-01-01T00:00:00+01:00"),
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap();
     }
@@ -906,14 +921,16 @@ mod tests {
             .respond_with(status_code(200).body(bundle(&[], None))),
         );
         let dir = tempfile::tempdir().unwrap();
-        let res = page_locations(
+        let res = page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &dir.path().join("i"),
             &mut Report::default(),
-            &[],
         )
         .unwrap();
         assert_eq!(res.pages, 2);
@@ -931,14 +948,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("i");
         std::fs::write(&out, "leftover junk from a previous run\nmore junk\n").unwrap();
-        page_locations(
+        page_resources(
             &client(),
-            &server.url("/fhir").to_string(),
-            ServerKind::Generic,
+            &Search::new(
+                &server.url("/fhir").to_string(),
+                ServerKind::Generic,
+                "Location",
+            ),
             None,
             &out,
             &mut Report::default(),
-            &[],
         )
         .unwrap();
         let text = std::fs::read_to_string(&out).unwrap();
@@ -977,14 +996,12 @@ mod tests {
                 ),
             );
             let dir = tempfile::tempdir().unwrap();
-            let res = page_locations(
+            let res = page_resources(
                 &client(),
-                &server.url("/fhir").to_string(),
-                kind,
+                &Search::new(&server.url("/fhir").to_string(), kind, "Location"),
                 None,
                 &dir.path().join("i"),
                 &mut Report::default(),
-                &[],
             )
             .unwrap();
             assert_eq!(res.notes.len(), 2, "{kind:?}");

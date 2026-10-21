@@ -9,7 +9,7 @@ use geo::Intersects;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::LineAccess;
 use crate::fhir::{Location, Organization};
-use crate::geometry::{self, GeomKind};
+use crate::geometry::{self, GeomKind, GeometryResult};
 use crate::index::hierarchy::Hierarchy;
 use crate::index::partition::{Claims, PartitionKey, segment};
 use crate::index::{Index, IndexRecord};
@@ -184,39 +184,24 @@ fn write_partitions(
     } else {
         output_schema(profile)
     };
-    let records: &[IndexRecord] = records;
-    let hierarchy: &Hierarchy = hierarchy;
-    let order: &[u32] = order;
-
-    // Group records by their partition values, preserving the index's
-    // (country, geom_type, Hilbert) order within each group so every
-    // partition stays spatially clustered whatever keys were chosen.
-    let mut groups: Vec<(Vec<String>, Vec<u32>)> = Vec::new();
-    let mut group_index: HashMap<Vec<String>, usize> = HashMap::new();
-    for &i in order {
-        let rec = &records[i as usize];
-        let values: Vec<String> = keys.iter().map(|k| k.value(rec).to_string()).collect();
-        match group_index.get(&values) {
-            Some(&gi) => groups[gi].1.push(i),
-            None => {
-                group_index.insert(values.clone(), groups.len());
-                groups.push((values, vec![i]));
-            }
-        }
-    }
-
-    let mut lines = LineAccess::open(ndjson)?;
-    // The Organization side of the facility pairing, when the snapshot has
-    // it. Indexed by id; each row's Organization is read on demand.
-    let mut organizations = match organizations {
-        Some(path) => Some((
-            index_by_id(path, report, "organization_line_unparsed")?,
-            LineAccess::open(path)?,
-        )),
-        None => None,
-    };
-    let mut parent_cache = ParentCache {
-        polygons: HashMap::new(),
+    let groups = group_by_partition(records, order, keys);
+    let mut source = RowSource {
+        records,
+        hierarchy,
+        profile,
+        lines: LineAccess::open(ndjson)?,
+        // The Organization side of the facility pairing, when the snapshot
+        // has it. Indexed by id; each row's Organization is read on demand.
+        organizations: match organizations {
+            Some(path) => Some(Organizations {
+                index: index_by_id(path, report, "organization_line_unparsed")?,
+                lines: LineAccess::open(path)?,
+            }),
+            None => None,
+        },
+        parents: ParentCache {
+            polygons: HashMap::new(),
+        },
     };
     // One claims table per (parent path, key): a segment only needs to be
     // unique among siblings in the same directory.
@@ -253,83 +238,11 @@ fn write_partitions(
 
         for &i in idxs {
             let i = i as usize;
-            let rec = &records[i];
-            let Some(loc) = load_location(&mut lines, rec, profile, true)? else {
-                report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
+            let Some((loc, geom)) = source.location(i, report)? else {
                 continue;
             };
-            // Pass one kept a row without geometry only when asked to
-            // (--keep-without-geometry); a row it gave geometry must still
-            // have it.
-            let geom = match rec.geometry {
-                None => None,
-                Some(_) => {
-                    let mut silent = Report::default();
-                    let Some(geom) = geometry::build(&loc, &mut silent) else {
-                        report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
-                        continue;
-                    };
-                    Some(geom)
-                }
-            };
-            let Some(info) = hierarchy.get(i) else {
-                report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
-                continue;
-            };
-
-            let org = match (&rec.managing_organization, organizations.as_mut()) {
-                (Some(org_id), Some((index, access))) => match index.get(org_id) {
-                    Some(&(offset, len)) => {
-                        let text = access.read_at(offset, len)?;
-                        let value: serde_json::Value = serde_json::from_str(&text)?;
-                        Organization::parse(&value, profile, &mut Report::default())
-                    }
-                    None => {
-                        report.add(
-                            "organization_missing",
-                            &rec.id,
-                            &format!(
-                                "managingOrganization {org_id} is not in organizations.ndjson"
-                            ),
-                        );
-                        None
-                    }
-                },
-                _ => None,
-            };
-            if let Some(o) = &org
-                && o.name.is_some()
-                && o.name != loc.name
-            {
-                report.add(
-                    "organization_name_mismatch",
-                    &rec.id,
-                    &format!(
-                        "Location is named {:?} but Organization {} is named {:?}",
-                        loc.name.as_deref().unwrap_or(""),
-                        o.id,
-                        o.name.as_deref().unwrap_or("")
-                    ),
-                );
-            }
-
-            if let (Some(geom), Some(parent_idx)) =
-                (&geom, nearest_polygon_ancestor(hierarchy, records, i))
-                && let Some(parent) = parent_cache.get(parent_idx, records, &mut lines, profile)?
-            {
-                let pt = geo::Point::new(geom.lon, geom.lat);
-                if !parent.intersects(&pt) {
-                    report.add(
-                        "point_outside_parent",
-                        &rec.id,
-                        &format!(
-                            "({}, {}) falls outside its nearest admin ancestor",
-                            geom.lon, geom.lat
-                        ),
-                    );
-                }
-            }
-
+            let org = source.organization(i, report)?;
+            source.check(i, &loc, org.as_ref(), geom.as_ref(), report)?;
             match &geom {
                 Some(geom) => {
                     let type_name = crate::geometry::kind_name(&geom.geometry);
@@ -339,66 +252,7 @@ fn write_partitions(
                 }
                 None => rows_without_geometry += 1,
             }
-
-            // Spatial cells are derived from the position; a row without
-            // geometry leaves them null even if the resource carries some.
-            let (quadkey, quadkey_level) = geom
-                .as_ref()
-                .and_then(|_| crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells))
-                .map(|c| (Some(c.cell.clone()), i32::try_from(c.level).ok()))
-                .unwrap_or((None, None));
-            let (organization_identifier, organization_columns, organization_json) = match org {
-                Some(o) => (
-                    o.identifier
-                        .into_iter()
-                        .map(|i| (i.system, i.value))
-                        .collect(),
-                    o.columns,
-                    Some(o.fhir_json),
-                ),
-                None => (Vec::new(), Vec::new(), None),
-            };
-            let row = OutputRow {
-                id: loc.id,
-                version_id: loc.version_id.clone(),
-                last_updated: loc.last_updated.clone(),
-                name: loc.name,
-                alias: loc.alias,
-                status: loc.status,
-                description: loc.description,
-                type_code: loc.type_code,
-                physical_type: loc.physical_type,
-                part_of: loc.part_of,
-                managing_organization: loc.managing_organization,
-                identifier: loc
-                    .identifier
-                    .into_iter()
-                    .map(|ident| (ident.system, ident.value))
-                    .collect(),
-                position: loc.position,
-                location_columns: loc.columns,
-                quadkey,
-                quadkey_level,
-                organization_identifier,
-                organization_columns,
-                depth: i32::from(info.depth),
-                admin_level: info.admin_level.map(i32::from),
-                tier: rec.tier.clone(),
-                path: hierarchy.path(records, i),
-                ancestor_ids: hierarchy.ancestor_ids(records, i),
-                admin_names: hierarchy.admin_names(records, i),
-                admin_codes: hierarchy.admin_codes(records, i),
-                overlays_admin_unit_ids: loc.overlays_admin_unit_ids,
-                organization_json,
-                country: rec.country.clone(),
-                geom_type: geom.as_ref().map(|g| g.kind.as_str().to_string()),
-                lon: geom.as_ref().map(|g| g.lon),
-                lat: geom.as_ref().map(|g| g.lat),
-                wkb: geom.as_ref().map(|g| g.wkb()).unwrap_or_default(),
-                bbox: geom.as_ref().map(|g| g.bbox),
-                fhir_json: loc.fhir_json,
-            };
-            batch.push(&row);
+            batch.push(&source.row(i, loc, org, geom));
             if batch.rows >= row_group_size {
                 writer.write(&mut batch)?;
             }
@@ -419,6 +273,232 @@ fn write_partitions(
     }
 
     Ok(written)
+}
+
+/// The records grouped by their partition values, preserving the index's
+/// (country, geom_type, Hilbert) order within each group so every
+/// partition stays spatially clustered whatever keys were chosen.
+fn group_by_partition(
+    records: &[IndexRecord],
+    order: &[u32],
+    keys: &[PartitionKey],
+) -> Vec<(Vec<String>, Vec<u32>)> {
+    let mut groups: Vec<(Vec<String>, Vec<u32>)> = Vec::new();
+    let mut group_index: HashMap<Vec<String>, usize> = HashMap::new();
+    for &i in order {
+        let rec = &records[i as usize];
+        let values: Vec<String> = keys.iter().map(|k| k.value(rec).to_string()).collect();
+        match group_index.get(&values) {
+            Some(&gi) => groups[gi].1.push(i),
+            None => {
+                group_index.insert(values.clone(), groups.len());
+                groups.push((values, vec![i]));
+            }
+        }
+    }
+    groups
+}
+
+/// What pass two builds rows from: the index, the snapshot's lines, and its
+/// Organizations when it has them.
+struct RowSource<'a> {
+    records: &'a [IndexRecord],
+    hierarchy: &'a Hierarchy,
+    profile: &'a Profile,
+    lines: LineAccess,
+    organizations: Option<Organizations>,
+    parents: ParentCache,
+}
+
+/// The snapshot's Organizations: where each one's line is, by id, and the
+/// lines.
+struct Organizations {
+    index: HashMap<String, (u64, usize)>,
+    lines: LineAccess,
+}
+
+impl RowSource<'_> {
+    /// Record `i`'s Location and geometry, read again, or `None` after
+    /// reporting a row that pass one indexed but that cannot be rebuilt.
+    fn location(
+        &mut self,
+        i: usize,
+        report: &mut Report,
+    ) -> Result<Option<(Location, Option<GeometryResult>)>> {
+        let rec = &self.records[i];
+        let Some(loc) = load_location(&mut self.lines, rec, self.profile, true)? else {
+            report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
+            return Ok(None);
+        };
+        // Pass one kept a row without geometry only when asked to
+        // (--keep-without-geometry); a row it gave geometry must still
+        // have it.
+        let geom = match rec.geometry {
+            None => None,
+            Some(_) => {
+                let mut silent = Report::default();
+                let Some(geom) = geometry::build(&loc, &mut silent) else {
+                    report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
+                    return Ok(None);
+                };
+                Some(geom)
+            }
+        };
+        if self.hierarchy.get(i).is_none() {
+            report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
+            return Ok(None);
+        }
+        Ok(Some((loc, geom)))
+    }
+
+    /// The Organization record `i`'s Location names as its
+    /// managingOrganization, when the snapshot has Organizations; one it
+    /// does not have is reported.
+    fn organization(&mut self, i: usize, report: &mut Report) -> Result<Option<Organization>> {
+        let rec = &self.records[i];
+        Ok(
+            match (&rec.managing_organization, self.organizations.as_mut()) {
+                (Some(org_id), Some(orgs)) => match orgs.index.get(org_id) {
+                    Some(&(offset, len)) => {
+                        let text = orgs.lines.read_at(offset, len)?;
+                        let value: serde_json::Value = serde_json::from_str(&text)?;
+                        Organization::parse(&value, self.profile, &mut Report::default())
+                    }
+                    None => {
+                        report.add(
+                            "organization_missing",
+                            &rec.id,
+                            &format!(
+                                "managingOrganization {org_id} is not in organizations.ndjson"
+                            ),
+                        );
+                        None
+                    }
+                },
+                _ => None,
+            },
+        )
+    }
+
+    /// Reports a Location named otherwise than its Organization, and a
+    /// point that falls outside its nearest admin ancestor's polygon.
+    fn check(
+        &mut self,
+        i: usize,
+        loc: &Location,
+        org: Option<&Organization>,
+        geom: Option<&GeometryResult>,
+        report: &mut Report,
+    ) -> Result<()> {
+        let rec = &self.records[i];
+        if let Some(o) = org
+            && o.name.is_some()
+            && o.name != loc.name
+        {
+            report.add(
+                "organization_name_mismatch",
+                &rec.id,
+                &format!(
+                    "Location is named {:?} but Organization {} is named {:?}",
+                    loc.name.as_deref().unwrap_or(""),
+                    o.id,
+                    o.name.as_deref().unwrap_or("")
+                ),
+            );
+        }
+        if let (Some(geom), Some(parent_idx)) = (
+            geom,
+            nearest_polygon_ancestor(self.hierarchy, self.records, i),
+        ) && let Some(parent) =
+            self.parents
+                .get(parent_idx, self.records, &mut self.lines, self.profile)?
+        {
+            let pt = geo::Point::new(geom.lon, geom.lat);
+            if !parent.intersects(&pt) {
+                report.add(
+                    "point_outside_parent",
+                    &rec.id,
+                    &format!(
+                        "({}, {}) falls outside its nearest admin ancestor",
+                        geom.lon, geom.lat
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `i`'s output row. `location` has checked that the record has
+    /// its place in the hierarchy.
+    fn row(
+        &self,
+        i: usize,
+        loc: Location,
+        org: Option<Organization>,
+        geom: Option<GeometryResult>,
+    ) -> OutputRow {
+        let (records, hierarchy) = (self.records, self.hierarchy);
+        let rec = &records[i];
+        let info = hierarchy.get(i).expect("checked by location");
+        // Spatial cells are derived from the position; a row without
+        // geometry leaves them null even if the resource carries some.
+        let (quadkey, quadkey_level) = geom
+            .as_ref()
+            .and_then(|_| crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells))
+            .map(|c| (Some(c.cell.clone()), i32::try_from(c.level).ok()))
+            .unwrap_or((None, None));
+        let (organization_identifier, organization_columns, organization_json) = match org {
+            Some(o) => (
+                o.identifier
+                    .into_iter()
+                    .map(|i| (i.system, i.value))
+                    .collect(),
+                o.columns,
+                Some(o.fhir_json),
+            ),
+            None => (Vec::new(), Vec::new(), None),
+        };
+        OutputRow {
+            id: loc.id,
+            version_id: loc.version_id.clone(),
+            last_updated: loc.last_updated.clone(),
+            name: loc.name,
+            alias: loc.alias,
+            status: loc.status,
+            description: loc.description,
+            type_code: loc.type_code,
+            physical_type: loc.physical_type,
+            part_of: loc.part_of,
+            managing_organization: loc.managing_organization,
+            identifier: loc
+                .identifier
+                .into_iter()
+                .map(|ident| (ident.system, ident.value))
+                .collect(),
+            position: loc.position,
+            location_columns: loc.columns,
+            quadkey,
+            quadkey_level,
+            organization_identifier,
+            organization_columns,
+            depth: i32::from(info.depth),
+            admin_level: info.admin_level.map(i32::from),
+            tier: rec.tier.clone(),
+            path: hierarchy.path(records, i),
+            ancestor_ids: hierarchy.ancestor_ids(records, i),
+            admin_names: hierarchy.admin_names(records, i),
+            admin_codes: hierarchy.admin_codes(records, i),
+            overlays_admin_unit_ids: loc.overlays_admin_unit_ids,
+            organization_json,
+            country: rec.country.clone(),
+            geom_type: geom.as_ref().map(|g| g.kind.as_str().to_string()),
+            lon: geom.as_ref().map(|g| g.lon),
+            lat: geom.as_ref().map(|g| g.lat),
+            wkb: geom.as_ref().map(|g| g.wkb()).unwrap_or_default(),
+            bbox: geom.as_ref().map(|g| g.bbox),
+            fhir_json: loc.fhir_json,
+        }
+    }
 }
 
 #[cfg(test)]

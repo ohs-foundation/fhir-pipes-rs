@@ -1,4 +1,5 @@
 pub mod chunks;
+pub mod edit;
 pub mod group;
 pub mod head;
 pub mod input;
