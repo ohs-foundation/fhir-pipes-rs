@@ -279,17 +279,42 @@ pub struct Database {
     pub mode: Mode,
 }
 
-/// An external command run after the manifest is written.
+/// An external command run after the run is published, or after it fails.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
     pub name: String,
-    /// Run only when this step ran (e.g. `locations`). Unset: always.
+    /// When the hook runs: after a run that succeeded (the default), after
+    /// one that failed, or after either.
+    #[serde(default)]
+    pub on: On,
+    /// Run only when this step ran (e.g. `locations`). Unset: always. Only
+    /// for a hook run on success.
     #[serde(default, deserialize_with = "hook_after")]
     pub after: Option<Step>,
     /// The command and its arguments. A program path with a `/` is relative to
     /// the config file.
     pub run: Vec<String>,
+}
+
+/// When a hook runs: `on = "success"`, `"failure"` or `"always"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum On {
+    #[default]
+    Success,
+    Failure,
+    Always,
+}
+
+impl On {
+    pub fn on_success(self) -> bool {
+        matches!(self, On::Success | On::Always)
+    }
+
+    pub fn on_failure(self) -> bool {
+        matches!(self, On::Failure | On::Always)
+    }
 }
 
 /// A hook's `after`: a step that runs before the hooks, in any case
@@ -484,6 +509,23 @@ pub struct Overrides {
 }
 
 pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
+    // `after` names a step that ran; a run that failed may not have got to
+    // it, so it is only for hooks run on success.
+    if let Some(h) = file
+        .hooks
+        .iter()
+        .find(|h| h.after.is_some() && h.on != On::Success)
+    {
+        bail!(
+            "hook {}: `after` is only for hooks run on success, not with `on = \"{}\"`",
+            h.name,
+            if h.on == On::Failure {
+                "failure"
+            } else {
+                "always"
+            }
+        );
+    }
     let data = match (o.data, file.data) {
         (Some(p), _) => p,
         (None, Some(p)) => resolve(&base, &p),
@@ -1009,6 +1051,31 @@ mod tests {
         }
         let none: File = toml::from_str("[[hooks]]\nname = \"h\"\nrun = [\"true\"]").unwrap();
         assert_eq!(none.hooks[0].after, None);
+        assert_eq!(none.hooks[0].on, On::Success);
+    }
+
+    #[test]
+    fn a_hooks_on_is_success_failure_or_always() {
+        let on = |on: &str| {
+            toml::from_str::<File>(&format!(
+                "[[hooks]]\nname = \"h\"\non = \"{on}\"\nrun = [\"true\"]"
+            ))
+            .map(|f| f.hooks[0].on)
+        };
+        assert_eq!(on("failure").unwrap(), On::Failure);
+        assert_eq!(on("always").unwrap(), On::Always);
+        assert!(on("sometimes").is_err());
+        let file: File = toml::from_str(
+            "data = \"d\"\n[[hooks]]\nname = \"h\"\non = \"failure\"\nafter = \"views\"\nrun = [\"true\"]",
+        )
+        .unwrap();
+        let err = settings(file, PathBuf::from("/b"), Overrides::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("hook h: `after` is only for hooks run on success"),
+            "{err}"
+        );
     }
 
     #[test]

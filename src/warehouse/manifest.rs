@@ -9,6 +9,8 @@ use serde_json::{Map, Value, json};
 
 use super::config::Settings;
 use super::partition::{open_parquet, partition_key, table_files};
+#[cfg(test)]
+use super::stage::Lock;
 use super::stage::Stage;
 
 /// The time now as `refreshed_at` gives it: UTC, to the second.
@@ -155,7 +157,7 @@ mod tests {
     fn the_manifest_counts_every_table_and_lists_the_staged_views() {
         let dir = tempfile::tempdir().unwrap();
         let s = settings(dir.path(), "");
-        let stage = Stage::new(&s).unwrap();
+        let stage = Stage::new(&s, &Lock::acquire(&s.data, None).unwrap()).unwrap();
         // A live table the run did not write, and one it did.
         table(&s.parquet_dir().join("old"), "country", 3);
         table(&stage.table("obs"), "country", 5);
@@ -205,7 +207,7 @@ mod tests {
     fn a_file_source_lists_its_inputs_and_records_no_server() {
         let dir = tempfile::tempdir().unwrap();
         let s = settings(dir.path(), "[source]\nfiles = ['in/a.ndjson']\n");
-        let stage = Stage::new(&s).unwrap();
+        let stage = Stage::new(&s, &Lock::acquire(&s.data, None).unwrap()).unwrap();
         write(&s, &stage, recorded_server(&s, true).as_deref()).unwrap();
         let m = read(&stage.file("manifest.json"));
         assert_eq!(m["server"], Value::Null);

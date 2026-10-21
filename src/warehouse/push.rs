@@ -118,9 +118,11 @@ pub fn push(s: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// Run a hook with the run's details in its environment: DATA, FHIR_BASE,
-/// SERVER_NAME and REFRESHED_AT. It runs in the config file's directory.
-pub fn hook(s: &Settings, h: &Hook, program: &str, refreshed_at: &str) -> Result<()> {
+/// Run a hook with the run's details in its environment: DATA, FHIR_BASE and
+/// SERVER_NAME, and `env` (STATUS, and REFRESHED_AT after a run that
+/// succeeded or FAILED_STEP, ERROR and EXIT_CODE after one that failed). It
+/// runs in the config file's directory.
+pub fn hook(s: &Settings, h: &Hook, program: &str, env: &[(&str, &str)]) -> Result<()> {
     println!("== hook {}", h.name);
     tools::run(
         Command::new(program)
@@ -129,7 +131,7 @@ pub fn hook(s: &Settings, h: &Hook, program: &str, refreshed_at: &str) -> Result
             .env("DATA", &s.data)
             .env("FHIR_BASE", s.server_used().unwrap_or(""))
             .env("SERVER_NAME", &s.server_name)
-            .env("REFRESHED_AT", refreshed_at),
+            .envs(env.iter().copied()),
     )
     .with_context(|| format!("hook {}", h.name))
 }

@@ -205,6 +205,144 @@ run = ["sh", "-c", "cp \"$DATA/manifest.json\" seen.json; exit 3"]
     assert_nothing_staged(&data);
 }
 
+fn last_run(data: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(data.join("last-run.json")).unwrap()).unwrap()
+}
+
+/// A run that succeeds records it in last-run.json, and its hooks get
+/// STATUS; hooks with `on = "failure"` do not run.
+#[test]
+#[cfg(unix)]
+fn a_run_that_succeeds_is_recorded_in_last_run() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "ok"
+run = ["sh", "-c", "echo \"$STATUS $REFRESHED_AT\" > ok.txt"]
+
+[[hooks]]
+name = "on-failure"
+on = "failure"
+run = ["sh", "-c", "touch on-failure.txt"]
+"#,
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks", "--reuse-raw"])
+        .assert()
+        .success();
+    let r = last_run(&dir.path().join("data"));
+    assert_eq!(r["status"], "succeeded");
+    assert_eq!(r["exit_code"], 0);
+    assert_eq!(r["server_name"], "test");
+    assert_eq!(r["steps"], json!(["views", "manifest", "hooks"]));
+    assert!(r["timings"]["views"].is_number(), "{r}");
+    assert!(r.get("failed_step").is_none());
+    let ok = fs::read_to_string(dir.path().join("ok.txt")).unwrap();
+    assert_eq!(
+        ok.trim(),
+        format!("succeeded {}", r["refreshed_at"].as_str().unwrap())
+    );
+    assert!(!dir.path().join("on-failure.txt").exists());
+}
+
+/// A run that fails records the step and the error in last-run.json, and
+/// runs the hooks with `on = "failure"` or `"always"` (not the others),
+/// which get FAILED_STEP, ERROR and EXIT_CODE. A failure hook that fails is
+/// a warning: the run still fails with its own error.
+#[test]
+#[cfg(unix)]
+fn a_run_that_fails_is_recorded_and_runs_the_failure_hooks() {
+    let (dir, config) = setup(
+        NOWHERE,
+        r#"
+[[hooks]]
+name = "on-success"
+run = ["sh", "-c", "touch on-success.txt"]
+
+[[hooks]]
+name = "on-failure"
+on = "failure"
+run = ["sh", "-c", "echo \"$STATUS|$FAILED_STEP|$EXIT_CODE|$ERROR\" > on-failure.txt"]
+
+[[hooks]]
+name = "broken"
+on = "failure"
+run = ["sh", "-c", "exit 4"]
+
+[[hooks]]
+name = "always"
+on = "always"
+run = ["sh", "-c", "echo \"$STATUS\" > always.txt"]
+"#,
+    );
+    cmd(&config)
+        .args(["--only", "views,hooks"])
+        .assert()
+        .code(1)
+        .stderr(has("warning: hook broken"))
+        .stderr(has("fhir-pipes: views"));
+    let r = last_run(&dir.path().join("data"));
+    assert_eq!(r["status"], "failed");
+    assert_eq!(r["failed_step"], "views");
+    assert_eq!(r["exit_code"], 1);
+    let error = r["error"].as_str().unwrap();
+    assert!(error.starts_with("views: "), "{error}");
+    let seen = fs::read_to_string(dir.path().join("on-failure.txt")).unwrap();
+    assert_eq!(seen.trim(), format!("failed|views|1|{error}"));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("always.txt"))
+            .unwrap()
+            .trim(),
+        "failed"
+    );
+    assert!(!dir.path().join("on-success.txt").exists());
+    assert_nothing_staged(&dir.path().join("data"));
+}
+
+/// With --lock-timeout, a run that cannot get the warehouse's lock fails,
+/// leaves last-run.json to the run that holds it, and runs the failure
+/// hooks with FAILED_STEP=lock.
+#[test]
+#[cfg(unix)]
+fn a_run_that_cannot_get_the_lock_in_time_fails() {
+    let (dir, config) = setup_with_raw(
+        r#"
+[[hooks]]
+name = "on-failure"
+on = "failure"
+run = ["sh", "-c", "echo \"$FAILED_STEP\" > on-failure.txt"]
+"#,
+    );
+    let data = dir.path().join("data");
+    let held = fs::File::create(data.join(".refresh.lock")).unwrap();
+    held.lock().unwrap();
+    fs::write(data.join("last-run.json"), r#"{"status": "running"}"#).unwrap();
+    cmd(&config)
+        .args([
+            "--only",
+            "views,hooks",
+            "--reuse-raw",
+            "--lock-timeout",
+            "0",
+        ])
+        .assert()
+        .code(1)
+        .stderr(has("still holds .refresh.lock after 0 s (--lock-timeout)"));
+    assert_eq!(last_run(&data), json!({"status": "running"}));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("on-failure.txt"))
+            .unwrap()
+            .trim(),
+        "lock"
+    );
+    drop(held);
+    cmd(&config)
+        .args(["--only", "views", "--reuse-raw", "--lock-timeout", "0"])
+        .assert()
+        .success();
+    assert_eq!(last_run(&data)["status"], "succeeded");
+}
+
 /// A successful run leaves the files it always did, and nothing staged.
 #[test]
 fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {

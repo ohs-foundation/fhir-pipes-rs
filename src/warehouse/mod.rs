@@ -19,13 +19,19 @@
 //!              build with the postgres feature. With mode = "upsert", only
 //!              the rows of the resources that changed, from the change log
 //!              raw/<server>/.changes.json (`Changes::begin`)
-//!   hooks      commands from the config (e.g. a catalog build)
+//!   hooks      commands from the config (e.g. a catalog build); hooks with
+//!              `on = "failure"` or `"always"` also run after a run that failed
 //!   push       mirror the warehouse to object storage (rclone); only with --push
 //!
 //! The tables, views/, tiles/, the manifest and catalog.sql are written to
 //! staging directories (stage.rs) and swapped in together after the database
 //! step, so a run that fails before then leaves the previous run's warehouse
 //! as it was. The hooks and the push work on the published warehouse.
+//!
+//! A run holds the warehouse's lock (stage::Lock) from before the tools check
+//! to the end, and while it holds it keeps `last-run.json` in the warehouse
+//! directory up to date (status.rs): `running`, then `succeeded` or `failed`
+//! with the step that failed and why.
 
 mod catalog;
 mod config;
@@ -38,13 +44,14 @@ mod partition;
 mod push;
 mod sql;
 mod stage;
+mod status;
 mod tiles;
 mod tools;
 mod views_step;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -151,6 +158,10 @@ pub struct RefreshArgs {
     /// Show the resolved settings and which tools are found, then exit.
     #[arg(long)]
     check: bool,
+    /// Seconds to wait for another refresh of the same warehouse to finish
+    /// before failing; 0 fails at once. Default: wait as long as it takes.
+    #[arg(long, env = "FHIR_PIPES_LOCK_TIMEOUT", value_name = "SECONDS")]
+    lock_timeout: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -198,12 +209,71 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
     let (later, now): (Vec<_>, Vec<_>) = needed
         .iter()
         .partition(|t| s.reads_files() && t.step == Step::Tiles);
-    tools::require(&now.iter().map(|t| t.pair()).collect::<Vec<_>>())?;
-    refresh(
+    let mut ran = Ran::default();
+    let result = locked(
         &s,
         &steps,
-        &later.iter().map(|t| t.pair()).collect::<Vec<_>>(),
-    )
+        args.lock_timeout.map(Duration::from_secs),
+        &mut ran,
+        |ran, lock| {
+            ran.at("tools");
+            tools::require(&now.iter().map(|t| t.pair()).collect::<Vec<_>>())?;
+            refresh(
+                &s,
+                &steps,
+                &later.iter().map(|t| t.pair()).collect::<Vec<_>>(),
+                ran,
+                lock,
+            )
+        },
+    );
+    if let Err(e) = &result
+        && steps.contains(&Step::Hooks)
+    {
+        failure_hooks(&s, ran.current, e);
+    }
+    result.map(|_| ())
+}
+
+/// Run `f` under the warehouse's lock, with `last-run.json` saying the run
+/// is running until it ends, then how it ended. A run that cannot get the
+/// lock writes nothing there, since the run that holds it owns the file.
+fn locked(
+    s: &Settings,
+    steps: &BTreeSet<Step>,
+    timeout: Option<Duration>,
+    ran: &mut Ran,
+    f: impl FnOnce(&mut Ran, &stage::Lock) -> Result<String>,
+) -> Result<String> {
+    ran.at("lock");
+    let lock = stage::Lock::acquire(&s.data, timeout)?;
+    let status = status::Status::start(s, steps)?;
+    let result = f(ran, &lock);
+    status.finish(&result, ran.current, &ran.timings);
+    drop(lock);
+    result
+}
+
+/// Run the hooks with `on = "failure"` or `"always"` after a run that failed
+/// at `step` with `err`. A hook that fails is reported; the run's error and
+/// exit status stay the run's own.
+fn failure_hooks(s: &Settings, step: &str, err: &anyhow::Error) {
+    let message = status::short(&crate::error::message(err));
+    let code = crate::error::exit_code(err).to_string();
+    for h in s.hooks.iter().filter(|h| h.on.on_failure()) {
+        let env = [
+            ("STATUS", "failed"),
+            ("FAILED_STEP", step),
+            ("ERROR", message.as_str()),
+            ("EXIT_CODE", code.as_str()),
+        ];
+        if let Err(e) = push::hook(s, h, &hook_program(s, &h.run[0]), &env) {
+            eprintln!(
+                "fhir-pipes: warning: {} (after the run failed)",
+                crate::error::message(&e)
+            );
+        }
+    }
 }
 
 /// The settings from the config file and flags, the steps to run and the
@@ -552,9 +622,18 @@ fn unwritten_tables(s: &Settings, written: BTreeSet<String>) -> Result<Vec<Strin
 struct Ran {
     timings: Vec<(&'static str, f64)>,
     steps: BTreeSet<Step>,
+    /// The part of the run under way, which is the one that failed when the
+    /// run fails: a step, or `lock`, `tools`, `start`, `files`, `publish`,
+    /// `finish`.
+    current: &'static str,
 }
 
 impl Ran {
+    /// The run is now in part `name`.
+    fn at(&mut self, name: &'static str) {
+        self.current = name;
+    }
+
     /// Runs `f` as the part `name`. When it succeeds its time is recorded,
     /// and `step`, if given, counts as run.
     fn run_step<T>(
@@ -563,6 +642,7 @@ impl Ran {
         step: Option<Step>,
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
+        self.at(name);
         let t = Instant::now();
         let value = f()?;
         self.record(name, step, t.elapsed().as_secs_f64());
@@ -579,16 +659,22 @@ impl Ran {
 }
 
 /// `tiles_tools`: the tiles step's tools, when they are checked only once the
-/// step is known to run.
-fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -> Result<()> {
+/// step is known to run. Returns the run's `refreshed_at`.
+fn refresh(
+    s: &Settings,
+    steps: &BTreeSet<Step>,
+    tiles_tools: &[(&str, &str)],
+    ran: &mut Ran,
+    lock: &stage::Lock,
+) -> Result<String> {
     let started = Instant::now();
-    let mut ran = Ran::default();
+    ran.at("start");
     // Whether the run downloaded anything from the server, for the server
     // the manifest records.
     let mut contacted = false;
     std::fs::create_dir_all(s.raw_dir())?;
     std::fs::create_dir_all(s.parquet_dir())?;
-    let stage = stage::Stage::new(s)?;
+    let stage = stage::Stage::new(s, lock)?;
     // The change log of an upsert run (export/changes.rs), which the
     // exports and the file source add to; in any other mode it is removed.
     if s.upsert() {
@@ -605,6 +691,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     }
 
     if steps.contains(&Step::Locations) {
+        ran.at("locations");
         let t = Instant::now();
         let built = if s.reads_files() {
             files::locations(s, stage.tables_dir())?
@@ -628,6 +715,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         println!("== tiles: there is no locations table; skipped");
     }
     if tiles_wanted {
+        ran.at("tiles");
         tools::require(tiles_tools)?;
     }
 
@@ -657,6 +745,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     #[cfg(feature = "postgres")]
     let mut built = None;
     if let Some(v) = views {
+        ran.at("views");
         let (done, secs) = v.context("views")?;
         ran.record("views", Some(Step::Views), secs);
         contacted |= done.downloaded;
@@ -672,6 +761,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     }
     let server = manifest::recorded_server(s, contacted);
     if let Some(t) = tiles {
+        ran.at("tiles");
         ran.record("tiles", Some(Step::Tiles), t.context("tiles")?);
     }
 
@@ -738,11 +828,15 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         let wanted: Vec<_> = s
             .hooks
             .iter()
-            .filter(|h| h.after.is_none_or(|a| ran.steps.contains(&a)))
+            .filter(|h| h.on.on_success() && h.after.is_none_or(|a| ran.steps.contains(&a)))
             .collect();
+        let env = [
+            ("STATUS", "succeeded"),
+            ("REFRESHED_AT", refreshed_at.as_str()),
+        ];
         ran.run_step("hooks", None, || {
             for h in wanted {
-                push::hook(s, h, &hook_program(s, &h.run[0]), &refreshed_at)?;
+                push::hook(s, h, &hook_program(s, &h.run[0]), &env)?;
             }
             Ok(())
         })?;
@@ -752,6 +846,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
         ran.run_step("push", None, || push::push(s))?;
     }
 
+    ran.at("finish");
     if let Some(written) = view_tables {
         let unwritten = unwritten_tables(s, written)?;
         if !unwritten.is_empty() {
@@ -796,7 +891,7 @@ fn refresh(s: &Settings, steps: &BTreeSet<Step>, tiles_tools: &[(&str, &str)]) -
     if s.upsert() {
         Changes::finish(&s.raw_dir())?;
     }
-    Ok(())
+    Ok(refreshed_at)
 }
 
 /// Print the values the views step could not write as they are, as
