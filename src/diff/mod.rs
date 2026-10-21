@@ -260,20 +260,16 @@ fn finish(out: Output<AtomicFile>, tmp: &Path) -> Result<()> {
     out.finish().map_err(|e| PipesError::io(tmp, e))?.commit()
 }
 
-pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> Result<()> {
+pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> anyhow::Result<()> {
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
-        return Err(PipesError::Usage(format!(
-            "snapshot file not found: {}",
-            ndjson.display()
-        )));
+        return Err(
+            PipesError::Usage(format!("snapshot file not found: {}", ndjson.display())).into(),
+        );
     }
     let format = InputFormat::from_path(&args.input)?;
     if !args.input.is_file() {
-        return Err(PipesError::Usage(format!(
-            "--in {}: not a file",
-            args.input.display()
-        )));
+        return Err(PipesError::Usage(format!("--in {}: not a file", args.input.display())).into());
     }
     crate::fs::check_out(&args.out)?;
 

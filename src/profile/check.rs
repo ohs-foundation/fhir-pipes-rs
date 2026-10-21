@@ -26,7 +26,7 @@ use clap::ValueEnum;
 use serde_json::Value;
 
 use crate::cli::ReportSource;
-use crate::error::{PipesError, Result};
+use crate::error::{Findings, PipesError, Result};
 use crate::fhir::package::Index;
 use crate::profile::{Column, Kind, Profile};
 
@@ -823,12 +823,13 @@ fn not_read(profile: &Profile, ig: &Ig) -> Vec<(String, Vec<String>)> {
 }
 
 /// Print the result. Errors make the command fail.
-pub fn run(args: &crate::cli::ProfileCheckArgs, spec: Option<&str>) -> Result<()> {
+pub fn run(args: &crate::cli::ProfileCheckArgs, spec: Option<&str>) -> anyhow::Result<()> {
     let profile = Profile::load(spec)?;
     if profile.is_base() {
         return Err(PipesError::Usage(
             "profile check needs a profile: pass --profile FILE|URL".into(),
-        ));
+        )
+        .into());
     }
     let ig = Ig::load(&args.ig)?;
     println!("profile: {} ({})", profile.name, profile.source);
@@ -861,10 +862,11 @@ pub fn run(args: &crate::cli::ProfileCheckArgs, spec: Option<&str>) -> Result<()
         result.warnings()
     );
     if result.errors() > 0 {
-        return Err(PipesError::Findings(format!(
-            "the profile does not match the IG: {} error(s)",
+        eprintln!(
+            "fhir-pipes: the profile does not match the IG: {} error(s)",
             result.errors()
-        )));
+        );
+        return Err(Findings.into());
     }
     Ok(())
 }

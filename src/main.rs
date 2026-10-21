@@ -38,40 +38,26 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let cli = cli::Cli::parse();
+    if let Err(err) = run(cli) {
+        // A check that failed has already printed its findings.
+        if !err.is::<error::Findings>() {
+            eprintln!("fhir-pipes: {}", error::message(&err));
+        }
+        std::process::exit(error::exit_code(&err));
+    }
+}
+
+fn run(cli: cli::Cli) -> anyhow::Result<()> {
     let profile = cli.profile.as_deref();
-    // refresh and views report anyhow errors with their context chain, and
-    // exit as the other commands do: 2 when the operator can fix the error.
-    if let cli::Command::Refresh(args) = &cli.command {
-        if let Err(err) = warehouse::run(args, profile) {
-            eprintln!("fhir-pipes: {err:#}");
-            std::process::exit(error::anyhow_exit_code(&err));
-        }
-        return;
-    }
-    if let cli::Command::Views(args) = &cli.command {
-        if let Err(err) = views::run(args) {
-            // validate, lint and test have already printed their findings.
-            if !err.is::<views::Failed>() {
-                eprintln!("fhir-pipes: {err:#}");
-            }
-            std::process::exit(error::anyhow_exit_code(&err));
-        }
-        return;
-    }
-    if let cli::Command::Terminology(command) = &cli.command {
-        if let Err(err) = terminology::run(command) {
-            eprintln!("fhir-pipes: {err:#}");
-            std::process::exit(error::anyhow_exit_code(&err));
-        }
-        return;
-    }
-    let result: error::Result<()> = match cli.command {
+    match cli.command {
         cli::Command::Transform(cli::TransformCommand::Locations(args)) => {
             transform::run_transform(&args, profile)
         }
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
-        cli::Command::Extract(args) => profile::Profile::for_snapshot(profile, &args.snapshot)
-            .and_then(|p| extract::run_extract(&args, &p.location.boundary_extensions)),
+        cli::Command::Extract(args) => {
+            let p = profile::Profile::for_snapshot(profile, &args.snapshot)?;
+            extract::run_extract(&args, &p.location.boundary_extensions)
+        }
         cli::Command::Export(args) => export::run_export(&args),
         cli::Command::Run(args) => run::run(&args, profile),
         cli::Command::Diff(args) => diff::run_diff(&args, profile),
@@ -84,12 +70,8 @@ fn main() {
             profile::check::run(&args, profile)
         }
         cli::Command::Import(cmd) => import::run(&cmd, profile),
-        cli::Command::Refresh(_) | cli::Command::Views(_) | cli::Command::Terminology(_) => {
-            unreachable!("handled above")
-        }
-    };
-    if let Err(err) = result {
-        eprintln!("fhir-pipes: {err}");
-        std::process::exit(err.exit_code());
+        cli::Command::Refresh(args) => warehouse::run(&args, profile),
+        cli::Command::Views(args) => views::run(&args),
+        cli::Command::Terminology(command) => terminology::run(&command),
     }
 }

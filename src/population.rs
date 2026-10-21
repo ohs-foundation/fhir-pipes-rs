@@ -187,34 +187,32 @@ fn valid_source_code(code: &str) -> bool {
     !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()> {
+pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> anyhow::Result<()> {
     let snapshot = Snapshot::new(&args.snapshot);
     let ndjson = snapshot.locations();
     if !ndjson.is_file() {
-        return Err(PipesError::Usage(format!(
-            "snapshot file not found: {}",
-            ndjson.display()
-        )));
+        return Err(
+            PipesError::Usage(format!("snapshot file not found: {}", ndjson.display())).into(),
+        );
     }
     crate::fs::check_out(&args.out)?;
     if !valid_source_code(&args.source) {
         return Err(PipesError::Usage(format!(
             "--source must be a code of letters, digits and hyphens, got {:?}",
             args.source
-        )));
+        ))
+        .into());
     }
     if !(1900..=2100).contains(&args.year) {
-        return Err(PipesError::Usage(format!(
-            "--year {} is outside 1900–2100",
-            args.year
-        )));
+        return Err(PipesError::Usage(format!("--year {} is outside 1900–2100", args.year)).into());
     }
     if let Some(d) = &args.estimate_date
         && !crate::calendar::is_date(d)
     {
         return Err(PipesError::Usage(format!(
             "--estimate-date must be a date, YYYY-MM-DD, got {d:?}"
-        )));
+        ))
+        .into());
     }
     let estimate_date = args
         .estimate_date
@@ -247,9 +245,9 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
         ),
         (None, Some(t)) if !t.is_empty() => Selector::Type(t.clone()),
         _ => {
-            return Err(PipesError::Usage(
-                "give exactly one of --level or --type".to_string(),
-            ));
+            return Err(
+                PipesError::Usage("give exactly one of --level or --type".to_string()).into(),
+            );
         }
     };
     // "level 2" / "type facility-catchment" in messages; "admin level 2" in the source text;
@@ -276,7 +274,8 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
         return Err(PipesError::Usage(match &selector {
             Selector::Level(l) => format!("no admin units at level {l} in {}", ndjson.display()),
             Selector::Type(t) => format!("no Locations of type {t} in {}", ndjson.display()),
-        }));
+        })
+        .into());
     }
 
     let cache_dir = args.cache_dir.clone().unwrap_or_else(|| snapshot.rasters());
@@ -344,7 +343,7 @@ pub fn run_population(args: &PopulationArgs, profile: Option<&str>) -> Result<()
         return Err(PipesError::Usage(format!(
             "no Location at {scope} has a raster pixel centre inside it (raster total {:.0}); is {} the right raster for this snapshot?",
             grand.sum, loaded.label
-        )));
+        )).into());
     }
 
     let source_text = format!(

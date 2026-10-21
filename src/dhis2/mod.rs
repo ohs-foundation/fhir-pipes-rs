@@ -31,15 +31,16 @@ pub const MAX_INSTANCE_LEN: usize = 16;
 
 /// Every system, profile and extension URL comes from the profile's [dhis2]
 /// section (and the Location roles from [location] and [organization]).
-pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> Result<()> {
+pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
     let profile = Profile::load(profile)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
     profile.dhis2()?;
     match cmd {
-        Dhis2Command::Locations(args) => locations::run_locations(args, &profile),
-        Dhis2Command::Measures(args) => measures::run_measures(args, &profile),
-        Dhis2Command::Reports(args) => reports::run_reports(args, &profile),
+        Dhis2Command::Locations(args) => locations::run_locations(args, &profile)?,
+        Dhis2Command::Measures(args) => measures::run_measures(args, &profile)?,
+        Dhis2Command::Reports(args) => reports::run_reports(args, &profile)?,
     }
+    Ok(())
 }
 
 /// True for a name made of ASCII letters, digits and hyphens, 1–`max` long.

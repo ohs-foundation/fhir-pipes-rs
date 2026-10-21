@@ -24,9 +24,9 @@ pub fn check_out_dir(out: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> Result<()> {
+pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> anyhow::Result<()> {
     let profile = Profile::for_snapshot(profile, &args.snapshot)?;
-    transform_with(args, &profile)
+    Ok(transform_with(args, &profile)?)
 }
 
 /// `run_transform` with the profile already loaded (`run` loads it once for

@@ -203,7 +203,45 @@ fn views_findings_exit_1() {
             "select":[{"column":[{"name":"x","path":"code.text"},{"name":"x","path":"id"}]}]}"#,
     )
     .unwrap();
-    views().arg("validate").arg(&view).assert().code(1);
+    // The findings are on stdout; nothing more is said.
+    views()
+        .arg("validate")
+        .arg(&view)
+        .assert()
+        .code(1)
+        .stdout(has("FH"))
+        .stderr("");
+
+    // A test case that fails.
+    let tests = dir.path().join("tests.json");
+    fs::write(
+        &tests,
+        r#"{"resources":[{"resourceType":"Patient","id":"p1"}],
+            "tests":[{"title":"ids","view":{"resource":"Patient","select":[{"column":[{"name":"id","path":"id"}]}]},
+                      "expect":[{"id":"p2"}]}]}"#,
+    )
+    .unwrap();
+    views()
+        .arg("test")
+        .arg(&tests)
+        .assert()
+        .code(1)
+        .stdout(has("0/1 passed"))
+        .stderr("");
+}
+
+/// An I/O error is reported once: `path: cause`, not `path: cause: cause`.
+#[cfg(unix)]
+#[test]
+fn refresh_io_error_names_its_cause_once() {
+    let (dir, mut c) = refresh("data = \"data\"\n[server]\nbase = \"http://127.0.0.1:9/fhir\"\n");
+    // A state file that cannot be read: a directory.
+    let state = dir.path().join("data/raw/hapi-local/locations/state.json");
+    fs::create_dir_all(&state).unwrap();
+    let a = c.args(["--only", "locations"]).assert().code(1);
+    let stderr = String::from_utf8_lossy(&a.get_output().stderr).to_string();
+    assert!(stderr.contains("state.json: "), "{stderr}");
+    assert_eq!(stderr.matches("(os error").count(), 1, "{stderr}");
 }
 
 /// A view whose path does not parse: it fails to compile.

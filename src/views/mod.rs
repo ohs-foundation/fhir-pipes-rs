@@ -24,7 +24,7 @@ use fhir_pipes_sof::output::{
 use fhir_pipes_sof::{SqlGenerator, ViewDefinition, ViewResult};
 use fhir_pipes_sof_lint::{Finding, Severity, lint_core, lint_shareable, validate_structure};
 
-use crate::error::usage;
+use crate::error::{Findings, usage};
 use crate::fhir::chunks;
 use crate::fhir::input::{
     for_each_chunk, is_ndjson, parse_resource_text, push_resource, resource_files,
@@ -668,19 +668,6 @@ fn report_findings(
     findings.iter().any(|f| f.severity == Severity::Error)
 }
 
-/// A run whose findings or test cases failed: reported already, so the
-/// caller only sets the exit status.
-#[derive(Debug)]
-pub struct Failed;
-
-impl std::fmt::Display for Failed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("failed")
-    }
-}
-
-impl std::error::Error for Failed {}
-
 async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
     match command {
         ViewsCommand::Sql {
@@ -850,7 +837,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             let findings = validate_structure(&view);
             let fmt = ReportFormat::from_flags(*json, *sarif);
             if report_findings(&origin, &source, &findings, fmt, color, "valid") {
-                return Err(Failed.into());
+                return Err(Findings.into());
             }
         }
         ViewsCommand::Test { manifest } => {
@@ -874,7 +861,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
                 println!("{}", diagnostic::ok(&summary, color));
             } else {
                 println!("{summary}");
-                return Err(Failed.into());
+                return Err(Findings.into());
             }
         }
         ViewsCommand::Lint {
@@ -897,7 +884,7 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             }
             let fmt = ReportFormat::from_flags(*json, *sarif);
             if report_findings(&origin, &source, &findings, fmt, color, "no findings") {
-                return Err(Failed.into());
+                return Err(Findings.into());
             }
         }
     }

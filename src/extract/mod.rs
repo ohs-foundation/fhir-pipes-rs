@@ -25,26 +25,26 @@ use crate::snapshot::{Snapshot, State, same_server};
 ///
 /// `boundary_extensions` are the profile's: boundary attachments under them
 /// are fetched and inlined like those under the HL7 extension.
-pub fn run_extract(args: &ExtractArgs, boundary_extensions: &[String]) -> Result<()> {
+pub fn run_extract(args: &ExtractArgs, boundary_extensions: &[String]) -> anyhow::Result<()> {
     if args.no_cache && (args.refresh || args.cache_dir.is_some()) {
         return Err(PipesError::Usage(
             "--no-cache cannot be combined with --refresh or --cache-dir".into(),
-        ));
+        )
+        .into());
     }
     if args.concurrency == 0 {
-        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()).into());
     }
     if args.full && args.since.is_some() {
-        return Err(PipesError::Usage(
-            "--since has no effect with --full; drop one".into(),
-        ));
+        return Err(PipesError::Usage("--since has no effect with --full; drop one".into()).into());
     }
     if let Some(s) = &args.since
         && parse_instant(s).is_none()
     {
         return Err(PipesError::Usage(format!(
             "--since {s}: not a FHIR instant (e.g. 2026-01-02T03:04:05Z)"
-        )));
+        ))
+        .into());
     }
     let snap = Snapshot::new(&args.snapshot);
     std::fs::create_dir_all(&snap.dir)
@@ -75,7 +75,8 @@ pub fn run_extract(args: &ExtractArgs, boundary_extensions: &[String]) -> Result
         return Err(PipesError::Usage(format!(
             "snapshot was extracted from {} but --server is {}; pass --full to repoint it",
             st.server, args.server
-        )));
+        ))
+        .into());
     }
     let since: Option<String> = if args.full {
         None
@@ -120,7 +121,7 @@ pub fn run_extract(args: &ExtractArgs, boundary_extensions: &[String]) -> Result
         let _ = std::fs::remove_file(snap.incoming());
         let _ = std::fs::remove_file(snap.incoming_organizations());
     }
-    result
+    Ok(result?)
 }
 
 /// The three phases. Split out so `run_extract` can clean up the incoming

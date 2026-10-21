@@ -74,6 +74,15 @@ facility_type = "clinic"
     )
     .unwrap();
     let a = check(&old).code(1);
+    let stderr = String::from_utf8_lossy(&a.get_output().stderr).to_string();
+    let errors = lines(&a, "error");
+    assert_eq!(
+        stderr,
+        format!(
+            "fhir-pipes: the profile does not match the IG: {} error(s)\n",
+            errors.len()
+        )
+    );
     let errors = lines(&a, "error").join("\n");
     for want in [
         "overlays-admin-unit is not an extension in the IG",

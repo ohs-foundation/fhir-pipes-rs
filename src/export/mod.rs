@@ -118,20 +118,21 @@ impl ExportState {
     }
 }
 
-pub fn run_export(args: &ExportArgs) -> Result<()> {
+pub fn run_export(args: &ExportArgs) -> anyhow::Result<()> {
     let mut types: Vec<&str> = Vec::new();
     for t in &args.types {
         if !valid_type(t) {
             return Err(PipesError::Usage(format!(
                 "--type {t}: not a FHIR resource type name (e.g. MeasureReport)"
-            )));
+            ))
+            .into());
         }
         if !types.contains(&t.as_str()) {
             types.push(t);
         }
     }
     if args.concurrency == 0 {
-        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()).into());
     }
     std::fs::create_dir_all(&args.out)
         .map_err(|e| PipesError::Usage(format!("--out {}: {e}", args.out.display())))?;

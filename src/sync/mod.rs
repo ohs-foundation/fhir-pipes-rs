@@ -475,18 +475,17 @@ fn print_dry_run(args: &SyncArgs, base: &str, plans: &[TypePlan]) {
     }
 }
 
-pub fn run_sync(args: &SyncArgs) -> Result<()> {
+pub fn run_sync(args: &SyncArgs) -> anyhow::Result<()> {
     if args.batch_size == 0 {
-        return Err(PipesError::Usage("--batch-size must be at least 1".into()));
+        return Err(PipesError::Usage("--batch-size must be at least 1".into()).into());
     }
     if args.concurrency == 0 {
-        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()).into());
     }
     if !args.from.is_dir() {
-        return Err(PipesError::Usage(format!(
-            "--from {}: not a directory",
-            args.from.display()
-        )));
+        return Err(
+            PipesError::Usage(format!("--from {}: not a directory", args.from.display())).into(),
+        );
     }
     let base = args.server.trim_end_matches('/').to_string();
     let types = types(args)?;
@@ -562,13 +561,15 @@ pub fn run_sync(args: &SyncArgs) -> Result<()> {
             "sync to {base} incomplete: {}\n\
              Resources not written are sent again by the next run.",
             failed.join("\n")
-        )));
+        ))
+        .into());
     }
     if !refused.is_empty() {
         return Err(PipesError::Usage(format!(
             "sync to {base}: deletions refused for {}; see above",
             refused.join(", ")
-        )));
+        ))
+        .into());
     }
     println!("Synced {} type(s) to {base}", plans.len());
     Ok(())

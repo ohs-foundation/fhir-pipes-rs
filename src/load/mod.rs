@@ -550,18 +550,15 @@ pub fn preflight(client: &FhirClient, base: &str, creates: &[String]) -> Result<
     Ok(())
 }
 
-pub fn run_load(args: &LoadArgs) -> Result<()> {
+pub fn run_load(args: &LoadArgs) -> anyhow::Result<()> {
     if args.batch_size == 0 {
-        return Err(PipesError::Usage("--batch-size must be at least 1".into()));
+        return Err(PipesError::Usage("--batch-size must be at least 1".into()).into());
     }
     if args.concurrency == 0 {
-        return Err(PipesError::Usage("--concurrency must be at least 1".into()));
+        return Err(PipesError::Usage("--concurrency must be at least 1".into()).into());
     }
     if !args.input.is_file() {
-        return Err(PipesError::Usage(format!(
-            "--in {}: not a file",
-            args.input.display()
-        )));
+        return Err(PipesError::Usage(format!("--in {}: not a file", args.input.display())).into());
     }
     let resources = read_plan(&args.input)?;
     if resources.is_empty() {
@@ -626,7 +623,7 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
         &post,
     );
     if let Some(e) = posted.failure {
-        return Err(e);
+        return Err(e.into());
     }
     println!("Loaded {total} resources in {count} bundle(s) to {base}");
     Ok(())
