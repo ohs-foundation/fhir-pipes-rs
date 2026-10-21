@@ -57,6 +57,7 @@ use sqlx_postgres::PgConnection;
 
 use crate::error::usage;
 use crate::export::changes::Changes;
+use crate::views::run::View;
 
 use super::config::{Database, Mode, Settings};
 use super::partition::{open_parquet, table_files_checked};
@@ -160,6 +161,34 @@ pub fn no_key(view: &str, table: &str) -> String {
          add {{\"name\": \"id\", \"path\": \"getResourceKey()\"}} to its select, leave {table} \
          out of [database] tables, or use mode = \"replace\""
     )
+}
+
+/// The views whose tables [database] loads: every view's, sorted by table,
+/// or those of the tables `tables` names, in its order, each of which must
+/// be a view's.
+pub fn view_tables(s: &Settings, d: &Database) -> Result<Vec<View>> {
+    let dir = s
+        .views
+        .as_ref()
+        .context("[database] loads the view tables, so it needs the views directory")
+        .map_err(usage)?;
+    let mut all: BTreeMap<String, View> = crate::views::run::discover(dir, &s.strip_prefix)
+        .map_err(usage)?
+        .into_iter()
+        .map(|v| (v.table.clone(), v))
+        .collect();
+    match &d.tables {
+        None => Ok(all.into_values().collect()),
+        Some(names) => {
+            if let Some(bad) = names.iter().find(|n| !all.contains_key(*n)) {
+                return Err(usage(anyhow::anyhow!(
+                    "[database] tables: `{bad}` is not a view table ({})",
+                    all.keys().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+            Ok(names.iter().filter_map(|n| all.remove(n)).collect())
+        }
+    }
 }
 
 /// Load `tables` into the database `d` points at. `built`: what the views
