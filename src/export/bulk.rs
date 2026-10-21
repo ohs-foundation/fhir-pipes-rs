@@ -1,7 +1,7 @@
 //! The Bulk Data `$export` protocol (FHIR Bulk Data Access 2.0) at the system
 //! level: the kick-off, polling the status URL until the export is done, and
 //! reading the manifest's files line by line as they download. What
-//! `export --bulk` does with the lines is in the parent module.
+//! `export --bulk` does with the lines is in `bulk_run`.
 //!
 //! A kick-off answered with 429 is tried again until the deadline, with the
 //! same waits as a status poll: a server that runs one export at a time
