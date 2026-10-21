@@ -531,25 +531,72 @@ impl AuthArgs {
         }
     }
 
+    /// The ways to authenticate that are set, in `AuthKind` order.
+    fn kinds(&self) -> Vec<AuthKind> {
+        [
+            (self.token.is_some(), AuthKind::Token),
+            (self.client_id.is_some(), AuthKind::ClientCredentials),
+            (self.username.is_some(), AuthKind::Basic),
+            (self.google_auth, AuthKind::Google),
+        ]
+        .into_iter()
+        .filter_map(|(set, kind)| set.then_some(kind))
+        .collect()
+    }
+
+    /// Checks that one way to authenticate is set, with what it needs: a
+    /// client id with its secret and token URL, a username with its
+    /// password. The flags' clap rules check most of this for the CLI;
+    /// `refresh`, whose settings also come from its config file, relies on
+    /// this. Each caller words the error for where its settings come from.
+    pub fn validate(&self) -> std::result::Result<(), AuthError> {
+        let kinds = self.kinds();
+        if kinds.len() > 1 {
+            return Err(AuthError::Several(kinds));
+        }
+        if self.client_id.is_some() {
+            if self.client_secret.is_none() {
+                return Err(AuthError::NoClientSecret);
+            }
+            if self.token_url.is_none() {
+                return Err(AuthError::NoTokenUrl);
+            }
+        }
+        if self.username.is_some() && self.password.is_none() {
+            return Err(AuthError::NoPassword);
+        }
+        Ok(())
+    }
+
     /// With `--google-auth`, finds the credentials (reading a key file if
     /// there is one), so a bad file fails here.
     pub fn auth(&self) -> Result<Auth> {
+        // --google-auth beside another way is refused here rather than with
+        // clap's conflicts_with, which would also refuse
+        // FHIR_PIPES_GOOGLE_AUTH=0 beside a token.
+        self.validate().map_err(|e| {
+            PipesError::Usage(match e {
+                AuthError::Several(kinds) => match kinds.iter().find(|&&k| k != AuthKind::Google) {
+                    Some(other) if kinds.contains(&AuthKind::Google) => format!(
+                        "use one way to authenticate: --google-auth (or FHIR_PIPES_GOOGLE_AUTH) \
+                         cannot be used with {} (or its environment variable)",
+                        other.flag()
+                    ),
+                    _ => format!(
+                        "use one way to authenticate, not {}",
+                        kinds
+                            .iter()
+                            .map(|k| k.flag())
+                            .collect::<Vec<_>>()
+                            .join(" and ")
+                    ),
+                },
+                AuthError::NoClientSecret => "--client-id needs --client-secret".into(),
+                AuthError::NoTokenUrl => "--client-id needs --token-url".into(),
+                AuthError::NoPassword => "--username needs --password".into(),
+            })
+        })?;
         if self.google_auth {
-            // Checked here rather than with clap's conflicts_with, which would
-            // also refuse FHIR_PIPES_GOOGLE_AUTH=0 beside a token.
-            let other = [
-                (self.token.is_some(), "--token"),
-                (self.client_id.is_some(), "--client-id"),
-                (self.username.is_some(), "--username"),
-            ]
-            .into_iter()
-            .find_map(|(set, flag)| set.then_some(flag));
-            if let Some(flag) = other {
-                return Err(PipesError::Usage(format!(
-                    "use one way to authenticate: --google-auth (or FHIR_PIPES_GOOGLE_AUTH) \
-                     cannot be used with {flag} (or its environment variable)"
-                )));
-            }
             return Ok(Auth::Google(Credentials::application_default()?));
         }
         Ok(
@@ -568,6 +615,40 @@ impl AuthArgs {
             },
         )
     }
+}
+
+/// A way to authenticate, as `AuthArgs::validate` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    Token,
+    ClientCredentials,
+    Basic,
+    Google,
+}
+
+impl AuthKind {
+    /// The flag that sets it.
+    pub fn flag(self) -> &'static str {
+        match self {
+            AuthKind::Token => "--token",
+            AuthKind::ClientCredentials => "--client-id",
+            AuthKind::Basic => "--username",
+            AuthKind::Google => "--google-auth",
+        }
+    }
+}
+
+/// What `AuthArgs::validate` found wrong.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthError {
+    /// More than one way to authenticate, in `AuthKind` order.
+    Several(Vec<AuthKind>),
+    /// A client id without a client secret.
+    NoClientSecret,
+    /// A client id and secret without a token URL.
+    NoTokenUrl,
+    /// A username without a password.
+    NoPassword,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -795,5 +876,64 @@ fn parse_share(s: &str) -> std::result::Result<f64, String> {
     match s.parse::<f64>() {
         Ok(v) if (0.0..=1.0).contains(&v) => Ok(v),
         _ => Err(format!("{s}: not a share between 0 and 1")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_wants_one_way_to_authenticate_and_what_it_needs() {
+        let none = AuthArgs::none();
+        assert_eq!(none.validate(), Ok(()));
+        let token = AuthArgs {
+            token: Some("t".into()),
+            ..AuthArgs::none()
+        };
+        assert_eq!(token.validate(), Ok(()));
+        let google = AuthArgs {
+            google_auth: true,
+            ..token.clone()
+        };
+        assert_eq!(
+            google.validate(),
+            Err(AuthError::Several(vec![AuthKind::Token, AuthKind::Google]))
+        );
+        let Err(err) = google.auth() else {
+            panic!("--google-auth with --token")
+        };
+        let msg = err.to_string();
+        assert_eq!(
+            msg,
+            "use one way to authenticate: --google-auth (or FHIR_PIPES_GOOGLE_AUTH) \
+             cannot be used with --token (or its environment variable)"
+        );
+        let client = AuthArgs {
+            client_id: Some("c".into()),
+            ..AuthArgs::none()
+        };
+        assert_eq!(client.validate(), Err(AuthError::NoClientSecret));
+        let client = AuthArgs {
+            client_secret: Some("s".into()),
+            ..client
+        };
+        assert_eq!(client.validate(), Err(AuthError::NoTokenUrl));
+        let client = AuthArgs {
+            token_url: Some("http://t".into()),
+            ..client
+        };
+        assert_eq!(client.validate(), Ok(()));
+        let basic = AuthArgs {
+            username: Some("u".into()),
+            ..AuthArgs::none()
+        };
+        assert_eq!(basic.validate(), Err(AuthError::NoPassword));
+        // A password alone is not a way to authenticate; it is unused.
+        let password = AuthArgs {
+            password: Some("p".into()),
+            ..AuthArgs::none()
+        };
+        assert_eq!(password.validate(), Ok(()));
     }
 }
