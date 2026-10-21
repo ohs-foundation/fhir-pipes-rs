@@ -88,7 +88,7 @@ pub(super) struct Writer<'a> {
     pub(super) info: &'a ServerInfo,
     pub(super) indicators: &'a BTreeMap<String, Indicator>,
     pub(super) mapping: &'a HashMap<String, Target>,
-    /// `--campaign`, added to every report after the period extension.
+    /// `--campaign`, in every report's extensions.
     pub(super) campaign: Option<&'a str>,
     /// Analytics or data values, written in the source extension.
     pub(super) source: ReportSource,
@@ -173,24 +173,17 @@ impl<'a> Writer<'a> {
                     );
                     continue;
                 };
-                if let Some(mut r) = measure_report(
+                if let Some(r) = measure_report(
                     row,
                     ind,
                     location,
                     period,
                     self.instance,
                     self.info,
+                    self.campaign,
+                    self.source,
                     &mut self.state.report,
                 ) {
-                    if let Some(ext) = r["extension"].as_array_mut() {
-                        if let Some(c) = self.campaign {
-                            ext.push(json!({"url": self.instance.urls.campaign_extension, "valueReference": {"reference": c}}));
-                        }
-                        let (code, display) = self.source.coding();
-                        ext.push(json!({"url": self.instance.urls.source_extension,
-                            "valueCodeableConcept": {"coding": [{"system": self.instance.urls.source_system,
-                                "code": code, "display": display}]}}));
-                    }
                     out.insert(r["id"].as_str().unwrap_or_default().to_string(), r);
                 }
             }

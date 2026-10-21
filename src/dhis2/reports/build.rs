@@ -6,6 +6,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::cli::ReportSource;
 use crate::dhis2::Instance;
 use crate::dhis2::api::ServerInfo;
 use crate::dhis2::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fhir_key};
@@ -116,7 +117,8 @@ pub fn report_id(instance: &Instance, row: &AnalyticsRow) -> String {
 }
 
 /// The MeasureReport for one analytics row, or `None` after reporting why
-/// there is none.
+/// there is none. Its extensions are the period, the `--campaign` if given,
+/// and the source of its values.
 #[allow(clippy::too_many_arguments)]
 pub fn measure_report(
     row: &AnalyticsRow,
@@ -125,6 +127,8 @@ pub fn measure_report(
     period: &(String, String),
     instance: &Instance,
     info: &ServerInfo,
+    campaign: Option<&str>,
+    source: ReportSource,
     report: &mut Report,
 ) -> Option<Value> {
     let id = report_id(instance, row);
@@ -139,11 +143,21 @@ pub fn measure_report(
     }
     group["measureScore"] = json!({"value": score});
     let pe = period_value(&row.pe);
+    let mut extension = vec![json!({"url": instance.urls.period_extension, "valueString": pe})];
+    if let Some(c) = campaign {
+        extension.push(
+            json!({"url": instance.urls.campaign_extension, "valueReference": {"reference": c}}),
+        );
+    }
+    let (code, display) = source.coding();
+    extension.push(json!({"url": instance.urls.source_extension,
+        "valueCodeableConcept": {"coding": [{"system": instance.urls.source_system,
+            "code": code, "display": display}]}}));
     let mut r = json!({
         "resourceType": "MeasureReport",
         "id": id,
         "meta": {"tag": [instance.tag()]},
-        "extension": [{"url": instance.urls.period_extension, "valueString": pe}],
+        "extension": extension,
         "status": "complete",
         "type": "summary",
         "measure": instance.measure_url(&ind.fhir_key()),
@@ -279,6 +293,8 @@ mod tests {
             &t.periods["2025"],
             &instance,
             &info,
+            None,
+            ReportSource::Analytics,
             &mut report,
         )
         .unwrap();
@@ -322,6 +338,8 @@ mod tests {
             &("2025-01-01".into(), "2025-01-31".into()),
             &instance,
             &ServerInfo::default(),
+            None,
+            ReportSource::Analytics,
             &mut report,
         )
         .unwrap();
@@ -343,6 +361,8 @@ mod tests {
                 &("a".into(), "b".into()),
                 &instance,
                 &ServerInfo::default(),
+                None,
+                ReportSource::Analytics,
                 &mut report
             )
             .is_none()
@@ -371,6 +391,8 @@ mod tests {
             &("2025-01-01".into(), "2025-12-31".into()),
             &instance,
             &ServerInfo::default(),
+            None,
+            ReportSource::Analytics,
             &mut report,
         )
         .unwrap();
@@ -403,6 +425,8 @@ mod tests {
             &("2025-01-01".into(), "2025-12-31".into()),
             &instance,
             &ServerInfo::default(),
+            None,
+            ReportSource::Analytics,
             &mut report,
         )
         .unwrap();
@@ -484,6 +508,8 @@ mod tests {
             &("2026-04-05".into(), "2026-05-20".into()),
             &instance,
             &ServerInfo::default(),
+            None,
+            ReportSource::Analytics,
             &mut report,
         )
         .unwrap();
@@ -495,5 +521,62 @@ mod tests {
         assert_eq!(r["extension"][0]["valueString"], "2026-04-05/2026-05-20");
         assert_eq!(r["period"]["start"], "2026-04-05");
         assert_eq!(r["period"]["end"], "2026-05-20");
+    }
+
+    #[test]
+    fn the_campaign_and_the_source_follow_the_period_extension() {
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let row = AnalyticsRow {
+            dx: "tUIlpyeeX9N".into(),
+            pe: "2025".into(),
+            ou: "ou".into(),
+            value: "50.0".into(),
+            numerator: "5.0".into(),
+            denominator: "10.0".into(),
+            option: None,
+        };
+        let mut report = Report::default();
+        let r = measure_report(
+            &row,
+            &penta3(),
+            &loc(),
+            &("2025-01-01".into(), "2025-12-31".into()),
+            &instance,
+            &ServerInfo::default(),
+            Some("CarePlan/bgd-mr-sia-2026"),
+            ReportSource::DataValues,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(
+            r["extension"],
+            json!([
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period",
+                 "valueString": "2025"},
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/campaign",
+                 "valueReference": {"reference": "CarePlan/bgd-mr-sia-2026"}},
+                {"url": "https://icr.healthcampaigns.org/StructureDefinition/report-source",
+                 "valueCodeableConcept": {"coding": [{
+                     "system": "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs",
+                     "code": "dhis2-data-values", "display": "DHIS2 data values"}]}}
+            ])
+        );
+        // The keys keep the order they were written in before.
+        let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "resourceType",
+                "id",
+                "meta",
+                "extension",
+                "status",
+                "type",
+                "measure",
+                "subject",
+                "period",
+                "group"
+            ]
+        );
     }
 }
