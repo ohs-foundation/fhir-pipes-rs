@@ -21,6 +21,10 @@
 //!
 //! [`OutputWriter::write_with_summary`] returns how many values of each
 //! column were written as their date or as null.
+//!
+//! By default the whole file is built in memory and then written. With
+//! [`ParquetWriter::with_row_group_size`] it is written a row group at a
+//! time, so only one row group's arrays and encoded bytes are held at once.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -101,6 +105,9 @@ impl std::str::FromStr for TemporalEncoding {
 pub struct ParquetWriter {
     /// How temporal columns are encoded.
     pub temporal: TemporalEncoding,
+    /// The most rows in a row group, written out as soon as it is full; with
+    /// `None`, the file is built whole before it is written.
+    pub row_group_size: Option<usize>,
 }
 
 impl ParquetWriter {
@@ -112,6 +119,14 @@ impl ParquetWriter {
     /// Set how temporal columns are encoded.
     pub fn with_temporal(mut self, temporal: TemporalEncoding) -> Self {
         self.temporal = temporal;
+        self
+    }
+
+    /// Write row groups of at most `rows` rows (at least one), each to the
+    /// output as soon as it is encoded, rather than building the whole file
+    /// first. The file reads back the same; only its row groups differ.
+    pub fn with_row_group_size(mut self, rows: usize) -> Self {
+        self.row_group_size = Some(rows.max(1));
         self
     }
 
@@ -156,36 +171,42 @@ impl ParquetWriter {
         Schema::new(fields)
     }
 
-    /// Build Arrow arrays from result data, with the values of each column
-    /// that did not match its type.
+    /// Build Arrow arrays from result data, adding the values of each column
+    /// that did not match its type to `counts`, one per column.
     fn build_arrays(
         columns: &[ColumnInfo],
         data: &[Vec<Value>],
         temporal: TemporalEncoding,
-    ) -> (Vec<ArrayRef>, WriteSummary) {
-        let mut summary = WriteSummary::default();
-        let arrays = columns
+        counts: &mut [Counts],
+    ) -> Vec<ArrayRef> {
+        columns
             .iter()
+            .zip(counts)
             .enumerate()
-            .map(|(i, col)| {
+            .map(|(i, (col, counts))| {
                 let values: Vec<Option<&Value>> = data
                     .iter()
                     .map(|row| row.get(i).filter(|v| !v.is_null()))
                     .collect();
+                Self::values_to_array(col, &values, temporal, counts)
+            })
+            .collect()
+    }
 
-                let (array, counts) = Self::values_to_array(col, &values, temporal);
-                if counts.written_as_date > 0 || counts.written_as_null > 0 {
-                    summary.columns.push(ColumnSummary {
-                        name: col.name.clone(),
-                        col_type: col.col_type,
-                        written_as_date: counts.written_as_date,
-                        written_as_null: counts.written_as_null,
-                    });
-                }
-                array
+    /// The columns with values that did not match their type, in column order.
+    fn summary(columns: &[ColumnInfo], counts: &[Counts]) -> WriteSummary {
+        let columns = columns
+            .iter()
+            .zip(counts)
+            .filter(|(_, c)| c.written_as_date > 0 || c.written_as_null > 0)
+            .map(|(col, c)| ColumnSummary {
+                name: col.name.clone(),
+                col_type: col.col_type,
+                written_as_date: c.written_as_date,
+                written_as_null: c.written_as_null,
             })
             .collect();
-        (arrays, summary)
+        WriteSummary { columns }
     }
 
     /// Convert JSON values to an Arrow array, counting the values that had to
@@ -194,8 +215,8 @@ impl ParquetWriter {
         col: &ColumnInfo,
         values: &[Option<&Value>],
         temporal: TemporalEncoding,
-    ) -> (ArrayRef, Counts) {
-        let mut counts = Counts::default();
+        counts: &mut Counts,
+    ) -> ArrayRef {
         let array: ArrayRef = match (col.col_type, temporal) {
             (ColumnType::Integer | ColumnType::Integer64, _) => Arc::new(
                 values
@@ -253,36 +274,56 @@ impl ParquetWriter {
                     .collect::<StringArray>(),
             ),
         };
-        (array, counts)
+        array
     }
 
-    /// Write result data to a buffer as Parquet.
-    fn write_to_buffer(&self, result: &ViewResult) -> Result<(Vec<u8>, WriteSummary)> {
+    /// Write result data to `output` as Parquet: a row group at a time with
+    /// a row group size, otherwise the whole file at the end. Each row group
+    /// is encoded into a buffer that is emptied into `output` once it is
+    /// written; the Parquet writer counts the bytes itself, so the offsets in
+    /// the footer stay right.
+    fn write_rows(&self, result: &ViewResult, output: &mut dyn Write) -> Result<WriteSummary> {
         let schema = Arc::new(Self::build_schema(&result.columns, self.temporal));
-        let (arrays, summary) = Self::build_arrays(&result.columns, &result.data, self.temporal);
-
-        let record_batch = RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| Error::Output(format!("Failed to create record batch: {}", e)))?;
-
-        let mut buffer = Vec::new();
-        {
-            let props = WriterProperties::builder()
-                .set_compression(Compression::SNAPPY)
-                .build();
-
-            let mut arrow_writer = ArrowWriter::try_new(&mut buffer, schema, Some(props))
+        let mut counts: Vec<Counts> = result.columns.iter().map(|_| Counts::default()).collect();
+        let mut props = WriterProperties::builder().set_compression(Compression::SNAPPY);
+        if let Some(rows) = self.row_group_size {
+            props = props.set_max_row_group_row_count(Some(rows));
+        }
+        let mut arrow_writer =
+            ArrowWriter::try_new(Vec::new(), schema.clone(), Some(props.build()))
                 .map_err(|e| Error::Output(format!("Failed to create Parquet writer: {}", e)))?;
-
+        // No rows is one empty batch, as with no row group size.
+        let data = &result.data;
+        let slices: Vec<&[Vec<Value>]> = match self.row_group_size {
+            Some(rows) if !data.is_empty() => data.chunks(rows).collect(),
+            _ => vec![data.as_slice()],
+        };
+        let streaming = self.row_group_size.is_some();
+        for slice in slices {
+            let arrays = Self::build_arrays(&result.columns, slice, self.temporal, &mut counts);
+            let record_batch = RecordBatch::try_new(schema.clone(), arrays)
+                .map_err(|e| Error::Output(format!("Failed to create record batch: {}", e)))?;
             arrow_writer
                 .write(&record_batch)
                 .map_err(|e| Error::Output(format!("Failed to write record batch: {}", e)))?;
-
-            arrow_writer
-                .close()
-                .map_err(|e| Error::Output(format!("Failed to close Parquet writer: {}", e)))?;
+            if streaming {
+                arrow_writer
+                    .flush()
+                    .map_err(|e| Error::Output(format!("Failed to write row group: {}", e)))?;
+                let buffer = arrow_writer.inner_mut();
+                output
+                    .write_all(buffer)
+                    .map_err(|e| Error::Output(e.to_string()))?;
+                buffer.clear();
+            }
         }
-
-        Ok((buffer, summary))
+        let buffer = arrow_writer
+            .into_inner()
+            .map_err(|e| Error::Output(format!("Failed to close Parquet writer: {}", e)))?;
+        output
+            .write_all(&buffer)
+            .map_err(|e| Error::Output(e.to_string()))?;
+        Ok(Self::summary(&result.columns, &counts))
     }
 }
 
@@ -450,10 +491,7 @@ impl OutputWriter for ParquetWriter {
         result: &ViewResult,
         output: &mut dyn Write,
     ) -> Result<WriteSummary> {
-        let (buffer, summary) = self.write_to_buffer(result)?;
-        output
-            .write_all(&buffer)
-            .map_err(|e| Error::Output(e.to_string()))?;
+        let summary = self.write_rows(result, output)?;
         output.flush().map_err(|e| Error::Output(e.to_string()))?;
         Ok(summary)
     }
@@ -1072,5 +1110,146 @@ mod tests {
 
         // Should write successfully with null value
         assert!(output.len() > 4);
+    }
+
+    /// Write a result and read it back: its schema, all its rows in one
+    /// batch, and the row count of each row group.
+    fn read_back(writer: &ParquetWriter, result: &ViewResult) -> (RecordBatch, Vec<i64>) {
+        let mut output = Vec::new();
+        writer.write(result, &mut output).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(output)).unwrap();
+        let groups = builder
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|g| g.num_rows())
+            .collect();
+        let reader = builder.build().unwrap();
+        let schema = reader.schema();
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        let batch = arrow::compute::concat_batches(&schema, &batches).unwrap();
+        (batch, groups)
+    }
+
+    /// `n` rows of every kind of column, with a value that does not fit its
+    /// type now and then, in different columns in different rows.
+    fn mixed_rows(n: usize) -> ViewResult {
+        ViewResult {
+            columns: vec![
+                ColumnInfo::new("id", ColumnType::String),
+                ColumnInfo::new("count", ColumnType::Integer),
+                ColumnInfo::new("ratio", ColumnType::Decimal),
+                ColumnInfo::new("active", ColumnType::Boolean),
+                ColumnInfo::new("born", ColumnType::Date),
+                ColumnInfo::new("seen", ColumnType::DateTime),
+            ],
+            data: (0..n)
+                .map(|i| {
+                    vec![
+                        json!(format!("r{i}")),
+                        if i % 7 == 6 { json!("x") } else { json!(i) },
+                        json!(i as f64 / 4.0),
+                        if i % 3 == 0 {
+                            Value::Null
+                        } else {
+                            json!(i % 2 == 0)
+                        },
+                        if i % 5 == 4 {
+                            json!("2026-06-15T08:30:00Z")
+                        } else {
+                            json!("2026-06-15")
+                        },
+                        json!(format!("2026-06-15T08:{:02}:00Z", i % 60)),
+                    ]
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn row_groups_read_back_as_the_whole_file_does() {
+        let result = mixed_rows(10);
+        let (whole, groups) = read_back(&native(), &result);
+        assert_eq!(groups, [10]);
+        for (size, expect) in [
+            (4, vec![4, 4, 2]),
+            (5, vec![5, 5]),
+            (10, vec![10]),
+            (64, vec![10]),
+            (1, vec![1; 10]),
+        ] {
+            let writer = native().with_row_group_size(size);
+            let (batch, groups) = read_back(&writer, &result);
+            assert_eq!(groups, expect, "row group size {size}");
+            assert_eq!(batch.schema(), whole.schema(), "row group size {size}");
+            assert_eq!(batch, whole, "row group size {size}");
+        }
+    }
+
+    #[test]
+    fn row_groups_give_the_whole_file_summary_in_column_order() {
+        // The first mismatches are in `born` (row 4), then `count` (row 6):
+        // the summary still lists `count` first.
+        let result = mixed_rows(12);
+        let mut whole = Vec::new();
+        let expected = native().write_with_summary(&result, &mut whole).unwrap();
+        let names: Vec<&str> = expected.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["count", "born"]);
+        let mut out = Vec::new();
+        let summary = native()
+            .with_row_group_size(5)
+            .write_with_summary(&result, &mut out)
+            .unwrap();
+        assert_eq!(summary, expected);
+    }
+
+    #[test]
+    fn row_groups_with_no_rows_still_write_the_columns() {
+        let result = mixed_rows(0);
+        let (whole, _) = read_back(&native(), &result);
+        let (batch, groups) = read_back(&native().with_row_group_size(4), &result);
+        assert_eq!(batch.num_rows(), 0);
+        assert!(groups.iter().all(|&n| n == 0));
+        assert_eq!(batch.schema(), whole.schema());
+    }
+
+    #[test]
+    fn a_row_group_is_written_out_before_the_next_is_built() {
+        /// Records the size of each write it is given.
+        struct Writes(Vec<usize>);
+        impl Write for Writes {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.push(buf.len());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // 4000 distinct 64-character strings, which neither the dictionary
+        // nor Snappy make much smaller: about 64 kB a row group.
+        let result = column_of(
+            ColumnType::String,
+            (0..4000u64)
+                .map(|i| {
+                    let x = i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                    json!(format!("{x:016x}{:016x}{:016x}{:016x}", !x, x ^ 7, x >> 3))
+                })
+                .collect(),
+        );
+        let mut whole = Writes(Vec::new());
+        ParquetWriter::new().write(&result, &mut whole).unwrap();
+        assert_eq!(whole.0.len(), 1, "the whole file in one write");
+        let total: usize = whole.0.iter().sum();
+        let mut groups = Writes(Vec::new());
+        ParquetWriter::new()
+            .with_row_group_size(1000)
+            .write(&result, &mut groups)
+            .unwrap();
+        // A write for each row group and the footer, none of them more than
+        // about a row group's bytes.
+        assert!(groups.0.len() >= 5, "{:?}", groups.0);
+        let largest = groups.0.iter().max().unwrap();
+        assert!(*largest < total / 3, "{largest} of {total}");
     }
 }
