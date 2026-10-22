@@ -819,6 +819,34 @@ fn the_result_file_is_written_when_last_run_cannot_be() {
     );
 }
 
+/// A token the server echoes in an error body is hidden before the body is
+/// cut to its 500 characters, so no part of it is left in the run's record.
+#[test]
+fn a_token_echoed_across_the_error_cut_is_hidden() {
+    const TOKEN: &str = "tok-0123456789abcdefghijklmnopqrs";
+    let server = Server::run();
+    let body = format!("{}{TOKEN}", "e".repeat(469));
+    server.expect(
+        Expectation::matching(any())
+            .times(..)
+            .respond_with(status_code(401).body(body)),
+    );
+    let (dir, config) = setup(&server.url_str("/fhir"), "");
+    cmd(&config)
+        .args(["--only", "views"])
+        .env("FHIR_PIPES_TOKEN", TOKEN)
+        .assert()
+        .code(1);
+    let text = fs::read_to_string(dir.path().join("data/last-run.json")).unwrap();
+    for n in 4..=TOKEN.len() {
+        assert!(
+            !text.contains(&TOKEN[..n]),
+            "{} characters shown: {text}",
+            n
+        );
+    }
+}
+
 /// A successful run leaves the files it always did, and nothing staged.
 #[test]
 fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {

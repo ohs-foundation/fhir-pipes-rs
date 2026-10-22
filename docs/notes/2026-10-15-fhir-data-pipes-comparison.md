@@ -199,10 +199,10 @@ into FHIR, release binaries for five platforms, and view linting.
 
 | Feature | fhir-data-pipes | fhir-pipes | Status |
 |---|---|---|---|
-| Long-running service | Spring Boot controller: one pipeline at a time, embedded Flink | None; a command run from cron, CI or a container's schedule | Missing |
-| Schedules | `incrementalSchedule` and `purgeSchedule` (Spring cron). Only incremental runs and purges are scheduled; the first, full run is started from the web page or `POST /run?runMode=FULL`, and no incremental run is scheduled before it (`PipelineManager.checkSchedule`) | External cron | Missing (external) |
+| Long-running service | Spring Boot controller: one pipeline at a time, embedded Flink | `fhir-pipes serve` (docs/serve.md): one run at a time, each a child `refresh`; or a command run from cron, CI or a container's schedule | Done (Unix) |
+| Schedules | `incrementalSchedule` and `purgeSchedule` (Spring cron). Only incremental runs and purges are scheduled; the first, full run is started from the web page or `POST /run?runMode=FULL`, and no incremental run is scheduled before it (`PipelineManager.checkSchedule`) | `[[serve.schedule]]`, five-field cron in UTC, incremental or full; or external cron | Done |
 | Web page | Run full, incremental or views; create Hive tables; metrics; config; snapshots; view editor. No authentication | None | Missing |
-| REST API and CLI | `/run`, `/status`, `/tables`, `/dwh`, `/config`, `/next`, `/download-error-log`; Python `controller` CLI over it | The CLI is the interface; `refresh --check` shows settings and tools | Not needed if run from cron |
+| REST API and CLI | `/run`, `/status`, `/tables`, `/dwh`, `/config`, `/next`, `/download-error-log`; Python `controller` CLI over it | `serve`: `POST /run`, `/status`, `/runs`, `/runs/{id}/log`, `/runs/{id}/cancel`, `/metrics`; the CLI for everything else | Partly: no `/tables`, `/dwh` or `/config` |
 | Metrics | Actuator health and Prometheus, Beam counters per resource type (fetched, parse errors, times) | Step timings in `raw/<server>/last-refresh.json`; row counts in `manifest.json`; per-type export reports (`--report`) | Partial |
 | Settings | `application.yaml` under `fhirdata:`, overridable by `FHIRDATA_*` variables | `fhir-pipes.toml`, overridable by flags and `FHIR_PIPES_*` variables | Same |
 
@@ -290,7 +290,7 @@ ROADMAP once agreed.
 | Spark or Hive table definitions | Sites with a Spark Thrift server could keep it: write a `CREATE TABLE … USING PARQUET` file next to `catalog.sql` | Small | #31, done (#43) |
 | Make a refresh all-or-nothing | A failed run can leave tables from two runs (section 7). Stage every table and swap them in at the end | Small | #35, done (#42) |
 | Snapshots and retention | Lets a run be rolled back and queries read a consistent set. Could be timestamped directories with the catalog pointing at the latest | Medium | option 2 of #35, on the ROADMAP |
-| A schedule and status endpoint | For sites that want a long-running service instead of cron: a `serve` mode with a schedule, `/status`, `/run` and Prometheus metrics | Medium to large |  |
+| A schedule and status endpoint | For sites that want a long-running service instead of cron: a `serve` mode with a schedule, `/status`, `/run` and Prometheus metrics | Medium to large | done: `fhir-pipes serve` (docs/serve.md) |
 | `refresh` from files | Run the warehouse from NDJSON or Bundle files (exports, Synthea) without a server | Small | #32, done (#47) |
 | STU3 | Only if a site still runs STU3 | Medium |  |
 | HAPI database source | Faster than search for very large HAPI servers, and sees deletions. Ties fhir-pipes to HAPI's schema | Medium | #33, done (#49) |

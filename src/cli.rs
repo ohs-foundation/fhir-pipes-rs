@@ -63,6 +63,10 @@ pub enum Command {
     /// Refresh a SQL-on-FHIR Parquet warehouse: locations, views, tiles,
     /// manifest and hooks, and push with --push
     Refresh(crate::warehouse::RefreshArgs),
+    /// Start refreshes over HTTP or on a schedule, and notify configured
+    /// destinations when each run ends (Unix)
+    #[cfg(unix)]
+    Serve(crate::serve::ServeArgs),
     /// Run, check and test SQL-on-FHIR ViewDefinitions directly: run, sql,
     /// validate, lint, test
     Views(crate::views::ViewsArgs),

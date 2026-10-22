@@ -21,6 +21,8 @@ mod report;
 mod run;
 #[cfg(feature = "postgres")]
 mod runtime;
+#[cfg(unix)]
+mod serve;
 mod snapshot;
 mod stop;
 mod sync;
@@ -74,6 +76,8 @@ fn run(cli: cli::Cli) -> anyhow::Result<()> {
         }
         cli::Command::Import(cmd) => import::run(&cmd, profile),
         cli::Command::Refresh(args) => warehouse::run(&args, profile),
+        #[cfg(unix)]
+        cli::Command::Serve(args) => serve::run(&args),
         cli::Command::Views(args) => views::run(&args),
         cli::Command::Terminology(command) => terminology::run(&command),
     }

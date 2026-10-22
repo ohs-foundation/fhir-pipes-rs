@@ -79,6 +79,8 @@ mimalloc = { version = "0.1.52", default-features = false }
 # in the tree, for kill(2).
 signal-hook = "0.3"
 libc = "0.2"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "query"] }
+croner = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

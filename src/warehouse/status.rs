@@ -161,6 +161,8 @@ impl Status {
 
 /// `message` cut to MAX_ERROR characters.
 pub fn short(message: &str) -> String {
+    // Secrets are hidden before the cut, which could leave one in part.
+    let message = crate::redact::known_secrets(message);
     match message.char_indices().nth(MAX_ERROR) {
         Some((at, _)) => format!("{}…", &message[..at]),
         None => message.to_string(),

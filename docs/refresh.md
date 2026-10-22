@@ -932,7 +932,7 @@ trigger that handles the alert.
 
 ### Running under a supervisor
 
-Three environment variables let a program that runs refreshes for you,
+Four environment variables let a program that runs refreshes for you,
 such as `fhir-pipes serve`, follow each one:
 
 - `FHIR_PIPES_RESULT_FILE=<path>`: the run also writes its final record,
@@ -947,6 +947,13 @@ such as `fhir-pipes serve`, follow each one:
 - `FHIR_PIPES_RUN_ID=<id>`: given to every hook as `RUN_ID` (empty
   without it), so an integration can tell the attempts of one run from
   separate runs.
+- `FHIR_PIPES_SECRET_VARS=<A,B>`: more variables whose values are secrets.
+  A refresh always hides the values of `FHIR_PIPES_TOKEN`,
+  `FHIR_PIPES_CLIENT_SECRET`, `FHIR_PIPES_PASSWORD`,
+  `FHIR_PIPES_HAPI_DATABASE_URL`, `FHIR_PIPES_DATABASE_URL` and
+  `FHIR_PIPES_SERVE_TOKEN` in an error before it cuts it short (an HTTP
+  error body, `last-run.json`'s `error`); with this, the variables named
+  too.
 
 ### last-refresh.json
 
