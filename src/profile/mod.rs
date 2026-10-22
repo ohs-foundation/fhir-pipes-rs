@@ -78,6 +78,10 @@ pub struct LocationProfile {
     pub type_systems: Vec<String>,
     /// The Location column holding an admin unit's code.
     pub admin_code_column: Option<String>,
+    /// The names of `refresh`'s admin tile layers, by admin level (`country`,
+    /// `states`, `lgas`). A level not named here is `admin<level>`.
+    #[serde(default)]
+    pub admin_layers: Vec<String>,
     /// `meta.profile` of the Locations `import` writes; else `[dhis2]
     /// location_profile`.
     pub profile: Option<String>,
@@ -475,6 +479,28 @@ impl Profile {
                 }
             }
         }
+        let mut layers = std::collections::HashSet::new();
+        for (level, name) in self.location.admin_layers.iter().enumerate() {
+            if !valid_column_name(name) {
+                return Err(format!(
+                    "[location] admin_layers name `{name}`: use lower case letters, digits and _"
+                ));
+            }
+            // admin<N> is the name a level not listed gets: only level N may
+            // use it.
+            if let Some(n) = name.strip_prefix("admin")
+                && n.parse::<usize>().is_ok_and(|n| n != level)
+            {
+                return Err(format!(
+                    "[location] admin_layers name `{name}` is the name of level {n} when it is not named"
+                ));
+            }
+            if !layers.insert(name.as_str()) {
+                return Err(format!(
+                    "[location] admin_layers name `{name}` is used twice"
+                ));
+            }
+        }
         if let Some(name) = &self.location.admin_code_column
             && self.admin_code_index().is_none()
         {
@@ -604,6 +630,19 @@ mod tests {
     }
 
     #[test]
+    fn admin_layers_name_the_tile_layers_by_level() {
+        let p = Profile::parse(
+            "[location]\nadmin_layers = [\"country\", \"states\", \"lgas\"]",
+            "t.toml",
+        )
+        .unwrap();
+        assert_eq!(p.location.admin_layers, ["country", "states", "lgas"]);
+        assert!(Profile::base().location.admin_layers.is_empty());
+        // A level may be given its own default name.
+        assert!(Profile::parse("[location]\nadmin_layers = [\"admin0\"]", "t.toml").is_ok());
+    }
+
+    #[test]
     fn bad_profiles_are_refused() {
         for (text, why) in [
             ("nme = \"typo\"", "unknown field"),
@@ -634,6 +673,22 @@ mod tests {
             (
                 "[[organization.column]]\nname = \"x\"\nkind = \"type_coding\"\nsystem = \"s\"\nmirror_to_organization = true",
                 "mirror_to_organization",
+            ),
+            (
+                "[location]\nadmin_layers = [\"country\", \"States\"]",
+                "admin_layers name `States`",
+            ),
+            (
+                "[location]\nadmin_layers = [\"country\", \"\"]",
+                "admin_layers name ``",
+            ),
+            (
+                "[location]\nadmin_layers = [\"states\", \"states\"]",
+                "admin_layers name `states` is used twice",
+            ),
+            (
+                "[location]\nadmin_layers = [\"admin1\"]",
+                "admin_layers name `admin1` is the name of level 1",
             ),
         ] {
             let err = Profile::parse(text, "t.toml").unwrap_err().to_string();
