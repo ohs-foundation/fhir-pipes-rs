@@ -104,6 +104,41 @@ mod database {
         sql(&[statement])[0][0].clone().unwrap_or_default()
     }
 
+    /// A stop that comes after the database's commit waits for the publish,
+    /// so the files match the database.
+    #[test]
+    #[cfg(unix)]
+    fn sigterm_after_the_database_commit_finishes_the_publish() {
+        if url().is_none() {
+            return;
+        }
+        let s = schema("stop");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS {s} CASCADE")]);
+        let (dir, config) = setup_with_raw(&format!(
+            "\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n"
+        ));
+        let data = dir.path().join("data");
+        let mut child = spawn_refresh(
+            &config,
+            &["--only", "views", "--reuse-raw"],
+            &[
+                ("FHIR_PIPES_TEST_PAUSE", "database-committed"),
+                (URL, &url().unwrap()),
+            ],
+        );
+        wait_for(&data.join(".paused"));
+        sigterm(&child);
+        assert_eq!(exit_within(&mut child, 20), Some(1));
+        let r = last_run(&data);
+        assert_eq!(r["committed"], true, "{r}");
+        assert_eq!(r["published"], true, "{r}");
+        assert!(
+            data.join("parquet/obs/country=SLE/part-0.parquet")
+                .is_file()
+        );
+        assert_eq!(one(&format!("SELECT count(*)::text FROM {s}.obs")), "3");
+    }
+
     #[test]
     fn view_tables_are_loaded_and_replaced() {
         if url().is_none() {

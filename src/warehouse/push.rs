@@ -9,7 +9,8 @@ use super::catalog;
 use super::config::{Hook, Settings};
 use super::tools;
 
-pub fn push(s: &Settings) -> Result<()> {
+/// `published` is set once the push has replaced the live catalog.duckdb.
+pub fn push(s: &Settings, published: &mut bool) -> Result<()> {
     let p = s
         .push
         .as_ref()
@@ -96,6 +97,7 @@ pub fn push(s: &Settings) -> Result<()> {
         if c.duckdb_file {
             if c.base_url.is_some() && !s.dry_run {
                 catalog::build_duckdb(s, c)?;
+                *published = true;
             }
             files.push(catalog::DUCKDB_FILE);
         }
@@ -118,8 +120,8 @@ pub fn push(s: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// Run a hook with the run's details in its environment: DATA, FHIR_BASE and
-/// SERVER_NAME, and `env` (STATUS, and REFRESHED_AT after a run that
+/// Run a hook with the run's details in its environment: DATA, FHIR_BASE,
+/// SERVER_NAME and RUN_ID, and `env` (STATUS, and REFRESHED_AT after a run that
 /// succeeded or FAILED_STEP, ERROR and EXIT_CODE after one that failed). It
 /// runs in the config file's directory.
 pub fn hook(s: &Settings, h: &Hook, program: &str, env: &[(&str, &str)]) -> Result<()> {
@@ -131,6 +133,12 @@ pub fn hook(s: &Settings, h: &Hook, program: &str, env: &[(&str, &str)]) -> Resu
             .env("DATA", &s.data)
             .env("FHIR_BASE", s.server_used().unwrap_or(""))
             .env("SERVER_NAME", &s.server_name)
+            // Set by a supervisor (fhir-pipes serve): the same for every
+            // attempt of one run.
+            .env(
+                "RUN_ID",
+                std::env::var("FHIR_PIPES_RUN_ID").unwrap_or_default(),
+            )
             .envs(env.iter().copied()),
     )
     .with_context(|| format!("hook {}", h.name))

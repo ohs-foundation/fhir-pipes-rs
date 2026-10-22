@@ -31,6 +31,9 @@ pub enum PipesError {
     },
     #[error("{0}")]
     Environment(String),
+    /// The run was stopped by SIGTERM or Ctrl-C (stop.rs).
+    #[error("stopped by signal")]
+    Stopped,
 }
 
 impl PipesError {

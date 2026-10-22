@@ -238,6 +238,7 @@ pub fn page_search(
     let origin = url.origin();
 
     loop {
+        crate::stop::check()?;
         let current = url.to_string();
         if !seen.insert(current.clone()) {
             return Err(PipesError::Environment(format!(

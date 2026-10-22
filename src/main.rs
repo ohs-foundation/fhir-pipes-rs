@@ -22,6 +22,7 @@ mod run;
 #[cfg(feature = "postgres")]
 mod runtime;
 mod snapshot;
+mod stop;
 mod sync;
 mod terminology;
 mod transform;

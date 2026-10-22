@@ -169,7 +169,9 @@ they find problems.
 directory (running, succeeded, or failed with the step and the error), can
 run hooks after a run that failed (`on = "failure"`), and with
 `--lock-timeout` gives up instead of waiting behind another refresh of the
-same warehouse. See [docs/refresh.md](docs/refresh.md#how-the-last-run-went).
+same warehouse. It stops cleanly on SIGTERM or Ctrl-C, and can report to a
+program that runs it for you. See
+[docs/refresh.md](docs/refresh.md#how-the-last-run-went).
 
 ### Running ViewDefinitions directly
 

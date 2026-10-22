@@ -141,13 +141,30 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("starting {}", s.duckdb))?;
-    child
+    // Registered before its input is written: a duckdb that stops reading
+    // must still be reached by a stop, and is reaped if the write fails.
+    let registered = crate::stop::register(child.id());
+    let written = child
         .stdin
         .take()
-        .context("duckdb stdin")?
-        .write_all(format!("{setup}\n{sql}").as_bytes())
-        .context("writing to duckdb")?;
-    let out = child.wait_with_output().context("running duckdb")?;
+        .context("duckdb stdin")
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(format!("{setup}\n{sql}").as_bytes())
+                .context("writing to duckdb")
+        });
+    if let Err(e) = written {
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(registered);
+        if crate::stop::requested() {
+            return Err(anyhow::Error::from(crate::error::PipesError::Stopped).context("duckdb"));
+        }
+        return Err(e);
+    }
+    let out = child.wait_with_output().context("running duckdb");
+    drop(registered);
+    let out = out?;
     // The duckdb shell carries on past a failed statement and still exits 0,
     // so its error output is the failure signal.
     let err = String::from_utf8_lossy(&out.stderr);

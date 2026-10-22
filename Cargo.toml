@@ -74,8 +74,15 @@ unicode-normalization = "0.1"
 # all musl's on Linux. Built from C source with cc.
 mimalloc = { version = "0.1.52", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+# refresh stops cleanly on SIGTERM and Ctrl-C (src/stop.rs); libc is already
+# in the tree, for kill(2).
+signal-hook = "0.3"
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2"
+libc = "0.2"
 predicates = "3"
 httptest = "0.16"
 

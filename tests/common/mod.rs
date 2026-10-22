@@ -92,33 +92,100 @@ table_key = "id"
 /// A server address nothing listens on, for runs that must not reach a server.
 pub const NOWHERE: &str = "http://127.0.0.1:9/fhir";
 
+/// The environment variables a test's refresh must not inherit.
+const CLEARED: &[&str] = &[
+    "FHIR_PIPES_CONFIG",
+    "FHIR_PIPES_DATA",
+    "FHIR_PIPES_VIEWS",
+    "FHIR_PIPES_SERVER",
+    "FHIR_PIPES_SERVER_NAME",
+    "FHIR_PIPES_SERVER_KIND",
+    "FHIR_PIPES_TOKEN_AUTH",
+    "FHIR_PIPES_SCOPE",
+    "FHIR_PIPES_REUSE_RAW",
+    "FHIR_PIPES_TOKEN",
+    "FHIR_PIPES_CLIENT_ID",
+    "FHIR_PIPES_CLIENT_SECRET",
+    "FHIR_PIPES_TOKEN_URL",
+    "FHIR_PIPES_USERNAME",
+    "FHIR_PIPES_PASSWORD",
+    "FHIR_PIPES_GOOGLE_AUTH",
+    "FHIR_PIPES_PROFILE",
+    "FHIR_PIPES_LOCK_TIMEOUT",
+    "FHIR_PIPES_TEST_PAUSE",
+    "FHIR_PIPES_RESULT_FILE",
+    "FHIR_PIPES_FAILURE_HOOKS",
+    "FHIR_PIPES_RUN_ID",
+];
+
 pub fn cmd(config: &Path) -> Command {
     let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     c.current_dir(config.parent().unwrap());
-    for var in [
-        "FHIR_PIPES_CONFIG",
-        "FHIR_PIPES_DATA",
-        "FHIR_PIPES_VIEWS",
-        "FHIR_PIPES_SERVER",
-        "FHIR_PIPES_SERVER_NAME",
-        "FHIR_PIPES_SERVER_KIND",
-        "FHIR_PIPES_TOKEN_AUTH",
-        "FHIR_PIPES_SCOPE",
-        "FHIR_PIPES_REUSE_RAW",
-        "FHIR_PIPES_TOKEN",
-        "FHIR_PIPES_CLIENT_ID",
-        "FHIR_PIPES_CLIENT_SECRET",
-        "FHIR_PIPES_TOKEN_URL",
-        "FHIR_PIPES_USERNAME",
-        "FHIR_PIPES_PASSWORD",
-        "FHIR_PIPES_GOOGLE_AUTH",
-        "FHIR_PIPES_PROFILE",
-        "FHIR_PIPES_LOCK_TIMEOUT",
-    ] {
+    for var in CLEARED {
         c.env_remove(var);
     }
     c.arg("refresh").arg("--config").arg(config);
     c
+}
+
+/// `refresh` as a plain child process, for tests that signal it.
+#[cfg(unix)]
+pub fn spawn_refresh(config: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Child {
+    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("fhir-pipes"));
+    c.current_dir(config.parent().unwrap());
+    for var in CLEARED {
+        c.env_remove(var);
+    }
+    c.envs(env.iter().copied())
+        .arg("refresh")
+        .arg("--config")
+        .arg(config)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    c.spawn().unwrap()
+}
+
+#[cfg(unix)]
+pub fn sigterm(child: &std::process::Child) {
+    // SAFETY: kill(2) on a child this test started and has not reaped.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+/// Wait for `path` to exist, for up to 20 s.
+pub fn wait_for(path: &Path) {
+    let started = std::time::Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed().as_secs() < 20,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Wait for a child for up to `secs` seconds, returning its exit code; one
+/// still running then is killed and the test fails.
+#[cfg(unix)]
+pub fn exit_within(child: &mut std::process::Child, secs: u64) -> Option<i32> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return s.code();
+        }
+        if started.elapsed().as_secs_f64() >= secs as f64 {
+            let _ = child.kill();
+            panic!("refresh still running after {secs} s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+pub fn last_run(data: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(data.join("last-run.json")).unwrap()).unwrap()
 }
 
 /// Rows of a parquet file as (column → display string) maps.
