@@ -1,9 +1,11 @@
 //! Location registry → PMTiles for MapLibre maps, with duckdb (GeoParquet →
 //! GeoJSON) and tippecanoe.
 //!
-//! - admin.pmtiles: polygons `country` (admin_level 0), `states` (1), `lgas` (2),
-//!   each with id, name, admin_level, admin1_name, admin2_name, path and the
-//!   profile's admin code column (ICR: pcode).
+//! - admin.pmtiles: one polygon layer per admin level in the registry, named
+//!   by the profile's `admin_layers` (`country`, `states`, `lgas`) or else
+//!   `admin0`, `admin1`, …; each feature has id, name, admin_level,
+//!   admin1_name, admin2_name, path and the profile's admin code column
+//!   (ICR: pcode).
 //! - facilities.pmtiles, settlements.pmtiles: every point, never thinned
 //!   (--drop-rate=1 --no-feature-limit --no-tile-size-limit), with the
 //!   profile's columns (`point_columns`).
@@ -140,7 +142,9 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         bail!("no admin-unit polygons for {}", countries.join(", "));
     }
     let poly = list(&poly);
-    for (level, name) in [(0, "country"), (1, "states"), (2, "lgas")] {
+    let mut admin_layers = Vec::new();
+    for level in admin_levels(s, &poly)? {
+        let name = admin_layer(&profile, level);
         let file = t.join(format!("{name}.geojson"));
         tools::duckdb(
             &s.duckdb,
@@ -153,7 +157,12 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
             ),
         )?;
         println!("   {name}: {} features", features(&file)?);
+        admin_layers.push((name, file));
     }
+    let admin_layers: Vec<(&str, PathBuf)> = admin_layers
+        .iter()
+        .map(|(name, file)| (name.as_str(), file.clone()))
+        .collect();
     tippecanoe(
         s,
         &out.join("admin.pmtiles"),
@@ -165,11 +174,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
             "--simplification=8",
             "--no-tile-size-limit",
         ],
-        &[
-            ("country", t.join("country.geojson")),
-            ("states", t.join("states.geojson")),
-            ("lgas", t.join("lgas.geojson")),
-        ],
+        &admin_layers,
     )?;
 
     let points = globs("geom_type=point", "**/*.parquet")?;
@@ -272,6 +277,39 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
 }
 
 /// The countries to build: those asked for, else every `country=` partition.
+/// The admin levels of the admin-unit polygons in `poly` (a duckdb list of
+/// files), lowest first.
+fn admin_levels(s: &Settings, poly: &str) -> Result<Vec<u32>> {
+    let out = tools::output(Command::new(&s.duckdb).args([
+        "-csv",
+        "-noheader",
+        "-c",
+        &format!(
+            "SELECT DISTINCT admin_level FROM read_parquet({poly}, union_by_name=true)
+             WHERE admin_level IS NOT NULL ORDER BY 1;"
+        ),
+    ]))?;
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            l.parse()
+                .with_context(|| format!("duckdb gave `{l}` as an admin level"))
+        })
+        .collect()
+}
+
+/// The name of the admin tile layer for `level`: the profile's, else
+/// `admin<level>`.
+fn admin_layer(profile: &Profile, level: u32) -> String {
+    profile
+        .location
+        .admin_layers
+        .get(level as usize)
+        .cloned()
+        .unwrap_or_else(|| format!("admin{level}"))
+}
+
 fn countries(locations: &Path, wanted: &[String]) -> Result<Vec<String>> {
     let present: Vec<String> = fs::read_dir(locations)
         .map(|it| {
@@ -412,6 +450,18 @@ mod tests {
     }
 
     #[test]
+    fn admin_layers_are_named_by_the_profile_or_by_level() {
+        let base = Profile::base();
+        assert_eq!(admin_layer(&base, 0), "admin0");
+        assert_eq!(admin_layer(&base, 3), "admin3");
+        let mut named = Profile::base();
+        named.location.admin_layers = vec!["country".into(), "states".into(), "lgas".into()];
+        assert_eq!(admin_layer(&named, 1), "states");
+        // A level the profile does not name falls back to its number.
+        assert_eq!(admin_layer(&named, 3), "admin3");
+    }
+
+    #[test]
     fn a_directory_name_is_not_a_pattern() {
         let dir = tempfile::tempdir().unwrap();
         let odd = dir.path().join("country=[A]");
@@ -436,8 +486,9 @@ mod tests {
         assert!(features(&dir.path().join("missing.geojson")).is_err());
     }
 
-    /// A fake duckdb that writes one feature to the file its COPY names,
-    /// except for the lgas and settlements, which have none; and a fake
+    /// A fake duckdb that lists admin levels 0 to 3 and writes one feature
+    /// to the file its COPY names, except for admin level 2 and the
+    /// settlements, which have none; and a fake
     /// tippecanoe that logs its arguments to `tippecanoe.log` and writes
     /// its output. Settings that use them, for the warehouse at `dir`.
     #[cfg(unix)]
@@ -447,8 +498,12 @@ mod tests {
         fs::write(
             &duckdb,
             r#"#!/bin/sh
-file=$(printf '%s\n' "$2" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
-case "$2" in
+for sql; do :; done
+case "$sql" in
+  *"DISTINCT admin_level"*) printf '0\n1\n2\n3\n'; exit 0 ;;
+esac
+file=$(printf '%s\n' "$sql" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
+case "$sql" in
   *"admin_level = 2"*|*"type = 'settlement'"*|*"type = 'settlement-catchment'"*) : > "$file" ;;
   *) echo '{"type":"Feature"}' > "$file" ;;
 esac
@@ -530,16 +585,42 @@ echo tiles > "$out"
                 .map(|l| l.split(':').next().unwrap().to_string())
                 .collect()
         };
-        // The empty lgas layer is left out of admin.pmtiles.
+        // One layer per admin level, named by level without a profile; the
+        // empty level 2 is left out of admin.pmtiles.
         let admin = call("admin.pmtiles");
         assert!(admin.starts_with("--force -o "), "{admin}");
         assert!(admin.contains("--maximum-zoom=11"), "{admin}");
-        assert_eq!(layers(admin), ["country", "states"]);
+        assert_eq!(layers(admin), ["admin0", "admin1", "admin3"]);
         // Points are never thinned.
         let facilities = call("facilities.pmtiles");
         assert!(facilities.contains("--drop-rate=1 --no-feature-limit"));
         assert_eq!(layers(facilities), ["facilities"]);
         assert_eq!(layers(call("catchments.pmtiles")), ["facility_catchments"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_profile_names_the_admin_layers_it_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = fake_tools(dir.path());
+        let profile = dir.path().join("profile.toml");
+        fs::write(
+            &profile,
+            "[location]\nadmin_layers = [\"country\", \"states\", \"lgas\"]\n",
+        )
+        .unwrap();
+        s.profile = Some(profile.display().to_string());
+        let loc = dir.path().join("locations");
+        locations(&loc, "NGA");
+        build(&s, &loc, &dir.path().join("tiles")).unwrap();
+        let log = fs::read_to_string(dir.path().join("tippecanoe.log")).unwrap();
+        let admin = log.lines().find(|c| c.contains("admin.pmtiles")).unwrap();
+        let layers: Vec<&str> = admin
+            .split(" -L ")
+            .skip(1)
+            .map(|l| l.split(':').next().unwrap())
+            .collect();
+        assert_eq!(layers, ["country", "states", "admin3"]);
     }
 
     #[test]

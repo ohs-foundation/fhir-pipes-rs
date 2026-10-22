@@ -32,6 +32,10 @@ type_systems = [
 # The column holding an admin unit's code: adminN_code, country (from the
 # level 0 unit) and the duplicate_admin_code report.
 admin_code_column = "pcode"
+# Names of the admin layers in refresh's tiles/admin.pmtiles, by admin level;
+# unnamed levels are admin0, admin1, …. Left out here, as ICR covers more than
+# one country; a single-country deployment can name them, for Nigeria:
+# admin_layers = ["country", "states", "lgas"]
 # `fhir-pipes import` writes meta.profile and admin codes from these. ICR leaves
 # them out: [dhis2] location_profile and country_code_system below give the same
 # values, and a profile with them does not load in fhir-pipes 0.4.0 or earlier.
