@@ -30,8 +30,14 @@ config file or the profile, a config file that cannot be read, `--only
 catalog` without a `[catalog]` section, an `--input` that is not there, or a
 ViewDefinition that is not valid. It exits 1 when something fails while it
 runs: a server or database that cannot be reached or answers with an error, a
-missing or failing tool, a failing hook, a file that cannot be written.
+missing or failing tool, a failing hook, a file that cannot be written, or
+another refresh that still holds the warehouse after `--lock-timeout`.
 Earlier versions exited 1 for every error.
+
+Every run that gets the warehouse's lock records how it went in
+`last-run.json` (see [How the last run went](#how-the-last-run-went)), and
+hooks can run after a run that failed as well as after one that succeeded
+(see [Hooks](#hooks)).
 
 ### Steps
 
@@ -122,7 +128,53 @@ between the two renames of a table's swap leaves the old table as
 `parquet/.<table>.old` (or `.views.old`, `.tiles.old` in the warehouse
 directory); the next run renames it back. While it runs, a refresh holds a lock on `.refresh.lock` in the
 warehouse directory, so a second refresh of the same warehouse waits for the
-first to finish.
+first to finish. With `--lock-timeout SECONDS` (or
+`FHIR_PIPES_LOCK_TIMEOUT`), it waits at most that long and then fails (exit
+1) without changing anything; `--lock-timeout 0` fails at once. A scheduler
+that retries a failed run can use it so that retries do not queue up behind
+a long run.
+
+### How the last run went
+
+`last-run.json` in the warehouse directory says how the last run went, or
+that one is running. A run writes it only while it holds the lock: first
+with `"status": "running"`, then `"succeeded"` or `"failed"`. It is written
+to a temporary file and renamed into place, so a reader never sees half of
+it. A run that is killed leaves `running`, with its process id in `pid`. A
+run that fails before it gets the lock (another run still holds it after
+`--lock-timeout`, or a config error) does not write it.
+
+```json
+{
+  "status": "failed",
+  "pid": 41207,
+  "started_at": "2026-10-21T02:00:00+00:00",
+  "server": "https://fhir.example.org/fhir",
+  "server_name": "prod",
+  "full": false,
+  "steps": ["locations", "views", "tiles", "manifest", "catalog", "hooks"],
+  "finished_at": "2026-10-21T02:04:12+00:00",
+  "seconds": 252.3,
+  "timings": {"locations": 31.0},
+  "failed_step": "views",
+  "error": "views: exporting Observation: GET https://fhir.example.org/fhir/Observation: 503 Service Unavailable",
+  "exit_code": 1
+}
+```
+
+`server` is redacted as in the manifest: without a user name, password or
+query string. `steps` are the steps the run was to take. `timings` are the parts that
+finished, in seconds. A run that succeeded has `refreshed_at` (the
+manifest's time) and `exit_code` 0. A run that failed has `failed_step`,
+`error` (cut to 2,000 characters) and `exit_code`, 1 or 2 as above.
+`failed_step` is a step, or the part of the run between them: `tools` (a
+tool the steps need is missing), `start` (the staging or the change log),
+`files` (splitting a file source by type), `publish` (the swap) or `finish`
+(the run's report).
+
+Unlike `raw/<server>/last-refresh.json` (see [last-refresh.json](#last-refreshjson)), it
+records failures, so a monitor can tell how the last run ended without
+having seen its exit status.
 
 Disk use doubles for the tables, views and tiles a run writes, until the swap.
 
@@ -786,15 +838,55 @@ spark_location = "s3a://warehouse"
 name = "catalog"
 after = "locations"         # only when that step ran; leave out to always run
 run = ["./catalog.sh"]      # a path with / is relative to this file
+
+[[hooks]]
+name = "alert"
+on = "failure"              # "success" (the default), "failure" or "always"
+run = ["sh", "-c", "curl -fsS -X POST --data-binary @\"$DATA/last-run.json\" \"$ALERT_URL\""]
 ```
 
-Hooks run in the config file's directory with `DATA` (the warehouse
-directory as an absolute path), `FHIR_BASE` (empty with a file source),
-`SERVER_NAME` and `REFRESHED_AT` (the manifest's time) set, after the run's
-tables, manifest and catalog are swapped in. `after` names one of the steps
-before the hooks, in any case: `locations`, `views`, `tiles`, `manifest`,
-`catalog` or `database`. A config whose hook names `hooks`, `push` or an
-unknown step is refused before anything runs.
+### Hooks
+
+A hook runs in the config file's directory with `DATA` (the warehouse
+directory as an absolute path), `FHIR_BASE` (empty with a file source) and
+`SERVER_NAME` set. `on` says when:
+
+- `on = "success"`, the default: in the `hooks` step, after the run's
+  tables, manifest and catalog are swapped in, with `STATUS=succeeded` and
+  `REFRESHED_AT` (the manifest's time). A hook that fails stops the run,
+  which then fails at `hooks`.
+- `on = "failure"`: after a run that failed, at any step or before the
+  first, once `last-run.json` records the failure, with `STATUS=failed`,
+  `FAILED_STEP`, `ERROR` and `EXIT_CODE` as in
+  [How the last run went](#how-the-last-run-went). They run before the run
+  lets go of the warehouse's lock, so the `last-run.json` they read is this
+  run's. A failure hook that fails, or whose program cannot be found, is
+  printed as a warning; the run still fails with its own error and exit
+  status. Its program is not checked before the run, so a missing alert
+  command never stops a run that would succeed.
+- `on = "always"`: both. A run whose success hook fails therefore runs an
+  `always` hook twice, once in the `hooks` step and once after the failure.
+
+A run that fails at `lock` (another refresh still held the warehouse after
+`--lock-timeout`) never wrote `last-run.json`: the file there is the other
+run's. Its failure hooks get `FAILED_STEP=lock` and should report from the
+environment, not the file.
+
+Failure hooks run only in a run that has the `hooks` step, as success hooks
+do: `--only views` or `--skip hooks` runs neither. A config error that stops
+the run before the config is read (exit 2) runs no hooks either.
+
+`after` names one of the steps before the hooks, in any case: `locations`,
+`views`, `tiles`, `manifest`, `catalog` or `database`. The hook then runs
+only when that step ran. It is only for hooks run on success. A config whose
+hook names `hooks`, `push` or an unknown step, or has `after` with
+`on = "failure"` or `"always"`, is refused before anything runs.
+
+A failure hook can tell someone, or another system, that the refresh failed:
+for example post `last-run.json` to a chat webhook, or to an OpenFn webhook
+trigger that handles the alert.
+
+### last-refresh.json
 
 Each run that finishes writes its step timings to
 `raw/<server>/last-refresh.json`; a run that stops at an error does not. When

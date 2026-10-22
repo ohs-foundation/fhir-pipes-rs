@@ -165,6 +165,12 @@ the database, a tool such as duckdb or rclone, a hook, a disk write).
 `views validate`, `views lint`, `views test` and `profile check` exit 1 when
 they find problems.
 
+`refresh` also records how each run went in `last-run.json` in the warehouse
+directory (running, succeeded, or failed with the step and the error), can
+run hooks after a run that failed (`on = "failure"`), and with
+`--lock-timeout` gives up instead of waiting behind another refresh of the
+same warehouse. See [docs/refresh.md](docs/refresh.md#how-the-last-run-went).
+
 ### Running ViewDefinitions directly
 
 `views` works with ViewDefinitions directly, without a warehouse:

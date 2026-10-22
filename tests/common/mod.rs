@@ -113,6 +113,7 @@ pub fn cmd(config: &Path) -> Command {
         "FHIR_PIPES_PASSWORD",
         "FHIR_PIPES_GOOGLE_AUTH",
         "FHIR_PIPES_PROFILE",
+        "FHIR_PIPES_LOCK_TIMEOUT",
     ] {
         c.env_remove(var);
     }
@@ -237,14 +238,16 @@ pub fn views_with(dir: &Path, names: &[&str], empty: bool) -> PathBuf {
     views
 }
 
-/// Every file of the warehouse but raw/, by path relative to it, with its
+/// Every file of the warehouse but raw/ and last-run.json, by path relative to it, with its
 /// contents.
 pub fn warehouse(data: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     fn walk(dir: &Path, data: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
         for e in fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
             let rel = p.strip_prefix(data).unwrap();
-            if rel.starts_with("raw") {
+            // raw/ and last-run.json change with every run, whether or not
+            // it succeeds.
+            if rel.starts_with("raw") || rel == Path::new("last-run.json") {
                 continue;
             }
             if p.is_dir() {

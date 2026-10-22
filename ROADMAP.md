@@ -26,6 +26,7 @@ release of fhir-pipes; earlier work was in kiln and fhir-warehouse.
 | A refresh is all-or-nothing: tables, `manifest.json` and `catalog.sql` are staged and swapped in together at the end, so a run that fails leaves the previous run's warehouse as it was (#35) | `refresh` | next release |
 | Map tiles of the Location registry (PMTiles, through duckdb and tippecanoe) | `refresh` (tiles step) | 0.3.0 |
 | Run your own commands after a refresh; push the warehouse to object storage with rclone | `refresh` (hooks, `--push`) | 0.3.0 |
+| Record how each run went in `last-run.json` (running, succeeded, or failed with the step, the error and the exit status); hooks after a run that failed (`on = "failure"` or `"always"`); `--lock-timeout` to fail instead of waiting behind another refresh of the warehouse | `refresh` | next release |
 | Load the view tables into PostgreSQL, all in one transaction, over TLS when the connection string asks (#25) | `refresh` (`[database]`) | next release |
 | Load only the rows of the resources that changed since the last load (`mode = "upsert"`): ids from search and bulk merges, `deleted[]`, HAPI's database, and full downloads and file sources compared with the old file; a full load when the log cannot vouch for the database (#38) | `refresh` (`[database]`) | next release |
 | A DuckDB catalog: `catalog.sql` with a view per table, read from a bucket URL, plus your own views; optionally `catalog.duckdb` to attach by URL (needs the duckdb command) | `refresh` (`[catalog]`) | next release |

@@ -16,8 +16,9 @@
 //! catalog.sql, so a reader can see two runs' files only during those renames.
 //!
 //! A run holds an exclusive lock on `.refresh.lock` in the warehouse directory
-//! from start to end, so two refreshes of one warehouse take turns instead of
-//! removing each other's staging.
+//! from start to end (`Lock`), so two refreshes of one warehouse take turns
+//! instead of removing each other's staging. A run waits for the lock as long
+//! as `--lock-timeout` allows, by default for as long as it takes.
 //!
 //! `publish` writes `.staging/.publishing` before its first rename and removes
 //! it after its last. A run that finds it, because the publish before it
@@ -28,8 +29,9 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::config::Settings;
 use super::partition;
@@ -41,9 +43,65 @@ const PUBLISHING: &str = ".publishing";
 /// The warehouse directories a run stages and swaps in whole.
 const DIRS: [&str; 2] = ["views", "tiles"];
 
+/// The warehouse's `.refresh.lock`, held exclusively until dropped.
+pub struct Lock(#[allow(dead_code)] fs::File);
+
+/// How often a run waiting with a timeout tries the lock again.
+const LOCK_RETRY: Duration = Duration::from_millis(250);
+
+impl Lock {
+    /// Take the lock on warehouse `data`, once any other refresh of it has
+    /// finished. With `timeout`, give up after waiting that long.
+    pub fn acquire(data: &Path, timeout: Option<Duration>) -> Result<Lock> {
+        fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
+        let path = data.join(LOCK);
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        let locking = || format!("locking {}", path.display());
+        match lock.try_lock() {
+            Ok(()) => return Ok(Lock(lock)),
+            Err(fs::TryLockError::WouldBlock) => {}
+            Err(fs::TryLockError::Error(e)) => return Err(e).with_context(locking),
+        }
+        let Some(timeout) = timeout else {
+            println!(
+                "   waiting for another refresh of {} to finish",
+                data.display()
+            );
+            lock.lock().with_context(locking)?;
+            return Ok(Lock(lock));
+        };
+        println!(
+            "   waiting up to {} s for another refresh of {} to finish",
+            timeout.as_secs(),
+            data.display()
+        );
+        let deadline = Instant::now() + timeout;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => return Ok(Lock(lock)),
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(fs::TryLockError::Error(e)) => return Err(e).with_context(locking),
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                bail!(
+                    "another refresh of {} still holds {} after {} s (--lock-timeout)",
+                    data.display(),
+                    LOCK,
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(LOCK_RETRY.min(deadline - now));
+        }
+    }
+}
+
 pub struct Stage {
-    /// Held for the whole run; released when the stage is dropped.
-    _lock: fs::File,
     data: PathBuf,
     parquet: PathBuf,
     /// parquet/.staging: the run's tables.
@@ -53,39 +111,16 @@ pub struct Stage {
 }
 
 impl Stage {
-    /// Start a run's staging, once any other refresh of the warehouse has
-    /// finished. What a killed run left behind is removed first, and a table
-    /// (or views/, tiles/) a killed swap left only as `.<name>.old` is put
-    /// back.
-    pub fn new(s: &Settings) -> Result<Stage> {
+    /// Start a run's staging. The caller holds the warehouse's lock, `_held`,
+    /// until the run ends. What a killed run left behind is removed first,
+    /// and a table (or views/, tiles/) a killed swap left only as
+    /// `.<name>.old` is put back.
+    pub fn new(s: &Settings, _held: &Lock) -> Result<Stage> {
         Stage::open(&s.data, &s.parquet_dir())
     }
 
     fn open(data: &Path, parquet: &Path) -> Result<Stage> {
-        fs::create_dir_all(data).with_context(|| format!("creating {}", data.display()))?;
-        let path = data.join(LOCK);
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => {
-                println!(
-                    "   waiting for another refresh of {} to finish",
-                    data.display()
-                );
-                lock.lock()
-                    .with_context(|| format!("locking {}", path.display()))?;
-            }
-            Err(fs::TryLockError::Error(e)) => {
-                return Err(e).with_context(|| format!("locking {}", path.display()));
-            }
-        }
         let stage = Stage {
-            _lock: lock,
             data: data.to_path_buf(),
             parquet: parquet.to_path_buf(),
             tables: parquet.join(DIR),
@@ -389,9 +424,9 @@ mod tests {
     }
 
     #[test]
-    fn a_run_holds_the_warehouse_lock_until_it_ends() {
+    fn the_warehouse_lock_is_held_until_it_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let s = stage(dir.path());
+        let s = Lock::acquire(dir.path(), None).unwrap();
         let other = fs::File::open(dir.path().join(LOCK)).unwrap();
         assert!(matches!(
             other.try_lock_shared(),
@@ -399,6 +434,21 @@ mod tests {
         ));
         drop(s);
         other.try_lock_shared().unwrap();
+    }
+
+    #[test]
+    fn a_run_with_a_lock_timeout_gives_up_when_another_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = Lock::acquire(dir.path(), None).unwrap();
+        let started = Instant::now();
+        let err = Lock::acquire(dir.path(), Some(Duration::from_millis(300)))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("still holds .refresh.lock after 0 s"), "{err}");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        drop(held);
+        Lock::acquire(dir.path(), Some(Duration::ZERO)).unwrap();
     }
 
     #[test]
