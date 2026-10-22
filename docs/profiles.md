@@ -102,7 +102,7 @@ name = "my-ig"            # shown in messages
 | `admin_unit_type` | transform, population, dhis2, import | The Location type code of an administrative unit. `admin_level`, `tier`, `adminN_name`, `adminN_code` and `country` follow the chain of these. |
 | `type_systems` | population, import | Code systems of the Location type codes. `population --type CODE` selects Locations with that code under any of these, wherever the coding sits in `type`. Empty or absent: a code under any system. `import` writes type codes under the first (else under `[dhis2] location_type_system`). |
 | `admin_code_column` | transform | The name of a `[[location.column]]` holding an admin unit's code. It fills `adminN_code`, gives `country` (from the level 0 unit), and is checked for duplicates (`duplicate_<column>` in the report). |
-| `admin_layers` | refresh | The names of the admin layers in `tiles/admin.pmtiles`, by admin level: `["country", "states", "lgas"]` names levels 0, 1 and 2. A level not named here, or every level without this key, is `admin0`, `admin1`, `admin2`, …. Names use lower case letters, digits and `_`. A profile with this key does not load in fhir-pipes 0.6.0 or earlier. |
+| `admin_layers` | refresh | The names of the admin layers in `tiles/admin.pmtiles`, by admin level: `["country", "states", "lgas"]` names levels 0, 1 and 2. A level not named here, or every level without this key, is `admin0`, `admin1`, `admin2`, …. Names use lower case letters, digits and `_`; `admin<N>` is only for level N. A profile with this key does not load in fhir-pipes 0.6.0 or earlier. |
 | `profile` | import | `meta.profile` of the Locations `import` writes. Absent: `[dhis2] location_profile`; with neither, no `meta`. |
 | `admin_code_system` | import | The identifier system of the admin codes `import location-boundaries` writes, unless `--code-system` is given. Absent: `[dhis2] country_code_system`. Make it one of the admin code column's `systems`, so the codes fill `adminN_code`. |
 | `[[location.column]]` | transform, diff | An extra column; see [Column kinds](#column-kinds). Columns appear in this order, after `position_latitude`. |
@@ -363,7 +363,7 @@ in the IG's Location profiles but not read by the profile:
 | `column … has a key that kind does not use` | For example `url` on an `identifier` column. |
 | `… is a built-in column` | Choose another name; built-in names are reserved. |
 | `admin_code_column … is not a [[location.column]]` | Declare the column, or fix the name. |
-| `admin_layers name …` | A layer name with characters other than lower case letters, digits and `_`, or one used twice. |
+| `admin_layers name …` | A layer name with characters other than lower case letters, digits and `_`, one used twice, or `admin<N>` given to a level other than N. |
 | `profiles are fetched over https only` | Use an https URL, or download the file. |
 | `the edited file has column(s) …` | See [Editing and diff](#editing-and-diff). |
 | `… needs a profile with a [dhis2] / [population] section` | Pass a profile that has it. |

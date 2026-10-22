@@ -480,10 +480,19 @@ impl Profile {
             }
         }
         let mut layers = std::collections::HashSet::new();
-        for name in &self.location.admin_layers {
+        for (level, name) in self.location.admin_layers.iter().enumerate() {
             if !valid_column_name(name) {
                 return Err(format!(
                     "[location] admin_layers name `{name}`: use lower case letters, digits and _"
+                ));
+            }
+            // admin<N> is the name a level not listed gets: only level N may
+            // use it.
+            if let Some(n) = name.strip_prefix("admin")
+                && n.parse::<usize>().is_ok_and(|n| n != level)
+            {
+                return Err(format!(
+                    "[location] admin_layers name `{name}` is the name of level {n} when it is not named"
                 ));
             }
             if !layers.insert(name.as_str()) {
@@ -629,6 +638,8 @@ mod tests {
         .unwrap();
         assert_eq!(p.location.admin_layers, ["country", "states", "lgas"]);
         assert!(Profile::base().location.admin_layers.is_empty());
+        // A level may be given its own default name.
+        assert!(Profile::parse("[location]\nadmin_layers = [\"admin0\"]", "t.toml").is_ok());
     }
 
     #[test]
@@ -674,6 +685,10 @@ mod tests {
             (
                 "[location]\nadmin_layers = [\"states\", \"states\"]",
                 "admin_layers name `states` is used twice",
+            ),
+            (
+                "[location]\nadmin_layers = [\"admin1\"]",
+                "admin_layers name `admin1` is the name of level 1",
             ),
         ] {
             let err = Profile::parse(text, "t.toml").unwrap_err().to_string();
