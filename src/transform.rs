@@ -10,6 +10,7 @@ use crate::profile::Profile;
 use crate::report::write_json;
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::write::dataset::write_dataset;
+use crate::write::hierarchy::write_hierarchy;
 
 pub const SNAPSHOT_FILE: &str = "locations.ndjson";
 
@@ -93,6 +94,10 @@ pub fn transform_with(args: &TransformArgs, profile: &Profile) -> Result<()> {
         args.row_group_size,
         organizations,
     )?;
+    if let Some(dir) = &args.hierarchy_out {
+        let n = write_hierarchy(&index, dir)?;
+        println!("Wrote {n} location_hierarchy rows to {}", dir.display());
+    }
 
     let without_geometry: usize = written.iter().map(|w| w.rows_without_geometry).sum();
     let mut report_json = index.report.to_json();

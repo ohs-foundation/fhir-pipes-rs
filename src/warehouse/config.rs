@@ -27,6 +27,12 @@ pub struct File {
     /// Where the ViewDefinitions are: a directory of JSON files, such as an IG
     /// build's fsh-generated/resources.
     pub views: Option<PathBuf>,
+    /// Where the libraries step finds SQL on FHIR Libraries, after the views
+    /// directory: directories of JSON (relative to this file), FHIR package
+    /// `.tgz` files (a path or https URL), or `name#version` in the package
+    /// cache. Without any, the step does not run.
+    #[serde(default)]
+    pub libraries: Vec<String>,
     /// The profile for the locations step: a file path (relative to this
     /// file) or an https URL. See docs/profiles.md.
     pub profile: Option<String>,
@@ -350,6 +356,9 @@ pub struct Settings {
     /// directory, not the current one.
     pub data: PathBuf,
     pub views: Option<PathBuf>,
+    /// The library sources, paths resolved against the config file's
+    /// directory; packages (`name#version`) and https URLs as given.
+    pub libraries: Vec<String>,
     /// The file source: files, directories and glob patterns, resolved. Empty:
     /// the resources come from the server.
     pub files: Vec<PathBuf>,
@@ -598,9 +607,21 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
     } else {
         o.countries
     };
+    let libraries = file
+        .libraries
+        .iter()
+        .map(|l| {
+            if l.contains('#') || l.starts_with("https://") {
+                l.clone()
+            } else {
+                resolve(&base, Path::new(l)).display().to_string()
+            }
+        })
+        .collect();
     Ok(Settings {
         data,
         views,
+        libraries,
         server_name: o.server_name.or(file.server.name).unwrap_or_else(|| {
             if files.is_empty() {
                 "hapi-local".into()

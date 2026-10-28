@@ -43,8 +43,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use arrow::array::{Array, AsArray, BooleanArray, RecordBatch};
 use arrow::datatypes::{
-    DataType, Float64Type, Int64Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType,
+    DataType, Float32Type, Float64Type, Int64Type, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
 };
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use fhir_pipes_sof::{SelectColumn, ViewDefinition};
@@ -57,11 +57,15 @@ use sqlx_postgres::PgConnection;
 
 use crate::error::usage;
 use crate::export::changes::Changes;
+use crate::library::compose::{Bind, compose};
+use crate::library::resolve::{Artifact, Catalog, HIERARCHY_TABLE, HIERARCHY_URL};
+use crate::library::{Kind, Library};
 use crate::views::run::View;
 
 use super::config::{Database, Mode, Settings};
+use super::libraries_step;
 use super::partition::{open_parquet, table_files_checked};
-use super::sql::ident;
+use super::sql::{ident, sql_str};
 
 /// Rows sent to COPY per message.
 const COPY_ROWS: usize = 4096;
@@ -77,6 +81,128 @@ pub struct Table {
     pub key: Option<String>,
     /// Its view calls a function of the time (`time_dependent`).
     pub time_dependent: bool,
+    /// Made from other tables (`location_hierarchy`, a SQLQuery Library's
+    /// result) rather than from a view: no resource key, loaded in full in
+    /// both modes, and no mark in the records table.
+    pub derived: bool,
+}
+
+/// A derived table: `location_hierarchy` or a SQLQuery Library's result,
+/// read from `dir`.
+pub fn derived_table(name: &str, dir: PathBuf) -> Table {
+    Table {
+        name: name.to_string(),
+        dir,
+        resource: String::new(),
+        key: None,
+        time_dependent: true,
+        derived: true,
+    }
+}
+
+/// The derived tables a load takes, after the view tables:
+/// `location_hierarchy` when the warehouse has it, then each SQLQuery
+/// Library's result in `catalog` (when the config has `libraries`), in the
+/// order they run. `dir` gives where a table is read. A result with no table
+/// yet (the libraries step has not run) is left out by `load`, which says
+/// so, and the database's copy, if any, left as it is.
+pub fn derived_tables(
+    s: &Settings,
+    catalog: Option<&Catalog>,
+    dir: impl Fn(&str) -> PathBuf,
+) -> Result<Vec<Table>> {
+    let mut out = Vec::new();
+    let hierarchy = dir(HIERARCHY_TABLE);
+    if hierarchy.is_dir() {
+        out.push(derived_table(HIERARCHY_TABLE, hierarchy));
+    }
+    let Some(catalog) = catalog else {
+        return Ok(out);
+    };
+    for lib in catalog.order()? {
+        if lib.kind != Kind::SqlQuery {
+            continue;
+        }
+        let table = lib.table(&s.strip_prefix);
+        out.push(derived_table(&table, dir(&table)));
+    }
+    Ok(out)
+}
+
+/// The comment that marks a view as a SQLView fhir-pipes made: followed by
+/// the Library's canonical. A load drops every view in its schema with it
+/// before it makes them again.
+const SQLVIEW_COMMENT: &str = "fhir-pipes SQLView ";
+
+/// A SQLView Library as a PostgreSQL view.
+pub struct SqlView {
+    /// The Library's name, for messages.
+    pub library: String,
+    /// The view's name: the Library's table.
+    pub name: String,
+    /// `CREATE VIEW <schema>.<name> AS <the Library's SQL>`.
+    pub create: String,
+    /// The view's comment: `fhir-pipes SQLView <canonical>`.
+    pub comment: String,
+}
+
+/// Each SQLView Library in `catalog` but the built-in LocationHierarchy, in
+/// `order()`, as a view in `schema`. Each input is read from its relation in
+/// `schema`: a view's table, `location_hierarchy`, a SQLQuery's result, or
+/// another SQLView's view (so no SQLView is inlined). A view input must be
+/// one the views directory writes, as the libraries step requires
+/// (`libraries_step::written`): the database may still hold the table of a
+/// view removed from it. This runs before the load drops or loads anything.
+pub fn sql_views(s: &Settings, catalog: &Catalog, schema: &str) -> Result<Vec<SqlView>> {
+    let relation = |a: &Artifact| match a {
+        Artifact::Library(l) if l.url == HIERARCHY_URL => HIERARCHY_TABLE.to_string(),
+        _ => a.table(&s.strip_prefix),
+    };
+    let bind = |a: &Artifact| -> Result<Option<Bind>> {
+        Ok(Some(Bind::Relation(qualified(schema, &relation(a)))))
+    };
+    let mut view_tables = None;
+    let mut out = Vec::new();
+    for lib in catalog.order()? {
+        if lib.kind != Kind::SqlView || lib.url == HIERARCHY_URL {
+            continue;
+        }
+        let view_tables = match &view_tables {
+            Some(t) => t,
+            None => view_tables.insert(libraries_step::view_tables(s)?),
+        };
+        for dep in &lib.depends_on {
+            let input = catalog
+                .get(&dep.canonical, dep.version.as_deref())
+                .with_context(|| format!("Library {} depends-on {}", lib.name, dep.label))
+                .map_err(usage)?;
+            let table = relation(input);
+            if !libraries_step::written(input, &table, view_tables) {
+                return Err(usage(libraries_step::missing(
+                    lib, lib, dep, &table, input, true,
+                )));
+            }
+        }
+        let name = lib.table(&s.strip_prefix);
+        let select = compose(lib, "postgresql", catalog, &bind)
+            .with_context(|| format!("Library {}", lib.name))
+            .map_err(usage)?;
+        out.push(SqlView {
+            library: lib.name.clone(),
+            create: format!("CREATE VIEW {} AS\n{select}", qualified(schema, &name)),
+            comment: format!("{SQLVIEW_COMMENT}{}", canonical(lib)),
+            name,
+        });
+    }
+    Ok(out)
+}
+
+/// `url|version`, or the url alone.
+fn canonical(lib: &Library) -> String {
+    match &lib.version {
+        Some(v) => format!("{}|{v}", lib.url),
+        None => lib.url.clone(),
+    }
 }
 
 /// The table, in the target schema, where upsert records which load wrote
@@ -198,7 +324,8 @@ pub fn view_tables(s: &Settings, d: &Database) -> Result<Vec<View>> {
 pub fn load(
     s: &Settings,
     d: &Database,
-    tables: &[Table],
+    tables: Vec<Table>,
+    views: &[SqlView],
     built: Option<&Built>,
     committed: &mut super::status::Committed,
 ) -> Result<()> {
@@ -218,10 +345,21 @@ pub fn load(
              which is also a view's table; rename the view or leave it out of [database] tables"
         )));
     }
+    let (tables, unwritten): (Vec<Table>, Vec<Table>) = tables
+        .into_iter()
+        .partition(|t| !t.derived || t.dir.is_dir());
+    let tables = &tables[..];
+    for t in unwritten {
+        println!(
+            "   {}: no table in the warehouse yet; run the libraries step",
+            t.name
+        );
+    }
     let mut plans = Vec::new();
     for t in tables {
         let column = super::partition::partition_key(&t.dir, &s.partition_column);
         let mut p = plan(&t.dir, &t.name, &column)?;
+        p.derived = t.derived;
         if upsert && let Some(key) = &t.key {
             p.key_nulls = key_has_nulls(&p.files, key)?;
             p.key = Some(key.clone());
@@ -240,11 +378,16 @@ pub fn load(
         &d.schema,
         tables,
         &plans,
+        views,
         upsert.as_ref(),
         committed,
     ))
     .context("starting the database runtime")??;
-    if let Some(u) = &upsert {
+    // A load of derived tables alone says nothing of the view tables: the
+    // change log is left to the next load that has them.
+    if let Some(u) = &upsert
+        && tables.iter().any(|t| !t.derived)
+    {
         record_load(s, &u.next, &plans, built)?;
     }
     Ok(())
@@ -340,13 +483,13 @@ impl<'a> Upsert<'a> {
 /// Every table needs its view's `getResourceKey()` column in upsert, as
 /// text in the Parquet files.
 fn check_keys(tables: &[Table], plans: &[Plan]) -> Result<()> {
-    for (t, p) in tables.iter().zip(plans) {
+    for (t, p) in tables.iter().zip(plans).filter(|(t, _)| !t.derived) {
         let key = t
             .key
             .clone()
             .ok_or_else(|| usage(anyhow::anyhow!(no_key(&t.name, &t.name))))?;
         match p.columns.iter().find(|(n, _)| *n == key) {
-            Some((_, "text")) => {}
+            Some((_, t)) if t == "text" => {}
             Some((_, other)) => bail!(
                 "{}.{key}: the getResourceKey() column is {other} in the Parquet files, not text",
                 t.name
@@ -390,6 +533,9 @@ fn decide_loads(
             let Some(u) = upsert else {
                 return Load::Full(None);
             };
+            if t.derived {
+                return Load::Full(None);
+            }
             let Some((c, built)) = &u.vouched else {
                 return Load::Full(None);
             };
@@ -467,10 +613,12 @@ fn record_load(s: &Settings, mark: &str, plans: &[Plan], built: Option<&Built>) 
 /// and whether some rows may have no key.
 struct Plan {
     table: String,
-    columns: Vec<(String, &'static str)>,
+    columns: Vec<(String, String)>,
     files: Vec<PathBuf>,
     key: Option<String>,
     key_nulls: bool,
+    /// A derived table (`Table::derived`).
+    derived: bool,
 }
 
 /// A table's columns, from its Parquet files, which must all agree.
@@ -480,7 +628,7 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
     let files = table_files_checked(dir, partition_column).with_context(|| {
         format!("{table}: cannot read its Parquet; the database was not changed")
     })?;
-    let mut columns: Option<Vec<(String, &'static str)>> = None;
+    let mut columns: Option<Vec<(String, String)>> = None;
     for f in &files {
         let reader = open_parquet(f)?;
         let these = reader
@@ -514,24 +662,32 @@ fn plan(dir: &Path, table: &str, partition_column: &str) -> Result<Plan> {
         files,
         key: None,
         key_nulls: false,
+        derived: false,
     })
 }
 
-/// The PostgreSQL type for a column the views step writes, as
-/// information_schema names it.
-fn pg_type(t: &DataType) -> Option<&'static str> {
-    Some(match t {
-        DataType::Utf8 | DataType::LargeUtf8 => "text",
-        DataType::Int64 => "bigint",
-        DataType::Int32 => "integer",
-        DataType::Float64 => "double precision",
-        DataType::Boolean => "boolean",
-        DataType::Date32 => "date",
-        DataType::Timestamp(_, Some(_)) => "timestamp with time zone",
-        DataType::Timestamp(_, None) => "timestamp without time zone",
-        DataType::Time64(TimeUnit::Microsecond) => "time without time zone",
-        _ => return None,
-    })
+/// The PostgreSQL type for a column the views step or DuckDB (the libraries
+/// step) writes, as information_schema names it, with a numeric's precision
+/// and scale (as `existing_columns` reads them).
+fn pg_type(t: &DataType) -> Option<String> {
+    Some(
+        match t {
+            DataType::Decimal128(p, s) => return Some(format!("numeric({p},{s})")),
+            DataType::Utf8 | DataType::LargeUtf8 => "text",
+            DataType::Int64 => "bigint",
+            DataType::Int32 => "integer",
+            DataType::Int16 | DataType::Int8 => "smallint",
+            DataType::Float64 => "double precision",
+            DataType::Float32 => "real",
+            DataType::Boolean => "boolean",
+            DataType::Date32 => "date",
+            DataType::Timestamp(_, Some(_)) => "timestamp with time zone",
+            DataType::Timestamp(_, None) => "timestamp without time zone",
+            DataType::Time64(TimeUnit::Microsecond) => "time without time zone",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 /// `schema.table`, quoted.
@@ -540,12 +696,15 @@ fn qualified(schema: &str, table: &str) -> String {
 }
 
 /// Load `plans` into `schema` in one transaction, then analyze the tables
-/// loaded.
+/// loaded. The SQLViews fhir-pipes made in `schema` are dropped first, so
+/// that no table they read is held by them, and `views` made after the
+/// tables are loaded, in the same transaction.
 async fn write(
     url: &str,
     schema: &str,
     tables: &[Table],
     plans: &[Plan],
+    views: &[SqlView],
     upsert: Option<&Upsert<'_>>,
     committed: &mut super::status::Committed,
 ) -> Result<()> {
@@ -576,6 +735,7 @@ async fn write(
         exec(&mut tx, &format!("CREATE SCHEMA {}", ident(schema))).await?;
     }
     let mut records = prepare_records(&mut tx, schema, upsert.is_some()).await?;
+    let kept = drop_sql_views(&mut tx, schema).await?;
     let (created, recreated) = reconcile_tables(&mut tx, schema, plans).await?;
     ensure_indexes(&mut tx, schema, plans, &created, upsert.is_some()).await?;
     let loads_table = qualified(schema, LOADS);
@@ -621,6 +781,7 @@ async fn write(
     }
     let (loaded, emptied) = apply_loads(&mut tx, schema, plans, loads).await?;
     update_marks(&mut tx, schema, plans, &emptied, upsert, &records).await?;
+    create_sql_views(&mut tx, schema, views, &kept).await?;
     *committed = super::status::Committed::Unknown;
     tx.commit().await.context("committing")?;
     *committed = super::status::Committed::Yes;
@@ -686,12 +847,7 @@ async fn reconcile_tables(
         .filter(|(_, p)| !p.files.is_empty())
     {
         let existing = existing_columns(conn, schema, &p.table).await?;
-        let wanted: Vec<(String, String)> = p
-            .columns
-            .iter()
-            .map(|(n, t)| (n.clone(), (*t).to_string()))
-            .collect();
-        if existing == wanted {
+        if existing == p.columns {
             continue;
         }
         recreated[i] = Some(if existing.is_empty() {
@@ -842,10 +998,21 @@ async fn update_marks(
     records: &Records,
 ) -> Result<()> {
     let loads_table = qualified(schema, LOADS);
+    // A derived table is always loaded in full: no mark.
     let filled: Vec<&str> = plans
         .iter()
-        .filter(|p| !p.files.is_empty())
+        .filter(|p| !p.files.is_empty() && !p.derived)
         .map(|p| p.table.as_str())
+        .collect();
+    let derived: HashSet<&str> = plans
+        .iter()
+        .filter(|p| p.derived)
+        .map(|p| p.table.as_str())
+        .collect();
+    let emptied: Vec<String> = emptied
+        .iter()
+        .filter(|t| !derived.contains(t.as_str()))
+        .cloned()
         .collect();
     match upsert {
         Some(u) => {
@@ -872,6 +1039,256 @@ async fn update_marks(
                 .with_context(|| loads_grant(schema, "SELECT, DELETE ON", &loads_table))?;
         }
         None => {}
+    }
+    Ok(())
+}
+
+/// What a SQLView's view had that dropping it loses, to give the view made
+/// again: an owner other than the role loading, and the privileges granted
+/// on it.
+#[derive(Debug, Default)]
+struct Kept {
+    owner: Option<String>,
+    grants: Vec<Grant>,
+}
+
+/// A privilege granted on a view, or on one of its columns.
+#[derive(Debug)]
+struct Grant {
+    /// The column, for a column privilege (`GRANT SELECT (id) ON …`).
+    column: Option<String>,
+    /// The role, or `None` for PUBLIC.
+    grantee: Option<String>,
+    /// `SELECT`, `INSERT` and so on, as `aclexplode` names it.
+    privilege: String,
+    grantable: bool,
+}
+
+/// The privileges `GRANT` takes on a view; `Kept` holds no other.
+const VIEW_PRIVILEGES: [&str; 8] = [
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+];
+
+/// Drop every view in `schema` that fhir-pipes made for a SQLView (by its
+/// comment, `SQLVIEW_COMMENT`), each before the views it reads. A view
+/// something else made on one of them stops the load: it is not dropped
+/// with it. Returns, by view name, the owner and privileges each had, which
+/// `create_sql_views` gives the view made again.
+async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<BTreeMap<String, Kept>> {
+    let rows = sqlx_core::query::query(
+        "SELECT c.oid::bigint, c.relname::text, obj_description(c.oid, 'pg_class'), \
+         CASE WHEN c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user) \
+         THEN pg_get_userbyid(c.relowner)::text END \
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind = 'v'",
+    )
+    .bind(schema)
+    .fetch_all(&mut *conn)
+    .await
+    .with_context(|| format!("reading the views of {schema}"))?;
+    let mut ours: BTreeMap<i64, String> = BTreeMap::new();
+    let mut kept: BTreeMap<String, Kept> = BTreeMap::new();
+    for r in &rows {
+        let comment: Option<String> = r.try_get(2)?;
+        if comment.is_some_and(|c| c.starts_with(SQLVIEW_COMMENT)) {
+            let name: String = r.try_get(1)?;
+            kept.insert(
+                name.clone(),
+                Kept {
+                    owner: r.try_get(3)?,
+                    grants: Vec::new(),
+                },
+            );
+            ours.insert(r.try_get(0)?, name);
+        }
+    }
+    if ours.is_empty() {
+        return Ok(kept);
+    }
+    let oids: Vec<i64> = ours.keys().copied().collect();
+    // The view's privileges (`relacl`) and its columns' (`attacl`). The
+    // owner's own privileges come with ownership; a grantee of 0 is PUBLIC.
+    let grants = sqlx_core::query::query(
+        "SELECT c.relname::text, NULL::text, \
+         CASE WHEN a.grantee <> 0 THEN pg_get_userbyid(a.grantee)::text END, \
+         a.privilege_type::text, a.is_grantable \
+         FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a \
+         WHERE c.oid::bigint = ANY($1) AND a.grantee <> c.relowner \
+         UNION ALL \
+         SELECT c.relname::text, t.attname::text, \
+         CASE WHEN a.grantee <> 0 THEN pg_get_userbyid(a.grantee)::text END, \
+         a.privilege_type::text, a.is_grantable \
+         FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid \
+         CROSS JOIN LATERAL aclexplode(t.attacl) a \
+         WHERE c.oid::bigint = ANY($1) AND t.attnum > 0 AND NOT t.attisdropped \
+         AND a.grantee <> c.relowner \
+         ORDER BY 1, 2 NULLS FIRST, 3, 4",
+    )
+    .bind(&oids)
+    .fetch_all(&mut *conn)
+    .await
+    .context("reading the privileges on the SQLViews")?;
+    for r in &grants {
+        let name: String = r.try_get(0)?;
+        let privilege: String = r.try_get(3)?;
+        if !VIEW_PRIVILEGES.contains(&privilege.as_str()) {
+            continue;
+        }
+        if let Some(k) = kept.get_mut(&name) {
+            k.grants.push(Grant {
+                column: r.try_get(1)?,
+                grantee: r.try_get(2)?,
+                privilege,
+                grantable: r.try_get(4)?,
+            });
+        }
+    }
+    // (view, a relation it reads), among these views.
+    let reads: Vec<(i64, i64)> = sqlx_core::query::query(
+        "SELECT DISTINCT r.ev_class::bigint, d.refobjid::bigint \
+         FROM pg_depend d JOIN pg_rewrite r ON r.oid = d.objid \
+         WHERE d.classid = 'pg_rewrite'::regclass AND d.refclassid = 'pg_class'::regclass \
+         AND r.ev_class <> d.refobjid \
+         AND r.ev_class::bigint = ANY($1) AND d.refobjid::bigint = ANY($1)",
+    )
+    .bind(&oids)
+    .fetch_all(&mut *conn)
+    .await
+    .context("reading what the SQLViews read")?
+    .iter()
+    .map(|r| Ok((r.try_get(0)?, r.try_get(1)?)))
+    .collect::<std::result::Result<_, sqlx_core::error::Error>>()?;
+    while !ours.is_empty() {
+        // A view no remaining view reads.
+        let free: Vec<i64> = ours
+            .keys()
+            .copied()
+            .filter(|v| {
+                !reads
+                    .iter()
+                    .any(|(by, read)| read == v && ours.contains_key(by))
+            })
+            .collect();
+        if free.is_empty() {
+            bail!("the SQLViews in {schema} read each other in a cycle; drop them by hand");
+        }
+        for v in free {
+            let name = ours.remove(&v).expect("a remaining view");
+            exec(conn, &format!("DROP VIEW {}", qualified(schema, &name)))
+                .await
+                .with_context(|| {
+                    format!(
+                        "dropping the view {schema}.{name}, a SQLView fhir-pipes made, to make \
+                         it again; drop what depends on it first"
+                    )
+                })?;
+        }
+    }
+    Ok(kept)
+}
+
+/// Make each of `views` in `schema`, with its comment, and give it what
+/// `kept` holds for a view of its name: its owner and the privileges granted
+/// on it. A view PostgreSQL cannot make fails the load, which rolls back.
+async fn create_sql_views(
+    conn: &mut PgConnection,
+    schema: &str,
+    views: &[SqlView],
+    kept: &BTreeMap<String, Kept>,
+) -> Result<()> {
+    for v in views {
+        sqlx_core::query::query(AssertSqlSafe(v.create.clone()))
+            .execute(&mut *conn)
+            .await
+            .with_context(|| {
+                format!(
+                    "Library {}: creating the view {schema}.{}; the database was not changed",
+                    v.library, v.name
+                )
+            })?;
+        exec(
+            conn,
+            &format!(
+                "COMMENT ON VIEW {} IS {}",
+                qualified(schema, &v.name),
+                sql_str(&v.comment)
+            ),
+        )
+        .await?;
+        if let Some(k) = kept.get(&v.name) {
+            restore(conn, schema, v, k).await.with_context(|| {
+                format!(
+                    "Library {}: giving the view {schema}.{} the owner and privileges it \
+                         had; the database was not changed",
+                    v.library, v.name
+                )
+            })?;
+        }
+        println!("   {} → {schema}.{} (view)", v.library, v.name);
+    }
+    Ok(())
+}
+
+/// Give the view `v` in `schema` the owner and grants it had. The owner
+/// first, then the grants, made as the owner: granting as a member of the
+/// owning role is allowed, so a role that could drop the view can grant on
+/// it again. Who made each grant is not kept. A column privilege on a
+/// column the view no longer has is left out, with a warning.
+async fn restore(conn: &mut PgConnection, schema: &str, v: &SqlView, kept: &Kept) -> Result<()> {
+    let view = &qualified(schema, &v.name);
+    let columns: Vec<String> = if kept.grants.iter().any(|g| g.column.is_some()) {
+        sqlx_core::query_scalar::query_scalar(
+            "SELECT attname::text FROM pg_attribute \
+             WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped",
+        )
+        .bind(view.as_str())
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| format!("reading the columns of {schema}.{}", v.name))?
+    } else {
+        Vec::new()
+    };
+    if let Some(owner) = &kept.owner {
+        exec(
+            conn,
+            &format!("ALTER VIEW {view} OWNER TO {}", ident(owner)),
+        )
+        .await?;
+    }
+    for g in &kept.grants {
+        let grantee = match &g.grantee {
+            Some(role) => ident(role),
+            None => "PUBLIC".to_string(),
+        };
+        let option = if g.grantable {
+            " WITH GRANT OPTION"
+        } else {
+            ""
+        };
+        let on = match &g.column {
+            Some(c) if !columns.contains(c) => {
+                eprintln!(
+                    "warning: Library {}: the view {schema}.{} no longer has column {c}, so \
+                     {} ({c}) granted to {grantee} on it is dropped",
+                    v.library, v.name, g.privilege
+                );
+                continue;
+            }
+            Some(c) => format!(" ({})", ident(c)),
+            None => String::new(),
+        };
+        exec(
+            conn,
+            &format!("GRANT {}{on} ON {view} TO {grantee}{option}", g.privilege),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1065,7 +1482,9 @@ async fn existing_columns(
     table: &str,
 ) -> Result<Vec<(String, String)>> {
     let rows = sqlx_core::query::query(
-        "SELECT column_name::text, data_type::text FROM information_schema.columns \
+        "SELECT column_name::text, CASE WHEN data_type = 'numeric' THEN 'numeric(' || \
+         coalesce(numeric_precision::text, '') || ',' || coalesce(numeric_scale::text, '') || ')' \
+         ELSE data_type::text END FROM information_schema.columns \
          WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position",
     )
     .bind(schema)
@@ -1146,6 +1565,7 @@ fn csv(batch: &RecordBatch) -> Result<String> {
             DataType::Utf8
             | DataType::LargeUtf8
             | DataType::Float64
+            | DataType::Float32
             | DataType::Int64
             | DataType::Timestamp(_, _) => Ok(None),
             _ => ArrayFormatter::try_new(c.as_ref(), &options).map(Some),
@@ -1168,14 +1588,11 @@ fn csv(batch: &RecordBatch) -> Result<String> {
                 }
                 DataType::Float64 => {
                     let v = column.as_primitive::<Float64Type>().value(row);
-                    out.push_str(&if v.is_nan() {
-                        "NaN".to_string()
-                    } else if v.is_infinite() {
-                        if v > 0.0 { "Infinity" } else { "-Infinity" }.to_string()
-                    } else {
-                        // Rust prints the shortest text that reads back to v.
-                        v.to_string()
-                    });
+                    float(&mut out, v, || v.to_string());
+                }
+                DataType::Float32 => {
+                    let v = column.as_primitive::<Float32Type>().value(row);
+                    float(&mut out, f64::from(v), || v.to_string());
                 }
                 DataType::Timestamp(unit, tz) => {
                     let c = column.as_ref();
@@ -1221,6 +1638,19 @@ fn csv(batch: &RecordBatch) -> Result<String> {
     Ok(out)
 }
 
+/// A float as PostgreSQL reads it: `text`, Rust's shortest text that reads
+/// back to the value; NaN and the infinities by PostgreSQL's names. `v` is
+/// the value, widened.
+fn float(out: &mut String, v: f64, text: impl FnOnce() -> String) {
+    if v.is_nan() {
+        out.push_str("NaN");
+    } else if v.is_infinite() {
+        out.push_str(if v > 0.0 { "Infinity" } else { "-Infinity" });
+    } else {
+        out.push_str(&text());
+    }
+}
+
 fn quote(out: &mut String, s: &str) {
     out.push('"');
     out.push_str(&s.replace('"', "\"\""));
@@ -1232,8 +1662,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{
-        BooleanArray, Date32Array, Float64Array, Int64Array, StringArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampSecondArray,
+        BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array, Int8Array,
+        Int16Array, Int64Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampSecondArray,
     };
     use arrow::datatypes::{Field, Schema};
 
@@ -1249,13 +1680,15 @@ mod tests {
             resource: resource.into(),
             key: Some("id".into()),
             time_dependent,
+            derived: false,
         };
         let plan = |name: &str| Plan {
             table: name.into(),
-            columns: vec![("id".into(), "text")],
+            columns: vec![("id".into(), "text".into())],
             files: vec![PathBuf::from("part-0.parquet")],
             key: Some("id".into()),
             key_nulls: false,
+            derived: false,
         };
         let names = [
             "now", "new", "patients", "built", "every", "dropped", "other", "ids", "same",
@@ -1347,6 +1780,32 @@ mod tests {
         }
     }
 
+    /// A derived table has no resource key: upsert loads it in full, with no
+    /// reason of its own, and does not ask for its key.
+    #[test]
+    fn a_derived_table_is_loaded_in_full_without_a_key() {
+        let mut log = Changes::default();
+        log.tables.insert("location_hierarchy".into(), "f1".into());
+        let built = Built::new();
+        let upsert = Upsert {
+            vouched: Some((log, &built)),
+            last: Some("m1".into()),
+            next: "m2".into(),
+        };
+        let tables = [derived_table("location_hierarchy", PathBuf::new())];
+        let plans = [Plan {
+            table: "location_hierarchy".into(),
+            columns: vec![("id".into(), "text".into())],
+            files: vec![PathBuf::from("part-0.parquet")],
+            key: None,
+            key_nulls: false,
+            derived: true,
+        }];
+        let loads = decide_loads(&tables, &plans, Some(&upsert), &[None], None);
+        assert!(matches!(loads[..], [Load::Full(None)]));
+        check_keys(&tables, &plans).unwrap();
+    }
+
     #[test]
     fn csv_quotes_strings_and_leaves_nulls_empty() {
         let schema = Arc::new(Schema::new(vec![
@@ -1383,6 +1842,39 @@ mod tests {
         assert_eq!(
             csv(&batch).unwrap(),
             "\"a \"\"b\"\", c\",1,41.735497,true,2020-05-01,2020-05-01 00:00:00.500000+00\n\"\",,NaN,false,,\n,-3,,,,\n"
+        );
+    }
+
+    /// DuckDB's types: DECIMAL, SMALLINT, TINYINT and REAL.
+    #[test]
+    fn csv_writes_decimals_small_integers_and_reals() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Decimal128(10, 2), true),
+            Field::new("s", DataType::Int16, true),
+            Field::new("t", DataType::Int8, true),
+            Field::new("r", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    Decimal128Array::from(vec![Some(150), Some(-3), None])
+                        .with_precision_and_scale(10, 2)
+                        .unwrap(),
+                ),
+                Arc::new(Int16Array::from(vec![Some(1), None, Some(-32768)])),
+                Arc::new(Int8Array::from(vec![Some(2), Some(-128), None])),
+                Arc::new(Float32Array::from(vec![
+                    Some(0.1),
+                    Some(f32::NEG_INFINITY),
+                    Some(f32::NAN),
+                ])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            csv(&batch).unwrap(),
+            "1.50,1,2,0.1\n-0.03,,-128,-Infinity\n,-32768,,NaN\n"
         );
     }
 
@@ -1508,12 +2000,22 @@ mod tests {
 
     #[test]
     fn types_map_to_postgres() {
-        assert_eq!(pg_type(&DataType::Utf8), Some("text"));
+        assert_eq!(pg_type(&DataType::Utf8).as_deref(), Some("text"));
+        for (t, pg) in [
+            (DataType::Decimal128(38, 0), "numeric(38,0)"),
+            (DataType::Decimal128(10, 2), "numeric(10,2)"),
+            (DataType::Int16, "smallint"),
+            (DataType::Int8, "smallint"),
+            (DataType::Float32, "real"),
+        ] {
+            assert_eq!(pg_type(&t).as_deref(), Some(pg), "{t}");
+        }
         assert_eq!(
             pg_type(&DataType::Timestamp(
                 TimeUnit::Microsecond,
                 Some("UTC".into())
-            )),
+            ))
+            .as_deref(),
             Some("timestamp with time zone")
         );
         assert_eq!(pg_type(&DataType::Binary), None);

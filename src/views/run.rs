@@ -114,7 +114,8 @@ pub fn table_name(view_name: &str, strip_prefix: &[String]) -> String {
 }
 
 /// A view's table must be a SQL name, which also keeps it one directory
-/// under parquet/, and must not be the table the Location transform writes.
+/// under parquet/, and must not be a table the locations step writes:
+/// `locations` (the Location transform's) or `location_hierarchy`.
 fn check_table(view: &str, table: &str) -> Result<()> {
     let sql_name = table.starts_with(|c: char| c.is_ascii_lowercase())
         && table
@@ -130,6 +131,12 @@ fn check_table(view: &str, table: &str) -> Result<()> {
         bail!(
             "view {view} would write table locations, which the Location transform writes; \
              rename the view"
+        );
+    }
+    if table == crate::library::resolve::HIERARCHY_TABLE {
+        bail!(
+            "view {view} would write table location_hierarchy, which the locations step \
+             writes; rename the view"
         );
     }
     Ok(())
@@ -320,6 +327,25 @@ mod tests {
             fs::write(dir.path().join("v.json"), view.to_string()).unwrap();
             let err = discover(dir.path(), &["icr_".into(), "icr".into()]).unwrap_err();
             assert!(err.to_string().contains(why), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_the_location_hierarchy_table() {
+        // The locations step writes location_hierarchy mid-refresh; a view
+        // (with a url or without) would replace it.
+        for strip in [vec![], vec!["icr_".to_string()]] {
+            let dir = tempfile::tempdir().unwrap();
+            let view = serde_json::json!({"resourceType": "ViewDefinition",
+                "name": "LocationHierarchy", "resource": "Location", "status": "active",
+                "select": [{"column": [{"name": "id", "path": "getResourceKey()"}]}]});
+            fs::write(dir.path().join("v.json"), view.to_string()).unwrap();
+            let err = discover(dir.path(), &strip).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("location_hierarchy, which the locations step writes"),
+                "{err}"
+            );
         }
     }
 

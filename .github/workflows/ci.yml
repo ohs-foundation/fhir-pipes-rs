@@ -74,16 +74,32 @@ jobs:
             -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem \
             -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
           for _ in $(seq 30); do docker exec pg pg_isready -U postgres && break; sleep 1; done
+      # The duckdb CLI, pinned, for the tests that run SQL in DuckDB (such as
+      # tests/location_hierarchy.rs); they are skipped where it is not
+      # installed. The test steps set DUCKDB_AGENT_MODE=0 so duckdb runs as a
+      # plain CLI.
+      - if: matrix.os == 'ubuntu-latest'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/duckdb.zip" \
+            https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          unzip -o "$RUNNER_TEMP/duckdb.zip" -d "$RUNNER_TEMP/duckdb"
+          echo "$RUNNER_TEMP/duckdb" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/duckdb/duckdb" --version
       - run: cargo test --workspace --locked
         env:
+          DUCKDB_AGENT_MODE: '0'
           FHIR_PIPES_TEST_DATABASE_URL: ${{ matrix.os == 'ubuntu-latest' && 'postgres://postgres:test@localhost:5432/postgres?sslmode=require' || '' }}
           SOF_CONFORMANCE_DB: ${{ matrix.os == 'ubuntu-latest' && 'postgres://postgres:test@localhost:5432/postgres?sslmode=require' || '' }}
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --all-features
         env:
+          DUCKDB_AGENT_MODE: '0'
           FHIR_PIPES_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=require
       - if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --no-default-features
+        env:
+          DUCKDB_AGENT_MODE: '0'
   # Known advisories against Cargo.lock. .cargo/audit.toml sets what fails
   # (a vulnerability, an unmaintained or an unsound crate) and which are
   # ignored and why. The weekly run catches advisories published after a merge.

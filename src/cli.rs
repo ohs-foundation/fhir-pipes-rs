@@ -70,6 +70,8 @@ pub enum Command {
     /// Run, check and test SQL-on-FHIR ViewDefinitions directly: run, sql,
     /// validate, lint, test
     Views(crate::views::ViewsArgs),
+    /// Build SQL on FHIR Libraries (SQLView, SQLQuery) from .sql files
+    Libraries(crate::library::LibrariesArgs),
     /// Turn a snapshot of FHIR resources into a dataset for another tool (offline)
     #[command(subcommand)]
     Transform(TransformCommand),
@@ -447,6 +449,9 @@ pub struct TransformArgs {
     /// Also write Locations that have no point and no usable boundary, with the geometry columns null (by default they are reported and left out)
     #[arg(long)]
     pub keep_without_geometry: bool,
+    /// Also write the location_hierarchy table (depth, admin units and path of every Location) to this directory, partitioned by country
+    #[arg(long)]
+    pub hierarchy_out: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -776,6 +781,9 @@ pub struct RunArgs {
     /// Also write Locations that have no point and no usable boundary, with the geometry columns null (by default they are reported and left out)
     #[arg(long)]
     pub keep_without_geometry: bool,
+    /// Also write the location_hierarchy table to this directory, as transform does
+    #[arg(long)]
+    pub hierarchy_out: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -787,6 +795,7 @@ impl RunArgs {
             row_group_size: self.row_group_size,
             partition_by: self.partition_by.clone(),
             keep_without_geometry: self.keep_without_geometry,
+            hierarchy_out: self.hierarchy_out.clone(),
         }
     }
 }

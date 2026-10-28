@@ -37,6 +37,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
                 row_group_size: DEFAULT_ROW_GROUP_SIZE,
                 partition_by: DEFAULT_PARTITION_BY.to_string(),
                 keep_without_geometry: false,
+                hierarchy_out: Some(out.join("location_hierarchy")),
             },
             s.profile.as_deref(),
         )?;
@@ -75,6 +76,7 @@ pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             partition_by: DEFAULT_PARTITION_BY.to_string(),
             keep_without_geometry: false,
+            hierarchy_out: Some(out.join("location_hierarchy")),
         },
         s.profile.as_deref(),
     )?;

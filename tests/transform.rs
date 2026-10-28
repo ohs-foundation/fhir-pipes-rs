@@ -677,3 +677,23 @@ fn duckdb_reads_rows_without_geometry_as_null_when_available() {
         "{text}"
     );
 }
+
+#[test]
+fn transform_writes_the_hierarchy_table() {
+    let out = tempfile::tempdir().unwrap();
+    let hierarchy = out.path().join("location_hierarchy");
+    let assert = Command::cargo_bin("fhir-pipes")
+        .unwrap()
+        .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
+        .args(["transform", "locations", "--snapshot"])
+        .arg(fixture_snapshot())
+        .arg("--out")
+        .arg(out.path())
+        .arg("--hierarchy-out")
+        .arg(&hierarchy)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("location_hierarchy rows"), "{stdout}");
+    assert!(hierarchy.join("country=NG/part-0.parquet").exists());
+}

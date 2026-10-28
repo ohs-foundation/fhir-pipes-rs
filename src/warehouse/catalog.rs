@@ -276,10 +276,16 @@ pub fn render(
             format!("[\n{}\n  ]", list.join(",\n"))
         } else {
             let b = base.as_deref().unwrap_or_default();
-            sql_str(&format!(
-                "{b}parquet/{}/{}=*/**/*.parquet",
-                t.name, t.column
-            ))
+            // An unpartitioned table (a libraries step result without a
+            // partition column) has its files at the top: parquet/<t>/part-0.parquet.
+            if t.files.iter().all(|f| f.matches('/').count() == 2) {
+                sql_str(&format!("{b}parquet/{}/part-*.parquet", t.name))
+            } else {
+                sql_str(&format!(
+                    "{b}parquet/{}/{}=*/**/*.parquet",
+                    t.name, t.column
+                ))
+            }
         };
         let _ = writeln!(
             out,
@@ -556,6 +562,19 @@ mod tests {
         assert!(sql.contains("-- empty: no files"), "{sql}");
         assert!(!sql.contains("VIEW \"empty\""), "{sql}");
         assert!(sql.contains("duckdb -init catalog.sql"), "{sql}");
+    }
+
+    #[test]
+    fn an_unpartitioned_table_is_globbed_at_its_top() {
+        let t = [Table {
+            name: "totals".into(),
+            column: "country".into(),
+            files: vec!["parquet/totals/part-0.parquet".into()],
+        }];
+        assert!(
+            render(&t, None, None, "now")
+                .contains("read_parquet('parquet/totals/part-*.parquet', hive_partitioning = true")
+        );
     }
 
     #[test]

@@ -51,6 +51,9 @@ pub fn partition_key(table_dir: &Path, default: &str) -> String {
 
 /// The parquet files of a partitioned table: those under a `<column>=` directory,
 /// which leaves out metadata kept beside the data (e.g. a catalog's items.parquet).
+/// A table with no `<column>=` directory is unpartitioned, as a libraries
+/// step result without a partition column is: its files are the
+/// `part-*.parquet` files in the table directory itself.
 /// A missing or unreadable directory counts as empty.
 pub fn table_files(table_dir: &Path, column: &str) -> Vec<PathBuf> {
     list_table_files(table_dir, column, |dir| {
@@ -73,16 +76,33 @@ type Entries = fn(&Path) -> Result<Vec<PathBuf>>;
 fn list_table_files(table_dir: &Path, column: &str, entries: Entries) -> Result<Vec<PathBuf>> {
     let prefix = format!("{column}=");
     let mut files = Vec::new();
-    for part in entries(table_dir)? {
-        if part.is_dir()
-            && part
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
-        {
-            collect_parquet(&part, entries, &mut files)?;
+    let mut partitioned = false;
+    let top = entries(table_dir)?;
+    for part in &top {
+        let name = part
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if part.is_dir() && name.contains('=') && !name.starts_with('.') {
+            partitioned = true;
+        }
+        if part.is_dir() && name.starts_with(&prefix) {
+            collect_parquet(part, entries, &mut files)?;
         }
     }
+    if !partitioned {
+        files.extend(top.into_iter().filter(|p| is_part_file(p)));
+    }
     Ok(files)
+}
+
+/// `part-<n>.parquet`, as fhir-pipes names a table's files.
+fn is_part_file(p: &Path) -> bool {
+    p.is_file()
+        && p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n.starts_with("part-") && n.ends_with(".parquet")
+        })
 }
 
 fn collect_parquet(dir: &Path, entries: Entries, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -275,6 +295,35 @@ pub fn replace(staged: &Path, table_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unpartitioned_tables_files_are_its_part_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path();
+        for f in ["part-0.parquet", "part-1.parquet", "items.parquet"] {
+            fs::write(t.join(f), "").unwrap();
+        }
+        let names = |files: Vec<PathBuf>| -> Vec<String> {
+            files
+                .iter()
+                .map(|f| f.strip_prefix(t).unwrap().display().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(table_files(t, "country")),
+            ["part-0.parquet", "part-1.parquet"]
+        );
+        // Partitioned: only the files under the partition directories.
+        fs::create_dir_all(t.join("country=SLE")).unwrap();
+        fs::write(t.join("country=SLE/part-0.parquet"), "").unwrap();
+        assert_eq!(
+            names(table_files(t, "country")),
+            [Path::new("country=SLE")
+                .join("part-0.parquet")
+                .display()
+                .to_string()]
+        );
+    }
 
     #[test]
     fn a_tables_partition_key_comes_from_its_directories() {

@@ -1,0 +1,27 @@
+{
+  "resourceType": "ViewDefinition",
+  "url": "https://healthcampaigns.org/fhir/analytics/ViewDefinition/Location",
+  "version": "0.1.0",
+  "name": "Location",
+  "title": "Location",
+  "status": "active",
+  "description": "One row per Location, with no geometry: its parent (partOf), its type code, whether it is an administrative unit and its administrative code. The constants are the project-specific parts: admin_unit_type is the type code that marks an administrative unit, and admin_code_system is the identifier system that holds the administrative code. fhir-pipes reads the first of a list of identifier systems; this view reads one, so the two differ only when a Location carries the code under a second system. LocationHierarchy depends on this view.",
+  "resource": "Location",
+  "constant": [
+    { "name": "admin_unit_type", "valueString": "admin-unit" },
+    { "name": "admin_code_system", "valueString": "https://icr.healthcampaigns.org/identifiers/pcode" }
+  ],
+  "select": [
+    {
+      "column": [
+        { "name": "id", "path": "getResourceKey()", "type": "id" },
+        { "name": "name", "path": "name", "type": "string" },
+        { "name": "status", "path": "status", "type": "code" },
+        { "name": "part_of", "path": "partOf.getReferenceKey(Location)", "type": "string" },
+        { "name": "type_code", "path": "type.coding.first().code", "type": "code" },
+        { "name": "is_admin", "path": "type.coding.first().code = %admin_unit_type", "type": "boolean" },
+        { "name": "admin_code", "path": "identifier.where(system = %admin_code_system).value.first()", "type": "string" }
+      ]
+    }
+  ]
+}

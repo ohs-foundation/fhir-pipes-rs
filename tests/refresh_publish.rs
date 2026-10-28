@@ -895,6 +895,7 @@ fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {
         [
             "_report.json",
             "catalog.sql",
+            "location_hierarchy",
             "locations",
             "manifest.json",
             "obs",
@@ -916,7 +917,10 @@ fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
     let tables: Vec<&String> = manifest["tables"].as_object().unwrap().keys().collect();
-    assert_eq!(tables, ["locations", "obs", "patient"]);
+    assert_eq!(
+        tables,
+        ["location_hierarchy", "locations", "obs", "patient"]
+    );
     assert!(manifest["tables"]["locations"]["rows"].as_i64().unwrap() > 2);
     let sql = fs::read_to_string(data.join("catalog.sql")).unwrap();
     assert!(

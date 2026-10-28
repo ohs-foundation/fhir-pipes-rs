@@ -12,6 +12,7 @@ mod http;
 mod import;
 mod index;
 mod inspect;
+mod library;
 mod load;
 mod population;
 mod profile;
@@ -79,6 +80,7 @@ fn run(cli: cli::Cli) -> anyhow::Result<()> {
         #[cfg(unix)]
         cli::Command::Serve(args) => serve::run(&args),
         cli::Command::Views(args) => views::run(&args),
+        cli::Command::Libraries(args) => library::run(&args),
         cli::Command::Terminology(command) => terminology::run(&command),
     }
 }
