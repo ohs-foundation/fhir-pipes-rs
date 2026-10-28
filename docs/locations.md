@@ -481,8 +481,8 @@ Library reads it (see [libraries.md](libraries.md#locationhierarchy)).
 | `admin_level` | The Location's level among the administrative units on its chain; null for a Location that is not an administrative unit |
 | `admin0_name` to `admin4_name` | The names of the first five administrative units on the chain, root first |
 | `admin0_code` to `admin4_code` | Their codes |
-| `country` | `admin0_code` |
 | `path` | The ids from the root down to the Location, separated by `/`, with a leading `/` |
+| `country` | `admin0_code`. It is the last column in the files |
 
 ### The report
 

@@ -135,8 +135,16 @@ A source is one of:
 - a directory of JSON files, read with its subdirectories. A relative path
   resolves against the config file (or, for `libraries sql`, the current
   directory);
-- a FHIR package `.tgz`, as a path or an https URL;
-- `name#version`, a package in the local FHIR package cache.
+- a FHIR package `.tgz`, as a path or an https URL. An https package is
+  downloaded again on every run that loads the Libraries;
+- `name#version`, a package in the local FHIR package cache
+  (`~/.fhir/packages`). fhir-pipes does not download it: it must be in the
+  cache already.
+
+A `refresh` loads the sources once, before the first step that needs them
+(the `libraries` step, else the `database` step), and both steps use what it
+loaded. The design asked for a package cache in the warehouse, so that a run
+would not fetch an https package each time; that cache is not built yet.
 
 A source's SQL is code that fhir-pipes runs. The libraries step runs it in
 duckdb with the same file access as the refresh: a Library's query can read
@@ -207,7 +215,7 @@ step and in `libraries sql`. fhir-pipes does not run the SQLView's SQL. The
 SQL is in the Library so that the columns and rules are written down, and it
 is portable. The table has one row per Location, with the columns `id`,
 `name`, `part_of`, `is_admin`, `depth`, `admin_level`, `admin0_name` to
-`admin4_name`, `admin0_code` to `admin4_code`, `country` and `path`. `part_of`
+`admin4_name`, `admin0_code` to `admin4_code`, `path` and `country`. `part_of`
 is the id the Location's `partOf` reference gives, so an orphan Location keeps
 the id of its missing parent. Where the table's rules differ from the SQL on
 broken trees (duplicate ids, cycles, chains deeper than 12), the table is the
@@ -219,16 +227,23 @@ written the table, the step stops and says to run the locations step.
 ## Where results go
 
 A SQLQuery writes `parquet/<table>/`, with `<table>` named from the Library's
-`name`. The Libraries run in dependency order in one duckdb process. Each
-result is written to staging with the other tables and published with them
-(see [What a failed run leaves behind](refresh.md#what-a-failed-run-leaves-behind)).
+`name`. The Libraries run in dependency order, each in its own duckdb runs:
+a `DESCRIBE` of the query, to see whether it has a `country` column, then a
+`COPY` of its rows, plus one more run that writes the empty file of an empty
+partitioned result. A SQLView is inlined into each query that reads it, so
+its SQL is computed again for each of them. Each result is written to
+staging with the other tables and published with them (see
+[What a failed run leaves behind](refresh.md#what-a-failed-run-leaves-behind)).
 
 - A result with a `country` column is partitioned by it:
   `country=<value>/part-0.parquet`, and `country=__HIVE_DEFAULT_PARTITION__`
   for rows with no country. The column is also in the files.
 - Any other result is one file, `part-0.parquet`, in the table directory.
 - An empty result still writes a file with its columns.
-- The Library's `ORDER BY` is kept in the file, or in each partition.
+- The Library's `ORDER BY` is kept only in an unpartitioned result, which is
+  one file. DuckDB's partitioned `COPY` does not keep the order within a
+  partition, so a reader of a partitioned result should use its own
+  `ORDER BY`.
 
 A result cannot use the name of the table of a view in the views directory,
 a `[[partition.lookup]]` table, `locations` or `location_hierarchy`. Such a

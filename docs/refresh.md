@@ -835,6 +835,16 @@ libraries = [
 ]
 ```
 
+An `https://` package is downloaded again on every run that loads the
+Libraries, and a `name#version` package must already be in the local FHIR
+package cache (`~/.fhir/packages`); fhir-pipes does not download it. The
+design asked for a package cache in the warehouse, which is not built yet.
+The sources are loaded once per run, by the `libraries` step (or by the
+`database` step when the libraries step does not run), so the database
+loads the SQLViews and results from the same Library content the libraries
+step ran. A source's SQL runs with the refresh's file access: use only
+sources you trust (see [Sources](libraries.md#sources)).
+
 A Library's `depends-on` canonicals resolve from the built-ins first
 (the `Location` view and the `LocationHierarchy` SQLView), then from the
 views directory, then from each source in order. A view in the views
@@ -842,8 +852,8 @@ directory needs a `url` for a Library to name it; views without one are
 skipped. `fhir-pipes libraries build` turns `.sql` files with `.toml`
 metadata into Library JSON.
 
-Each SQLQuery Library runs after the Libraries it depends on, in one duckdb
-process, and writes `parquet/<table>/`, the table named from the Library's
+Each SQLQuery Library runs after the Libraries it depends on and writes
+`parquet/<table>/`, the table named from the Library's
 `name` as a view's is (`IcrCoverageByArea` → `coverage_by_area`). Its inputs
 are read as follows:
 
@@ -864,8 +874,12 @@ are (`country=<value>/part-0.parquet`, rows with no country in
 its columns. A result table cannot be the table of a view in the views
 directory (with a url or without), a `[[partition.lookup]]` table, `locations` or
 `location_hierarchy`: such a Library stops the step before anything runs.
-A Library's `ORDER BY` is kept in the file, or within each
-partition of a partitioned result.
+Each Library takes its own duckdb runs: a `DESCRIBE` of the query, a `COPY`
+of its rows, and, for an empty partitioned result, one more to write its
+empty file. A SQLView is computed again in each query that reads it. A
+Library's `ORDER BY` is kept only in an unpartitioned result (one file);
+DuckDB's partitioned `COPY` does not keep it within a partition, so readers
+of a partitioned result should use their own `ORDER BY`.
 
 The results are written to staging like every other table and published
 with them, so a run that fails in `libraries` leaves the warehouse as it was.
