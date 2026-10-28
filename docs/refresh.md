@@ -46,6 +46,7 @@ hooks can run after a run that failed as well as after one that succeeded
 | `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations`; with `--reuse-raw` and a snapshot there, transformed without an extract | |
 | `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, 20,000 lines at a time, and write the type's tables as soon as its views are done | |
 | `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
+| `libraries` | run each SQLQuery Library over this run's tables and write its result as a table; only with `libraries` in the config. See [Libraries](#libraries) | duckdb |
 | `manifest` | `manifest.json`: time, server (see below), each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
 | `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | |
@@ -53,15 +54,17 @@ hooks can run after a run that failed as well as after one that succeeded
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
 `locations` runs first. `views` and `tiles` then run side by side, since both
-read only the registry. The manifest, the catalog and the database follow.
+read only the registry. `libraries` runs once both are done, then the
+manifest, the catalog and the database.
 The run's tables, manifest and catalog are then swapped in together (see
 below), and the hooks and the push run last, on the swapped-in warehouse.
 
 By default every step except `push` runs, `catalog` only when the config has a
-`[catalog]` section, and `database` only with `[database]`. `--only
-views,tiles` picks steps (the manifest and the catalog are added when a data
-step is picked, and the database when `views` is, since it loads the view
-tables), `--skip tiles` leaves some out,
+`[catalog]` section, `database` only with `[database]`, and `libraries` only
+with `libraries`. `--only views,tiles` picks steps (the manifest and the
+catalog are added when a data step is picked, `libraries` when `locations` or
+`views` is, since the Libraries read their tables, and the database when
+`views` or `libraries` is), `--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
 
@@ -98,8 +101,8 @@ same way, then `manifest.json` and `catalog.sql` are renamed into place. A
 reader can see files from two runs only during those renames. A table is
 never half-written.
 
-So a run that fails in `locations`, `views`, `tiles`, `manifest`, `catalog`
-or `database` leaves every table, `views/`, `tiles/`, `manifest.json` and
+So a run that fails in `locations`, `views`, `tiles`, `libraries`,
+`manifest`, `catalog` or `database` leaves every table, `views/`, `tiles/`, `manifest.json` and
 `catalog.sql` exactly as the previous successful run left them, and removes
 its staging. What it does change:
 
@@ -300,7 +303,8 @@ A view that is removed or renamed leaves its table behind in `parquet/`.
 refresh does not delete it: it is still counted in the manifest, named in
 the catalog and pushed. A run that ran the views step ends with a note
 naming each table in `parquet/` that no current view writes, leaving out
-`locations` and the lookup tables, and `--check` lists them as
+`locations`, `location_hierarchy`, the lookup tables and the tables this
+run's Libraries wrote, and `--check` lists them as
 `unwritten:`. Delete a table's directory by hand if it is no longer wanted.
 
 ### Parallel downloads
@@ -781,6 +785,54 @@ default; keep it on for the schema's tables, or run `VACUUM` on them yourself
 runs `ANALYZE` on each table it loaded, so the planner's statistics describe
 the new rows at once rather than after autovacuum's next analyze.
 
+## Libraries
+
+The `libraries` step runs SQL on FHIR SQLQuery Libraries over the warehouse
+and writes each result as a table. It runs only when the config has
+`libraries`, a list of sources:
+
+```toml
+libraries = [
+  "../libraries/out",              # a directory of JSON, relative to this file
+  "example.analytics#0.1.0",       # a FHIR package in the package cache
+  "https://example.org/libs.tgz",  # a FHIR package .tgz
+]
+```
+
+A Library's `depends-on` canonicals resolve from the built-ins first
+(the `Location` view and the `LocationHierarchy` SQLView), then from the
+views directory, then from each source in order. A view in the views
+directory needs a `url` for a Library to name it; views without one are
+skipped. `fhir-pipes libraries build` turns `.sql` files with `.toml`
+metadata into Library JSON.
+
+Each SQLQuery Library runs after the Libraries it depends on, in one duckdb
+process, and writes `parquet/<table>/`, the table named from the Library's
+`name` as a view's is (`IcrCoverageByArea` → `coverage_by_area`). Its inputs
+are read as follows:
+
+- a view: its table as this run left it, from staging when the run wrote it,
+  else from `parquet/`. A view outside the views directory has no table and
+  stops the step, naming the Library, the input's label and canonical, and
+  the table;
+- `LocationHierarchy`: the `location_hierarchy` table the `locations` step
+  writes from its partOf walk; its SQL is not run;
+- a SQLView: its SQL, inlined into the query. A SQLView writes no table;
+- another SQLQuery: the table it wrote earlier in the step.
+
+Partition directories are read as text, so `country=123` is the string `123`.
+A result with a `country` column is partitioned by it, as the views' tables
+are (`country=<value>/part-0.parquet`, rows with no country in
+`country=__HIVE_DEFAULT_PARTITION__`); any other result is one file,
+`parquet/<table>/part-0.parquet`. An empty result still writes a file with
+its columns. A Library's `ORDER BY` is kept in the file, or within each
+partition of a partitioned result.
+
+The results are written to staging like every other table and published
+with them, so a run that fails in `libraries` leaves the warehouse as it was.
+`--only libraries` reruns the Libraries on the published tables and adds the
+manifest, the catalog and the database.
+
 ## Settings
 
 Command-line flags win over their environment variables, which win over the
@@ -793,6 +845,7 @@ the file are relative to the file.
 | `--data` | `FHIR_PIPES_DATA` | `data` | (required) |
 | `--profile` | `FHIR_PIPES_PROFILE` | `profile` | the snapshot's copy, else none (base FHIR); a path relative to the config file, or an https URL. See [profiles.md](profiles.md) |
 | `--views` | `FHIR_PIPES_VIEWS` | `views` | (required for `views`) |
+| | | `libraries` | none: the `libraries` step does not run. A list of library sources; see [Libraries](#libraries) |
 | `--server` | `FHIR_PIPES_SERVER` | `server.base` | `http://localhost:3447/fhir`; a Cloud Healthcare API store path (`projects/…/fhirStores/…`) is expanded to its FHIR URL |
 | `--input` (repeatable) | | `source.files` | no file source: the resources come from the server. See [From files](#from-files) |
 | `--server-name` | `FHIR_PIPES_SERVER_NAME` | `server.name` | `hapi-local`; `files` with a file source |
@@ -830,6 +883,7 @@ A token, a client ID, a username and Google auth are mutually exclusive.
 ```toml
 data = "../data"
 views = "../ig/fsh-generated/resources"
+libraries = ["../libraries/out"]   # SQLView and SQLQuery Libraries
 
 [server]
 base = "https://fhir.example.org/fhir"
@@ -921,7 +975,7 @@ do: `--only views` or `--skip hooks` runs neither. A config error that stops
 the run before the config is read (exit 2) runs no hooks either.
 
 `after` names one of the steps before the hooks, in any case: `locations`,
-`views`, `tiles`, `manifest`, `catalog` or `database`. The hook then runs
+`views`, `tiles`, `libraries`, `manifest`, `catalog` or `database`. The hook then runs
 only when that step ran. It is only for hooks run on success. A config whose
 hook names `hooks`, `push` or an unknown step, or has `after` with
 `on = "failure"` or `"always"`, is refused before anything runs.

@@ -206,6 +206,7 @@ impl Catalog {
     }
 
     /// Every Library, in the order read.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn libraries(&self) -> Vec<&Library> {
         self.artifacts
             .iter()
@@ -307,7 +308,7 @@ fn resolve_spec(source: &str, base: &Path) -> String {
     base.join(source).to_string_lossy().into_owned()
 }
 
-/// The artefact `v` is, if any: a ViewDefinition (plain, SUSHI's
+/// The artefact `v` is, if any: a ViewDefinition with a url (plain, SUSHI's
 /// logical-model form, or either inside a Binary), or a Library with the
 /// SQLView or SQLQuery profile. Other resources are `None`.
 fn artifact(v: &Value, strip_prefix: &[String]) -> Result<Option<Artifact>> {
@@ -351,8 +352,10 @@ fn artifact(v: &Value, strip_prefix: &[String]) -> Result<Option<Artifact>> {
         .clone()
         .filter(|n| !n.is_empty())
         .ok_or_else(|| anyhow!("a ViewDefinition has no name"))?;
+    // No Library can name a view without a url, so it is not an artefact; a
+    // project's views directory (a source in a refresh) can have such views.
     if json["url"].as_str().is_none_or(str::is_empty) {
-        bail!("ViewDefinition {name} has no url, so no Library can depend on it");
+        return Ok(None);
     }
     Ok(Some(Artifact::View(View {
         table: table_name(&name, strip_prefix),
@@ -440,6 +443,25 @@ mod tests {
             "{err:#}"
         );
         assert!(cat.get(&format!("{BASE}Nope"), None).is_err());
+    }
+
+    #[test]
+    fn a_view_without_a_url_is_skipped() {
+        // A project's views directory is a source too; its views need no url,
+        // but no Library can name one without.
+        let mut no_url = view("IcrNoUrl", "");
+        no_url.as_object_mut().unwrap().remove("url");
+        let a = dir(&[no_url, view("IcrBlank", ""), lib("Foo", "1", false, &[])]);
+        let cat = load(&[&a], &["icr_"]).unwrap();
+        assert!(cat.get(&format!("{BASE}Foo"), None).is_ok());
+        assert_eq!(
+            cat.artifacts
+                .iter()
+                .filter(|a| matches!(a, Artifact::View(_)))
+                .count(),
+            1,
+            "only the built-in Location view"
+        );
     }
 
     #[test]

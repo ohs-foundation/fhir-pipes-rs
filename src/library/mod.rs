@@ -3,10 +3,6 @@
 //! command, which turns `.sql` files with a `.toml` metadata file into Library
 //! JSON; `source` does the building.
 
-// `Library::json`, `Library::table` and `Catalog::libraries` are used by the
-// refresh step that comes later.
-#![allow(dead_code)]
-
 pub mod builtin;
 pub mod compose;
 pub mod resolve;
@@ -135,7 +131,8 @@ fn library_sql(
             .join(a.table(strip_prefix))
             .join("**/*.parquet");
         Ok(Some(compose::Bind::Relation(format!(
-            "read_parquet({}, hive_partitioning=true, union_by_name=true)",
+            "read_parquet({}, hive_partitioning = true, union_by_name = true, \
+             hive_types_autocast = false)",
             sql_path(&files)
         ))))
     };
@@ -167,6 +164,8 @@ pub struct Library {
     pub depends_on: Vec<Dependency>,
     /// (contentType, SQL) for each content entry.
     pub content: Vec<(String, String)>,
+    /// The Library resource as read.
+    #[allow(dead_code)]
     pub json: Value,
 }
 
@@ -357,8 +356,8 @@ mod tests {
         let strip = ["icr_".to_string()];
         let read = |t: &str| {
             format!(
-                "read_parquet('/wh/parquet/{t}/**/*.parquet', hive_partitioning=true, \
-                 union_by_name=true)"
+                "read_parquet('/wh/parquet/{t}/**/*.parquet', hive_partitioning = true, \
+                 union_by_name = true, hive_types_autocast = false)"
             )
         };
         let want = format!(

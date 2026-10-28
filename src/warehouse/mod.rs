@@ -12,6 +12,9 @@
 //!              since the last refresh), run the views in memory
 //!              (fhir-pipes-sof), partition each table by a looked-up column
 //!   tiles      the registry → PMTiles (duckdb + tippecanoe); runs beside views
+//!   libraries  each SQLQuery Library from the views directory and the
+//!              `libraries` sources, run with duckdb over this run's tables
+//!              (libraries_step.rs); only with `libraries` in the config
 //!   manifest   manifest.json: row counts, views, the extract state
 //!   catalog    catalog.sql: a DuckDB view per table, and catalog.spark.sql
 //!              with spark = true; only with [catalog]
@@ -39,6 +42,7 @@ mod config;
 mod database;
 mod fhir;
 mod files;
+mod libraries_step;
 mod manifest;
 pub(crate) mod partition;
 mod push;
@@ -169,6 +173,7 @@ pub enum Step {
     Locations,
     Views,
     Tiles,
+    Libraries,
     Manifest,
     Catalog,
     Database,
@@ -182,6 +187,7 @@ impl Step {
             Step::Locations => "locations",
             Step::Views => "views",
             Step::Tiles => "tiles",
+            Step::Libraries => "libraries",
             Step::Manifest => "manifest",
             Step::Catalog => "catalog",
             Step::Database => "database",
@@ -411,6 +417,13 @@ fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSe
         },
     )?;
     let mut steps = steps;
+    // The libraries step is in every run with library sources.
+    if s.libraries.is_empty() {
+        if args.only.contains(&Step::Libraries) {
+            bail!("--only libraries needs `libraries` (the library sources) in the config");
+        }
+        steps.remove(&Step::Libraries);
+    }
     // The catalog step is in every run with a [catalog] section.
     if s.catalog.is_none() {
         if args.only.contains(&Step::Catalog) {
@@ -454,6 +467,7 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
             Step::Locations,
             Step::Views,
             Step::Tiles,
+            Step::Libraries,
             Step::Manifest,
             Step::Catalog,
             Step::Database,
@@ -462,16 +476,23 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
         .into()
     } else {
         let mut only: BTreeSet<Step> = args.only.iter().copied().collect();
-        if only
-            .iter()
-            .any(|s| matches!(s, Step::Locations | Step::Views | Step::Tiles))
-        {
+        // The libraries read the tables of the locations and views steps,
+        // so they run again when those tables change.
+        if only.contains(&Step::Locations) || only.contains(&Step::Views) {
+            only.insert(Step::Libraries);
+        }
+        if only.iter().any(|s| {
+            matches!(
+                s,
+                Step::Locations | Step::Views | Step::Tiles | Step::Libraries
+            )
+        }) {
             only.insert(Step::Manifest);
             only.insert(Step::Catalog);
         }
         // The database holds the view tables only: without the views step
         // there is nothing new to load, and a load would be in full.
-        if only.contains(&Step::Views) {
+        if only.contains(&Step::Views) || args.only.contains(&Step::Libraries) {
             only.insert(Step::Database);
         }
         only
@@ -533,6 +554,9 @@ fn required_tools(s: &Settings, steps: &BTreeSet<Step>) -> Result<Tools> {
     if steps.contains(&Step::Tiles) {
         need(&s.duckdb, Step::Tiles, "tiles".into());
         need(&s.tippecanoe, Step::Tiles, "tiles".into());
+    }
+    if steps.contains(&Step::Libraries) && !s.libraries.is_empty() {
+        need(&s.duckdb, Step::Libraries, "libraries".into());
     }
     if let Some(c) = &s.catalog
         && c.duckdb_file
@@ -638,6 +662,9 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
             .as_ref()
             .map_or("-".into(), |p| p.display().to_string())
     );
+    if !s.libraries.is_empty() {
+        println!("libraries:  {}", s.libraries.join(", "));
+    }
     println!("threads:    {}", s.threads);
     println!(
         "profile:    {}",
@@ -709,8 +736,9 @@ fn check(s: &Settings, steps: &BTreeSet<Step>, needed: &[Tool]) {
     }
 }
 
-/// The tables in parquet/ that no current view writes (`written`), leaving
-/// out `locations` and the lookup tables, which need not come from a view.
+/// The tables in parquet/ that no current view or Library writes (`written`),
+/// leaving out `locations`, `location_hierarchy` and the lookup tables, which
+/// need not come from a view.
 /// A view that was removed or renamed leaves its table behind: refresh keeps
 /// it, and it stays in the manifest and the catalog, until it is removed by
 /// hand.
@@ -718,7 +746,10 @@ fn unwritten_tables(s: &Settings, written: BTreeSet<String>) -> Result<Vec<Strin
     Ok(stage::table_names(&s.parquet_dir())?
         .into_iter()
         .filter(|t| {
-            t != "locations" && !written.contains(t) && !s.lookups.iter().any(|l| &l.table == t)
+            t != "locations"
+                && t != crate::library::resolve::HIERARCHY_TABLE
+                && !written.contains(t)
+                && !s.lookups.iter().any(|l| &l.table == t)
         })
         .collect())
 }
@@ -900,6 +931,14 @@ fn refresh(
         ran.record("tiles", Some(Step::Tiles), t.context("tiles")?);
     }
 
+    // The libraries read the tables the steps above wrote.
+    let mut library_tables = BTreeSet::new();
+    if steps.contains(&Step::Libraries) {
+        library_tables = ran.run_step("libraries", Some(Step::Libraries), || {
+            libraries_step::libraries_step(s, &stage)
+        })?;
+    }
+
     let mut refreshed_at = manifest::now();
     if steps.contains(&Step::Manifest) {
         refreshed_at = ran.run_step("manifest", Some(Step::Manifest), || {
@@ -1005,7 +1044,8 @@ fn refresh(
     }
 
     ran.at("finish")?;
-    if let Some(written) = view_tables {
+    if let Some(mut written) = view_tables {
+        written.extend(library_tables);
         let unwritten = unwritten_tables(s, written)?;
         if !unwritten.is_empty() {
             println!(
@@ -1127,10 +1167,50 @@ mod tests {
     }
 
     #[test]
+    fn libraries_follow_views_and_locations() {
+        assert!(steps_of(&[]).contains(&Step::Libraries));
+        for only in ["views", "locations"] {
+            assert!(
+                steps_of(&["--only", only]).contains(&Step::Libraries),
+                "{only}"
+            );
+        }
+        assert!(!steps_of(&["--only", "tiles"]).contains(&Step::Libraries));
+        let s = steps_of(&["--only", "libraries"]);
+        for step in [
+            Step::Libraries,
+            Step::Manifest,
+            Step::Catalog,
+            Step::Database,
+        ] {
+            assert!(s.contains(&step), "{step:?}");
+        }
+        assert!(!s.contains(&Step::Views));
+    }
+
+    #[test]
+    fn the_libraries_step_needs_libraries_and_duckdb() {
+        let s = settings("libraries = ['libs', 'example.pkg#1.0', 'https://x.example/p.tgz']\n");
+        assert_eq!(
+            s.libraries,
+            [
+                PathBuf::from("/cfg").join("libs").display().to_string(),
+                "example.pkg#1.0".into(),
+                "https://x.example/p.tgz".into(),
+            ]
+        );
+        assert_eq!(
+            tools(&s, &[Step::Libraries]).unwrap(),
+            [("duckdb".into(), Step::Libraries, "libraries".into())]
+        );
+        assert_eq!(tools(&settings(""), &[Step::Libraries]).unwrap(), []);
+    }
+
+    #[test]
     fn push_is_asked_for_and_skip_has_the_last_word() {
         let all = steps_of(&[]);
         assert!(!all.contains(&Step::Push));
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         assert!(steps_of(&["--push"]).contains(&Step::Push));
         let s = steps_of(&["--push", "--skip", "tiles,push,catalog"]);
         assert!(!s.contains(&Step::Push));
@@ -1140,7 +1220,7 @@ mod tests {
         let s = steps_of(&["--only", "views", "--skip", "database"]);
         assert_eq!(
             s,
-            [Step::Views, Step::Manifest, Step::Catalog]
+            [Step::Views, Step::Libraries, Step::Manifest, Step::Catalog]
                 .into_iter()
                 .collect()
         );
