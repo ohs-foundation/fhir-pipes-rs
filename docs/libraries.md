@@ -264,6 +264,7 @@ writes the table.
 With a `[database]` section, the `database` step loads each SQLQuery result as
 a table and each SQLView (not the built-in) as a view. The SQLViews are
 dropped and recreated inside the load's transaction, so a reader of those views
-waits until the whole load commits. The result of a SQLQuery that has been
+waits until the whole load commits. The privileges granted on a SQLView's
+view and its owner are kept. The result of a SQLQuery that has been
 removed from the sources stays in the database as a table; drop it by hand.
 See [Database](refresh.md#database).

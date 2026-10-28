@@ -657,7 +657,15 @@ views it reads (a view of your own built on one of them stops the step: drop
 it first), then the tables are loaded, then the views are made again in the
 order the Libraries depend on each other. So a table whose columns changed
 can be recreated, and a SQLView that was removed from the sources is
-dropped. A view PostgreSQL cannot make (SQL it does not accept, an input
+dropped. A view made again keeps the privileges granted on it (`GRANT SELECT
+ON <schema>.<view> TO reporting`, to `PUBLIC` too, with or without `WITH
+GRANT OPTION`) and its owner, when someone has changed it from the role in
+the connection string: the step reads them before it drops the views and
+gives them back after it makes the views, in the same transaction. Each
+grant is made again as the view's owner, so who made the first grant is not
+kept, and column privileges (`GRANT SELECT (id) ON …`) are not kept. Giving
+the view back to its owner needs that owner to have `CREATE` on the schema;
+if it cannot, the step stops and the load rolls back. A view PostgreSQL cannot make (SQL it does not accept, an input
 with no table in the schema) stops the step, naming the Library and with
 PostgreSQL's message, and the whole load rolls back: the tables and views
 stay as the last run left them.

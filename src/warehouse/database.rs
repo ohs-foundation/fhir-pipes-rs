@@ -735,7 +735,7 @@ async fn write(
         exec(&mut tx, &format!("CREATE SCHEMA {}", ident(schema))).await?;
     }
     let mut records = prepare_records(&mut tx, schema, upsert.is_some()).await?;
-    drop_sql_views(&mut tx, schema).await?;
+    let kept = drop_sql_views(&mut tx, schema).await?;
     let (created, recreated) = reconcile_tables(&mut tx, schema, plans).await?;
     ensure_indexes(&mut tx, schema, plans, &created, upsert.is_some()).await?;
     let loads_table = qualified(schema, LOADS);
@@ -781,7 +781,7 @@ async fn write(
     }
     let (loaded, emptied) = apply_loads(&mut tx, schema, plans, loads).await?;
     update_marks(&mut tx, schema, plans, &emptied, upsert, &records).await?;
-    create_sql_views(&mut tx, schema, views).await?;
+    create_sql_views(&mut tx, schema, views, &kept).await?;
     *committed = super::status::Committed::Unknown;
     tx.commit().await.context("committing")?;
     *committed = super::status::Committed::Yes;
@@ -1043,13 +1043,47 @@ async fn update_marks(
     Ok(())
 }
 
+/// What a SQLView's view had that dropping it loses, to give the view made
+/// again: an owner other than the role loading, and the privileges granted
+/// on it.
+#[derive(Debug, Default)]
+struct Kept {
+    owner: Option<String>,
+    grants: Vec<Grant>,
+}
+
+/// A privilege granted on a view.
+#[derive(Debug)]
+struct Grant {
+    /// The role, or `None` for PUBLIC.
+    grantee: Option<String>,
+    /// `SELECT`, `INSERT` and so on, as `aclexplode` names it.
+    privilege: String,
+    grantable: bool,
+}
+
+/// The privileges `GRANT` takes on a view; `Kept` holds no other.
+const VIEW_PRIVILEGES: [&str; 8] = [
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+];
+
 /// Drop every view in `schema` that fhir-pipes made for a SQLView (by its
 /// comment, `SQLVIEW_COMMENT`), each before the views it reads. A view
 /// something else made on one of them stops the load: it is not dropped
-/// with it.
-async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<()> {
+/// with it. Returns, by view name, the owner and privileges each had, which
+/// `create_sql_views` gives the view made again.
+async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<BTreeMap<String, Kept>> {
     let rows = sqlx_core::query::query(
-        "SELECT c.oid::bigint, c.relname::text, obj_description(c.oid, 'pg_class') \
+        "SELECT c.oid::bigint, c.relname::text, obj_description(c.oid, 'pg_class'), \
+         CASE WHEN c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = current_user) \
+         THEN pg_get_userbyid(c.relowner)::text END \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relkind = 'v'",
     )
@@ -1058,17 +1092,54 @@ async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<()> {
     .await
     .with_context(|| format!("reading the views of {schema}"))?;
     let mut ours: BTreeMap<i64, String> = BTreeMap::new();
+    let mut kept: BTreeMap<String, Kept> = BTreeMap::new();
     for r in &rows {
         let comment: Option<String> = r.try_get(2)?;
         if comment.is_some_and(|c| c.starts_with(SQLVIEW_COMMENT)) {
-            ours.insert(r.try_get(0)?, r.try_get(1)?);
+            let name: String = r.try_get(1)?;
+            kept.insert(
+                name.clone(),
+                Kept {
+                    owner: r.try_get(3)?,
+                    grants: Vec::new(),
+                },
+            );
+            ours.insert(r.try_get(0)?, name);
         }
     }
     if ours.is_empty() {
-        return Ok(());
+        return Ok(kept);
+    }
+    let oids: Vec<i64> = ours.keys().copied().collect();
+    // The owner's own privileges come with ownership; a grantee of 0 is
+    // PUBLIC.
+    let grants = sqlx_core::query::query(
+        "SELECT c.relname::text, \
+         CASE WHEN a.grantee <> 0 THEN pg_get_userbyid(a.grantee)::text END, \
+         a.privilege_type::text, a.is_grantable \
+         FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a \
+         WHERE c.oid::bigint = ANY($1) AND a.grantee <> c.relowner \
+         ORDER BY 1, 2, 3",
+    )
+    .bind(&oids)
+    .fetch_all(&mut *conn)
+    .await
+    .context("reading the privileges on the SQLViews")?;
+    for r in &grants {
+        let name: String = r.try_get(0)?;
+        let privilege: String = r.try_get(2)?;
+        if !VIEW_PRIVILEGES.contains(&privilege.as_str()) {
+            continue;
+        }
+        if let Some(k) = kept.get_mut(&name) {
+            k.grants.push(Grant {
+                grantee: r.try_get(1)?,
+                privilege,
+                grantable: r.try_get(3)?,
+            });
+        }
     }
     // (view, a relation it reads), among these views.
-    let oids: Vec<i64> = ours.keys().copied().collect();
     let reads: Vec<(i64, i64)> = sqlx_core::query::query(
         "SELECT DISTINCT r.ev_class::bigint, d.refobjid::bigint \
          FROM pg_depend d JOIN pg_rewrite r ON r.oid = d.objid \
@@ -1109,12 +1180,18 @@ async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<()> {
                 })?;
         }
     }
-    Ok(())
+    Ok(kept)
 }
 
-/// Make each of `views` in `schema`, with its comment. A view PostgreSQL
-/// cannot make fails the load, which rolls back.
-async fn create_sql_views(conn: &mut PgConnection, schema: &str, views: &[SqlView]) -> Result<()> {
+/// Make each of `views` in `schema`, with its comment, and give it what
+/// `kept` holds for a view of its name: its owner and the privileges granted
+/// on it. A view PostgreSQL cannot make fails the load, which rolls back.
+async fn create_sql_views(
+    conn: &mut PgConnection,
+    schema: &str,
+    views: &[SqlView],
+    kept: &BTreeMap<String, Kept>,
+) -> Result<()> {
     for v in views {
         sqlx_core::query::query(AssertSqlSafe(v.create.clone()))
             .execute(&mut *conn)
@@ -1134,7 +1211,49 @@ async fn create_sql_views(conn: &mut PgConnection, schema: &str, views: &[SqlVie
             ),
         )
         .await?;
+        if let Some(k) = kept.get(&v.name) {
+            restore(conn, &qualified(schema, &v.name), k)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Library {}: giving the view {schema}.{} the owner and privileges it \
+                         had; the database was not changed",
+                        v.library, v.name
+                    )
+                })?;
+        }
         println!("   {} → {schema}.{} (view)", v.library, v.name);
+    }
+    Ok(())
+}
+
+/// Give the view `view` (qualified) the owner and grants it had. The owner
+/// first, so the grants are the owner's, as they were. Granting as a member
+/// of the owning role is allowed, so a role that could drop the view can
+/// grant on it again.
+async fn restore(conn: &mut PgConnection, view: &str, kept: &Kept) -> Result<()> {
+    if let Some(owner) = &kept.owner {
+        exec(
+            conn,
+            &format!("ALTER VIEW {view} OWNER TO {}", ident(owner)),
+        )
+        .await?;
+    }
+    for g in &kept.grants {
+        let grantee = match &g.grantee {
+            Some(role) => ident(role),
+            None => "PUBLIC".to_string(),
+        };
+        let option = if g.grantable {
+            " WITH GRANT OPTION"
+        } else {
+            ""
+        };
+        exec(
+            conn,
+            &format!("GRANT {} ON {view} TO {grantee}{option}", g.privilege),
+        )
+        .await?;
     }
     Ok(())
 }

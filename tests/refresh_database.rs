@@ -1659,6 +1659,52 @@ mod database {
         );
     }
 
+    /// A load drops and makes the SQLViews again; the privileges granted on
+    /// one, and an owner set by hand, are kept.
+    #[test]
+    fn sqlview_grants_and_owner_survive_a_refresh() {
+        if !ready("sqlview_grants_and_owner_survive_a_refresh") {
+            return;
+        }
+        let s = schema("grants");
+        let pid = std::process::id();
+        // A name that needs quoting.
+        let reader = format!("Fhir Reader {pid}");
+        let owner = format!("fhir_view_owner_{pid}");
+        let _cleanup = Cleanup(vec![
+            format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE"),
+            format!("DROP ROLE IF EXISTS \"{reader}\""),
+            format!("DROP ROLE IF EXISTS {owner}"),
+        ]);
+        let (dir, config, views) = library_setup(&replace_section(&s), &[by_area()]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success();
+        sql(&[
+            &format!("CREATE ROLE \"{reader}\""),
+            &format!("CREATE ROLE {owner}"),
+            &format!("GRANT USAGE, CREATE ON SCHEMA \"{s}\" TO {owner}"),
+            &format!("ALTER VIEW \"{s}\".reading_by_area OWNER TO {owner}"),
+            &format!("GRANT SELECT ON \"{s}\".reading_by_area TO \"{reader}\" WITH GRANT OPTION"),
+        ]);
+        let privileges = || {
+            one(&format!(
+                "SELECT concat_ws(' ', pg_get_userbyid(c.relowner), \
+                 has_table_privilege('{reader}', c.oid, 'SELECT'), \
+                 has_table_privilege('{reader}', c.oid, 'SELECT WITH GRANT OPTION'), \
+                 has_table_privilege('{reader}', c.oid, 'INSERT')) \
+                 FROM pg_class c WHERE c.oid = '\"{s}\".reading_by_area'::regclass"
+            ))
+        };
+        assert_eq!(privileges(), format!("{owner} t t f"));
+        library_run(&config, &views, "libraries")
+            .assert()
+            .success()
+            .stdout(has(format!("ReadingByArea → {s}.reading_by_area (view)")));
+        assert_eq!(privileges(), format!("{owner} t t f"));
+    }
+
     /// A view removed from the views directory leaves its table in the
     /// database. A SQLView that still reads it, through a copy of the
     /// ViewDefinition in a library source, is refused before anything is
