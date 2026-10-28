@@ -177,7 +177,11 @@ fn the_users_duckdbrc_is_not_read() {
     let root = dir.path();
     let home = root.join("home");
     fs::create_dir_all(&home).unwrap();
-    fs::write(home.join(".duckdbrc"), "SELECT error('~/.duckdbrc was read');\n").unwrap();
+    fs::write(
+        home.join(".duckdbrc"),
+        "SELECT error('~/.duckdbrc was read');\n",
+    )
+    .unwrap();
     let input = inputs(root, &[("a.ndjson", lines(&[obs("o1", 30, None)]))]);
     cmd(&config)
         .env("HOME", &home)
