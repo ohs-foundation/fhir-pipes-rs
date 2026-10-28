@@ -1,0 +1,25 @@
+url = "https://healthcampaigns.org/fhir/analytics/Library/LocationHierarchy"
+name = "LocationHierarchy"
+version = "0.1.0"
+status = "active"
+kind = "SQLView"
+title = "Location hierarchy"
+description = """
+Each Location with its place in the partOf tree: depth, admin_level, the names \
+and codes of the first five administrative units on its chain (admin0..4, root \
+first), country and path. The rules are those of fhir-pipes' Location walk: a \
+Location whose partOf is empty or names a missing Location is a root at depth \
+0; the walk stops at depth 11 (12 levels); admin_level counts only \
+administrative units on the chain, so it is null for a Location that is not an \
+administrative unit and is not the parent's level plus one when a \
+non-administrative Location sits between them; country is admin0_code; path is \
+the ids from the root down to the Location itself, '/'-separated, with a \
+leading '/' (/uga/ug-r1/ug-d12). The input must have no duplicate ids; on \
+broken trees (duplicates, cycles, chains deeper than 12) fhir-pipes' own table \
+is the reference. fhir-pipes does not run this SQL: it writes the \
+location_hierarchy table from its walk and uses that table wherever a Library \
+depends on this one."""
+
+[[depends_on]]
+label = "location"
+resource = "https://healthcampaigns.org/fhir/analytics/ViewDefinition/Location"

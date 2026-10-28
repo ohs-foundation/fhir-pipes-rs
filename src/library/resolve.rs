@@ -266,11 +266,9 @@ impl Catalog {
                 None => dep.canonical.clone(),
             };
             let what = || format!("Library {} depends-on {} ({resource})", lib.name, dep.label);
-            if dep.canonical == LOCATION_URL {
-                bail!(
-                    "{}: the built-in Location view writes no table; depend on {HIERARCHY_URL}",
-                    what()
-                );
+            // Only the built-in hierarchy reads the Location view.
+            if dep.canonical == LOCATION_URL && lib.url != HIERARCHY_URL {
+                bail!("{}: {}", what(), location_dependency());
             }
             let j = self
                 .index(&dep.canonical, dep.version.as_deref())
@@ -282,6 +280,14 @@ impl Catalog {
         out.push(lib);
         Ok(())
     }
+}
+
+/// Why a Library cannot depend on the built-in Location view.
+pub fn location_dependency() -> String {
+    format!(
+        "the built-in Location view writes no table; depend on LocationHierarchy \
+         ({HIERARCHY_URL}) instead"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +452,21 @@ mod tests {
     }
 
     #[test]
+    fn the_built_ins_load_with_no_sources() {
+        // LocationHierarchy writes the reserved table and depends on the
+        // Location view, both of which only a built-in may do.
+        let cat = Catalog::load(&[], Path::new("/"), &[]).unwrap();
+        let h = cat.get(HIERARCHY_URL, None).unwrap();
+        assert!(matches!(h, Artifact::Library(_)));
+        assert_eq!(h.table(&[]), HIERARCHY_TABLE);
+        assert!(matches!(
+            cat.get(LOCATION_URL, None).unwrap(),
+            Artifact::View(_)
+        ));
+        assert_eq!(names(&cat.order().unwrap()), ["LocationHierarchy"]);
+    }
+
+    #[test]
     fn two_artifacts_with_one_table_are_refused() {
         let a = dir(&[
             lib("IcrFoo", "1", false, &[]),
@@ -476,8 +497,12 @@ mod tests {
             view("Patients", v),
         ]);
         let cat = load(&[&a], &[]).unwrap();
-        assert_eq!(names(&cat.order().unwrap()), ["B", "A"]);
-        assert_eq!(cat.libraries().len(), 2);
+        // The built-in LocationHierarchy is read first.
+        assert_eq!(
+            names(&cat.order().unwrap()),
+            ["LocationHierarchy", "B", "A"]
+        );
+        assert_eq!(cat.libraries().len(), 3);
 
         let a = dir(&[
             lib("A", "1", true, &[("b", &format!("{BASE}B"))]),
@@ -517,7 +542,8 @@ mod tests {
             .unwrap();
         assert!(matches!(got, Artifact::View(_)));
         assert_eq!(got.table(&["icr_".into()]), "thing");
-        assert!(cat.libraries().is_empty());
+        // Only the built-in LocationHierarchy.
+        assert_eq!(names(&cat.libraries()), ["LocationHierarchy"]);
     }
 
     #[test]

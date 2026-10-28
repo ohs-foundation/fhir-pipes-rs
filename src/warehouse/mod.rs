@@ -42,7 +42,7 @@ mod files;
 mod manifest;
 mod partition;
 mod push;
-mod sql;
+pub(crate) mod sql;
 mod stage;
 mod status;
 mod tiles;

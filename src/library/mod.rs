@@ -3,19 +3,24 @@
 //! command, which turns `.sql` files with a `.toml` metadata file into Library
 //! JSON; `source` does the building.
 
-// The model is used by the commands added after `build`.
+// `Library::json`, `Library::table` and `Catalog::libraries` are used by the
+// refresh step that comes later.
 #![allow(dead_code)]
 
 pub mod builtin;
+pub mod compose;
 pub mod resolve;
 pub mod source;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
+
+use crate::error::usage;
+use crate::warehouse::sql::sql_path;
 
 pub const SQLVIEW_PROFILE: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView";
 pub const SQLQUERY_PROFILE: &str =
@@ -41,6 +46,25 @@ enum LibrariesCommand {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Print the DuckDB SQL that runs a Library over a warehouse, with each
+    /// input read from the warehouse's Parquet, to paste into `duckdb`.
+    Sql {
+        /// A Library JSON file, or a canonical URL (`url` or `url|version`)
+        /// to resolve from the built-ins and --sources.
+        library: String,
+        /// Where canonicals resolve from, after the built-ins: directories of
+        /// JSON, FHIR package .tgz files (a path or https URL), or
+        /// `name#version` in the FHIR package cache.
+        #[arg(long, num_args = 1..)]
+        sources: Vec<String>,
+        /// The warehouse directory whose parquet/ holds the input tables.
+        #[arg(long, default_value = ".")]
+        warehouse: PathBuf,
+        /// Prefixes taken off table names, as the config's
+        /// `tables.strip_prefix` (e.g. icr_). Repeat for more.
+        #[arg(long)]
+        strip_prefix: Vec<String>,
+    },
 }
 
 pub fn run(args: &LibrariesArgs) -> Result<()> {
@@ -50,7 +74,72 @@ pub fn run(args: &LibrariesArgs) -> Result<()> {
             println!("wrote {n} Library file(s) to {}", out.display());
             Ok(())
         }
+        LibrariesCommand::Sql {
+            library,
+            sources,
+            warehouse,
+            strip_prefix,
+        } => {
+            println!(
+                "{};",
+                library_sql(library, sources, warehouse, strip_prefix)?
+            );
+            Ok(())
+        }
     }
+}
+
+/// The DuckDB SQL for `library` (a Library JSON file or a canonical), with
+/// views, the hierarchy and SQLQuery inputs read from `warehouse`'s Parquet
+/// and SQLViews inlined.
+fn library_sql(
+    library: &str,
+    sources: &[String],
+    warehouse: &Path,
+    strip_prefix: &[String],
+) -> Result<String> {
+    let base = std::env::current_dir().context("reading the current directory")?;
+    let catalog = resolve::Catalog::load(sources, &base, strip_prefix)?;
+    let from_file;
+    let lib = if Path::new(library).is_file() {
+        let text = std::fs::read_to_string(library)
+            .with_context(|| format!("reading {library}"))
+            .map_err(usage)?;
+        let v: Value = serde_json::from_str(&text)
+            .with_context(|| format!("parsing {library}"))
+            .map_err(usage)?;
+        from_file = Library::from_json(&v)
+            .with_context(|| format!("reading {library}"))
+            .map_err(usage)?;
+        &from_file
+    } else {
+        let (url, version) = split_canonical(library);
+        match catalog.get(&url, version.as_deref()).map_err(usage)? {
+            resolve::Artifact::Library(l) => l,
+            resolve::Artifact::View(_) => {
+                return Err(usage(anyhow!(
+                    "{library} is a ViewDefinition, not a Library; `views run` runs views"
+                )));
+            }
+        }
+    };
+    let bind = |a: &resolve::Artifact| -> Result<Option<compose::Bind>> {
+        if let resolve::Artifact::Library(l) = a
+            && l.kind == Kind::SqlView
+            && l.url != resolve::HIERARCHY_URL
+        {
+            return Ok(None);
+        }
+        let files = warehouse
+            .join("parquet")
+            .join(a.table(strip_prefix))
+            .join("**/*.parquet");
+        Ok(Some(compose::Bind::Relation(format!(
+            "read_parquet({}, hive_partitioning=true, union_by_name=true)",
+            sql_path(&files)
+        ))))
+    };
+    compose::compose(lib, "duckdb", &catalog, &bind).map_err(usage)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,5 +257,89 @@ fn split_canonical(resource: &str) -> (String, Option<String>) {
     match resource.split_once('|') {
         Some((url, version)) => (url.to_string(), Some(version.to_string())),
         None => (resource.to_string(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+
+    #[test]
+    fn libraries_sql_binds_inputs_to_warehouse_parquet() {
+        let d = tempfile::tempdir().unwrap();
+        let view = json!({
+            "resourceType": "ViewDefinition",
+            "url": "https://example.org/ViewDefinition/IcrTask", "name": "IcrTask",
+            "resource": "Task", "status": "active",
+            "select": [{"column": [{"name": "id", "path": "id"}]}],
+        });
+        fs::write(d.path().join("v.json"), view.to_string()).unwrap();
+        let meta = |name: &str, kind: &str, deps: &str| {
+            format!(
+                "url = \"https://example.org/Library/{name}\"\nname = \"{name}\"\n\
+                 status = \"draft\"\nkind = \"{kind}\"\n{deps}"
+            )
+        };
+        let dep = |label: &str, url: &str| {
+            format!("[[depends_on]]\nlabel = \"{label}\"\nresource = \"{url}\"\n")
+        };
+        let s = source::build_from(
+            "SELECT * FROM t",
+            &[],
+            &meta(
+                "ByArea",
+                "SQLView",
+                &dep("t", "https://example.org/ViewDefinition/IcrTask"),
+            ),
+        )
+        .unwrap();
+        fs::write(d.path().join("s.json"), s.to_string()).unwrap();
+        let q = source::build_from(
+            "SELECT * FROM s JOIN h USING (id);",
+            &[],
+            &meta(
+                "Tasks",
+                "SQLQuery",
+                &(dep("s", "https://example.org/Library/ByArea")
+                    + &dep("h", resolve::HIERARCHY_URL)),
+            ),
+        )
+        .unwrap();
+        let q_path = d.path().join("q.json");
+        fs::write(&q_path, q.to_string()).unwrap();
+
+        let sources = [d.path().to_str().unwrap().to_string()];
+        let strip = ["icr_".to_string()];
+        let read = |t: &str| {
+            format!(
+                "read_parquet('/wh/parquet/{t}/**/*.parquet', hive_partitioning=true, \
+                 union_by_name=true)"
+            )
+        };
+        let want = format!(
+            "WITH \"s\" AS (WITH \"t\" AS (SELECT * FROM {})\nSELECT * FROM (\n\
+             SELECT * FROM t\n) AS q), \"h\" AS (SELECT * FROM {})\n\
+             SELECT * FROM (\nSELECT * FROM s JOIN h USING (id)\n) AS q",
+            read("task"),
+            read("location_hierarchy")
+        );
+        // From a file, and by canonical from the sources.
+        for arg in [
+            q_path.to_str().unwrap(),
+            "https://example.org/Library/Tasks",
+        ] {
+            let got = library_sql(arg, &sources, Path::new("/wh"), &strip).unwrap();
+            assert_eq!(got, want);
+        }
+        let err = library_sql(
+            "https://example.org/Nope",
+            &sources,
+            Path::new("/wh"),
+            &strip,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("Nope"), "{err:#}");
     }
 }
