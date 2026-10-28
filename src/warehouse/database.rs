@@ -63,6 +63,7 @@ use crate::library::{Kind, Library};
 use crate::views::run::View;
 
 use super::config::{Database, Mode, Settings};
+use super::libraries_step;
 use super::partition::{open_parquet, table_files_checked};
 use super::sql::{ident, sql_str};
 
@@ -148,19 +149,39 @@ pub struct SqlView {
 /// Each SQLView Library in `catalog` but the built-in LocationHierarchy, in
 /// `order()`, as a view in `schema`. Each input is read from its relation in
 /// `schema`: a view's table, `location_hierarchy`, a SQLQuery's result, or
-/// another SQLView's view (so no SQLView is inlined).
+/// another SQLView's view (so no SQLView is inlined). A view input must be
+/// one the views directory writes, as the libraries step requires
+/// (`libraries_step::written`): the database may still hold the table of a
+/// view removed from it. This runs before the load drops or loads anything.
 pub fn sql_views(s: &Settings, catalog: &Catalog, schema: &str) -> Result<Vec<SqlView>> {
-    let bind = |a: &Artifact| -> Result<Option<Bind>> {
-        let table = match a {
-            Artifact::Library(l) if l.url == HIERARCHY_URL => HIERARCHY_TABLE.to_string(),
-            _ => a.table(&s.strip_prefix),
-        };
-        Ok(Some(Bind::Relation(qualified(schema, &table))))
+    let relation = |a: &Artifact| match a {
+        Artifact::Library(l) if l.url == HIERARCHY_URL => HIERARCHY_TABLE.to_string(),
+        _ => a.table(&s.strip_prefix),
     };
+    let bind = |a: &Artifact| -> Result<Option<Bind>> {
+        Ok(Some(Bind::Relation(qualified(schema, &relation(a)))))
+    };
+    let mut view_tables = None;
     let mut out = Vec::new();
     for lib in catalog.order()? {
         if lib.kind != Kind::SqlView || lib.url == HIERARCHY_URL {
             continue;
+        }
+        let view_tables = match &view_tables {
+            Some(t) => t,
+            None => view_tables.insert(libraries_step::view_tables(s)?),
+        };
+        for dep in &lib.depends_on {
+            let input = catalog
+                .get(&dep.canonical, dep.version.as_deref())
+                .with_context(|| format!("Library {} depends-on {}", lib.name, dep.label))
+                .map_err(usage)?;
+            let table = relation(input);
+            if !libraries_step::written(input, &table, view_tables) {
+                return Err(usage(libraries_step::missing(
+                    lib, lib, dep, &table, input, true,
+                )));
+            }
         }
         let name = lib.table(&s.strip_prefix);
         let select = compose(lib, "postgresql", catalog, &bind)

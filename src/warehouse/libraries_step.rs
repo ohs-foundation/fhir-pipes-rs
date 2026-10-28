@@ -50,14 +50,8 @@ pub(super) fn libraries_step(
     if queries.is_empty() {
         println!("   no SQLQuery Libraries");
     }
-    let views = match &s.views {
-        Some(dir) => crate::views::run::discover(dir, &s.strip_prefix).map_err(usage)?,
-        None => Vec::new(),
-    };
-    // The tables this configuration's views write. A view input whose table
-    // is not one of them is refused, even when a table of that name is left
-    // in the warehouse from an earlier configuration.
-    let view_tables: BTreeSet<String> = views.iter().map(|v| v.table.clone()).collect();
+    let views = config_views(s)?;
+    let view_tables = tables_of(&views);
     let taken = other_tables(s, &views);
     for lib in &queries {
         let table = lib.table(&s.strip_prefix);
@@ -96,6 +90,35 @@ pub(super) fn catalog(s: &Settings) -> Result<Catalog> {
     let mut sources: Vec<String> = s.views.iter().map(|p| p.display().to_string()).collect();
     sources.extend(s.libraries.iter().cloned());
     Catalog::load(&sources, &s.base_dir, &s.strip_prefix)
+}
+
+/// The views of the views directory, with a url or without.
+fn config_views(s: &Settings) -> Result<Vec<crate::views::run::View>> {
+    match &s.views {
+        Some(dir) => crate::views::run::discover(dir, &s.strip_prefix).map_err(usage),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn tables_of(views: &[crate::views::run::View]) -> BTreeSet<String> {
+    views.iter().map(|v| v.table.clone()).collect()
+}
+
+/// The tables this configuration's views directory writes. A view input
+/// whose table is not one of them is refused (`written`), even when a table
+/// of that name is left in the warehouse or the database from an earlier
+/// configuration.
+#[cfg(feature = "postgres")]
+pub(super) fn view_tables(s: &Settings) -> Result<BTreeSet<String>> {
+    Ok(tables_of(&config_views(s)?))
+}
+
+/// Whether this configuration writes `input`'s table `table`. A view's
+/// table must be one of `view_tables`, the tables the views directory
+/// writes; the hierarchy is written by the locations step, and a SQLQuery's
+/// result by this step.
+pub(super) fn written(input: &Artifact, table: &str, view_tables: &BTreeSet<String>) -> bool {
+    !matches!(input, Artifact::View(_)) || view_tables.contains(table)
 }
 
 /// The tables other steps write, which no result may replace, each with what
@@ -149,7 +172,7 @@ fn check_inputs(
             (None, Artifact::View(_)) => {}
             (Some(table), _) => {
                 let dir = stage.read(&table);
-                let foreign = matches!(input, Artifact::View(_)) && !view_tables.contains(&table);
+                let foreign = !written(input, &table, view_tables);
                 if foreign || !dir.is_dir() || files(s, &dir).is_empty() {
                     let stale = foreign && dir.is_dir();
                     return Err(usage(missing(lib, query, dep, &table, input, stale)));
@@ -162,7 +185,7 @@ fn check_inputs(
 
 /// The error for an input without a table, or, `stale`, for a view input
 /// whose table the views directory does not write.
-fn missing(
+pub(super) fn missing(
     lib: &Library,
     query: &Library,
     dep: &Dependency,

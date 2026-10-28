@@ -1659,6 +1659,50 @@ mod database {
         );
     }
 
+    /// A view removed from the views directory leaves its table in the
+    /// database. A SQLView that still reads it, through a copy of the
+    /// ViewDefinition in a library source, is refused before anything is
+    /// dropped or loaded, rather than made over the stale table.
+    #[test]
+    fn a_sqlview_over_a_view_the_views_directory_does_not_write_is_refused() {
+        if !ready("a_sqlview_over_a_view_the_views_directory_does_not_write_is_refused") {
+            return;
+        }
+        let s = schema("staleview");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let (dir, config, views) = library_setup(&replace_section(&s), &[by_area()]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success();
+        // The view leaves the views directory; its definition stays in the
+        // library source.
+        let reading = views.join("IcrReading.json");
+        let libs = dir.path().join("libs");
+        fs::copy(&reading, libs.join("IcrReading.json")).unwrap();
+        fs::remove_file(&reading).unwrap();
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4), at("o2", "aa-r1", 9)]);
+        library_run(&config, &views, "views")
+            .assert()
+            .failure()
+            .stderr(has("Library ReadingByArea"))
+            .stderr(has("is not a view in the views directory"));
+        // Nothing was dropped or loaded: the view and the tables are as the
+        // first run left them.
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',') FROM \"{s}\".reading_by_area"
+            )),
+            "o1"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',' ORDER BY id) FROM \"{s}\".obs"
+            )),
+            "o1"
+        );
+    }
+
     /// Under upsert the derived tables have no resource key and are loaded in
     /// full; a run without the views step does not make the next one a full
     /// load.

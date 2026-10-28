@@ -645,7 +645,11 @@ built-in `LocationHierarchy` becomes a PostgreSQL view, `<schema>.<table>`
 `postgresql` dialect (its `application/sql;dialect=postgresql` content, else
 its `application/sql`). Each input is read from its relation in the schema:
 a view's table, `location_hierarchy`, a SQLQuery's result, or another
-SQLView's view, so one SQLView read by another is not inlined. A SQLQuery
+SQLView's view, so one SQLView read by another is not inlined. A view input
+must be a view in the views directory, as in the libraries step: the schema
+can still hold the table of a view removed from the views directory, and a
+SQLView whose input is such a view stops the step before anything in the
+database changes. A SQLQuery
 Library is not a view: its result is loaded as a table. Each view gets the
 comment `fhir-pipes SQLView <canonical>`. In the load's transaction, every
 view in the schema with such a comment is first dropped, each before the
