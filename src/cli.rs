@@ -70,6 +70,8 @@ pub enum Command {
     /// Run, check and test SQL-on-FHIR ViewDefinitions directly: run, sql,
     /// validate, lint, test
     Views(crate::views::ViewsArgs),
+    /// Build SQL on FHIR Libraries (SQLView, SQLQuery) from .sql files
+    Libraries(crate::library::LibrariesArgs),
     /// Turn a snapshot of FHIR resources into a dataset for another tool (offline)
     #[command(subcommand)]
     Transform(TransformCommand),
