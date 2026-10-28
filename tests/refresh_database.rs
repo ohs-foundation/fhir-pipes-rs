@@ -28,6 +28,7 @@ fn the_database_step_needs_the_postgres_feature() {
 mod database {
     use super::*;
     use httptest::{Expectation, all_of, matchers::*, responders::*};
+    use predicates::prelude::PredicateBooleanExt;
     use serde_json::json;
     use sqlx_core::connection::Connection;
     use sqlx_core::row::Row;
@@ -1243,5 +1244,465 @@ mod database {
             .assert()
             .failure()
             .stderr(has("$FHIR_PIPES_NO_SUCH_URL"));
+    }
+
+    // Libraries: the derived tables (location_hierarchy and the SQLQuery
+    // results) and the SQLViews, which become PostgreSQL views.
+
+    const SQLVIEW: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView";
+    const SQLQUERY: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery";
+    const HIERARCHY: &str = "https://healthcampaigns.org/fhir/analytics/Library/LocationHierarchy";
+    const READING: &str = "https://example.org/ViewDefinition/IcrReading";
+
+    /// With PostgreSQL and duckdb, which runs the SQLQuery Libraries.
+    fn ready(test: &str) -> bool {
+        let duckdb = std::process::Command::new("duckdb")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !duckdb {
+            eprintln!("skipped without duckdb: {test}");
+        }
+        url().is_some() && duckdb
+    }
+
+    /// A SQLView (`view`) or SQLQuery Library named `name`; `deps` are (label,
+    /// canonical) pairs.
+    fn library(name: &str, view: bool, deps: &[(&str, &str)], sql: &str) -> serde_json::Value {
+        use base64::Engine;
+        let related: Vec<serde_json::Value> = deps
+            .iter()
+            .map(|(l, r)| json!({"type": "depends-on", "label": l, "resource": r}))
+            .collect();
+        json!({
+            "resourceType": "Library",
+            "meta": {"profile": [if view { SQLVIEW } else { SQLQUERY }]},
+            "url": format!("https://example.org/Library/{name}"),
+            "name": name,
+            "status": "draft",
+            "relatedArtifact": related,
+            "content": [{"contentType": "application/sql",
+                "data": base64::engine::general_purpose::STANDARD.encode(sql)}],
+        })
+    }
+
+    /// IcrReading: Observations with their location and value, plus `extra`
+    /// columns.
+    fn reading_view(views: &std::path::Path, extra: &[serde_json::Value]) {
+        let mut columns = vec![
+            json!({"name": "id", "path": "getResourceKey()", "type": "id"}),
+            json!({"name": "location_id", "path": "subject.getReferenceKey(Location)", "type": "string"}),
+            json!({"name": "value", "path": "value.ofType(integer)", "type": "integer"}),
+        ];
+        columns.extend(extra.iter().cloned());
+        let reading = json!({"resourceType": "ViewDefinition", "url": READING,
+            "name": "IcrReading", "status": "active", "resource": "Observation",
+            "select": [{"column": columns}]});
+        fs::write(views.join("IcrReading.json"), reading.to_string()).unwrap();
+    }
+
+    fn write_libraries(root: &std::path::Path, libraries: &[serde_json::Value]) {
+        let libs = root.join("libs");
+        let _ = fs::remove_dir_all(&libs);
+        fs::create_dir_all(&libs).unwrap();
+        for (i, l) in libraries.iter().enumerate() {
+            fs::write(libs.join(format!("{i}.json")), l.to_string()).unwrap();
+        }
+    }
+
+    /// An Observation at Location `loc`.
+    fn at(id: &str, loc: &str, v: i64) -> serde_json::Value {
+        json!({"resourceType": "Observation", "id": id, "status": "final", "code": {"text": "x"},
+            "subject": {"reference": format!("Location/{loc}")}, "valueInteger": v})
+    }
+
+    /// The hierarchy fixture's Locations and `observations`, as input files.
+    fn library_input(
+        root: &std::path::Path,
+        observations: &[serde_json::Value],
+    ) -> std::path::PathBuf {
+        let locations = fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/hierarchy/locations.ndjson"),
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(root.join("input"));
+        inputs(
+            root,
+            &[
+                ("locations.ndjson", locations),
+                ("obs.ndjson", lines(observations)),
+            ],
+        )
+    }
+
+    /// A warehouse loading into `database` (a [database] section), whose
+    /// config names `libs/` as a library source holding `libraries`, with the
+    /// fixture views and IcrReading. Returns (dir, config, views directory).
+    fn library_setup(
+        database: &str,
+        libraries: &[serde_json::Value],
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let (dir, config) = setup(NOWHERE, database);
+        let root = dir.path();
+        let text = fs::read_to_string(&config).unwrap();
+        fs::write(&config, format!("libraries = ['libs']\n{text}")).unwrap();
+        write_libraries(root, libraries);
+        let views = root.join("my-views");
+        fs::create_dir_all(&views).unwrap();
+        for f in fs::read_dir(fixtures().join("views")).unwrap() {
+            let f = f.unwrap().path();
+            fs::copy(&f, views.join(f.file_name().unwrap())).unwrap();
+        }
+        reading_view(&views, &[]);
+        (dir, config, views)
+    }
+
+    fn library_run(
+        config: &std::path::Path,
+        views: &std::path::Path,
+        only: &str,
+    ) -> assert_cmd::Command {
+        let mut c = cmd(config);
+        c.args(["--only", only, "--views"]).arg(views);
+        if only != "libraries" {
+            c.arg("--input").arg(config.parent().unwrap().join("input"));
+        }
+        c
+    }
+
+    fn replace_section(s: &str) -> String {
+        format!("\n[database]\nurl_env = \"{URL}\"\nschema = \"{s}\"\n")
+    }
+
+    /// A ReadingByArea-style SQLView over the reading view and the hierarchy.
+    fn by_area() -> serde_json::Value {
+        library(
+            "ReadingByArea",
+            true,
+            &[("r", READING), ("h", HIERARCHY)],
+            "SELECT r.id, r.value, h.admin0_name, h.admin1_name, h.admin2_name \
+             FROM r LEFT JOIN h ON h.id = r.location_id",
+        )
+    }
+
+    fn type_of(s: &str, table: &str, column: &str) -> String {
+        one(&format!(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute \
+             WHERE attrelid = '\"{s}\".\"{table}\"'::regclass AND attname = '{column}'"
+        ))
+    }
+
+    /// DuckDB's types beyond the views': DECIMAL, SMALLINT and REAL load as
+    /// numeric, smallint and real. `sum(bigint)` is a HUGEINT in DuckDB,
+    /// which it writes to Parquet as a DOUBLE (DuckDB 1.5 and 2.0) or a
+    /// DECIMAL(38,0): either loads.
+    #[test]
+    fn derived_tables_with_decimal_and_smallint_load() {
+        if !ready("derived_tables_with_decimal_and_smallint_load") {
+            return;
+        }
+        let s = schema("derived");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let sums = library(
+            "ReadingSums",
+            false,
+            &[("r", READING)],
+            "SELECT country, sum(CAST(value AS BIGINT)) AS total, \
+             CAST(sum(value) AS DECIMAL(38,0)) AS exact, CAST(1.5 AS DECIMAL(10,2)) AS price, \
+             CAST(1 AS SMALLINT) AS one, CAST(2 AS TINYINT) AS two, CAST(0.5 AS REAL) AS half, \
+             count(*) AS n FROM r GROUP BY country",
+        );
+        let (dir, config, views) = library_setup(&replace_section(&s), &[sums]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 30), at("o2", "aa-r1", 5)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success()
+            .stdout(has(format!(
+                "location_hierarchy → {s}.location_hierarchy (21 rows)"
+            )))
+            .stdout(has(format!("reading_sums → {s}.reading_sums (1 rows)")));
+        for (column, wanted) in [
+            ("exact", "numeric(38,0)"),
+            ("price", "numeric(10,2)"),
+            ("one", "smallint"),
+            ("two", "smallint"),
+            ("half", "real"),
+            ("n", "bigint"),
+            // The partition column is in the files too.
+            ("country", "text"),
+        ] {
+            assert_eq!(type_of(&s, "reading_sums", column), wanted, "{column}");
+        }
+        assert!(
+            ["numeric(38,0)", "double precision"]
+                .contains(&type_of(&s, "reading_sums", "total").as_str())
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT concat_ws(' ', coalesce(country, 'none'), total::bigint, exact, price, \
+                 one, two, half, n) FROM \"{s}\".reading_sums"
+            )),
+            // The partition lookup finds no country for these Locations.
+            "none 35 35 1.50 1 2 0.5 2"
+        );
+        // A second run finds the tables as it made them.
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success()
+            .stdout(has(format!("reading_sums → {s}.reading_sums (1 rows)")));
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*)::text FROM \"{s}\".location_hierarchy"
+            )),
+            "21"
+        );
+    }
+
+    /// Each SQLView is a PostgreSQL view over the loaded tables; one SQLView
+    /// read by another is that one's view, not inlined.
+    #[test]
+    fn sqlviews_are_created_as_views() {
+        if !ready("sqlviews_are_created_as_views") {
+            return;
+        }
+        let s = schema("sqlviews");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let by_region = library(
+            "ReadingByRegion",
+            true,
+            &[("b", "https://example.org/Library/ReadingByArea")],
+            "SELECT admin1_name, sum(value) AS total FROM b GROUP BY admin1_name",
+        );
+        let areas = library(
+            "ReadingAreas",
+            false,
+            &[("b", "https://example.org/Library/ReadingByArea")],
+            "SELECT * FROM b ORDER BY id",
+        );
+        let (dir, config, views) =
+            library_setup(&replace_section(&s), &[by_region, by_area(), areas]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4), at("o2", "aa-r1", 9)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success()
+            .stdout(has(format!("ReadingByArea → {s}.reading_by_area (view)")));
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(c.relname || ':' || c.relkind::text || ':' || \
+                 coalesce(obj_description(c.oid, 'pg_class'), ''), ',' ORDER BY c.relname) \
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = '{s}' AND c.relkind IN ('r', 'v')"
+            )),
+            "location_hierarchy:r:,obs:r:,patient:r:,reading:r:,reading_areas:r:,\
+             reading_by_area:v:fhir-pipes SQLView https://example.org/Library/ReadingByArea,\
+             reading_by_region:v:fhir-pipes SQLView https://example.org/Library/ReadingByRegion"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(concat_ws(':', id, value, admin0_name, admin1_name, admin2_name), \
+                 ',' ORDER BY id) FROM \"{s}\".reading_by_area"
+            )),
+            "o1:4:Country A:Region 1:District 1,o2:9:Country A:Region 1"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(admin1_name || '=' || total, ',') FROM \"{s}\".reading_by_region"
+            )),
+            "Region 1=13"
+        );
+        // ReadingByRegion reads the view reading_by_area.
+        assert!(
+            one(&format!(
+                "SELECT pg_get_viewdef('\"{s}\".reading_by_region'::regclass)"
+            ))
+            .contains("reading_by_area")
+        );
+        assert_eq!(
+            one(&format!("SELECT count(*)::text FROM \"{s}\".reading_areas")),
+            "2"
+        );
+    }
+
+    /// `--only libraries` loads the derived tables and the views, and leaves
+    /// the view tables alone.
+    #[test]
+    fn only_libraries_leaves_the_view_tables_alone() {
+        if !ready("only_libraries_leaves_the_view_tables_alone") {
+            return;
+        }
+        let s = schema("onlylib");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let totals = |plus: i64| {
+            library(
+                "ReadingTotals",
+                false,
+                &[("r", READING)],
+                &format!("SELECT sum(value) + {plus} AS total FROM r"),
+            )
+        };
+        let (dir, config, views) = library_setup(&replace_section(&s), &[totals(0), by_area()]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success();
+        sql(&[&format!(
+            "INSERT INTO \"{s}\".reading (id, value) VALUES ('marker', 1)"
+        )]);
+        write_libraries(dir.path(), &[totals(100), by_area()]);
+        library_run(&config, &views, "libraries")
+            .assert()
+            .success()
+            .stdout(has(format!("reading_totals → {s}.reading_totals (1 rows)")))
+            .stdout(has(format!("location_hierarchy → {s}.location_hierarchy")))
+            .stdout(has(format!("{s}.reading ")).not());
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',' ORDER BY id) FROM \"{s}\".reading"
+            )),
+            "marker,o1"
+        );
+        assert_eq!(
+            one(&format!("SELECT total::text FROM \"{s}\".reading_totals")),
+            "104"
+        );
+        // The view was made again, over the table with the marker.
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',' ORDER BY id) FROM \"{s}\".reading_by_area"
+            )),
+            "marker,o1"
+        );
+    }
+
+    /// The input view gains a column: its table is recreated, which the
+    /// views on it would block, so they are dropped first and made again.
+    #[test]
+    fn a_column_change_recreates_the_views() {
+        if !ready("a_column_change_recreates_the_views") {
+            return;
+        }
+        let s = schema("colchange");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let everything = library("ReadingAll", true, &[("r", READING)], "SELECT * FROM r");
+        let (dir, config, views) = library_setup(&replace_section(&s), &[by_area(), everything]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success();
+        reading_view(
+            &views,
+            &[json!({"name": "status", "path": "status", "type": "code"})],
+        );
+        library_run(&config, &views, "views").assert().success();
+        assert_eq!(type_of(&s, "reading", "status"), "text");
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id || ':' || admin1_name, ',') FROM \"{s}\".reading_by_area"
+            )),
+            "o1:Region 1"
+        );
+        // `SELECT *` is expanded when the view is made: the new one has the
+        // new column.
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id || ':' || status, ',') FROM \"{s}\".reading_all"
+            )),
+            "o1:final"
+        );
+    }
+
+    /// A SQLView PostgreSQL cannot make rolls the whole load back: the tables
+    /// keep the last run's rows and the views are still there.
+    #[test]
+    fn a_view_that_fails_rolls_back_the_load() {
+        if !ready("a_view_that_fails_rolls_back_the_load") {
+            return;
+        }
+        let s = schema("viewfail");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let (dir, config, views) = library_setup(&replace_section(&s), &[by_area()]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success();
+        // list_value is DuckDB's; PostgreSQL has no such function.
+        let broken = library(
+            "Broken",
+            true,
+            &[("r", READING)],
+            "SELECT id, list_value(value) AS l FROM r",
+        );
+        write_libraries(dir.path(), &[by_area(), broken]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4), at("o2", "aa-r1", 9)]);
+        library_run(&config, &views, "views")
+            .assert()
+            .failure()
+            .stderr(has("Library Broken"))
+            .stderr(has("list_value"));
+        assert_eq!(
+            one(&format!("SELECT string_agg(id, ',') FROM \"{s}\".reading")),
+            "o1"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',') FROM \"{s}\".reading_by_area"
+            )),
+            "o1"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = '{s}' AND c.relname = 'broken'"
+            )),
+            "0"
+        );
+    }
+
+    /// Under upsert the derived tables have no resource key and are loaded in
+    /// full; a run without the views step does not make the next one a full
+    /// load.
+    #[test]
+    fn derived_tables_load_in_full_under_upsert() {
+        if !ready("derived_tables_load_in_full_under_upsert") {
+            return;
+        }
+        let s = schema("derived_upsert");
+        let _cleanup = Cleanup(vec![format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE")]);
+        let totals = library(
+            "ReadingTotals",
+            false,
+            &[("r", READING)],
+            "SELECT sum(value) AS total FROM r",
+        );
+        let (dir, config, views) = library_setup(&upsert(&s), &[totals, by_area()]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success()
+            .stdout(has(format!("reading_totals → {s}.reading_totals (1 rows)")));
+        library_run(&config, &views, "libraries")
+            .assert()
+            .success()
+            .stdout(has(format!("reading_totals → {s}.reading_totals (1 rows)")));
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4), at("o2", "aa-r1", 9)]);
+        library_run(&config, &views, "views")
+            .assert()
+            .success()
+            .stdout(has("every table in full").not())
+            .stdout(has(format!(
+                "reading → {s}.reading (1 resources changed or deleted: 0 rows deleted, 1 copied)"
+            )))
+            .stdout(has(format!("reading_totals → {s}.reading_totals (1 rows)")));
+        assert_eq!(
+            one(&format!("SELECT total::text FROM \"{s}\".reading_totals")),
+            "13"
+        );
+        assert_eq!(
+            one(&format!(
+                "SELECT string_agg(id, ',' ORDER BY id) FROM \"{s}\".reading_by_area"
+            )),
+            "o1,o2"
+        );
     }
 }

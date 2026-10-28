@@ -18,10 +18,14 @@
 //!   manifest   manifest.json: row counts, views, the extract state
 //!   catalog    catalog.sql: a DuckDB view per table, and catalog.spark.sql
 //!              with spark = true; only with [catalog]
-//!   database   the view tables into PostgreSQL; only with [database] and a
-//!              build with the postgres feature. With mode = "upsert", only
-//!              the rows of the resources that changed, from the change log
-//!              raw/<server>/.changes.json (`Changes::begin`)
+//!   database   the view tables into PostgreSQL, then the derived tables
+//!              (`location_hierarchy`, the SQLQuery results) and the SQLViews
+//!              as views; only with [database] and a build with the postgres
+//!              feature. The view tables only when the views step runs or
+//!              --only names database (`database_loads_views`). With
+//!              mode = "upsert", only the rows of the resources that changed,
+//!              from the change log raw/<server>/.changes.json
+//!              (`Changes::begin`)
 //!   hooks      commands from the config (e.g. a catalog build); hooks with
 //!              `on = "failure"` or `"always"` also run after a run that failed
 //!   push       mirror the warehouse to object storage (rclone); only with --push
@@ -277,6 +281,7 @@ pub fn run(args: &RefreshArgs, profile: Option<&str>) -> Result<()> {
             refresh(
                 &s,
                 &steps,
+                database_loads_views(args, &steps),
                 &later.iter().map(|t| t.pair()).collect::<Vec<_>>(),
                 ran,
                 lock,
@@ -447,6 +452,7 @@ fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSe
     // a view without one is refused before anything is downloaded.
     #[cfg(feature = "postgres")]
     if steps.contains(&Step::Database)
+        && database_loads_views(args, &steps)
         && s.upsert()
         && let Some(d) = &s.database
     {
@@ -458,6 +464,14 @@ fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSe
     }
     let needed = required_tools(&s, &steps)?;
     Ok((s, steps, needed))
+}
+
+/// Whether the database step loads the view tables: when the views step
+/// runs, or --only names database. Otherwise (`--only libraries`, or
+/// `--skip views`) the view tables in the database are as the last load left
+/// them, and only the derived tables and the SQLViews are loaded.
+fn database_loads_views(args: &RefreshArgs, steps: &BTreeSet<Step>) -> bool {
+    steps.contains(&Step::Views) || args.only.contains(&Step::Database)
 }
 
 /// The steps a run takes, from --only, --skip and --push.
@@ -490,8 +504,8 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
             only.insert(Step::Manifest);
             only.insert(Step::Catalog);
         }
-        // The database holds the view tables only: without the views step
-        // there is nothing new to load, and a load would be in full.
+        // The database step follows the steps whose tables it loads: the
+        // views', and the libraries' (`database_loads_views`).
         if only.contains(&Step::Views) || args.only.contains(&Step::Libraries) {
             only.insert(Step::Database);
         }
@@ -829,6 +843,7 @@ fn test_pause(s: &Settings, point: &str) {
 fn refresh(
     s: &Settings,
     steps: &BTreeSet<Step>,
+    #[cfg_attr(not(feature = "postgres"), allow(unused_variables))] database_views: bool,
     tiles_tools: &[(&str, &str)],
     ran: &mut Ran,
     lock: &stage::Lock,
@@ -966,19 +981,37 @@ fn refresh(
         ran.at("database")?;
         window = Some(crate::stop::hold()?);
         let mut committed = status::Committed::No;
-        let loaded = ran.run_step("database", Some(Step::Database), || {
-            let tables: Vec<database::Table> = database::view_tables(s, d)?
-                .into_iter()
-                .map(|v| database::Table {
-                    dir: stage.read(&v.table),
-                    key: database::key_column(&v.definition),
-                    time_dependent: database::time_dependent(&v.definition),
-                    resource: v.resource,
-                    name: v.table,
-                })
-                .collect();
-            database::load(s, d, &tables, built.as_ref(), &mut committed)
-        });
+        let loaded =
+            ran.run_step("database", Some(Step::Database), || {
+                let mut tables: Vec<database::Table> = Vec::new();
+                if database_views {
+                    tables.extend(database::view_tables(s, d)?.into_iter().map(|v| {
+                        database::Table {
+                            dir: stage.read(&v.table),
+                            key: database::key_column(&v.definition),
+                            time_dependent: database::time_dependent(&v.definition),
+                            resource: v.resource,
+                            name: v.table,
+                            derived: false,
+                        }
+                    }));
+                }
+                // The Libraries, only with `libraries` in the config, as the
+                // libraries step.
+                let catalog = if s.libraries.is_empty() {
+                    None
+                } else {
+                    Some(libraries_step::catalog(s)?)
+                };
+                tables.extend(database::derived_tables(s, catalog.as_ref(), |t| {
+                    stage.read(t)
+                })?);
+                let views = match &catalog {
+                    Some(c) => database::sql_views(s, c, &d.schema)?,
+                    None => Vec::new(),
+                };
+                database::load(s, d, tables, &views, built.as_ref(), &mut committed)
+            });
         ran.committed = committed;
         loaded?;
         test_pause(s, "database-committed");
@@ -1152,6 +1185,29 @@ mod tests {
             unreachable!()
         };
         steps(&r)
+    }
+
+    /// The view tables are loaded with the views step or when --only names
+    /// database; `--only libraries` and `--skip views` load the derived
+    /// tables alone.
+    #[test]
+    fn the_database_loads_the_view_tables_after_the_views_step() {
+        let loads = |args: &[&str]| {
+            let cli = crate::cli::Cli::try_parse_from(
+                ["fhir-pipes", "refresh"].iter().chain(args).copied(),
+            )
+            .unwrap();
+            let crate::cli::Command::Refresh(r) = cli.command else {
+                unreachable!()
+            };
+            database_loads_views(&r, &steps(&r))
+        };
+        assert!(loads(&[]));
+        assert!(loads(&["--only", "views"]));
+        assert!(loads(&["--only", "database"]));
+        assert!(loads(&["--only", "libraries,database"]));
+        assert!(!loads(&["--only", "libraries"]));
+        assert!(!loads(&["--skip", "views"]));
     }
 
     #[test]

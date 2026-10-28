@@ -8,8 +8,9 @@
 //! view's table, `location_hierarchy` for the built-in LocationHierarchy, and
 //! an earlier SQLQuery's result; a SQLView's SQL is inlined. SQLViews write
 //! no table here. A result with a `country` column is partitioned by it, as
-//! the views' tables are (`<table>/country=<value>/part-0.parquet`); any other
-//! is one file, `<table>/part-0.parquet`.
+//! the views' tables are (`<table>/country=<value>/part-0.parquet`, the
+//! column in the files as well, as the database step and Spark read it);
+//! any other is one file, `<table>/part-0.parquet`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -36,9 +37,7 @@ const PARTITION_COLUMN: &str = "country";
 /// tables written.
 pub(super) fn libraries_step(s: &Settings, stage: &stage::Stage) -> Result<BTreeSet<String>> {
     println!("== libraries");
-    let mut sources: Vec<String> = s.views.iter().map(|p| p.display().to_string()).collect();
-    sources.extend(s.libraries.iter().cloned());
-    let catalog = Catalog::load(&sources, &s.base_dir, &s.strip_prefix)?;
+    let catalog = catalog(s)?;
     let queries: Vec<&Library> = catalog
         .order()?
         .into_iter()
@@ -77,6 +76,14 @@ pub(super) fn libraries_step(s: &Settings, stage: &stage::Stage) -> Result<BTree
         written.insert(table);
     }
     Ok(written)
+}
+
+/// The Libraries and views of the views directory and the `libraries`
+/// sources.
+pub(super) fn catalog(s: &Settings) -> Result<Catalog> {
+    let mut sources: Vec<String> = s.views.iter().map(|p| p.display().to_string()).collect();
+    sources.extend(s.libraries.iter().cloned());
+    Catalog::load(&sources, &s.base_dir, &s.strip_prefix)
 }
 
 /// The tables other steps write, which no result may replace, each with what
@@ -228,7 +235,7 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
             &s.duckdb,
             &format!(
                 "COPY ({sql}) TO {} (FORMAT PARQUET, PARTITION_BY ({PARTITION_COLUMN}), \
-                 FILENAME_PATTERN 'part-{{i}}');",
+                 WRITE_PARTITION_COLUMNS true, FILENAME_PATTERN 'part-{{i}}');",
                 sql_path(staging)
             ),
         )?;
@@ -241,8 +248,7 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
             tools::duckdb(
                 &s.duckdb,
                 &format!(
-                    "COPY (SELECT * EXCLUDE ({PARTITION_COLUMN}) FROM ({sql}) LIMIT 0) TO {} \
-                     (FORMAT PARQUET);",
+                    "COPY (SELECT * FROM ({sql}) LIMIT 0) TO {} (FORMAT PARQUET);",
                     sql_path(&dir.join("part-0.parquet"))
                 ),
             )?;

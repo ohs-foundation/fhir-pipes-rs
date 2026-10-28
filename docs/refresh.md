@@ -49,7 +49,7 @@ hooks can run after a run that failed as well as after one that succeeded
 | `libraries` | run each SQLQuery Library over this run's tables and write its result as a table; only with `libraries` in the config. See [Libraries](#libraries) | duckdb |
 | `manifest` | `manifest.json`: time, server (see below), each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |
-| `database` | the view tables into PostgreSQL; only with a `[database]` section. See [Database](#database) | |
+| `database` | the view tables, `location_hierarchy` and the Library results into PostgreSQL, and the SQLViews as views; only with a `[database]` section. See [Database](#database) | |
 | `hooks` | the config's commands, in order | the commands |
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
@@ -606,7 +606,7 @@ refresh with `[database]` before it runs (`--skip database` runs the rest).
 [database]
 url_env = "FHIR_PIPES_DATABASE_URL"   # the variable holding the connection string (the default)
 schema = "public"                      # the default
-tables = ["indicator_value", "coverage"]   # default: every view table
+tables = ["indicator_value", "coverage"]   # default: every view table (the derived tables are always loaded)
 mode = "replace"                       # the default; "upsert" rewrites only what changed
 ```
 
@@ -626,6 +626,40 @@ Each view table becomes a table of the same name, with the same columns and
 the partition column (`country`), its types taken from the Parquet files:
 `text`, `bigint`, `double precision`, `boolean`, `date`, `timestamp with time
 zone` and `time`. The Location table is not loaded.
+
+**Derived tables.** The step also loads `location_hierarchy`, when the
+warehouse has it, and, when the config has `libraries`, the result of each
+SQLQuery Library (see [Libraries](#libraries)) that has a table. `tables`
+does not limit them. They have no resource key, so they are loaded in full
+in both modes. Their columns also take DuckDB's types: `numeric(p,s)` for a
+`DECIMAL`, `smallint` for a `SMALLINT` or `TINYINT`, `real` for a `REAL`.
+DuckDB writes a `HUGEINT` (what `sum` of a `BIGINT` gives) to Parquet as a
+`DOUBLE`, so such a column is `double precision`; cast it to a `DECIMAL` or
+`BIGINT` in the Library for an exact type.
+
+**SQLViews.** With `libraries` in the config, each SQLView Library but the
+built-in `LocationHierarchy` becomes a PostgreSQL view, `<schema>.<table>`
+(the table named from the Library's `name`), made from its SQL for the
+`postgresql` dialect (its `application/sql;dialect=postgresql` content, else
+its `application/sql`). Each input is read from its relation in the schema:
+a view's table, `location_hierarchy`, a SQLQuery's result, or another
+SQLView's view, so one SQLView read by another is not inlined. A SQLQuery
+Library is not a view: its result is loaded as a table. Each view gets the
+comment `fhir-pipes SQLView <canonical>`. In the load's transaction, every
+view in the schema with such a comment is first dropped, each before the
+views it reads (a view of your own built on one of them stops the step: drop
+it first), then the tables are loaded, then the views are made again in the
+order the Libraries depend on each other. So a table whose columns changed
+can be recreated, and a SQLView that was removed from the sources is
+dropped. A view PostgreSQL cannot make (SQL it does not accept, an input
+with no table in the schema) stops the step, naming the Library and with
+PostgreSQL's message, and the whole load rolls back: the tables and views
+stay as the last run left them.
+
+**Which tables a run loads.** The view tables are loaded when the views step
+runs, or when `--only` names `database`. A run without the views step
+otherwise (`--only libraries`, `--skip views`) loads the derived tables and
+the SQLViews alone, and leaves the view tables in the database as they are.
 
 The step reads the tables the run has staged, before they are swapped into
 `parquet/`, so a database failure leaves the files as they were too. All the
@@ -704,7 +738,8 @@ its ids.
 - the views step did not run in this refresh (`--only database`), since the
   Parquet may then be older than the log; such a load also clears the
   log's record of the tables, so the next run with the views loads in full
-  too.
+  too. A run that loads only the derived tables (`--only libraries`) leaves
+  the log as it is.
 
 And for one table when:
 
@@ -834,7 +869,10 @@ partition of a partitioned result.
 The results are written to staging like every other table and published
 with them, so a run that fails in `libraries` leaves the warehouse as it was.
 `--only libraries` reruns the Libraries on the published tables and adds the
-manifest, the catalog and the database.
+manifest, the catalog and the database, which then loads the results,
+`location_hierarchy` and the SQLViews but not the view tables (see
+[Database](#database)). A partitioned result has its `country` column in the
+files as well as the directory names, as the views' tables do.
 
 ## Settings
 
