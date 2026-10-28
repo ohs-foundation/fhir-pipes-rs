@@ -386,3 +386,50 @@ fn a_byarea_view_joins_the_hierarchy() {
     // The SQLView is inlined: it writes no table.
     assert!(!root.join("data/parquet/reading_by_area").exists());
 }
+
+#[test]
+fn a_result_cannot_replace_a_view_or_lookup_table() {
+    if !have_duckdb("a_result_cannot_replace_a_view_or_lookup_table") {
+        return;
+    }
+    // IcrObs → obs, the table of the fixture view IcrObs, which has no url;
+    // CampaignCalendar → campaign_calendar, a lookup table; Locations →
+    // locations, which the locations step writes.
+    for (name, said) in [
+        (
+            "IcrObs",
+            "Library IcrObs would write table obs, which is the table of view IcrObs",
+        ),
+        (
+            "CampaignCalendar",
+            "Library CampaignCalendar would write table campaign_calendar, which is a \
+             [[partition.lookup]] table",
+        ),
+        (
+            "Locations",
+            "would write table locations, which is reserved",
+        ),
+    ] {
+        let (dir, config, views) =
+            setup_libraries(&[library(name, false, &[("r", READING)], "SELECT id FROM r")]);
+        let root = dir.path();
+        let text = fs::read_to_string(&config).unwrap();
+        fs::write(
+            &config,
+            format!("{text}\n[[partition.lookup]]\nkey = \"campaign_id\"\ntable = \"campaign_calendar\"\n"),
+        )
+        .unwrap();
+        let input = inputs(root, &[("a.ndjson", lines(&[obs("o1", 30, None)]))]);
+        refresh(&config, &views, &input, "views")
+            .failure()
+            .code(2)
+            .stderr(has(said));
+        let data = root.join("data");
+        let run = last_run(&data);
+        assert_eq!(run["failed_step"], "libraries", "{name}");
+        assert_eq!(run["published"], false, "{name}");
+        // Nothing of the run is published.
+        assert!(!data.join("parquet/obs").exists(), "{name}");
+        assert!(!data.join("parquet/reading").exists(), "{name}");
+    }
+}

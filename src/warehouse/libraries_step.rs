@@ -11,7 +11,7 @@
 //! the views' tables are (`<table>/country=<value>/part-0.parquet`); any other
 //! is one file, `<table>/part-0.parquet`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -47,6 +47,17 @@ pub(super) fn libraries_step(s: &Settings, stage: &stage::Stage) -> Result<BTree
     if queries.is_empty() {
         println!("   no SQLQuery Libraries");
     }
+    let taken = other_tables(s)?;
+    for lib in &queries {
+        let table = lib.table(&s.strip_prefix);
+        if let Some(by) = taken.get(&table) {
+            return Err(usage(anyhow!(
+                "Library {} would write table {table}, which is {by}; rename the Library \
+                 or change strip_prefix",
+                lib.name
+            )));
+        }
+    }
     let mut written = BTreeSet::new();
     for lib in queries {
         crate::stop::check()?;
@@ -66,6 +77,25 @@ pub(super) fn libraries_step(s: &Settings, stage: &stage::Stage) -> Result<BTree
         written.insert(table);
     }
     Ok(written)
+}
+
+/// The tables other steps write, which no result may replace, each with what
+/// writes it: every view in the views directory (with a url or without),
+/// the lookup tables, `locations` and `location_hierarchy`.
+fn other_tables(s: &Settings) -> Result<BTreeMap<String, String>> {
+    let mut taken = BTreeMap::new();
+    for t in ["locations", HIERARCHY_TABLE] {
+        taken.insert(t.to_string(), "written by the locations step".to_string());
+    }
+    for l in &s.lookups {
+        taken.insert(l.table.clone(), "a [[partition.lookup]] table".to_string());
+    }
+    if let Some(dir) = &s.views {
+        for v in crate::views::run::discover(dir, &s.strip_prefix).map_err(usage)? {
+            taken.insert(v.table, format!("the table of view {}", v.name));
+        }
+    }
+    Ok(taken)
 }
 
 /// The table an input is read from, or `None` for a SQLView, whose SQL is

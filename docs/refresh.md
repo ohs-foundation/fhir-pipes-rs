@@ -825,7 +825,10 @@ A result with a `country` column is partitioned by it, as the views' tables
 are (`country=<value>/part-0.parquet`, rows with no country in
 `country=__HIVE_DEFAULT_PARTITION__`); any other result is one file,
 `parquet/<table>/part-0.parquet`. An empty result still writes a file with
-its columns. A Library's `ORDER BY` is kept in the file, or within each
+its columns. A result table cannot be the table of a view in the views
+directory (with a url or without), a `[[partition.lookup]]` table, `locations` or
+`location_hierarchy`: such a Library stops the step before anything runs.
+A Library's `ORDER BY` is kept in the file, or within each
 partition of a partitioned result.
 
 The results are written to staging like every other table and published
