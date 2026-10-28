@@ -105,11 +105,15 @@ fn last_code_byte(sql: &str) -> Option<usize> {
 
 /// The byte indexes of `sql` that are SQL code, in order: not whitespace,
 /// not in a comment, and not inside a string or quoted identifier (a closing
-/// quote counts as code).
+/// quote counts as code). Strings are PostgreSQL's and DuckDB's: `'…'`,
+/// `"…"`, `E'…'` with backslash escapes, and dollar quotes, `$$…$$` or
+/// `$tag$…$tag$`.
 fn code_bytes(sql: &str) -> Vec<usize> {
     let bytes = sql.as_bytes();
     let mut code = Vec::new();
     let mut i = 0;
+    // Where a quoted run with no closing quote ends: the last byte.
+    let last = bytes.len().saturating_sub(1);
     while i < bytes.len() {
         match bytes[i] {
             b'-' if bytes.get(i + 1) == Some(&b'-') => {
@@ -124,13 +128,46 @@ fn code_bytes(sql: &str) -> Vec<usize> {
                 }
                 i += 2;
             }
+            b'E' | b'e' if bytes.get(i + 1) == Some(&b'\'') && !follows_word(bytes, i) => {
+                // An escape string: a backslash escapes the next byte, and a
+                // doubled quote is a quote.
+                code.push(i);
+                i += 2;
+                loop {
+                    match bytes.get(i) {
+                        None => break,
+                        Some(b'\\') => i += 2,
+                        Some(b'\'') if bytes.get(i + 1) == Some(&b'\'') => i += 2,
+                        Some(b'\'') => break,
+                        Some(_) => i += 1,
+                    }
+                }
+                code.push(i.min(last));
+                i += 1;
+            }
+            b'$' if !follows_word(bytes, i) && dollar_tag(bytes, i).is_some() => {
+                let tag = dollar_tag(bytes, i).expect("checked");
+                let delimiter = &bytes[i..i + tag];
+                let body = i + tag;
+                match bytes[body..].windows(tag).position(|w| w == delimiter) {
+                    Some(at) => {
+                        let close = body + at + tag - 1;
+                        code.push(close);
+                        i = close + 1;
+                    }
+                    None => {
+                        code.push(last);
+                        i = bytes.len();
+                    }
+                }
+            }
             q @ (b'\'' | b'"') => {
                 // A doubled quote inside is two quoted runs back to back.
                 i += 1;
                 while i < bytes.len() && bytes[i] != q {
                     i += 1;
                 }
-                code.push(i.min(bytes.len() - 1));
+                code.push(i.min(last));
                 i += 1;
             }
             b if b.is_ascii_whitespace() => i += 1,
@@ -141,6 +178,34 @@ fn code_bytes(sql: &str) -> Vec<usize> {
         }
     }
     code
+}
+
+/// Whether the byte before `i` is part of a word (a name or a number), so
+/// `$` or `E` at `i` continues it rather than opening a quote: `a$b`, `$1`'s
+/// digits, `typE'x'`.
+fn follows_word(bytes: &[u8], i: usize) -> bool {
+    i > 0 && {
+        let b = bytes[i - 1];
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+    }
+}
+
+/// The length of the dollar-quote delimiter at `i` (`$$` or `$tag$`, the tag
+/// a name that does not start with a digit), or `None` when `$` there does
+/// not open one, as in the parameter `$1`.
+fn dollar_tag(bytes: &[u8], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    while let Some(&b) = bytes.get(j) {
+        let name = b.is_ascii_alphabetic() || b == b'_' || b >= 0x80;
+        if b == b'$' {
+            return Some(j + 1 - i);
+        }
+        if !(name || (j > i + 1 && b.is_ascii_digit())) {
+            return None;
+        }
+        j += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -313,6 +378,7 @@ mod tests {
             "SELECT 1 AS x -- end",
             "SELECT 1 AS x; /* end; */ ;",
             "SELECT ';' AS y, 1 AS x -- it's;",
+            "SELECT $$a;b$$ AS y, $t$;$t$ AS z, E'\\';' AS w, 1 AS x;",
         ] {
             let q = lib("Q", false, text, &[]);
             let sql = compose(&q, "duckdb", &cat, &bind_tables).unwrap();
@@ -320,6 +386,32 @@ mod tests {
             if let Some(out) = duckdb(&format!("SELECT x FROM ({sql}) AS r")) {
                 assert_eq!(out.trim(), "1", "{text:?} composed to:\n{sql}");
             }
+        }
+    }
+
+    #[test]
+    fn dollar_quotes_and_escape_strings_hold_semicolons() {
+        for one in [
+            "SELECT $$a;b$$ AS value",
+            "SELECT $x$a;b$x$ AS value",
+            "SELECT $x$a;$y$;b$x$ AS value",
+            "SELECT $x$a$$;b$x$ AS value",
+            "SELECT E'a\\';b' AS value",
+            "SELECT e'a\\\\' AS value, ';' AS other",
+            "SELECT E'a'';b' AS value",
+        ] {
+            assert!(!has_several_statements(one), "{one}");
+            assert_eq!(strip_terminator(&format!("{one}; -- end")), one);
+        }
+        for several in [
+            "SELECT 1; SELECT 2",
+            "SELECT $$a$$; SELECT 2",
+            "SELECT E'a\\'';' ; SELECT 2",
+            // $1 is a parameter, a$b an identifier: neither opens a quote.
+            "SELECT $1; SELECT 2",
+            "SELECT a$b$; SELECT 2",
+        ] {
+            assert!(has_several_statements(several), "{several}");
         }
     }
 

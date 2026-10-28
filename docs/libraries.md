@@ -162,7 +162,9 @@ to a URL you control, or download it and use the local `.tgz`.
 fhir-pipes limits what a Library can do beyond its query:
 
 - a Library's SQL must be one statement. SQL with a `;` before more SQL
-  (outside strings and comments) is refused when the Library is read and
+  (outside strings, quoted names and comments) is refused. Strings are
+  `'…'`, `E'…'` with backslash escapes, and dollar quotes, `$$…$$` or
+  `$tag$…$tag$`. It is refused when the Library is read and
   when `libraries build` builds it, naming the Library;
 - the step's duckdb runs with `-init /dev/null`, so the user's
   `~/.duckdbrc` is not loaded.
