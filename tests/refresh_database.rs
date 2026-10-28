@@ -1705,6 +1705,60 @@ mod database {
         assert_eq!(privileges(), format!("{owner} t t f"));
     }
 
+    /// Column privileges on a SQLView's view are kept too; one on a column
+    /// the view made again no longer has is dropped with a warning.
+    #[test]
+    fn sqlview_column_grants_survive_a_refresh() {
+        if !ready("sqlview_column_grants_survive_a_refresh") {
+            return;
+        }
+        let s = schema("colgrants");
+        let reader = format!("fhir_col_reader_{}", std::process::id());
+        let _cleanup = Cleanup(vec![
+            format!("DROP SCHEMA IF EXISTS \"{s}\" CASCADE"),
+            format!("DROP ROLE IF EXISTS {reader}"),
+        ]);
+        let (dir, config, views) = library_setup(&replace_section(&s), &[by_area()]);
+        library_input(dir.path(), &[at("o1", "aa-hf1", 4)]);
+        library_run(&config, &views, "locations,views")
+            .assert()
+            .success();
+        sql(&[
+            &format!("CREATE ROLE {reader}"),
+            &format!("GRANT SELECT (id, admin2_name) ON \"{s}\".reading_by_area TO {reader}"),
+            &format!("GRANT UPDATE (value) ON \"{s}\".reading_by_area TO {reader}"),
+        ]);
+        let column = |c: &str, p: &str| {
+            one(&format!(
+                "SELECT has_column_privilege('{reader}', '\"{s}\".reading_by_area', '{c}', '{p}')::text"
+            ))
+        };
+        assert_eq!(column("id", "SELECT"), "true");
+        // The SQLView loses admin2_name.
+        let narrower = library(
+            "ReadingByArea",
+            true,
+            &[("r", READING), ("h", HIERARCHY)],
+            "SELECT r.id, r.value, h.admin0_name, h.admin1_name \
+             FROM r LEFT JOIN h ON h.id = r.location_id",
+        );
+        write_libraries(dir.path(), &[narrower]);
+        library_run(&config, &views, "libraries")
+            .assert()
+            .success()
+            .stderr(has("admin2_name"));
+        assert_eq!(column("id", "SELECT"), "true");
+        assert_eq!(column("value", "UPDATE"), "true");
+        assert_eq!(column("value", "SELECT"), "false");
+        assert_eq!(column("admin1_name", "SELECT"), "false");
+        assert_eq!(
+            one(&format!(
+                "SELECT has_table_privilege('{reader}', '\"{s}\".reading_by_area', 'SELECT')::text"
+            )),
+            "false"
+        );
+    }
+
     /// A view removed from the views directory leaves its table in the
     /// database. A SQLView that still reads it, through a copy of the
     /// ViewDefinition in a library source, is refused before anything is

@@ -1052,9 +1052,11 @@ struct Kept {
     grants: Vec<Grant>,
 }
 
-/// A privilege granted on a view.
+/// A privilege granted on a view, or on one of its columns.
 #[derive(Debug)]
 struct Grant {
+    /// The column, for a column privilege (`GRANT SELECT (id) ON …`).
+    column: Option<String>,
     /// The role, or `None` for PUBLIC.
     grantee: Option<String>,
     /// `SELECT`, `INSERT` and so on, as `aclexplode` names it.
@@ -1111,15 +1113,23 @@ async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<BTreeMa
         return Ok(kept);
     }
     let oids: Vec<i64> = ours.keys().copied().collect();
-    // The owner's own privileges come with ownership; a grantee of 0 is
-    // PUBLIC.
+    // The view's privileges (`relacl`) and its columns' (`attacl`). The
+    // owner's own privileges come with ownership; a grantee of 0 is PUBLIC.
     let grants = sqlx_core::query::query(
-        "SELECT c.relname::text, \
+        "SELECT c.relname::text, NULL::text, \
          CASE WHEN a.grantee <> 0 THEN pg_get_userbyid(a.grantee)::text END, \
          a.privilege_type::text, a.is_grantable \
          FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a \
          WHERE c.oid::bigint = ANY($1) AND a.grantee <> c.relowner \
-         ORDER BY 1, 2, 3",
+         UNION ALL \
+         SELECT c.relname::text, t.attname::text, \
+         CASE WHEN a.grantee <> 0 THEN pg_get_userbyid(a.grantee)::text END, \
+         a.privilege_type::text, a.is_grantable \
+         FROM pg_class c JOIN pg_attribute t ON t.attrelid = c.oid \
+         CROSS JOIN LATERAL aclexplode(t.attacl) a \
+         WHERE c.oid::bigint = ANY($1) AND t.attnum > 0 AND NOT t.attisdropped \
+         AND a.grantee <> c.relowner \
+         ORDER BY 1, 2 NULLS FIRST, 3, 4",
     )
     .bind(&oids)
     .fetch_all(&mut *conn)
@@ -1127,15 +1137,16 @@ async fn drop_sql_views(conn: &mut PgConnection, schema: &str) -> Result<BTreeMa
     .context("reading the privileges on the SQLViews")?;
     for r in &grants {
         let name: String = r.try_get(0)?;
-        let privilege: String = r.try_get(2)?;
+        let privilege: String = r.try_get(3)?;
         if !VIEW_PRIVILEGES.contains(&privilege.as_str()) {
             continue;
         }
         if let Some(k) = kept.get_mut(&name) {
             k.grants.push(Grant {
-                grantee: r.try_get(1)?,
+                column: r.try_get(1)?,
+                grantee: r.try_get(2)?,
                 privilege,
-                grantable: r.try_get(3)?,
+                grantable: r.try_get(4)?,
             });
         }
     }
@@ -1212,26 +1223,38 @@ async fn create_sql_views(
         )
         .await?;
         if let Some(k) = kept.get(&v.name) {
-            restore(conn, &qualified(schema, &v.name), k)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Library {}: giving the view {schema}.{} the owner and privileges it \
+            restore(conn, schema, v, k).await.with_context(|| {
+                format!(
+                    "Library {}: giving the view {schema}.{} the owner and privileges it \
                          had; the database was not changed",
-                        v.library, v.name
-                    )
-                })?;
+                    v.library, v.name
+                )
+            })?;
         }
         println!("   {} → {schema}.{} (view)", v.library, v.name);
     }
     Ok(())
 }
 
-/// Give the view `view` (qualified) the owner and grants it had. The owner
-/// first, so the grants are the owner's, as they were. Granting as a member
-/// of the owning role is allowed, so a role that could drop the view can
-/// grant on it again.
-async fn restore(conn: &mut PgConnection, view: &str, kept: &Kept) -> Result<()> {
+/// Give the view `v` in `schema` the owner and grants it had. The owner
+/// first, then the grants, made as the owner: granting as a member of the
+/// owning role is allowed, so a role that could drop the view can grant on
+/// it again. Who made each grant is not kept. A column privilege on a
+/// column the view no longer has is left out, with a warning.
+async fn restore(conn: &mut PgConnection, schema: &str, v: &SqlView, kept: &Kept) -> Result<()> {
+    let view = &qualified(schema, &v.name);
+    let columns: Vec<String> = if kept.grants.iter().any(|g| g.column.is_some()) {
+        sqlx_core::query_scalar::query_scalar(
+            "SELECT attname::text FROM pg_attribute \
+             WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped",
+        )
+        .bind(view.as_str())
+        .fetch_all(&mut *conn)
+        .await
+        .with_context(|| format!("reading the columns of {schema}.{}", v.name))?
+    } else {
+        Vec::new()
+    };
     if let Some(owner) = &kept.owner {
         exec(
             conn,
@@ -1249,9 +1272,21 @@ async fn restore(conn: &mut PgConnection, view: &str, kept: &Kept) -> Result<()>
         } else {
             ""
         };
+        let on = match &g.column {
+            Some(c) if !columns.contains(c) => {
+                eprintln!(
+                    "warning: Library {}: the view {schema}.{} no longer has column {c}, so \
+                     {} ({c}) granted to {grantee} on it is dropped",
+                    v.library, v.name, g.privilege
+                );
+                continue;
+            }
+            Some(c) => format!(" ({})", ident(c)),
+            None => String::new(),
+        };
         exec(
             conn,
-            &format!("GRANT {} ON {view} TO {grantee}{option}", g.privilege),
+            &format!("GRANT {}{on} ON {view} TO {grantee}{option}", g.privilege),
         )
         .await?;
     }

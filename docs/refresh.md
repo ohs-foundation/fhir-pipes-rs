@@ -661,11 +661,18 @@ dropped. A view made again keeps the privileges granted on it (`GRANT SELECT
 ON <schema>.<view> TO reporting`, to `PUBLIC` too, with or without `WITH
 GRANT OPTION`) and its owner, when someone has changed it from the role in
 the connection string: the step reads them before it drops the views and
-gives them back after it makes the views, in the same transaction. Each
-grant is made again as the view's owner, so who made the first grant is not
-kept, and column privileges (`GRANT SELECT (id) ON …`) are not kept. Giving
-the view back to its owner needs that owner to have `CREATE` on the schema;
-if it cannot, the step stops and the load rolls back. A view PostgreSQL cannot make (SQL it does not accept, an input
+gives them back after it makes the views, in the same transaction. Column
+privileges (`GRANT SELECT (id) ON …`) are kept as well. One on a column the
+view made again no longer has is left out, with a warning naming the
+Library, the view, the column and the role. Giving the view back to its
+owner needs that owner to have `CREATE` on the schema; if it cannot, the
+step stops and the load rolls back.
+
+Each grant is made again by the view's owner, not by the role that first made
+it. A chain of grants is therefore not kept. If role A, holding a privilege
+`WITH GRANT OPTION`, granted it to role B, then after a refresh B's privilege
+comes from the owner and no longer depends on A's. `REVOKE … FROM A CASCADE`
+then leaves B's access in place: revoke it from B by name too. A view PostgreSQL cannot make (SQL it does not accept, an input
 with no table in the schema) stops the step, naming the Library and with
 PostgreSQL's message, and the whole load rolls back: the tables and views
 stay as the last run left them.
