@@ -505,8 +505,13 @@ fn steps(args: &RefreshArgs) -> BTreeSet<Step> {
             only.insert(Step::Catalog);
         }
         // The database step follows the steps whose tables it loads: the
-        // views', and the libraries' (`database_loads_views`).
-        if only.contains(&Step::Views) || args.only.contains(&Step::Libraries) {
+        // views', the locations' (`location_hierarchy`) and the libraries'.
+        // Without the views step it loads only the derived tables and the
+        // SQLViews (`database_loads_views`).
+        if only.contains(&Step::Views)
+            || only.contains(&Step::Locations)
+            || only.contains(&Step::Libraries)
+        {
             only.insert(Step::Database);
         }
         only
@@ -1207,6 +1212,7 @@ mod tests {
         assert!(loads(&["--only", "database"]));
         assert!(loads(&["--only", "libraries,database"]));
         assert!(!loads(&["--only", "libraries"]));
+        assert!(!loads(&["--only", "locations"]));
         assert!(!loads(&["--skip", "views"]));
     }
 
@@ -1214,11 +1220,15 @@ mod tests {
     fn the_database_step_follows_the_views_step() {
         assert!(steps_of(&[]).contains(&Step::Database));
         assert!(steps_of(&["--only", "views"]).contains(&Step::Database));
-        for only in ["locations", "tiles"] {
-            let s = steps_of(&["--only", only]);
-            assert!(!s.contains(&Step::Database), "{only}");
-            assert!(s.contains(&Step::Catalog), "{only}");
-        }
+        // `--only locations` rewrites location_hierarchy and, through the
+        // libraries step it adds, the Library results.
+        let s = steps_of(&["--only", "locations"]);
+        assert!(s.contains(&Step::Database));
+        assert!(s.contains(&Step::Libraries));
+        assert!(s.contains(&Step::Catalog));
+        let s = steps_of(&["--only", "tiles"]);
+        assert!(!s.contains(&Step::Database));
+        assert!(s.contains(&Step::Catalog));
         assert!(steps_of(&["--only", "database"]).contains(&Step::Database));
     }
 

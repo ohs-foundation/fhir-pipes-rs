@@ -64,7 +64,8 @@ By default every step except `push` runs, `catalog` only when the config has a
 with `libraries`. `--only views,tiles` picks steps (the manifest and the
 catalog are added when a data step is picked, `libraries` when `locations` or
 `views` is, since the Libraries read their tables, and the database when
-`views` or `libraries` is), `--skip tiles` leaves some out,
+`views`, `locations` or `libraries` is, since it loads their tables),
+`--skip tiles` leaves some out,
 and `--push` adds the push. Before anything runs, the binary checks that each
 tool the chosen steps need is installed, and stops if one is missing.
 
@@ -658,8 +659,8 @@ stay as the last run left them.
 
 **Which tables a run loads.** The view tables are loaded when the views step
 runs, or when `--only` names `database`. A run without the views step
-otherwise (`--only libraries`, `--skip views`) loads the derived tables and
-the SQLViews alone, and leaves the view tables in the database as they are.
+otherwise (`--only libraries`, `--only locations`, `--skip views`) loads the
+derived tables and the SQLViews alone, and leaves the view tables in the database as they are.
 
 The step reads the tables the run has staged, before they are swapped into
 `parquet/`, so a database failure leaves the files as they were too. All the
