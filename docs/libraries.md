@@ -188,6 +188,12 @@ When the same URL and version is in more than one place, the first one wins.
 A canonical with no `|version` must have one version only; with several, name
 one as `url|version`.
 
+Each artefact has a table of its own, named from its `name`, and for a SQLView
+that name is also its PostgreSQL view's. Two versions of one canonical with
+the same `name` would write the same table, so a Library pinned to one version
+could read the other's result. The load refuses them, naming both as
+`url|version`: give each version a name of its own.
+
 The built-ins cannot be overridden. A source that defines the Location view or
 `LocationHierarchy` stops the load, naming the URL.
 

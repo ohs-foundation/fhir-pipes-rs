@@ -50,6 +50,14 @@ impl Artifact {
         }
     }
 
+    /// `url|version`, or the url alone.
+    pub fn canonical(&self) -> String {
+        match self.version() {
+            Some(v) => format!("{}|{v}", self.url()),
+            None => self.url().to_string(),
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
             Artifact::View(v) => &v.name,
@@ -136,9 +144,11 @@ impl Catalog {
             .find(|&i| self.artifacts[i].version() == version)
     }
 
-    /// Each URL writes one table, which no other URL writes; an artefact
-    /// from a source (past the first `builtins`) cannot write a reserved
-    /// table.
+    /// Each artefact writes its own table, which no other artefact writes:
+    /// not another URL, and not another version of its own URL, which a
+    /// Library pinned to one version would otherwise read. For a SQLView the
+    /// table is the name of its PostgreSQL view. An artefact from a source
+    /// (past the first `builtins`) cannot write a reserved table.
     fn check_tables(&self, builtins: usize, strip_prefix: &[String]) -> Result<()> {
         let mut seen: BTreeMap<String, &Artifact> = BTreeMap::new();
         for (i, a) in self.artifacts.iter().enumerate() {
@@ -160,17 +170,17 @@ impl Catalog {
                     a.url()
                 );
             }
-            match seen.get(&table) {
-                Some(other) if other.url() != a.url() => bail!(
-                    "{} and {} both write table {table}; rename one or change strip_prefix",
-                    other.url(),
-                    a.url()
-                ),
-                Some(_) => {}
-                None => {
-                    seen.insert(table, a);
-                }
+            // A URL and version is read once (`load`), so any artefact
+            // already seen for this table is a different one.
+            if let Some(other) = seen.get(&table) {
+                bail!(
+                    "{} and {} both write table {table}; give each a name of its own or \
+                     change strip_prefix",
+                    other.canonical(),
+                    a.canonical()
+                );
             }
+            seen.insert(table, a);
         }
         Ok(())
     }
@@ -431,8 +441,12 @@ mod tests {
 
     #[test]
     fn a_canonical_resolves_from_the_first_source_that_has_it() {
+        // Two versions of one canonical need names of their own: each
+        // writes its own table.
         let a = dir(&[lib("Foo", "1", false, &[])]);
-        let b = dir(&[lib("Foo", "2", false, &[])]);
+        let mut foo2 = lib("FooTwo", "2", false, &[]);
+        foo2["url"] = json!(format!("{BASE}Foo"));
+        let b = dir(&[foo2, lib("Foo", "1", false, &[])]);
         let cat = load(&[&a, &b], &[]).unwrap();
         let url = format!("{BASE}Foo");
         assert_eq!(cat.get(&url, Some("2")).unwrap().version(), Some("2"));
@@ -498,6 +512,34 @@ mod tests {
         assert!(
             format!("{err:#}").contains("both write table foo"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn two_versions_with_one_table_are_refused() {
+        // A consumer pinned to Foo|1 would read version 2's result, or, for
+        // SQLViews, the PostgreSQL view of version 2.
+        for view in [false, true] {
+            let a = dir(&[lib("Foo", "1", view, &[])]);
+            let b = dir(&[lib("Foo", "2", view, &[])]);
+            let err = format!("{:#}", load(&[&a, &b], &[]).unwrap_err());
+            assert!(
+                err.contains(&format!("{BASE}Foo|1"))
+                    && err.contains(&format!("{BASE}Foo|2"))
+                    && err.contains("both write table foo"),
+                "{err}"
+            );
+        }
+        // Views too: each version's table would be the same.
+        let v = "https://example.org/ViewDefinition/V";
+        let mut v2 = view("V", v);
+        v2["version"] = json!("2");
+        let mut v1 = view("V", v);
+        v1["version"] = json!("1");
+        let err = format!("{:#}", load(&[&dir(&[v1, v2])], &[]).unwrap_err());
+        assert!(
+            err.contains(&format!("{v}|1")) && err.contains(&format!("{v}|2")),
+            "{err}"
         );
     }
 
