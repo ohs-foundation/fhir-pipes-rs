@@ -40,7 +40,7 @@ mod database;
 mod fhir;
 mod files;
 mod manifest;
-mod partition;
+pub(crate) mod partition;
 mod push;
 pub(crate) mod sql;
 mod stage;
