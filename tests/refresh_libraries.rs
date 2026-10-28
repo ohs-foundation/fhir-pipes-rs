@@ -433,3 +433,73 @@ fn a_result_cannot_replace_a_view_or_lookup_table() {
         assert!(!data.join("parquet/reading").exists(), "{name}");
     }
 }
+
+#[test]
+fn results_and_the_hierarchy_are_in_the_catalog() {
+    if !have_duckdb("results_and_the_hierarchy_are_in_the_catalog") {
+        return;
+    }
+    // ReadingTotals has a country column (partitioned); ReadingAreas has not
+    // (one part-0.parquet).
+    let query = library(
+        "ReadingAreas",
+        false,
+        &[("r", READING)],
+        "SELECT id, value FROM r ORDER BY id",
+    );
+    let (dir, config, views) = setup_libraries(&[totals(), query]);
+    let root = dir.path();
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{text}\n[catalog]\n")).unwrap();
+    let locations = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hierarchy/locations.ndjson"),
+    )
+    .unwrap();
+    let input = inputs(
+        root,
+        &[
+            ("locations.ndjson", locations),
+            (
+                "obs.ndjson",
+                lines(&[obs("o1", 30, None), obs("o2", 5, None)]),
+            ),
+        ],
+    );
+    refresh(&config, &views, &input, "locations,views").success();
+    let data = root.join("data");
+    let sql = fs::read_to_string(data.join("catalog.sql")).unwrap();
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
+    let hierarchy_rows = duckdb_value(
+        &data,
+        "SELECT count(*) FROM read_parquet('parquet/location_hierarchy/**/*.parquet')",
+    );
+    assert_ne!(hierarchy_rows, "0");
+    for (table, count) in [
+        ("location_hierarchy", hierarchy_rows.as_str()),
+        ("reading_totals", "1"),
+        ("reading_areas", "2"),
+    ] {
+        assert!(
+            sql.contains(&format!("CREATE OR REPLACE VIEW \"{table}\" AS")),
+            "{table}: {sql}"
+        );
+        assert_eq!(
+            manifest["tables"][table]["rows"].to_string(),
+            count,
+            "{table}: {manifest}"
+        );
+        // The view reads the table's rows.
+        assert_eq!(
+            duckdb_value(
+                &data,
+                &format!(
+                    "{}\nSELECT count(*) FROM \"{table}\";",
+                    fs::read_to_string(data.join("catalog.sql")).unwrap()
+                )
+            ),
+            count,
+            "{table}"
+        );
+    }
+}
