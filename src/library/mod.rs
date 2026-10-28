@@ -6,6 +6,8 @@
 // The model is used by the commands added after `build`.
 #![allow(dead_code)]
 
+pub mod builtin;
+pub mod resolve;
 pub mod source;
 
 use std::path::PathBuf;
