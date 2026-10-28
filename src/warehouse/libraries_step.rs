@@ -35,9 +35,13 @@ const PARTITION_COLUMN: &str = "country";
 
 /// Run every SQLQuery Library into the staging directory. Returns the
 /// tables written.
-pub(super) fn libraries_step(s: &Settings, stage: &stage::Stage) -> Result<BTreeSet<String>> {
-    println!("== libraries");
-    let catalog = catalog(s)?;
+/// `catalog` is the run's Libraries (`catalog`), which the database step
+/// uses too.
+pub(super) fn libraries_step(
+    s: &Settings,
+    catalog: &Catalog,
+    stage: &stage::Stage,
+) -> Result<BTreeSet<String>> {
     let queries: Vec<&Library> = catalog
         .order()?
         .into_iter()
@@ -62,9 +66,9 @@ pub(super) fn libraries_step(s: &Settings, stage: &stage::Stage) -> Result<BTree
         crate::stop::check()?;
         let t = Instant::now();
         let table = lib.table(&s.strip_prefix);
-        check_inputs(s, stage, &catalog, lib, lib)?;
+        check_inputs(s, stage, catalog, lib, lib)?;
         let bind = |a: &Artifact| bind(s, stage, a);
-        let sql = compose(lib, "duckdb", &catalog, &bind).map_err(usage)?;
+        let sql = compose(lib, "duckdb", catalog, &bind).map_err(usage)?;
         let dir = stage.table(&table);
         write(s, &sql, &dir).with_context(|| format!("Library {}", lib.name))?;
         let rows = manifest::rows(&dir, PARTITION_COLUMN)?;

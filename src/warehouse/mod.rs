@@ -951,11 +951,19 @@ fn refresh(
         ran.record("tiles", Some(Step::Tiles), t.context("tiles")?);
     }
 
+    // The Libraries of the views directory and the `libraries` sources,
+    // loaded once per run, by the first step that needs them, so the
+    // database step's SQLViews and derived tables come from the same Library
+    // content as the results the libraries step wrote.
+    let mut library_catalog: Option<crate::library::resolve::Catalog> = None;
+
     // The libraries read the tables the steps above wrote.
     let mut library_tables = BTreeSet::new();
     if steps.contains(&Step::Libraries) {
         library_tables = ran.run_step("libraries", Some(Step::Libraries), || {
-            libraries_step::libraries_step(s, &stage)
+            println!("== libraries");
+            let catalog = library_catalog.insert(libraries_step::catalog(s)?);
+            libraries_step::libraries_step(s, catalog, &stage)
         })?;
     }
 
@@ -1001,12 +1009,13 @@ fn refresh(
                         }
                     }));
                 }
-                // The Libraries, only with `libraries` in the config, as the
-                // libraries step.
-                let catalog = if s.libraries.is_empty() {
-                    None
-                } else {
-                    Some(libraries_step::catalog(s)?)
+                // The Libraries, only with `libraries` in the config: those
+                // the libraries step loaded, or, when it did not run, loaded
+                // here.
+                let catalog = match library_catalog.take() {
+                    Some(c) => Some(c),
+                    None if s.libraries.is_empty() => None,
+                    None => Some(libraries_step::catalog(s)?),
                 };
                 tables.extend(database::derived_tables(s, catalog.as_ref(), |t| {
                     stage.read(t)
