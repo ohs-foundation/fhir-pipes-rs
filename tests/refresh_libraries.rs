@@ -465,18 +465,29 @@ fn results_and_the_hierarchy_are_in_the_catalog() {
             ),
         ],
     );
+    // `--only views` also runs the libraries step, which is why `reading_*` exist.
     refresh(&config, &views, &input, "locations,views").success();
     let data = root.join("data");
+    // Partitioned result: a country= directory. Unpartitioned: one file, no x= directories.
+    let subdirs = |t: &str| -> Vec<String> {
+        fs::read_dir(data.join("parquet").join(t))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    // These Observations have no country, so the partition is the default one.
+    let totals_dirs = subdirs("reading_totals");
+    assert!(
+        totals_dirs.len() == 1 && totals_dirs[0].starts_with("country="),
+        "{totals_dirs:?}"
+    );
+    assert_eq!(subdirs("reading_areas"), ["part-0.parquet"]);
     let sql = fs::read_to_string(data.join("catalog.sql")).unwrap();
     let manifest: Value =
         serde_json::from_str(&fs::read_to_string(data.join("manifest.json")).unwrap()).unwrap();
-    let hierarchy_rows = duckdb_value(
-        &data,
-        "SELECT count(*) FROM read_parquet('parquet/location_hierarchy/**/*.parquet')",
-    );
-    assert_ne!(hierarchy_rows, "0");
     for (table, count) in [
-        ("location_hierarchy", hierarchy_rows.as_str()),
+        // One row per Location in the fixture; none is in a cycle or too deep.
+        ("location_hierarchy", "21"),
         ("reading_totals", "1"),
         ("reading_areas", "2"),
     ] {
@@ -491,13 +502,7 @@ fn results_and_the_hierarchy_are_in_the_catalog() {
         );
         // The view reads the table's rows.
         assert_eq!(
-            duckdb_value(
-                &data,
-                &format!(
-                    "{}\nSELECT count(*) FROM \"{table}\";",
-                    fs::read_to_string(data.join("catalog.sql")).unwrap()
-                )
-            ),
+            duckdb_value(&data, &format!("{sql}\nSELECT count(*) FROM \"{table}\";")),
             count,
             "{table}"
         );
