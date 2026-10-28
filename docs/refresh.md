@@ -860,7 +860,8 @@ are read as follows:
 - a view: its table as this run left it, from staging when the run wrote it,
   else from `parquet/`. A view outside the views directory has no table and
   stops the step, naming the Library, the input's label and canonical, and
-  the table;
+  the table. This holds when `parquet/` has a table of that name left from
+  an earlier configuration: it is not read;
 - `LocationHierarchy`: the `location_hierarchy` table the `locations` step
   writes from its partOf walk; its SQL is not run;
 - a SQLView: its SQL, inlined into the query. A SQLView writes no table;

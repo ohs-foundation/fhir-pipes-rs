@@ -323,6 +323,34 @@ fn a_missing_input_fails_the_step_with_its_label() {
     assert!(!data.join("parquet/reading").exists());
 }
 
+/// A view input whose table is left from an earlier configuration is not
+/// read: here IcrReading has moved from the views directory to a library
+/// source, and parquet/reading/ is the last views run's.
+#[test]
+fn a_view_table_left_from_an_earlier_config_is_not_read() {
+    if !have_duckdb("a_view_table_left_from_an_earlier_config_is_not_read") {
+        return;
+    }
+    let (dir, config, views) = setup_libraries(&[totals()]);
+    let root = dir.path();
+    let input = inputs(root, &[("a.ndjson", lines(&[obs("o1", 30, None)]))]);
+    refresh(&config, &views, &input, "views").success();
+    let data = root.join("data");
+    assert!(data.join("parquet/reading").is_dir());
+
+    let reading = fs::read_to_string(views.join("IcrReading.json")).unwrap();
+    fs::remove_file(views.join("IcrReading.json")).unwrap();
+    let reading: Value = serde_json::from_str(&reading).unwrap();
+    write_libraries(root, &[reading, totals()]);
+    refresh(&config, &views, &input, "libraries")
+        .failure()
+        .stderr(has(format!(
+            "Library ReadingTotals: input r ({READING}) is not a view in the views directory"
+        )))
+        .stderr(has("left from an earlier run is not read"));
+    assert_eq!(last_run(&data)["failed_step"], "libraries");
+}
+
 #[test]
 fn order_by_is_kept() {
     if !have_duckdb("order_by_is_kept") {

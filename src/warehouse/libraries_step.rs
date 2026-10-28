@@ -50,7 +50,15 @@ pub(super) fn libraries_step(
     if queries.is_empty() {
         println!("   no SQLQuery Libraries");
     }
-    let taken = other_tables(s)?;
+    let views = match &s.views {
+        Some(dir) => crate::views::run::discover(dir, &s.strip_prefix).map_err(usage)?,
+        None => Vec::new(),
+    };
+    // The tables this configuration's views write. A view input whose table
+    // is not one of them is refused, even when a table of that name is left
+    // in the warehouse from an earlier configuration.
+    let view_tables: BTreeSet<String> = views.iter().map(|v| v.table.clone()).collect();
+    let taken = other_tables(s, &views);
     for lib in &queries {
         let table = lib.table(&s.strip_prefix);
         if let Some(by) = taken.get(&table) {
@@ -66,7 +74,7 @@ pub(super) fn libraries_step(
         crate::stop::check()?;
         let t = Instant::now();
         let table = lib.table(&s.strip_prefix);
-        check_inputs(s, stage, catalog, lib, lib)?;
+        check_inputs(s, stage, catalog, &view_tables, lib, lib)?;
         let bind = |a: &Artifact| bind(s, stage, a);
         let sql = compose(lib, "duckdb", catalog, &bind).map_err(usage)?;
         let dir = stage.table(&table);
@@ -93,7 +101,7 @@ pub(super) fn catalog(s: &Settings) -> Result<Catalog> {
 /// The tables other steps write, which no result may replace, each with what
 /// writes it: every view in the views directory (with a url or without),
 /// the lookup tables, `locations` and `location_hierarchy`.
-fn other_tables(s: &Settings) -> Result<BTreeMap<String, String>> {
+fn other_tables(s: &Settings, views: &[crate::views::run::View]) -> BTreeMap<String, String> {
     let mut taken = BTreeMap::new();
     for t in ["locations", HIERARCHY_TABLE] {
         taken.insert(t.to_string(), "written by the locations step".to_string());
@@ -101,12 +109,10 @@ fn other_tables(s: &Settings) -> Result<BTreeMap<String, String>> {
     for l in &s.lookups {
         taken.insert(l.table.clone(), "a [[partition.lookup]] table".to_string());
     }
-    if let Some(dir) = &s.views {
-        for v in crate::views::run::discover(dir, &s.strip_prefix).map_err(usage)? {
-            taken.insert(v.table, format!("the table of view {}", v.name));
-        }
+    for v in views {
+        taken.insert(v.table.clone(), format!("the table of view {}", v.name));
     }
-    Ok(taken)
+    taken
 }
 
 /// The table an input is read from, or `None` for a SQLView, whose SQL is
@@ -120,12 +126,14 @@ fn input_table(s: &Settings, a: &Artifact) -> Option<String> {
     }
 }
 
-/// Every table `lib` reads, through the SQLViews it inlines, must be there.
-/// `query` is the SQLQuery being run, for the message.
+/// Every table `lib` reads, through the SQLViews it inlines, must be there,
+/// and a view's table must be one of `view_tables`, the tables the views
+/// directory writes. `query` is the SQLQuery being run, for the message.
 fn check_inputs(
     s: &Settings,
     stage: &stage::Stage,
     catalog: &Catalog,
+    view_tables: &BTreeSet<String>,
     lib: &Library,
     query: &Library,
 ) -> Result<()> {
@@ -135,12 +143,16 @@ fn check_inputs(
             .with_context(|| format!("Library {} depends-on {}", lib.name, dep.label))
             .map_err(usage)?;
         match (input_table(s, input), input) {
-            (None, Artifact::Library(view)) => check_inputs(s, stage, catalog, view, query)?,
+            (None, Artifact::Library(view)) => {
+                check_inputs(s, stage, catalog, view_tables, view, query)?
+            }
             (None, Artifact::View(_)) => {}
             (Some(table), _) => {
                 let dir = stage.read(&table);
-                if !dir.is_dir() || files(s, &dir).is_empty() {
-                    return Err(usage(missing(lib, query, dep, &table, input)));
+                let foreign = matches!(input, Artifact::View(_)) && !view_tables.contains(&table);
+                if foreign || !dir.is_dir() || files(s, &dir).is_empty() {
+                    let stale = foreign && dir.is_dir();
+                    return Err(usage(missing(lib, query, dep, &table, input, stale)));
                 }
             }
         }
@@ -148,13 +160,15 @@ fn check_inputs(
     Ok(())
 }
 
-/// The error for an input without a table.
+/// The error for an input without a table, or, `stale`, for a view input
+/// whose table the views directory does not write.
 fn missing(
     lib: &Library,
     query: &Library,
     dep: &Dependency,
     table: &str,
     input: &Artifact,
+    stale: bool,
 ) -> anyhow::Error {
     let by = if lib.url == query.url {
         String::new()
@@ -175,6 +189,15 @@ fn missing(
              add the view there, or run the views step"
         }
     };
+    if stale {
+        return anyhow!(
+            "Library {}{by}: input {} ({canonical}) is not a view in the views directory, \
+             so table {table} is not written by this configuration; a table of that name \
+             left from an earlier run is not read; add the view to the views directory",
+            lib.name,
+            dep.label
+        );
+    }
     anyhow!(
         "Library {}{by}: input {} ({canonical}) has no table {table} in the warehouse; {why}",
         lib.name,
