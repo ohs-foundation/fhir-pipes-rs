@@ -231,8 +231,9 @@ Disk use doubles for the tables, views and tiles a run writes, until the swap.
 Each ViewDefinition writes `parquet/<table>/<column>=<value>/part-0.parquet`.
 The table is the view's name in snake case minus a configured prefix
 (`IcrIndicatorValue` → `indicator_value`). It must be a SQL name (a letter, then
-letters, digits and `_`), and must not be `locations`, which the Location
-transform writes; a view that would give another name stops the run. Dates,
+letters, digits and `_`), and must not be `locations` or `location_hierarchy`,
+which the locations step writes; a view that would give another name stops
+the run. This holds for a view with no `url` too. Dates,
 dateTimes, instants and times are parquet date and timestamp types, not text.
 
 The value in the directory name is escaped the way hive escapes it, `%2F` for
