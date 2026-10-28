@@ -180,11 +180,25 @@ pub fn build_dir(src: &Path, out: &Path) -> Result<usize> {
     let entries = fs::read_dir(src)
         .with_context(|| format!("reading {}", src.display()))
         .map_err(usage)?;
-    let mut paths: Vec<_> = entries
+    let mut sql: Vec<_> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "sql") && p.with_extension("toml").exists())
+        .filter(|p| p.extension().is_some_and(|x| x == "sql"))
         .collect();
-    paths.sort();
+    sql.sort();
+    for p in without_metadata(&sql) {
+        eprintln!(
+            "warning: {} has no {} beside it, so no Library is built from it",
+            p.display(),
+            p.with_extension("toml")
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+    }
+    let paths: Vec<_> = sql
+        .into_iter()
+        .filter(|p| p.with_extension("toml").exists())
+        .collect();
     fs::create_dir_all(out)
         .with_context(|| format!("creating {}", out.display()))
         .map_err(usage)?;
@@ -196,6 +210,22 @@ pub fn build_dir(src: &Path, out: &Path) -> Result<usize> {
         fs::write(&dest, text).with_context(|| format!("writing {}", dest.display()))?;
     }
     Ok(paths.len())
+}
+
+/// The `.sql` files of `sql` with no `.toml` beside them, other than the
+/// dialect files (`<stem>.<dialect>.sql`) of a `<stem>.sql`.
+fn without_metadata(sql: &[std::path::PathBuf]) -> Vec<&Path> {
+    sql.iter()
+        .map(|p| p.as_path())
+        .filter(|p| !p.with_extension("toml").exists())
+        .filter(|p| {
+            let stem = p.with_extension("");
+            let dialect = stem
+                .extension()
+                .is_some_and(|d| DIALECTS.iter().any(|x| d == *x));
+            !(dialect && stem.with_extension("sql").exists())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -320,6 +350,33 @@ resource = "https://icr.healthcampaigns.org/uganda/Library/IcrCampaignTaskByArea
             "{msg}"
         );
         assert!(build_from("SELECT ';' AS x; -- end;", &[], META).is_ok());
+    }
+
+    #[test]
+    fn a_sql_file_without_metadata_is_named_but_not_a_dialect_file() {
+        let dir = source(META);
+        for f in [
+            "t.duckdb.sql",
+            "t.postgresql.sql",
+            "orphan.sql",
+            "lone.duckdb.sql",
+        ] {
+            fs::write(dir.path().join(f), "SELECT 1").unwrap();
+        }
+        let mut sql: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "sql"))
+            .collect();
+        sql.sort();
+        let names: Vec<_> = without_metadata(&sql)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // lone.duckdb.sql has no lone.sql, so it is not a dialect file.
+        assert_eq!(names, ["lone.duckdb.sql", "orphan.sql"]);
+        let out = tempfile::tempdir().unwrap();
+        assert_eq!(build_dir(dir.path(), out.path()).unwrap(), 1);
     }
 
     #[test]

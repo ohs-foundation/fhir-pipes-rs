@@ -34,3 +34,33 @@ fn build_writes_one_library_per_sql_file() {
     }
     assert_eq!(fs::read_dir(out.path()).unwrap().count(), 2);
 }
+
+#[test]
+fn build_warns_about_a_sql_file_without_a_toml() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    fs::write(src.path().join("One.sql"), "SELECT 1 AS x\n").unwrap();
+    fs::write(src.path().join("One.duckdb.sql"), "SELECT 2 AS x\n").unwrap();
+    fs::write(
+        src.path().join("One.toml"),
+        "url = \"https://example.org/Library/One\"\nname = \"One\"\n\
+         status = \"draft\"\nkind = \"SQLView\"\n",
+    )
+    .unwrap();
+    fs::write(src.path().join("Forgotten.sql"), "SELECT 3 AS x\n").unwrap();
+    let assert = Command::cargo_bin("fhir-pipes")
+        .unwrap()
+        .args(["libraries", "build"])
+        .arg(src.path())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("Forgotten.sql has no Forgotten.toml beside it"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("One.duckdb.sql"), "{stderr}");
+    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
+}

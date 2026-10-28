@@ -102,7 +102,10 @@ Reads every `*.sql` file in `<src>` that has a `.toml` file beside it, and
 writes `Library-<name>.json` in `<dir>`. The Library has the SQLView or
 SQLQuery profile in `meta.profile`, the SQL as base64 `content` (with the
 text also in the `sql-text` extension), and a `relatedArtifact` for each
-input. It prints the number of files written.
+input. It prints the number of files written. A `.sql` file with no `.toml`
+beside it is not built, and a warning names it; a dialect file
+(`<name>.duckdb.sql`, `<name>.postgresql.sql`) beside `<name>.sql` is not
+warned about.
 
 ## libraries sql
 
