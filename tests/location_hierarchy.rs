@@ -138,9 +138,14 @@ impl Warehouse {
         files
     }
 
-    /// `libraries sql`: LocationHierarchy's SQL with the label `location`
-    /// bound to this warehouse's Location Parquet.
-    fn library_sql(&self) -> String {
+    /// LocationHierarchy's portable SQL (views/location/LocationHierarchy.sql)
+    /// with the label `location` bound to this warehouse's Location Parquet,
+    /// composed as fhir-pipes composes a Library: the input in a CTE named
+    /// by the label. `libraries sql` does not print this for the built-in:
+    /// it reads the `location_hierarchy` table, as the refresh does.
+    /// What `libraries sql` prints for LocationHierarchy: a read of this
+    /// warehouse's `location_hierarchy`, without the trailing `;`.
+    fn printed_sql(&self) -> String {
         let out = pipes()
             .args(["libraries", "sql", HIERARCHY, "--warehouse"])
             .arg(self.root())
@@ -151,7 +156,21 @@ impl Warehouse {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8(out.stdout).unwrap()
+        let text = String::from_utf8(out.stdout).unwrap();
+        text.trim_end().trim_end_matches(';').to_string()
+    }
+
+    fn library_sql(&self) -> String {
+        let sql = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("views/location/LocationHierarchy.sql"),
+        )
+        .unwrap();
+        format!(
+            "WITH \"location\" AS (SELECT * FROM read_parquet({}, hive_partitioning = true, \
+             union_by_name = true, hive_types_autocast = false))\nSELECT * FROM (\n{}\n) AS q",
+            sql_string(&self.root().join("parquet/location/**/*.parquet")),
+            sql.trim_end().trim_end_matches(';')
+        )
     }
 }
 
@@ -275,6 +294,13 @@ fn the_sql_matches_the_rust_in_duckdb() {
     let n = fixture_rows().to_string();
     assert_eq!(duckdb(&db, "SELECT count(*) FROM s;"), n);
     assert_eq!(duckdb(&db, "SELECT count(*) FROM r;"), n);
+    // `libraries sql` for the built-in reads the walk's table.
+    let printed = w.printed_sql();
+    assert!(!printed.contains("WITH RECURSIVE"), "{printed}");
+    assert_eq!(
+        duckdb(&db, &format!("SELECT count(*) FROM ({printed}) AS p;")),
+        n
+    );
     for (a, b) in [("s", "r"), ("r", "s")] {
         assert_eq!(
             duckdb(&db, &format!("{};", rows_only_in(a, b))),
@@ -440,7 +466,7 @@ mod postgresql {
         statements
     }
 
-    /// The composed SQL of `libraries sql` with its one input, the
+    /// The composed SQL (`Warehouse::library_sql`) with its one input, the
     /// `read_parquet(...)` that `location` is bound to, replaced by `table`.
     fn bind_location(composed: &str, table: &str) -> String {
         let start = composed

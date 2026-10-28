@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::error::usage;
 use crate::warehouse::sql::sql_path;
+use resolve::HIERARCHY_TABLE;
 
 pub const SQLVIEW_PROFILE: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView";
 pub const SQLQUERY_PROFILE: &str =
@@ -119,22 +120,34 @@ fn library_sql(
             }
         }
     };
-    let bind = |a: &resolve::Artifact| -> Result<Option<compose::Bind>> {
-        if let resolve::Artifact::Library(l) = a
-            && l.kind == Kind::SqlView
-            && l.url != resolve::HIERARCHY_URL
-        {
-            return Ok(None);
-        }
-        let files = warehouse
-            .join("parquet")
-            .join(a.table(strip_prefix))
-            .join("**/*.parquet");
-        Ok(Some(compose::Bind::Relation(format!(
+    let read = |table: &str| {
+        let files = warehouse.join("parquet").join(table).join("**/*.parquet");
+        format!(
             "read_parquet({}, hive_partitioning = true, union_by_name = true, \
              hive_types_autocast = false)",
             sql_path(&files)
-        ))))
+        )
+    };
+    // The built-in hierarchy is the table the locations step writes, as in
+    // the refresh, whatever the strip prefix. Its own SQL reads the Location
+    // view, which writes no table, so it is not composed.
+    if lib.url == resolve::HIERARCHY_URL {
+        return Ok(format!(
+            "-- fhir-pipes reads the {HIERARCHY_TABLE} table the locations step writes; \
+             the portable SQL is in views/location/LocationHierarchy.sql\n\
+             SELECT * FROM {}",
+            read(HIERARCHY_TABLE)
+        ));
+    }
+    let bind = |a: &resolve::Artifact| -> Result<Option<compose::Bind>> {
+        let table = match a {
+            resolve::Artifact::Library(l) if l.url == resolve::HIERARCHY_URL => {
+                HIERARCHY_TABLE.to_string()
+            }
+            resolve::Artifact::Library(l) if l.kind == Kind::SqlView => return Ok(None),
+            _ => a.table(strip_prefix),
+        };
+        Ok(Some(compose::Bind::Relation(read(&table))))
     };
     compose::compose(lib, "duckdb", &catalog, &bind).map_err(usage)
 }
@@ -420,5 +433,66 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("Nope"), "{err:#}");
+    }
+
+    fn read_hierarchy() -> String {
+        "read_parquet('/wh/parquet/location_hierarchy/**/*.parquet', hive_partitioning = true, \
+         union_by_name = true, hive_types_autocast = false)"
+            .to_string()
+    }
+
+    #[test]
+    fn libraries_sql_for_the_hierarchy_reads_its_table() {
+        // fhir-pipes never runs the hierarchy's SQL, and refresh writes no
+        // parquet/location for it to read.
+        for strip in [vec![], vec!["location_".to_string()]] {
+            for arg in [
+                resolve::HIERARCHY_URL.to_string(),
+                format!("{}|0.1.0", resolve::HIERARCHY_URL),
+            ] {
+                let got = library_sql(&arg, &[], Path::new("/wh"), &strip).unwrap();
+                assert!(got.starts_with("-- "), "{got}");
+                assert!(
+                    got.contains("views/location/LocationHierarchy.sql"),
+                    "{got}"
+                );
+                assert!(
+                    got.ends_with(&format!("\nSELECT * FROM {}", read_hierarchy())),
+                    "{got}"
+                );
+                assert!(!got.contains("WITH RECURSIVE"), "{got}");
+            }
+        }
+    }
+
+    #[test]
+    fn libraries_sql_reads_the_hierarchy_whatever_the_strip_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        let q = source::build_from(
+            "SELECT * FROM h",
+            &[],
+            &format!(
+                "url = \"https://example.org/Library/Q\"\nname = \"Q\"\nstatus = \"draft\"\n\
+                 kind = \"SQLQuery\"\n[[depends_on]]\nlabel = \"h\"\nresource = \"{}\"\n",
+                resolve::HIERARCHY_URL
+            ),
+        )
+        .unwrap();
+        let q_path = d.path().join("q.json");
+        fs::write(&q_path, q.to_string()).unwrap();
+        let got = library_sql(
+            q_path.to_str().unwrap(),
+            &[],
+            Path::new("/wh"),
+            &["location_".to_string()],
+        )
+        .unwrap();
+        assert!(
+            got.starts_with(&format!(
+                "WITH \"h\" AS (SELECT * FROM {})",
+                read_hierarchy()
+            )),
+            "{got}"
+        );
     }
 }

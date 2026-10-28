@@ -129,7 +129,12 @@ The printed SQL reads each table with
 With `hive_types_autocast = false`, a partition value such as `country=123`
 is read as the string `123`, as it is in the warehouse's tables. A SQLView
 the Library reads is written into the query; `location_hierarchy` and the
-tables of ViewDefinitions and SQLQueries are read from their files.
+tables of ViewDefinitions and SQLQueries are read from their files. The
+built-in `LocationHierarchy` is always read from `parquet/location_hierarchy/`,
+whatever `--strip-prefix` says, as `refresh` reads it. Asked for
+`LocationHierarchy` itself, the command prints `SELECT * FROM` that table,
+after a comment saying that fhir-pipes reads the table the `locations` step
+writes; the portable SQL is in `views/location/LocationHierarchy.sql`.
 
 ## Sources
 

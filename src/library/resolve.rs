@@ -65,8 +65,13 @@ impl Artifact {
         }
     }
 
-    /// The warehouse table the artefact stands for.
+    /// The warehouse table the artefact stands for. The built-in
+    /// LocationHierarchy's is `location_hierarchy`, which the locations step
+    /// writes, whatever `strip_prefix` says.
     pub fn table(&self, strip_prefix: &[String]) -> String {
+        if self.url() == HIERARCHY_URL {
+            return HIERARCHY_TABLE.to_string();
+        }
         table_name(self.name(), strip_prefix)
     }
 }
@@ -540,6 +545,26 @@ mod tests {
         assert!(
             err.contains(&format!("{v}|1")) && err.contains(&format!("{v}|2")),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn the_hierarchy_table_is_kept_whatever_the_strip_prefix() {
+        // With location_ stripped, LocationHierarchy is still
+        // location_hierarchy, so a Library named Hierarchy has a table of its
+        // own.
+        let a = dir(&[lib("Hierarchy", "1", false, &[])]);
+        let strip = ["location_".to_string()];
+        let cat = load(&[&a], &["location_"]).unwrap();
+        assert_eq!(
+            cat.get(HIERARCHY_URL, None).unwrap().table(&strip),
+            HIERARCHY_TABLE
+        );
+        assert_eq!(
+            cat.get(&format!("{BASE}Hierarchy"), None)
+                .unwrap()
+                .table(&strip),
+            "hierarchy"
         );
     }
 
