@@ -231,8 +231,8 @@ fn write(s: &Settings, sql: &str, table_dir: &Path) -> Result<()> {
 /// Write the rows of `sql` as a table at `staging`.
 fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
     if columns(s, sql)?.iter().any(|c| c == PARTITION_COLUMN) {
-        tools::duckdb(
-            &s.duckdb,
+        duckdb(
+            s,
             &format!(
                 "COPY ({sql}) TO {} (FORMAT PARQUET, PARTITION_BY ({PARTITION_COLUMN}), \
                  WRITE_PARTITION_COLUMNS true, FILENAME_PATTERN 'part-{{i}}');",
@@ -245,8 +245,8 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
         if empty {
             let dir = staging.join(format!("{PARTITION_COLUMN}={NULL_PARTITION}"));
             fs::create_dir_all(&dir)?;
-            tools::duckdb(
-                &s.duckdb,
+            duckdb(
+                s,
                 &format!(
                     "COPY (SELECT * FROM ({sql}) LIMIT 0) TO {} (FORMAT PARQUET);",
                     sql_path(&dir.join("part-0.parquet"))
@@ -255,8 +255,8 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
         }
     } else {
         fs::create_dir_all(staging)?;
-        tools::duckdb(
-            &s.duckdb,
+        duckdb(
+            s,
             &format!(
                 "COPY ({sql}) TO {} (FORMAT PARQUET);",
                 sql_path(&staging.join("part-0.parquet"))
@@ -266,9 +266,26 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A file with no SQL, given to duckdb's `-init`.
+const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+/// duckdb for a Library's SQL. `-init` with an empty file keeps duckdb from
+/// running the user's `~/.duckdbrc` first, which could change settings or
+/// the output format the step reads, or run statements of its own.
+fn duckdb_command(s: &Settings) -> Command {
+    let mut c = Command::new(&s.duckdb);
+    c.args(["-init", NO_INIT]);
+    c
+}
+
+/// Run a SQL script with `duckdb_command`, discarding its result table.
+fn duckdb(s: &Settings, sql: &str) -> Result<()> {
+    tools::output(duckdb_command(s).args(["-c", sql])).map(|_| ())
+}
+
 /// The column names of `sql`'s result.
 fn columns(s: &Settings, sql: &str) -> Result<Vec<String>> {
-    let out = tools::output(Command::new(&s.duckdb).args([
+    let out = tools::output(duckdb_command(s).args([
         "-noheader",
         "-list",
         "-c",

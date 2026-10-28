@@ -89,7 +89,8 @@ and the portable content when there is none.
 - In DuckDB 2.0, `sum` of a `BIGINT` gives a `HUGEINT`, which Parquet stores as
   `DOUBLE`. Cast the sum to a `DECIMAL` or `BIGINT` when you need an exact
   value.
-- A trailing `;` is removed, so a query can end with one.
+- A trailing `;` is removed, so a query can end with one. A Library holds one
+  statement: SQL with a second statement is refused (see [Sources](#sources)).
 
 ## libraries build
 
@@ -136,6 +137,26 @@ A source is one of:
   directory);
 - a FHIR package `.tgz`, as a path or an https URL;
 - `name#version`, a package in the local FHIR package cache.
+
+A source's SQL is code that fhir-pipes runs. The libraries step runs it in
+duckdb with the same file access as the refresh: a Library's query can read
+any file the refresh can read, and DuckDB functions such as `read_csv` or
+`read_text` read files by path. The database step also makes each SQLView
+into a PostgreSQL view as the configured database user. Use only sources you
+trust. An `https://`
+package is fetched again on every run, so whoever controls that URL, or the
+server behind it, decides the SQL the next refresh runs. Pin such a package
+to a URL you control, or download it and use the local `.tgz`.
+
+fhir-pipes limits what a Library can do beyond its query:
+
+- a Library's SQL must be one statement. SQL with a `;` before more SQL
+  (outside strings and comments) is refused when the Library is read and
+  when `libraries build` builds it, naming the Library;
+- the step's duckdb runs with `-init /dev/null`, so the user's
+  `~/.duckdbrc` is not loaded.
+
+These checks do not make an untrusted Library safe to run.
 
 A source can hold ViewDefinitions, SQLView and SQLQuery Libraries, and
 anything else, which is ignored. A file that is not JSON is skipped with a

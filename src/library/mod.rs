@@ -220,6 +220,12 @@ impl Library {
                 .with_context(|| format!("Library {url}: content {content_type} is not base64"))?;
             let sql = String::from_utf8(bytes)
                 .with_context(|| format!("Library {url}: content {content_type} is not UTF-8"))?;
+            if compose::has_several_statements(&sql) {
+                bail!(
+                    "Library {url} ({name}): content {content_type} has more than one SQL \
+                     statement; a Library's SQL is a single query"
+                );
+            }
             content.push((content_type.to_string(), sql));
         }
 
@@ -306,6 +312,37 @@ mod tests {
         );
         let lib = Library::from_json(&with_label("group")).unwrap();
         assert_eq!(lib.depends_on[0].label, "group");
+    }
+
+    #[test]
+    fn from_json_refuses_sql_with_more_than_one_statement() {
+        let with_sql = |sql: &str| {
+            let mut v = with_label("task");
+            v["content"] = json!([{"contentType": "application/sql",
+                "data": STANDARD.encode(sql)}]);
+            v
+        };
+        for bad in [
+            "SELECT 1; SELECT 2",
+            "SELECT 1; COPY (SELECT 1) TO '/tmp/x.csv';",
+            "SELECT 1;\nATTACH 'x.db'; -- end",
+        ] {
+            let err = Library::from_json(&with_sql(bad)).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("Library https://example.org/Library/Q")
+                    && msg.contains("more than one SQL statement"),
+                "{bad}: {msg}"
+            );
+        }
+        for good in [
+            "SELECT 1;",
+            "SELECT 1; -- done; really",
+            "SELECT ';' AS x /* a; b */ ;\n",
+            "SELECT \"a;b\" FROM t",
+        ] {
+            assert!(Library::from_json(&with_sql(good)).is_ok(), "{good}");
+        }
     }
 
     #[test]

@@ -86,12 +86,29 @@ fn strip_terminator(sql: &str) -> &str {
     text.trim_end()
 }
 
+/// Whether `sql` holds more than one statement: a `;` in its code (not in a
+/// string, quoted identifier or comment) before its trailing terminators. A
+/// Library's SQL is one query; a second statement would run as well.
+pub fn has_several_statements(sql: &str) -> bool {
+    let text = strip_terminator(sql);
+    code_bytes(text)
+        .into_iter()
+        .any(|i| text.as_bytes()[i] == b';')
+}
+
 /// The byte index of the last byte of `sql` that is SQL code: not
 /// whitespace, not in a comment, and not inside a string or quoted
 /// identifier (a closing quote counts as code).
 fn last_code_byte(sql: &str) -> Option<usize> {
+    code_bytes(sql).last().copied()
+}
+
+/// The byte indexes of `sql` that are SQL code, in order: not whitespace,
+/// not in a comment, and not inside a string or quoted identifier (a closing
+/// quote counts as code).
+fn code_bytes(sql: &str) -> Vec<usize> {
     let bytes = sql.as_bytes();
-    let mut last = None;
+    let mut code = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -113,17 +130,17 @@ fn last_code_byte(sql: &str) -> Option<usize> {
                 while i < bytes.len() && bytes[i] != q {
                     i += 1;
                 }
-                last = Some(i.min(bytes.len() - 1));
+                code.push(i.min(bytes.len() - 1));
                 i += 1;
             }
             b if b.is_ascii_whitespace() => i += 1,
             _ => {
-                last = Some(i);
+                code.push(i);
                 i += 1;
             }
         }
     }
-    last
+    code
 }
 
 #[cfg(test)]

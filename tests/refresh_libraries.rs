@@ -165,6 +165,34 @@ fn a_sqlquery_result_is_published_with_the_views() {
     assert_nothing_staged(&data);
 }
 
+/// The step's duckdb does not read `~/.duckdbrc`, which could change
+/// settings or run statements of its own. This one fails any duckdb that
+/// reads it.
+#[test]
+fn the_users_duckdbrc_is_not_read() {
+    if !have_duckdb("the_users_duckdbrc_is_not_read") {
+        return;
+    }
+    let (dir, config, views) = setup_libraries(&[totals()]);
+    let root = dir.path();
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join(".duckdbrc"), "SELECT error('~/.duckdbrc was read');\n").unwrap();
+    let input = inputs(root, &[("a.ndjson", lines(&[obs("o1", 30, None)]))]);
+    cmd(&config)
+        .env("HOME", &home)
+        .args(["--only", "views", "--views"])
+        .arg(&views)
+        .arg("--input")
+        .arg(&input)
+        .assert()
+        .success();
+    assert!(
+        root.join("data/parquet/reading_totals/country=SLE/part-0.parquet")
+            .is_file()
+    );
+}
+
 #[test]
 fn results_read_this_runs_tables() {
     if !have_duckdb("results_read_this_runs_tables") {

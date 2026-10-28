@@ -102,6 +102,18 @@ pub fn build_from(sql: &str, dialects: &[(String, String)], meta: &str) -> Resul
         related.push(json!({"type": "depends-on", "label": label, "resource": dep.resource}));
     }
 
+    for (file, text) in std::iter::once(("the portable SQL", sql))
+        .chain(dialects.iter().map(|(d, t)| (d.as_str(), t.as_str())))
+    {
+        if super::compose::has_several_statements(text) {
+            bail!(
+                "Library {}: {file} has more than one SQL statement; a Library's SQL is \
+                 a single query",
+                meta.name
+            );
+        }
+    }
+
     let mut content = vec![content_entry("application/sql", sql)];
     for (dialect, text) in dialects {
         content.push(content_entry(
@@ -291,6 +303,23 @@ resource = "https://icr.healthcampaigns.org/uganda/Library/IcrCampaignTaskByArea
         }
         let meta = META.replace("label = \"task\"", "label = \"group\"");
         assert!(build_from("SELECT 1", &[], &meta).is_ok());
+    }
+
+    #[test]
+    fn build_from_refuses_sql_with_more_than_one_statement() {
+        let err = build_from("SELECT 1; SELECT 2;", &[], META).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("UgandaTasks") && msg.contains("more than one SQL statement"),
+            "{msg}"
+        );
+        let dialect = [("duckdb".to_string(), "SELECT 1; DETACH x".to_string())];
+        let msg = format!("{:#}", build_from("SELECT 1", &dialect, META).unwrap_err());
+        assert!(
+            msg.contains("UgandaTasks") && msg.contains("duckdb"),
+            "{msg}"
+        );
+        assert!(build_from("SELECT ';' AS x; -- end;", &[], META).is_ok());
     }
 
     #[test]
