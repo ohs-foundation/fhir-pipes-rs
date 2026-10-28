@@ -196,6 +196,7 @@ impl Library {
             let label = ra["label"].as_str().ok_or_else(|| {
                 anyhow!("Library {url}: a depends-on relatedArtifact has no label")
             })?;
+            check_label(label).with_context(|| format!("Library {url}"))?;
             let resource = ra["resource"].as_str().ok_or_else(|| {
                 anyhow!("Library {url}: depends-on {label} has no resource canonical")
             })?;
@@ -252,6 +253,23 @@ impl Library {
     }
 }
 
+/// A `depends-on` label must be a lowercase SQL name (`[a-z_][a-z0-9_]*`).
+/// The SQL names it unquoted, and PostgreSQL folds unquoted names to
+/// lowercase, so a mixed-case label would not match its quoted binding.
+pub fn check_label(label: &str) -> Result<()> {
+    let ok = label.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        bail!(
+            "depends-on label {label:?} must be a lowercase SQL name: a-z, 0-9 and _, \
+             not starting with a digit"
+        );
+    }
+    Ok(())
+}
+
 /// Split `url|version` into the URL and the version.
 fn split_canonical(resource: &str) -> (String, Option<String>) {
     match resource.split_once('|') {
@@ -265,6 +283,31 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+
+    fn with_label(label: &str) -> Value {
+        json!({
+            "resourceType": "Library",
+            "meta": {"profile": [SQLQUERY_PROFILE]},
+            "url": "https://example.org/Library/Q", "name": "Q",
+            "relatedArtifact": [{"type": "depends-on", "label": label,
+                "resource": "https://example.org/ViewDefinition/Patient"}],
+            "content": [],
+        })
+    }
+
+    #[test]
+    fn from_json_refuses_a_label_that_is_not_a_lowercase_sql_name() {
+        let err = Library::from_json(&with_label("Patient")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Library https://example.org/Library/Q")
+                && msg.contains("Patient")
+                && msg.contains("lowercase"),
+            "{msg}"
+        );
+        let lib = Library::from_json(&with_label("group")).unwrap();
+        assert_eq!(lib.depends_on[0].label, "group");
+    }
 
     #[test]
     fn libraries_sql_binds_inputs_to_warehouse_parquet() {

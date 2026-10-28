@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{SQL_TEXT_EXTENSION, SQLQUERY_PROFILE, SQLVIEW_PROFILE};
+use super::{SQL_TEXT_EXTENSION, SQLQUERY_PROFILE, SQLVIEW_PROFILE, check_label};
 use crate::error::usage;
 
 /// Dialects with a `<stem>.<dialect>.sql` sibling file.
@@ -98,6 +98,7 @@ pub fn build_from(sql: &str, dialects: &[(String, String)], meta: &str) -> Resul
                     dep.resource
                 )
             })?;
+        check_label(label).with_context(|| format!("Library {}", meta.name))?;
         related.push(json!({"type": "depends-on", "label": label, "resource": dep.resource}));
     }
 
@@ -275,6 +276,21 @@ resource = "https://icr.healthcampaigns.org/uganda/Library/IcrCampaignTaskByArea
         let dir = source(&meta);
         let err = build_source(&dir.path().join("t.sql")).unwrap_err();
         assert!(format!("{err:#}").contains("needs a label"), "{err:#}");
+    }
+
+    #[test]
+    fn a_label_must_be_a_lowercase_sql_name() {
+        for bad in ["Tasks", "my-table"] {
+            let meta = META.replace("label = \"task\"", &format!("label = \"{bad}\""));
+            let err = build_from("SELECT 1", &[], &meta).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("UgandaTasks") && msg.contains(bad) && msg.contains("lowercase"),
+                "{msg}"
+            );
+        }
+        let meta = META.replace("label = \"task\"", "label = \"group\"");
+        assert!(build_from("SELECT 1", &[], &meta).is_ok());
     }
 
     #[test]
