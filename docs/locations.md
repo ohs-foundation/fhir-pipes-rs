@@ -461,6 +461,29 @@ functions, and `diff` uses it as the base when reconstructing an edited
 resource, so an extension fhir-pipes has never heard of survives a round trip
 through QGIS untouched.
 
+### The location_hierarchy table
+
+`transform locations --hierarchy-out <dir>` also writes `location_hierarchy`,
+one row per Location the walk resolved, with or without geometry. `refresh`
+writes it to `parquet/location_hierarchy/` in its `locations` step. It is
+partitioned by `country` (`country=<code>/part-0.parquet`, and
+`country=__HIVE_DEFAULT_PARTITION__` for a Location with no level 0 code), and
+`country` is also a column in the files. The built-in `LocationHierarchy`
+Library reads it (see [libraries.md](libraries.md#locationhierarchy)).
+
+| Column | Content |
+|---|---|
+| `id` | The Location's id |
+| `name` | The Location's name |
+| `part_of` | The id in the Location's `partOf` reference, not checked against the other Locations, so an orphan Location keeps the id of its missing parent |
+| `is_admin` | Whether the Location is an administrative unit |
+| `depth` | 0 at a root; a Location with no `partOf`, or whose parent is missing, is a root |
+| `admin_level` | The Location's level among the administrative units on its chain; null for a Location that is not an administrative unit |
+| `admin0_name` to `admin4_name` | The names of the first five administrative units on the chain, root first |
+| `admin0_code` to `admin4_code` | Their codes |
+| `country` | `admin0_code` |
+| `path` | The ids from the root down to the Location, separated by `/`, with a leading `/` |
+
 ### The report
 
 `_report.json` records what transform found and could not or would not fix:

@@ -153,6 +153,7 @@ data to show what each part does.
 | `index` | in | Add spatial index identifiers (quadkey, geohash) to Locations | [locations.md](docs/locations.md#index) |
 | `population` | in | Population Groups for admin units from a raster such as WorldPop | [locations.md](docs/locations.md#population) |
 | `dhis2 locations`, `measures`, `reports` | in | DHIS2 org units, indicators and data → FHIR NDJSON | [dhis2.md](docs/dhis2.md) |
+| `libraries build`, `libraries sql` | | SQL on FHIR Libraries: build Library JSON from SQL files, and print the SQL that runs one over a warehouse | [libraries.md](docs/libraries.md) |
 | `profile check` | | Compare a profile with its IG's extensions, code systems and profiles | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
 | `terminology valueset`, `conceptmap` | out | A value set or concept map from FHIR packages as a table SQL can join to (offline) | [terminology.md](docs/terminology.md) |
 
