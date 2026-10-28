@@ -45,7 +45,7 @@ hooks can run after a run that failed as well as after one that succeeded
 |---|---|---|
 | `locations` | the Location registry, as `fhir-pipes run` does it: extracted incrementally into `raw/<server>/locations`, transformed into `parquet/locations`; with `--reuse-raw` and a snapshot there, transformed without an extract | |
 | `views` | download each resource type the views read, as `fhir-pipes export --incremental` does (only what changed since the last refresh; by search, by `$export` with `fetch = "bulk"`, or from the HAPI server's database with `fetch = "hapi-db"`), run each type's views on one read of it, 20,000 lines at a time, and write the type's tables as soon as its views are done | |
-| `tiles` | the registry → `tiles/admin.pmtiles`, `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
+| `tiles` | the registry → `tiles/admin.pmtiles` (a layer per admin level: `admin0`, `admin1`, …, or the names in the profile's `[location] admin_layers`), `facilities`, `settlements`, `catchments` | duckdb (spatial), tippecanoe |
 | `libraries` | run each SQLQuery Library over this run's tables and write its result as a table; only with `libraries` in the config. See [Libraries](#libraries) | duckdb |
 | `manifest` | `manifest.json`: time, server (see below), each table's row count, the views, the Location extract's state | |
 | `catalog` | `catalog.sql`: a DuckDB view per table, plus your own views; with `spark = true`, also `catalog.spark.sql`: a Spark SQL table per table; only with a `[catalog]` section. See [Catalog](#catalog) | duckdb, only for `duckdb_file` |

@@ -1027,8 +1027,8 @@ run = ["sh", "-c", "touch after-views.txt"]
     }
 }
 
-/// A fake duckdb that writes one feature to the file a COPY names, and a
-/// fake tippecanoe that writes $TILES to its output.
+/// A fake duckdb that lists admin level 0 and writes one feature to the file
+/// a COPY names, and a fake tippecanoe that writes $TILES to its output.
 #[cfg(unix)]
 fn fake_tile_tools(dir: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -1036,7 +1036,9 @@ fn fake_tile_tools(dir: &Path) -> (PathBuf, PathBuf) {
     fs::write(
         &duckdb,
         r#"#!/bin/sh
-file=$(printf '%s\n' "$2" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
+for sql; do :; done
+case "$sql" in *"DISTINCT admin_level"*) echo 0; exit 0 ;; esac
+file=$(printf '%s\n' "$sql" | sed -n "s/.*TO '\([^']*\)'.*/\1/p" | tail -n 1)
 [ -n "$file" ] && echo '{"type":"Feature"}' > "$file"
 exit 0
 "#,
