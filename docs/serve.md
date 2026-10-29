@@ -300,13 +300,19 @@ The catalog is what `refresh` builds: the views directory, the
 `libraries` sources in the config and the built-ins (`Location`,
 `LocationHierarchy`). `serve` loads it at start, and a failure stops
 `serve` with exit status 2. It loads the catalog again after each run that
-succeeded, so a changed Library is served once the refresh that fetched it
-ends. When that load fails, `serve` keeps the old catalog and logs
+succeeded, once the run's end is recorded, so a changed Library is served
+shortly after the refresh that fetched it ends. When that load fails, `serve` keeps the old catalog and logs
 `query catalog not reloaded: …`. A catalog error shows no credentials from a
 Library source URL.
 
 A SQLQuery whose url contains `|` stops the catalog from loading, since
 `url|version` is how a caller names a version. Change the url.
+
+An approved query's SQL runs in DuckDB with `serve`'s access to the file
+system and the network, so approving a query is a decision to trust it.
+DuckDB runs without `serve`'s secrets in its environment: the two tokens,
+the variables `refresh` reads credentials from, the database URL variable
+and each notify header's `value_env`.
 
 ### Tokens
 
@@ -422,11 +428,11 @@ a disabled API, which have no body.
 | `415` | A POST with no `Content-Type`, or one other than `application/fhir+json` or `application/json`. Malformed JSON with an accepted `Content-Type` is `400`. |
 | `422` | The query failed or ran past `timeout`, or the `duckdb_setup` SQL failed. |
 | `500` | An error in `serve` itself. |
-| `503` | An input table has no data yet, a refresh is publishing, or `concurrency` queries are already running. |
+| `503` | An input table has no data yet, a refresh is publishing, `concurrency` queries are already running, or `serve` is stopping. |
 
 A `503` has `Retry-After: 5`. Its text is fixed: `an input table is not
-available yet; retry later`, `a refresh is publishing; retry later` or `too
-many queries running; retry later`.
+available yet; retry later`, `a refresh is publishing; retry later`, `too
+many queries running; retry later` or `serve is stopping`.
 
 A caller never sees DuckDB's error text, which can quote the setup SQL, and
 a `422` carries fixed text: `the query failed; the serve log has the
@@ -446,7 +452,12 @@ query https://example.org/Library/CoverageByArea csv 422 0 rows 31 ms: <detail>
 ```
 
 A line for an error ends in `: <detail>`, which for a failed query is
-DuckDB's message. A result cut at `max_rows` ends in `truncated at <n>`.
+DuckDB's message without the lines that quote the setup SQL: a line that
+holds 6 characters of the setup in a row (other than only spaces and
+punctuation) is dropped, and the setup's quoted strings are blanked in the
+rest. For a failed setup it is only the kind of error, such as `the
+duckdb_setup SQL failed: IO Error`, since the message can hold a value the
+setup made from its keys. A result cut at `max_rows` ends in `truncated at <n>`.
 
 ### While a refresh publishes
 
@@ -460,7 +471,9 @@ answer is `503`.
 `source = "r2://…"` or `"s3://…"` reads the Parquet files from object
 storage instead, with `duckdb_setup` to give DuckDB the credentials and
 settings it needs (an `INSTALL httpfs;` and a `CREATE SECRET`, say). The
-setup SQL is read once at start and runs before each query.
+setup SQL is read once at start and runs before each query. DuckDB is given
+it on its standard input, not on its command line, which other users of the
+machine can read.
 
 A query that runs while `rclone` pushes a refresh to the bucket can read a
 mix of old and new files. `serve` cannot tell, as it does with a local
@@ -503,6 +516,11 @@ from the database step to the end of the publish it finishes the publish
 first. After `stop_grace` seconds `serve` sends SIGKILL to the refresh's
 process group. The run is recorded as it ended, or `interrupted`, and its
 notify is sent in the time left; anything not sent goes at the next start.
+
+Running queries are stopped at once: `serve` sends SIGTERM to their DuckDB
+processes, and SIGKILL to any still running 2 seconds later. Their callers,
+and any query asked for while `serve` stops, get `503` with `serve is
+stopping`.
 
 A `serve` that is killed (SIGKILL, out of memory) marks the runs it left
 unfinished as `interrupted` when it next starts, and sends their notify. If
