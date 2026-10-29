@@ -394,6 +394,8 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         .env("FHIR_PIPES_RESULT_FILE", &result_file)
         .env("FHIR_PIPES_FAILURE_HOOKS", "off")
         .env("FHIR_PIPES_RUN_ID", rec.id.as_str())
+        // A refresh never needs the query token.
+        .env_remove("FHIR_PIPES_QUERY_TOKEN")
         .envs(job.child_env.iter().map(|(k, v)| (k, v)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

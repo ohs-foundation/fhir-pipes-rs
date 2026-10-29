@@ -66,6 +66,7 @@ struct App {
 /// What the query API is built from, loaded at startup.
 struct QueryParts {
     settings: crate::warehouse::config::Settings,
+    approve: query::config::Approve,
     queries: query::catalog::Queries,
     runner: query::run::Runner,
 }
@@ -74,11 +75,12 @@ struct QueryParts {
 /// over the warehouse serve looks after, and the catalog and runner built
 /// from them.
 fn query_parts(
-    inputs: &mut crate::warehouse::ServeInputs,
+    inputs: &crate::warehouse::ServeInputs,
+    file: crate::warehouse::config::File,
     cfg: &query::config::QueryConfig,
 ) -> Result<QueryParts> {
     let settings = crate::warehouse::config::settings(
-        std::mem::take(&mut inputs.file),
+        file,
         inputs.base.clone(),
         crate::warehouse::serve_overrides(inputs.data.clone())?,
     )?;
@@ -87,6 +89,7 @@ fn query_parts(
         query::run::Runner::new(cfg, &inputs.data, &settings.duckdb, &settings.strip_prefix)?;
     Ok(QueryParts {
         settings,
+        approve: cfg.approve.clone(),
         queries,
         runner,
     })
@@ -141,17 +144,16 @@ fn server(
         crate::redact::SECRET_VARS_ENV.to_string(),
         secret_vars.join(","),
     ));
-    let query = match (query, &cfg.query) {
-        (Some(q), Some(qcfg)) => Some(Arc::new(query::http::QueryApi {
+    let query = query.map(|q| {
+        Arc::new(query::http::QueryApi {
             queries: RwLock::new(Arc::new(q.queries)),
             runner: q.runner,
             settings: q.settings,
-            approve: qcfg.approve.clone(),
+            approve: q.approve,
             metrics: metrics.clone(),
             stdout: stdout.clone(),
-        })),
-        _ => None,
-    };
+        })
+    });
     let job = Arc::new(runner::Job {
         program: std::env::current_exe().context("finding the fhir-pipes binary")?,
         base_args,
@@ -175,7 +177,7 @@ fn server(
 }
 
 pub fn run(args: &ServeArgs) -> Result<()> {
-    let mut inputs =
+    let (inputs, file) =
         crate::warehouse::serve_inputs(args.config.as_deref(), args.data.clone()).map_err(usage)?;
     let cfg = config::parse(inputs.serve.clone(), &inputs.base).map_err(usage)?;
     let listen: SocketAddr = args
@@ -199,7 +201,13 @@ pub fn run(args: &ServeArgs) -> Result<()> {
         )));
     }
     let query = match &cfg.query {
-        Some(q) => Some(query_parts(&mut inputs, q).map_err(usage)?),
+        // The error can quote a Library source's URL, token and all.
+        Some(q) => Some(query_parts(&inputs, file, q).map_err(|e| {
+            usage(anyhow::anyhow!(
+                "{}",
+                crate::redact::urls(&crate::error::message(&e))
+            ))
+        })?),
         None => None,
     };
     let dir = inputs.data.join(".serve");

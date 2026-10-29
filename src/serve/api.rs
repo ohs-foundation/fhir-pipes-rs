@@ -115,15 +115,16 @@ impl Server {
             server
                 .metrics
                 .run_ended(&rec, started.elapsed().as_secs_f64());
-            // The run may have changed the Libraries; on an error the last
-            // catalog is kept.
-            if let Some(q) = &server.query
+            // A run that succeeded may have changed the Libraries; on an
+            // error the last catalog is kept.
+            if rec.status == super::store::RunStatus::Succeeded
+                && let Some(q) = &server.query
                 && let Err(e) = q.reload()
             {
-                server.job.stdout.push(format!(
-                    "query catalog not reloaded: {}",
-                    crate::error::message(&e)
-                ));
+                server
+                    .job
+                    .stdout
+                    .push(not_reloaded(&e, &server.job.redactor));
             }
             server.job.stdout.push(format!(
                 "{} ended: {}",
@@ -143,6 +144,16 @@ impl Server {
     fn current_id(&self) -> Option<RunId> {
         self.lock_current().as_ref().map(|(id, _)| id.clone())
     }
+}
+
+/// The line serve prints when the query catalog was not built again: the
+/// error, which can quote a Library source's URL, with URLs' credentials
+/// and serve's secrets hidden.
+fn not_reloaded(e: &anyhow::Error, redactor: &super::secrets::Redactor) -> String {
+    format!(
+        "query catalog not reloaded: {}",
+        redactor.redact(&crate::redact::urls(&crate::error::message(e)))
+    )
 }
 
 pub fn routes(server: Arc<Server>) -> axum::Router {
@@ -380,6 +391,36 @@ mod tests {
             stopping: Default::default(),
             query: None,
         })
+    }
+
+    #[test]
+    fn a_reload_error_hides_urls_credentials_and_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = crate::warehouse::config::settings(
+            Default::default(),
+            dir.path().to_path_buf(),
+            crate::warehouse::config::Overrides {
+                data: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        settings.libraries = vec!["https://u:k1-user@127.0.0.1:9/p.tgz?token=k2-query".into()];
+        let err = super::super::query::catalog::Queries::load(
+            &settings,
+            &super::super::query::config::Approve::All,
+        )
+        .err()
+        .unwrap();
+        let err = err.context("serve-secret-k3");
+        let (redactor, _) =
+            super::super::secrets::Redactor::new([("test".into(), "serve-secret-k3".into())]);
+        let line = not_reloaded(&err, &redactor);
+        assert!(line.starts_with("query catalog not reloaded: "), "{line}");
+        assert!(line.contains("https://127.0.0.1:9/p.tgz"), "{line}");
+        for secret in ["k1-user", "k2-query", "serve-secret-k3"] {
+            assert!(!line.contains(secret), "{secret}: {line}");
+        }
     }
 
     #[test]

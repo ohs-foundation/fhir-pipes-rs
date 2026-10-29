@@ -278,3 +278,61 @@ fn a_config_refresh_accepts_starts_the_query_api() {
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.contains("FHIR_PIPES_PASSWORD"), "{stderr}");
 }
+
+/// A refresh started by serve is not given the query token, and a run
+/// that fails leaves the catalog as it was.
+#[test]
+fn a_failed_run_keeps_the_catalog_and_never_sees_the_query_token() {
+    if !have_duckdb("a_failed_run_keeps_the_catalog_and_never_sees_the_query_token") {
+        return;
+    }
+    let (dir, config) = warehouse(&format!(
+        "\n[[hooks]]\nname = \"leak\"\nrun = [\"sh\", \"-c\", \"echo q=$FHIR_PIPES_QUERY_TOKEN; exit 1\"]\n\
+         \n[serve]\nretries = 0\n{QUERY_SECTION}"
+    ));
+    cmd(&config)
+        .args(["--only", "views,libraries"])
+        .assert()
+        .success();
+    let s = start_serve(
+        &config,
+        &[
+            ("FHIR_PIPES_SERVE_TOKEN", TOKEN),
+            ("FHIR_PIPES_QUERY_TOKEN", QUERY_TOKEN),
+        ],
+    );
+    let totals = library(
+        "ReadingTotals",
+        false,
+        &[("r", READING)],
+        "SELECT count(*) AS n FROM r",
+    );
+    fs::write(dir.path().join("libs/totals.json"), totals.to_string()).unwrap();
+    let id = s.start_run(r#"{"only": ["libraries", "hooks"]}"#);
+    let r = s.finished(&id);
+    assert_eq!(r["status"], "failed", "{r}");
+    idle(&s);
+    let (_, log) = s.get(&format!("/runs/{id}/log"));
+    assert!(log.contains("q="), "{log}");
+    assert!(!log.contains(QUERY_TOKEN), "{log}");
+    assert_eq!(sql_run(&s, TOTALS, Some(TOKEN)).0, 404);
+}
+
+/// A Library source's URL can carry a token: the error that stops serve
+/// does not show it.
+#[test]
+fn a_library_url_token_is_not_printed() {
+    let (_dir, config) = warehouse(QUERY_SECTION);
+    let text = fs::read_to_string(&config).unwrap().replacen(
+        "libraries = ['libs']",
+        "libraries = ['libs', 'https://u:k1-user@127.0.0.1:9/p.tgz?token=k2-query']",
+        1,
+    );
+    fs::write(&config, text).unwrap();
+    let (code, stderr) = serve_fails(&config, "127.0.0.1:0", &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("https://127.0.0.1:9/p.tgz"), "{stderr}");
+    for secret in ["k1-user", "k2-query"] {
+        assert!(!stderr.contains(secret), "{secret}: {stderr}");
+    }
+}

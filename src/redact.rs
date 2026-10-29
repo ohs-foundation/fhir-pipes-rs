@@ -16,6 +16,30 @@ pub fn url(url: &str) -> String {
     }
 }
 
+/// `text` with each http(s) URL in it passed through [`url`]: an error can
+/// quote a URL given with a token in it, such as a Library source.
+pub fn urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = ["https://", "http://"]
+        .iter()
+        .filter_map(|p| rest.find(p))
+        .min()
+    {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '"' | '\'' | '<' | '>'))
+            .unwrap_or(tail.len());
+        // Punctuation that ends the sentence, not the URL.
+        let found = tail[..end].trim_end_matches([':', ',', '.', ';']);
+        out.push_str(&url(found));
+        rest = &tail[found.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `text` with every single-quoted string of `sql` in it blanked: a tool's
 /// error can quote the SQL it ran, and that SQL can hold keys
 /// (`CREATE SECRET … KEY_ID '…'`).
@@ -35,13 +59,14 @@ pub fn sql_strings(text: &str, sql: &str) -> String {
 }
 
 /// The variables whose values refresh holds as secrets.
-const SECRET_VARS: [&str; 6] = [
+const SECRET_VARS: [&str; 7] = [
     "FHIR_PIPES_TOKEN",
     "FHIR_PIPES_CLIENT_SECRET",
     "FHIR_PIPES_PASSWORD",
     "FHIR_PIPES_HAPI_DATABASE_URL",
     "FHIR_PIPES_DATABASE_URL",
     "FHIR_PIPES_SERVE_TOKEN",
+    "FHIR_PIPES_QUERY_TOKEN",
 ];
 
 /// The variable that names more secret variables, comma-separated: those a
@@ -92,6 +117,18 @@ mod tests {
         // Anything else as it was, trailing slash or not.
         assert_eq!(url("https://h.org/fhir"), "https://h.org/fhir");
         assert_eq!(url("Binary/1"), "Binary/1");
+    }
+
+    #[test]
+    fn urls_in_text_lose_their_credentials() {
+        assert_eq!(
+            urls(
+                "libraries https://u:k1@h.org/p.tgz?token=k2: error sending request \
+                 for url (https://h.org/p.tgz?token=k2)"
+            ),
+            "libraries https://h.org/p.tgz: error sending request for url (https://h.org/p.tgz)"
+        );
+        assert_eq!(urls("no url here"), "no url here");
     }
 
     #[test]

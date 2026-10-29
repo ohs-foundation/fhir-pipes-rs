@@ -216,17 +216,16 @@ pub struct ServeInputs {
     /// The variable holding the `[database]` connection string, if there is
     /// a `[database]` section.
     pub database_url_env: Option<String>,
-    /// The rest of the config, for the query API's `Settings`.
-    pub file: config::File,
 }
 
 /// The config file `serve` was given, or the one `refresh` would find, read
-/// as `refresh` reads it; `data` is `--data` or FHIR_PIPES_DATA.
+/// as `refresh` reads it; `data` is `--data` or FHIR_PIPES_DATA. With the
+/// rest of the config, for the query API's `Settings`.
 #[cfg(unix)]
 pub fn serve_inputs(
     config: Option<&std::path::Path>,
     data: Option<PathBuf>,
-) -> Result<ServeInputs> {
+) -> Result<(ServeInputs, config::File)> {
     let path = match config {
         Some(p) => p.to_path_buf(),
         None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
@@ -243,7 +242,7 @@ pub fn serve_inputs(
             "no warehouse directory: pass --data, set FHIR_PIPES_DATA, or set `data` in the config"
         ),
     };
-    Ok(ServeInputs {
+    let inputs = ServeInputs {
         config: std::path::absolute(&path)?,
         base,
         data: std::path::absolute(&data)?,
@@ -253,8 +252,8 @@ pub fn serve_inputs(
                 .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into())
         }),
         serve: file.serve.take(),
-        file,
-    })
+    };
+    Ok((inputs, file))
 }
 
 fn env_secret(name: &str) -> Option<String> {
@@ -396,8 +395,6 @@ fn failure_hooks(s: &Settings, step: &str, err: &anyhow::Error) {
     }
 }
 
-/// The settings from the config file and flags, the steps to run and the
-/// tools they need.
 /// The values refresh takes from its flags and the environment.
 fn overrides(args: &RefreshArgs, profile: Option<&str>) -> config::Overrides {
     config::Overrides {
@@ -441,6 +438,8 @@ pub fn serve_overrides(data: PathBuf) -> Result<config::Overrides> {
     })
 }
 
+/// The settings from the config file and flags, the steps to run and the
+/// tools they need.
 fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSet<Step>, Tools)> {
     let steps = steps(args);
     let (file, base) = config::load(args.config.as_deref())?;
@@ -1226,7 +1225,7 @@ mod tests {
         std::fs::write(real.join("fhir-pipes.toml"), "data = \"w\"\n").unwrap();
         let link = deploy.join("fhir-pipes.toml");
         std::os::unix::fs::symlink(real.join("fhir-pipes.toml"), &link).unwrap();
-        let inputs = serve_inputs(Some(&link), None).unwrap();
+        let (inputs, _) = serve_inputs(Some(&link), None).unwrap();
         assert_eq!(inputs.base, real.canonicalize().unwrap());
         assert_eq!(inputs.config, link);
     }
