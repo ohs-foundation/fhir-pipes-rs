@@ -384,13 +384,27 @@ pub struct PublishState {
 
 /// The publish state of warehouse `data`. An absent, unreadable or unparsable
 /// generation file reads as 0.
+///
+/// The marker is read before the generation. A publish writes the new
+/// generation and then removes the marker, so a reader that finds no marker
+/// reads a generation at least as new as that publish. Reading the
+/// generation first would let a publish finish between the two reads and
+/// report `{publishing: false, generation: N}` for a query that overlapped it.
 pub fn publish_state(data: &Path) -> PublishState {
+    publish_state_with(data, || {})
+}
+
+/// `publish_state`, running `between` after the marker read and before the
+/// generation read, so a test can interleave a publish's last steps.
+fn publish_state_with(data: &Path, between: impl FnOnce()) -> PublishState {
+    let publishing = data.join(DIR).join(PUBLISHING).exists();
+    between();
     let generation = fs::read_to_string(data.join(GENERATION))
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
     PublishState {
-        publishing: data.join(DIR).join(PUBLISHING).exists(),
+        publishing,
         generation,
     }
 }
@@ -437,6 +451,35 @@ mod tests {
         fs::create_dir_all(dir.path().join(".staging")).unwrap();
         fs::write(dir.path().join(".staging/.publishing"), "").unwrap();
         assert!(publish_state(dir.path()).publishing);
+    }
+
+    #[test]
+    fn a_publish_finishing_between_the_reads_is_seen_as_under_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        fs::create_dir_all(data.join(DIR)).unwrap();
+        fs::write(data.join(GENERATION), "4").unwrap();
+        fs::write(data.join(DIR).join(PUBLISHING), "").unwrap();
+        // The publish's last two steps land between the reader's two reads.
+        let state = publish_state_with(data, || {
+            fs::write(data.join(GENERATION), "5").unwrap();
+            fs::remove_file(data.join(DIR).join(PUBLISHING)).unwrap();
+        });
+        assert_eq!(
+            state,
+            PublishState {
+                publishing: true,
+                generation: 5
+            }
+        );
+        // Read after the publish finished: no marker, new generation.
+        assert_eq!(
+            publish_state(data),
+            PublishState {
+                publishing: false,
+                generation: 5
+            }
+        );
     }
 
     fn marker(dir: &Path) -> String {

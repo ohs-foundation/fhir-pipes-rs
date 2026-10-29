@@ -130,14 +130,7 @@ fn server(
 pub fn run(args: &ServeArgs) -> Result<()> {
     let inputs =
         crate::warehouse::serve_inputs(args.config.as_deref(), args.data.clone()).map_err(usage)?;
-    let cfg = config::parse(
-        inputs.serve.clone(),
-        inputs
-            .config
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".")),
-    )
-    .map_err(usage)?;
+    let cfg = config::parse(inputs.serve.clone(), &inputs.base).map_err(usage)?;
     let listen: SocketAddr = args
         .listen
         .parse()

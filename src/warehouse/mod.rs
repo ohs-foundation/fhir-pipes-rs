@@ -206,6 +206,9 @@ impl Step {
 pub struct ServeInputs {
     /// The config file, as an absolute path, for the refreshes it starts.
     pub config: PathBuf,
+    /// The directory relative settings in the config resolve against: the
+    /// parent of the config file's canonical path.
+    pub base: PathBuf,
     /// The warehouse directory, absolute.
     pub data: PathBuf,
     /// The `[serve]` section.
@@ -240,6 +243,7 @@ pub fn serve_inputs(
     };
     Ok(ServeInputs {
         config: std::path::absolute(&path)?,
+        base,
         data: std::path::absolute(&data)?,
         database_url_env: file.database.as_ref().map(|d| {
             d.url_env
@@ -1190,6 +1194,22 @@ fn mismatch_report(m: &[(String, WriteSummary)]) -> serde_json::Value {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[cfg(unix)]
+    #[test]
+    fn serve_inputs_base_is_the_real_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("site");
+        let deploy = dir.path().join("deploy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&deploy).unwrap();
+        std::fs::write(real.join("fhir-pipes.toml"), "data = \"w\"\n").unwrap();
+        let link = deploy.join("fhir-pipes.toml");
+        std::os::unix::fs::symlink(real.join("fhir-pipes.toml"), &link).unwrap();
+        let inputs = serve_inputs(Some(&link), None).unwrap();
+        assert_eq!(inputs.base, real.canonicalize().unwrap());
+        assert_eq!(inputs.config, link);
+    }
 
     fn steps_of(args: &[&str]) -> BTreeSet<Step> {
         let cli =
