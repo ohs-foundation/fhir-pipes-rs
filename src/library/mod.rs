@@ -196,8 +196,9 @@ pub struct Library {
     pub depends_on: Vec<Dependency>,
     /// (contentType, SQL) for each content entry.
     pub content: Vec<(String, String)>,
+    /// `draft`, `active`, `retired` or `unknown`, as the resource says.
+    pub status: Option<String>,
     /// The Library resource as read.
-    #[allow(dead_code)]
     pub json: Value,
 }
 
@@ -268,6 +269,7 @@ impl Library {
             kind,
             depends_on,
             content,
+            status: text("status"),
             json: v.clone(),
         })
     }
@@ -308,7 +310,7 @@ pub fn check_label(label: &str) -> Result<()> {
 }
 
 /// Split `url|version` into the URL and the version.
-fn split_canonical(resource: &str) -> (String, Option<String>) {
+pub(crate) fn split_canonical(resource: &str) -> (String, Option<String>) {
     match resource.split_once('|') {
         Some((url, version)) => (url.to_string(), Some(version.to_string())),
         None => (resource.to_string(), None),

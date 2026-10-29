@@ -41,12 +41,12 @@
 //! with the step that failed and why.
 
 mod catalog;
-mod config;
+pub(crate) mod config;
 #[cfg(feature = "postgres")]
 mod database;
 mod fhir;
 mod files;
-mod libraries_step;
+pub(crate) mod libraries_step;
 mod manifest;
 pub(crate) mod partition;
 mod push;

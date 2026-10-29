@@ -18,8 +18,6 @@ use crate::warehouse::sql::sql_path;
 use crate::warehouse::stage::publish_state;
 
 /// The format of a result's rows.
-// Read once the query API is wired in.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Ndjson,
@@ -28,8 +26,6 @@ pub enum Format {
 }
 
 impl Format {
-    // Read once the query API is wired in.
-    #[allow(dead_code)]
     pub fn media_type(self) -> &'static str {
         match self {
             Format::Ndjson => "application/x-ndjson",
@@ -50,8 +46,6 @@ impl Format {
 
 /// A query's result: its rows in the format asked for, how many there are,
 /// and `max_rows` when the rows were cut short there.
-// Read once the query API is wired in.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Output {
     pub body: Vec<u8>,
@@ -60,8 +54,6 @@ pub struct Output {
 }
 
 /// Why a query gave no result.
-// Read once the query API is wired in.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum QueryError {
     /// The data is not there to read yet, or is being replaced: an input
@@ -101,8 +93,6 @@ impl Root {
 }
 
 /// Runs SQLQuery Libraries, `concurrency` at once.
-// Read once the query API is wired in.
-#[allow(dead_code)]
 pub struct Runner {
     duckdb: String,
     root: Root,
@@ -124,7 +114,7 @@ pub struct Runner {
 }
 
 /// A running query's slot, given back when dropped.
-struct Slot<'a>(&'a AtomicUsize);
+pub(super) struct Slot<'a>(&'a AtomicUsize);
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
@@ -132,7 +122,7 @@ impl Drop for Slot<'_> {
     }
 }
 
-// Used once the query API is wired in.
+// Built once the query API is wired in.
 #[allow(dead_code)]
 impl Runner {
     /// A runner for the query settings `cfg` over warehouse `data`, running
@@ -215,7 +205,7 @@ impl Runner {
     }
 
     /// A slot to run a query in, or `None` when all are taken.
-    fn slot(&self) -> Option<Slot<'_>> {
+    pub(super) fn slot(&self) -> Option<Slot<'_>> {
         self.running
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < self.concurrency).then_some(n + 1)
@@ -498,176 +488,8 @@ const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::resolve::Artifact;
-    use crate::serve::query::config::Approve;
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-    use serde_json::{Value, json};
-    use std::io::Write as _;
-
-    const SQLVIEW: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView";
-    const SQLQUERY: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLQuery";
-
-    fn have_duckdb(skipped: &str) -> bool {
-        let found = Command::new("duckdb")
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if !found {
-            let _ = writeln!(std::io::stderr(), "skipped without duckdb: {skipped}");
-        }
-        found
-    }
-
-    /// A SQLView (`view`) or SQLQuery Library named `name`; `deps` are
-    /// (label, canonical) pairs.
-    fn library(name: &str, view: bool, deps: &[(&str, &str)], sql: &str) -> Value {
-        let related: Vec<Value> = deps
-            .iter()
-            .map(|(l, r)| json!({"type": "depends-on", "label": l, "resource": r}))
-            .collect();
-        json!({
-            "resourceType": "Library",
-            "meta": {"profile": [if view { SQLVIEW } else { SQLQUERY }]},
-            "url": format!("https://example.org/Library/{name}"),
-            "name": name,
-            "status": "draft",
-            "relatedArtifact": related,
-            "content": [{"contentType": "application/sql", "data": STANDARD.encode(sql)}],
-        })
-    }
-
-    /// A warehouse in a temp dir: table `task` (`id`, `n` from 1 to 4) in
-    /// `wh/`, and in `defs/` its ViewDefinition, the SQLView `TaskBig`
-    /// (`n > 1`), the SQLQuery `Q` over it, highest `n` first, and the
-    /// SQLQuery `Bad`, which names a column that is not there.
-    struct Warehouse {
-        dir: tempfile::TempDir,
-        catalog: Catalog,
-    }
-
-    impl Warehouse {
-        fn new() -> Warehouse {
-            let dir = tempfile::tempdir().unwrap();
-            let part = dir.path().join("wh/parquet/task/country=UGA");
-            fs::create_dir_all(&part).unwrap();
-            let out = Command::new("duckdb")
-                .args(["-init", "/dev/null", "-c"])
-                .arg(format!(
-                    "COPY (SELECT * FROM (VALUES ('a', 1), ('b', 2), ('c', 3), ('d', 4)) \
-                     AS t(id, n)) TO {} (FORMAT parquet);",
-                    sql_path(&part.join("part-0.parquet"))
-                ))
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let defs = dir.path().join("defs");
-            fs::create_dir_all(&defs).unwrap();
-            let view = json!({
-                "resourceType": "ViewDefinition",
-                "url": "https://example.org/ViewDefinition/Task", "name": "Task",
-                "resource": "Task", "status": "active",
-                "select": [{"column": [{"name": "id", "path": "id"}]}],
-            });
-            let big = library(
-                "TaskBig",
-                true,
-                &[("task", "https://example.org/ViewDefinition/Task")],
-                "SELECT * FROM task WHERE n > 1",
-            );
-            let q = library(
-                "Q",
-                false,
-                &[("big", "https://example.org/Library/TaskBig")],
-                "SELECT id, n FROM big ORDER BY n DESC",
-            );
-            let bad = library(
-                "Bad",
-                false,
-                &[("task", "https://example.org/ViewDefinition/Task")],
-                "SELECT nope FROM task",
-            );
-            let slow = library(
-                "Slow",
-                false,
-                &[],
-                "SELECT sum(range) FROM range(100000000000)",
-            );
-            for (f, v) in [
-                ("v", view),
-                ("big", big),
-                ("q", q),
-                ("bad", bad),
-                ("slow", slow),
-            ] {
-                fs::write(defs.join(format!("{f}.json")), v.to_string()).unwrap();
-            }
-            let sources = [defs.display().to_string()];
-            let catalog = Catalog::load(&sources, dir.path(), &[]).unwrap();
-            Warehouse { dir, catalog }
-        }
-
-        fn data(&self) -> PathBuf {
-            self.dir.path().join("wh")
-        }
-
-        fn lib(&self, name: &str) -> &Library {
-            match self
-                .catalog
-                .get(&format!("https://example.org/Library/{name}"), None)
-                .unwrap()
-            {
-                Artifact::Library(l) => l,
-                Artifact::View(_) => panic!("{name} is a view"),
-            }
-        }
-
-        fn runner(&self, max_rows: usize, setup: Option<&str>) -> Runner {
-            Runner::new(&self.config(max_rows, setup), &self.data(), "duckdb", &[]).unwrap()
-        }
-
-        fn config(&self, max_rows: usize, setup: Option<&str>) -> QueryConfig {
-            let duckdb_setup = setup.map(|sql| {
-                let p = self.dir.path().join("setup.sql");
-                fs::write(&p, sql).unwrap();
-                p
-            });
-            QueryConfig {
-                approve: Approve::All,
-                source: Source::Local,
-                duckdb_setup,
-                timeout: Duration::from_secs(30),
-                max_rows,
-                concurrency: 1,
-            }
-        }
-
-        fn run(&self, runner: &Runner, format: Format, limit: Option<usize>) -> Output {
-            match runner.run(&self.catalog, self.lib("Q"), format, limit) {
-                Ok(o) => o,
-                Err(e) => panic!("{e:?}"),
-            }
-        }
-    }
-
-    fn lines(body: &[u8]) -> Vec<Value> {
-        String::from_utf8_lossy(body)
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
-
-    fn rows() -> Vec<Value> {
-        vec![
-            json!({"id": "d", "n": 4}),
-            json!({"id": "c", "n": 3}),
-            json!({"id": "b", "n": 2}),
-        ]
-    }
+    use crate::serve::query::testing::{Warehouse, have_duckdb, lines, rows};
+    use serde_json::Value;
 
     #[test]
     fn runs_through_a_sqlview_in_order() {

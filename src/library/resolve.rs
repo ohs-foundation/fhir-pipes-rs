@@ -221,7 +221,6 @@ impl Catalog {
     }
 
     /// Every Library, in the order read.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn libraries(&self) -> Vec<&Library> {
         self.artifacts
             .iter()
