@@ -50,9 +50,9 @@ resource = "https://healthcampaigns.org/fhir/analytics/Library/LocationHierarchy
 `SQLQuery`) are required. A SQLQuery's table is named from `name`. Each
 `[[depends_on]]` has a `label` (matching `[a-z_][a-z0-9_]*`) and a `resource`,
 a canonical URL (add `|version` to pick one). `version`, `title` and
-`description` are also accepted; any other key is an error.
+`description` are also accepted; SQLQueries also accept `[[parameter]]` metadata (execution does not yet support parameters). Any other key is an error.
 
-SQLQuery results run in DuckDB and SQLViews in PostgreSQL, so write standard
+SQLQueries run in DuckDB; SQLViews run inline there and can also become PostgreSQL views. So write standard
 SQL that both accept, or add a `<name>.duckdb.sql` or `<name>.postgresql.sql`
 file beside the `.sql` file. A Library holds one statement.
 

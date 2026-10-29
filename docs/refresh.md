@@ -52,8 +52,8 @@ is installed before anything runs.
 ### Incremental and full
 
 After the first run, `locations` and `views` download only what changed since
-the last refresh. `--full` downloads everything again. `--reuse-raw` skips the
-download and uses the files in `raw/<server>/`. The views step keeps
+the last refresh. `--full` downloads everything again. `--reuse-raw` uses the files in
+`raw/<server>/` where they exist; missing or empty view inputs are fetched. The views step keeps
 `server.concurrency` requests in flight (default 4); see the
 [README](export.md#parallel-downloads). With `fetch = "bulk"` in `[server]`
 it uses a Bulk Data `$export` instead of search (`bulk_timeout` in seconds,
@@ -126,6 +126,13 @@ string. A run that failed has `failed_step`, `error` and `exit_code`.
 
 Each run that finishes also writes `raw/<server>/last-refresh.json`, with its
 step timings and `type_mismatches` (see [Tables](#tables)).
+
+#### Environment variables for a supervisor
+
+- `FHIR_PIPES_RESULT_FILE`: path for this attempt's own result. Set a unique one per attempt, including lock failures, because `last-run.json` may belong to another attempt.
+- `FHIR_PIPES_FAILURE_HOOKS=off`: suppresses the failure hooks, so a supervisor that alerts itself does not send duplicates.
+- `FHIR_PIPES_RUN_ID`: the `RUN_ID` passed to hooks.
+- `FHIR_PIPES_SECRET_VARS`: names of additional variables whose values are redacted from output.
 
 ### Tables
 
@@ -231,7 +238,10 @@ same schema.
 
 The schema is created only when it does not exist, which needs `CREATE` on the
 database. Loading into an existing schema needs `USAGE` on it and `SELECT`,
-`INSERT` and `DELETE` on the tables.
+`INSERT` and `DELETE` on the tables. Creating tables needs `CREATE` on the
+schema, recreating a changed table needs ownership, and upsert also needs
+`UPDATE` on `fhir_pipes_loads`. Manual edits to reused raw files or database
+rows are not tracked; use a full or replacement load to reconcile them.
 
 ## Libraries
 
@@ -280,8 +290,8 @@ when present). Paths in the file are relative to the file.
 Authentication is a token (`FHIR_PIPES_TOKEN`), a username with
 `FHIR_PIPES_PASSWORD`, a client ID and secret (`FHIR_PIPES_CLIENT_ID`,
 `FHIR_PIPES_CLIENT_SECRET`, with `server.token_url`), or `server.google_auth`;
-use only one. Secrets and connection strings are read only from the environment,
-never from flags or the file. See the
+use only one. Client credentials, passwords and connection strings are read only from the
+environment; a fixed token also accepts `--token`. See the
 [README](../README.md#connecting-to-a-fhir-server).
 
 ```toml

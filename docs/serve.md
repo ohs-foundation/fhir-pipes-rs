@@ -16,7 +16,7 @@ fhir-pipes serve --config fhir-pipes.toml --listen 0.0.0.0:8090
 It reads the same `fhir-pipes.toml` as `refresh`, plus a `[serve]` section.
 `--listen` (or `FHIR_PIPES_SERVE_LISTEN`) defaults to `127.0.0.1:8090`. Callers
 send `Authorization: Bearer <token>`. Without `FHIR_PIPES_SERVE_TOKEN`, `serve`
-refuses to start on a non-loopback address.
+refuses to start on a non-loopback address. `serve` speaks plain HTTP; terminate TLS at a reverse proxy before exposing it.
 
 One `serve` looks after one warehouse and holds `.serve/serve.lock` in it. Run
 records are in `.serve/runs/<run id>/`. Do not also run `refresh` from cron on
@@ -56,7 +56,7 @@ header = "x-api-key"              # optional, with value_env
 value_env = "OPENFN_WEBHOOK_KEY"  # the variable holding the header's value
 ```
 
-The values shown are the defaults. A notify `url` must be `http` or `https`
+The scalar settings shown are defaults; the schedule and notify entries are examples. A notify `url` must be `http` or `https`
 with no user name or password; put a key in `header` and `value_env`.
 
 ## The API
@@ -74,7 +74,7 @@ Every path but `/health` needs the token.
 
 The steps are `refresh`'s: `locations`, `views`, `tiles`, `libraries`,
 `manifest`, `catalog`, `database`, `hooks`, `push`. A run's `status` is
-`running`, `waiting`, `succeeded`, `failed`, `cancelled` or `interrupted`. Each attempt's `result` is the refresh's `last-run.json` (see
+`accepted`, `running`, `waiting`, `succeeded`, `failed`, `cancelled` or `interrupted`. Each attempt's `result` is the refresh's `last-run.json` (see
 [refresh.md](refresh.md#how-the-last-run-went)).
 
 ## Retries, notify and the schedule
@@ -134,7 +134,7 @@ everything. Callers send either as `Authorization: Bearer <token>`. With
 `[serve.query]`, a non-loopback `--listen` needs both. A path with no token set
 is open, allowed only on loopback: setting only `FHIR_PIPES_QUERY_TOKEN` leaves
 the run API open to anything on the machine, so set both. Without
-`[serve.query]`, every `/fhir` path answers `404`.
+`[serve.query]`, `/fhir` paths answer `404` after authentication.
 
 ### Routes and parameters
 

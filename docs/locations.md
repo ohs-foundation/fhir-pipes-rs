@@ -30,7 +30,7 @@ fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY 
 
 `--help` on each command lists every flag. `AUTH`, timeouts and retries work as for every command; see [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server). `--server-kind` (`generic` by default; `medplum` or `aidbox`) adds the search parameters those servers need; see [servers.md](servers.md).
 
-Only `extract` and `load` use the network. `transform locations`, `inspect`, `diff` and `import` work on files.
+`extract`, `run` and `load` contact FHIR; `population` can download a raster. `transform locations`, `inspect`, `diff` and `import` work on files.
 
 ## extract and the snapshot
 
@@ -54,7 +54,7 @@ snapshot/
 | `--no-cache`, `--refresh`, `--cache-dir DIR` | | Skip, refetch, or relocate the boundary cache. Only successful fetches are cached. |
 | `--max-consecutive-failures N` | 50 | Abort if N boundary fetches in a row fail with no success; `0` disables. |
 
-Incremental runs ask the server for `Location?_lastUpdated=ge<watermark>` (the greatest `meta.lastUpdated` in the snapshot) and merge the result by id. An incremental extract against a different server than the snapshot came from is refused; `--full` repoints it.
+Incremental runs ask the server for `Location?_lastUpdated=ge<watermark>` (the greatest `meta.lastUpdated`, capped at the server's search-start time minus five minutes when the response has a usable HTTP `Date`) and merge the result by id. An incremental extract against a different server than the snapshot came from is refused; `--full` repoints it.
 
 **Deleted Locations are invisible to an incremental extract.** A search never returns them. Retire Locations by setting `status` to `inactive` instead of deleting them, and run `extract --full` now and then. Every incremental run also compares the server's resource count with the snapshot and reports `count_mismatch` if they differ. A full run does the same check when the server stops paging early, so a short snapshot is not mistaken for a complete one.
 
@@ -113,7 +113,7 @@ Only these columns are writable. `diff` refuses a file with a column that is nei
 
 **Derived hierarchy. Rebuilt on every transform, ignored by `diff`:** `depth`, `admin_level`, `tier`, `path`, `ancestor_ids`, `admin0_name` to `admin4_name`, `admin0_code` to `admin4_code`, `country`, `geom_type` (`polygon` or `point`), `lon`, `lat`, `bbox`, `quadkey`, `quadkey_level` (with a profile that names a spatial index extension), and `overlays_admin_unit_ids` (with a profile that names an overlays extension). An admin unit deeper than level 4 is reported as `admin_level_beyond_columns`. With `--keep-without-geometry`, `geom_type`, `lon`, `lat` and `bbox` are nullable and rows with null geometry land in `geom_type=null/` directories.
 
-**Lossless fallback:** `fhir_json` is the complete Location with the boundary attachment removed, and `organization_json` is the complete paired Organization (null if none). Any field not modelled as a column is still there, and `diff` uses it as the base when rebuilding an edited resource, so an unknown extension survives a round trip through QGIS.
+**Lossless fallback:** `fhir_json` is the complete Location with the boundary attachment removed, and `organization_json` is the complete paired Organization (null if none). Any field not modelled as a column is still there, and `diff` keeps those fields from the snapshot, so an unknown extension survives a round trip through QGIS.
 
 In ICR a facility is a Location paired with an Organization (`org-<location id>`) that carries the registry codes. A missing Organization is reported as `organization_missing`, and a differing name as `organization_name_mismatch`.
 
@@ -147,7 +147,7 @@ WHERE type = 'facility'
 GROUP BY admin1_name;
 ```
 
-With `LOAD spatial;` DuckDB can also use spatial predicates such as `ST_Intersects`. QGIS opens the directory or a single partition file as a layer; the edit-and-push-back steps are in [qgis.md](qgis.md). GeoPandas reads it with `read_parquet`. fhir-pipes does not make vector tiles; tippecanoe or DuckDB `ST_AsMVT` can build them from the output.
+With `LOAD spatial;` DuckDB can also use spatial predicates such as `ST_Intersects`. QGIS opens the directory or a single partition file as a layer; the edit-and-push-back steps are in [qgis.md](qgis.md). GeoPandas reads it with `read_parquet`. These standalone Location commands do not make vector tiles (`refresh` can build PMTiles); tippecanoe or DuckDB `ST_AsMVT` can build them from the output.
 
 ## Importing admin boundaries and sites
 
@@ -294,10 +294,10 @@ Sends any NDJSON of FHIR resources that have a `resourceType` and an `id`. It or
 
 Safety rules:
 
-- **Version check.** Every entry whose resource has a `meta.versionId` is sent with `ifMatch` set to that version. If the resource changed on the server after the snapshot was taken, the server answers 412 (some answer 409), nothing in that bundle is written, and fhir-pipes names the conflicting ids and the server's current versions. The run stops; bundles before it stay committed. Re-running the same file is safe. To fix a conflict: extract again, re-apply the edit, and diff again.
+- **Version check.** Every entry whose resource has a `meta.versionId` is sent with `ifMatch` set to that version. If the resource changed on the server after the snapshot was taken, the server answers 412 (some answer 409), nothing in that bundle is written, and fhir-pipes names the conflicting ids and the server's current versions. The run stops; bundles before it stay committed. To fix a conflict: extract again, re-apply the edit, and diff again.
 - **Retries.** A bundle is sent again after a timeout or a 5xx. If the first attempt was committed but its answer was lost, the retry can conflict with its own writes. A 412 or 409 after more than one attempt says so; check the named resources on the server before extracting again.
 - **Dry run.** `--dry-run` runs the preflight and prints one line per bundle, naming each entry as `create` or `update@<version>`, without posting anything. Use it first.
-- **Creating resources.** New resources need update-as-create (`PUT` to a new id). A server that advertises `updateCreate: false` for a needed type is refused up front. A server that does not state it gets a warning and the load proceeds.
+- **Creating resources.** New resources need update-as-create (`PUT` to a new id). A server that advertises `updateCreate: false` for a needed type is refused up front. A server that does not state it gets a warning and the load proceeds. Keep `meta.versionId` on resources you update: without it the `PUT` is unconditional and can overwrite an existing resource with the same id.
 - **`--concurrency N`** (default 1) posts N bundles at a time. A bundle starts only after every earlier bundle holding a resource it references is committed. The first failure stops new bundles; those already committed stay committed.
 - **The input file must not change while it is loaded.** Load reads it more than once and stops with exit 1 if it changes.
 
@@ -307,4 +307,4 @@ Safety rules:
 
 - No deletion. Retire Locations with `status: inactive`.
 - Derived columns are not written back.
-- fhir-pipes does not make vector tiles or publish the output.
+- These standalone Location commands do not build tiles or publish; `refresh` can do both.

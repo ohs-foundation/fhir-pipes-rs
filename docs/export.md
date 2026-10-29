@@ -6,7 +6,7 @@
 fhir-pipes export --server https://fhir.example.org/fhir --type Patient --type Observation --out raw/
 ```
 
-Each file is written beside the target and renamed into place, so a failed run leaves the previous download intact. If the server's count differs from what was downloaded, the run reports `count_mismatch`.
+Each file is written beside the target and renamed into place, so a file is never left half-written. If a run fails partway, types completed before the failure stay updated. If the server's count differs from what was downloaded, the run reports `count_mismatch`.
 
 | Option | Default | What it does |
 |---|---|---|
@@ -20,7 +20,7 @@ Each file is written beside the target and renamed into place, so a failed run l
 
 ## Incremental downloads
 
-`OUT/.export-state.json` records the greatest `meta.lastUpdated` downloaded for each type. With `--incremental`, a type that has one is searched with `_lastUpdated=ge<that time>` and merged into its file by id. A `_lastUpdated` search cannot see deleted resources, so after the merge the server's count is compared with the file's, and a type whose counts differ is downloaded in full. `refresh` exports this way unless given `--full`. The saved time is five minutes before the server's clock when the search began, so a resource updated during a run is fetched by the next one.
+`OUT/.export-state.json` records the greatest `meta.lastUpdated` downloaded for each type. With `--incremental`, a type that has one is searched with `_lastUpdated=ge<that time>` and merged into its file by id. A `_lastUpdated` search cannot see deleted resources, so after the merge the server's count is compared with the file's, and a type whose counts differ is downloaded in full. `refresh` exports this way unless given `--full`. The saved time is the greatest `meta.lastUpdated`, capped at five minutes before the server's clock when the search began (when the response has a usable HTTP `Date`), so a resource updated during a run is fetched by the next one.
 
 ## Parallel downloads
 
@@ -38,7 +38,7 @@ fhir-pipes export --bulk --incremental --server https://fhir.example.org/fhir \
 - The kick-off is `GET [base]/$export?_type=…` with `Prefer: respond-async`. With `--incremental`, types that have a saved time are exported with `_since` the earliest of them and merged by id; the others are exported in full.
 - The status URL is saved in `.export-state.json` as soon as the server returns it, so a run that stops early polls the same export next time. After `--bulk-timeout` the run cancels the export with a `DELETE` of the status URL and fails.
 - A kick-off answered with 429 is retried until `--bulk-timeout` (Aidbox runs one export at a time).
-- Output files are downloaded `--concurrency` at a time. The bearer token is sent only when the manifest says `requiresAccessToken`. If a download fails, no file or saved time changes and the next run reads the same export again.
+- Output files are downloaded `--concurrency` at a time. The bearer token is sent when the manifest says `requiresAccessToken`, and for Medplum `Binary` references. If a download fails, no file or saved time changes and the next run reads the same export again.
 - Resources in the manifest's `deleted` Bundles are removed from the files. Not every server lists deletions (HAPI does not), so the count check still applies after a merge.
 - An `OperationOutcome` from the server, or an error or fatal issue in the manifest's `error` files, fails the run. Warnings go in the report.
 - After the files are read, the status URL gets a `DELETE` so the server can remove them.

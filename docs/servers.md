@@ -8,7 +8,7 @@ Aidbox and the Google Cloud Healthcare API.
 ## Connecting to a server
 
 `--server` is the FHIR base URL. It cannot carry a user name or password; use
-the options below. Credentials go only to the `--server` origin.
+the options below. FHIR request credentials stay on the `--server` origin, except that authenticated bulk output URLs supplied by the server are also sent them.
 
 | Auth | Flags | Environment variables |
 |---|---|---|
