@@ -338,7 +338,7 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let store = Arc::new(super::super::store::Store::open(dir.join("runs")).unwrap());
         let stdout = super::super::output::StdoutQueue::start(Box::new(std::io::sink()));
-        let cfg = super::super::config::parse(None).unwrap();
+        let cfg = super::super::config::parse(None, std::path::Path::new(".")).unwrap();
         let notifier = Notifier::start(
             store.clone(),
             vec![],
