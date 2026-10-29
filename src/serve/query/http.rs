@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use super::catalog::{Lookup, Queries};
 use super::config::Approve;
 use super::run::{Format, Output, QueryError, Runner};
+use crate::library::Library;
 use crate::serve::metrics::Metrics;
 use crate::serve::output::StdoutQueue;
 use crate::warehouse::config::Settings;
@@ -98,6 +99,7 @@ pub fn routes(api: Arc<QueryApi>) -> Router {
         )
         .route("/fhir/Library", get(libraries).fallback(method_not_allowed))
         .route("/fhir", any(not_found))
+        .route("/fhir/", any(not_found))
         .route("/fhir/{*rest}", any(not_found))
         .with_state(api)
 }
@@ -206,8 +208,12 @@ fn accepted(headers: &HeaderMap) -> Format {
         };
         // A q that does not parse makes the type unacceptable.
         let q = parts
-            .filter_map(|p| p.trim().strip_prefix("q="))
-            .map(|q| q.trim().parse::<f32>().unwrap_or(0.0))
+            .filter_map(|p| {
+                let (name, value) = p.split_once('=')?;
+                name.trim()
+                    .eq_ignore_ascii_case("q")
+                    .then(|| value.trim().parse::<f32>().unwrap_or(0.0))
+            })
             .next_back()
             .unwrap_or(1.0);
         if q > 0.0 && best.is_none_or(|(b, _)| q > b) {
@@ -544,7 +550,7 @@ async fn metadata(date: String) -> Response {
             "date": date,
             "kind": "instance",
             "software": {"name": "fhir-pipes", "version": env!("CARGO_PKG_VERSION")},
-            "implementation": {"description": "fhir-pipes serve", "url": CANONICAL_BASE},
+            "implementation": {"description": "fhir-pipes serve"},
             "fhirVersion": "4.0.1",
             "format": ["json"],
             "rest": [{
@@ -603,13 +609,13 @@ async fn libraries(State(api): State<Arc<QueryApi>>, RawQuery(query): RawQuery) 
         .response();
     }
     let queries = api.queries();
-    let entries: Vec<Value> = queries
-        .approved()
+    let approved = queries.approved();
+    let entries: Vec<Value> = approved
         .iter()
-        .map(|l| {
-            let id = l.json["id"].as_str().unwrap_or(&l.name);
+        .zip(full_urls(&approved))
+        .map(|(l, full_url)| {
             json!({
-                "fullUrl": format!("{CANONICAL_BASE}/Library/{id}"),
+                "fullUrl": full_url,
                 "resource": l.json,
                 "search": {"mode": "match"},
             })
@@ -624,6 +630,36 @@ async fn libraries(State(api): State<Arc<QueryApi>>, RawQuery(query): RawQuery) 
             "entry": entries,
         }),
     )
+}
+
+/// A `fullUrl` for each Library, unique in the list: `<base>/Library/<id>`
+/// when every Library has an id and no two share one, else from the name
+/// and version, with `-<n>` added to any that would still clash.
+fn full_urls(libs: &[&Library]) -> Vec<String> {
+    let ids: Vec<Option<&str>> = libs.iter().map(|l| l.json["id"].as_str()).collect();
+    let unique_ids = ids
+        .iter()
+        .enumerate()
+        .all(|(i, id)| id.is_some_and(|id| !ids[..i].contains(&Some(id))));
+    let mut taken: Vec<String> = Vec::new();
+    for (l, id) in libs.iter().zip(ids) {
+        let key = match (unique_ids, id, &l.version) {
+            (true, Some(id), _) => id.to_string(),
+            (_, _, Some(v)) => format!("{}-{v}", l.name),
+            (_, _, None) => l.name.clone(),
+        };
+        let mut part = key.clone();
+        let mut n = 2;
+        while taken.contains(&part) {
+            part = format!("{key}-{n}");
+            n += 1;
+        }
+        taken.push(part);
+    }
+    taken
+        .into_iter()
+        .map(|part| format!("{CANONICAL_BASE}/Library/{part}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -804,6 +840,16 @@ mod tests {
             ),
             (vec![subject], "application/json", "application/json"),
             (vec![subject], "text/html, text/csv;q=0.9", "text/csv"),
+            (
+                vec![subject],
+                "application/json;Q=0, text/csv;q=0.5",
+                "text/csv",
+            ),
+            (
+                vec![subject],
+                "application/json ; q = 0.2, text/csv ;Q= 0.5",
+                "text/csv",
+            ),
             (vec![subject], "*/*", "application/x-ndjson"),
             (
                 vec![subject],
@@ -1035,6 +1081,7 @@ mod tests {
         for (method, path, status) in [
             ("GET", "/fhir/Patient", StatusCode::NOT_FOUND),
             ("GET", "/fhir", StatusCode::NOT_FOUND),
+            ("GET", "/fhir/", StatusCode::NOT_FOUND),
             ("DELETE", "/fhir/metadata", StatusCode::METHOD_NOT_ALLOWED),
             ("PUT", "/fhir/$sql-run", StatusCode::METHOD_NOT_ALLOWED),
         ] {
@@ -1122,7 +1169,7 @@ mod tests {
             chrono::Utc::now().format("%Y-%m-%d").to_string()
         );
         assert_eq!(cs["software"]["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(cs["implementation"]["url"], "https://fhir-pipes.local/fhir");
+        assert!(cs["implementation"]["url"].is_null());
         assert_eq!(cs["implementation"]["description"], "fhir-pipes serve");
         let op = &cs["rest"][0]["operation"][0];
         assert_eq!(op["name"], "sql-run");
@@ -1177,6 +1224,45 @@ mod tests {
         let r = send(&api, get("/fhir/Library?name=Q")).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST);
         assert!(r.says().contains("name"), "{}", r.says());
+    }
+
+    #[test]
+    fn full_urls_are_unique() {
+        let lib = |name: &str, id: Option<&str>, version: Option<&str>| {
+            let mut v = crate::serve::query::testing::library(name, false, &[], "SELECT 1");
+            if let Some(id) = id {
+                v["id"] = id.into();
+            }
+            if let Some(version) = version {
+                v["version"] = version.into();
+            }
+            crate::library::Library::from_json(&v).unwrap()
+        };
+        let base = "https://fhir-pipes.local/fhir/Library";
+        let (a, b) = (lib("A", Some("a"), None), lib("B", Some("b"), None));
+        assert_eq!(
+            full_urls(&[&a, &b]),
+            [format!("{base}/a"), format!("{base}/b")]
+        );
+        // A shared id, or a Library without one: names, with the version.
+        let (a, b) = (lib("A", Some("x"), Some("1")), lib("B", Some("x"), None));
+        assert_eq!(
+            full_urls(&[&a, &b]),
+            [format!("{base}/A-1"), format!("{base}/B")]
+        );
+        let (a, b, c) = (
+            lib("A", None, Some("1")),
+            lib("A", None, Some("1")),
+            lib("A-1", None, None),
+        );
+        assert_eq!(
+            full_urls(&[&a, &b, &c]),
+            [
+                format!("{base}/A-1"),
+                format!("{base}/A-1-2"),
+                format!("{base}/A-1-3")
+            ]
+        );
     }
 
     #[test]
