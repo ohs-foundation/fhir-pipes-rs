@@ -111,6 +111,9 @@ pub struct Runner {
     /// read again.
     #[cfg(test)]
     after_run: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The pid of the last duckdb run.
+    #[cfg(test)]
+    last_pid: std::sync::Mutex<Option<u32>>,
 }
 
 /// A running query's slot, given back when dropped.
@@ -144,8 +147,20 @@ impl Runner {
             Source::Local => Root::Local(data.to_path_buf()),
             Source::Remote(prefix) => Root::Remote(prefix.clone()),
         };
+        // duckdb runs in a temp directory, so a relative path to it is
+        // resolved here, against the working directory, where refresh
+        // finds it. A bare name is looked up on PATH.
+        let duckdb = if Path::new(duckdb).is_relative() && duckdb.contains(['/', '\\']) {
+            std::env::current_dir()
+                .context("reading the current directory")?
+                .join(duckdb)
+                .display()
+                .to_string()
+        } else {
+            duckdb.to_string()
+        };
         Ok(Runner {
-            duckdb: duckdb.to_string(),
+            duckdb,
             root,
             setup,
             strip_prefix: strip_prefix.to_vec(),
@@ -155,6 +170,8 @@ impl Runner {
             running: AtomicUsize::new(0),
             #[cfg(test)]
             after_run: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            last_pid: std::sync::Mutex::new(None),
         })
     }
 
@@ -219,17 +236,22 @@ impl Runner {
             .map_err(|e| QueryError::Internal(format!("creating a temp directory: {e}")))?;
         let count = tmp.path().join("n.csv");
         let out = tmp.path().join("out");
+        // duckdb stops at the first error, so without this file the setup
+        // is what failed.
+        let set_up = tmp.path().join("setup.ok");
         let mut script = self.setup.clone().unwrap_or_default();
         script.push_str(&format!(
-            "\nCREATE TEMP TABLE r AS SELECT * FROM ({sql}) AS q LIMIT {};\n\
+            "\nCOPY (SELECT 1) TO {} (HEADER false);\n\
+             CREATE TEMP TABLE r AS SELECT * FROM ({sql}) AS q LIMIT {};\n\
              COPY (SELECT count(*) FROM r) TO {} (HEADER false);\n\
              COPY (SELECT * FROM r LIMIT {cap}) TO {} ({});\n",
+            sql_path(&set_up),
             cap.saturating_add(1),
             sql_path(&count),
             sql_path(&out),
             format.copy_options()
         ));
-        self.duckdb(tmp.path(), &script)?;
+        self.duckdb(tmp.path(), &script, &set_up)?;
         let read = |p: &Path| {
             fs::read(p).map_err(|e| QueryError::Internal(format!("reading {}: {e}", p.display())))
         };
@@ -266,7 +288,7 @@ impl Runner {
                 (None, Artifact::Library(view)) => self.check_inputs(data, catalog, view)?,
                 (None, Artifact::View(_)) => {}
                 (Some(table), _) => {
-                    if !data.join("parquet").join(&table).is_dir() {
+                    if !has_parquet(&data.join("parquet").join(&table)) {
                         return Err(QueryError::Unavailable(format!(
                             "Library {} input {} has no table {table} yet",
                             lib.name, dep.label
@@ -279,7 +301,8 @@ impl Runner {
     }
 
     /// Run `script` with duckdb in `dir`, killing it after the timeout.
-    fn duckdb(&self, dir: &Path, script: &str) -> Result<(), QueryError> {
+    /// `set_up` is the file the script writes once the setup SQL has run.
+    fn duckdb(&self, dir: &Path, script: &str, set_up: &Path) -> Result<(), QueryError> {
         let internal = |what: &str, e: std::io::Error| QueryError::Internal(format!("{what}: {e}"));
         // stderr goes to a file, so a long error cannot fill a pipe and
         // stall duckdb while it is waited for.
@@ -294,6 +317,10 @@ impl Runner {
             .spawn()
             .map_err(|e| internal(&format!("running {}", self.duckdb), e))?;
         let registered = crate::stop::register(child.id());
+        #[cfg(test)]
+        {
+            *self.last_pid.lock().unwrap() = Some(child.id());
+        }
         let start = Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -322,14 +349,134 @@ impl Runner {
         if status.success() {
             return Ok(());
         }
+        // An error in the setup SQL can quote it, keys and all, in whole or
+        // cut short, so it is reported without its detail.
+        if self.setup.is_some() && !set_up.exists() {
+            return Err(QueryError::Sql("the duckdb_setup SQL failed".to_string()));
+        }
         let stderr = fs::read_to_string(&err_path).unwrap_or_default();
-        let message =
-            crate::redact::sql_strings(stderr.trim(), self.setup.as_deref().unwrap_or_default());
+        let message = without_setup(stderr.trim(), self.setup.as_deref().unwrap_or_default());
         if matches!(self.root, Root::Remote(_)) && message.contains("No files found") {
             return Err(QueryError::Unavailable(message));
         }
         Err(QueryError::Sql(message))
     }
+}
+
+/// Whether `dir` has a Parquet file in it, at any depth.
+fn has_parquet(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let path = e.path();
+        if path.is_dir() {
+            has_parquet(&path)
+        } else {
+            path.extension().is_some_and(|x| x == "parquet")
+        }
+    })
+}
+
+/// The shortest run of a setup literal's characters that marks a line of an
+/// error as quoting it.
+const QUOTED_RUN: usize = 6;
+
+/// `text` with no part of a string in `setup` (`'…'`, `E'…'`, `$$…$$` or
+/// `$tag$…$tag$`), where a key would be: a line holding `QUOTED_RUN`
+/// characters of a longer string in a row is dropped, since duckdb can cut a
+/// long string short where it quotes it, and a shorter string is blanked.
+fn without_setup(text: &str, setup: &str) -> String {
+    let literals = setup_literals(setup);
+    let quotes = |line: &str| {
+        literals.iter().any(|l| {
+            let chars: Vec<char> = l.chars().collect();
+            chars.len() >= QUOTED_RUN
+                && chars
+                    .windows(QUOTED_RUN)
+                    .any(|w| line.contains(&w.iter().collect::<String>()))
+        })
+    };
+    let mut kept: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if quotes(line) {
+            continue;
+        }
+        let mut line = line.to_string();
+        for l in &literals {
+            if !l.trim().is_empty() {
+                line = line.replace(l.as_str(), "***");
+            }
+        }
+        kept.push(line);
+    }
+    let kept = kept.join("\n");
+    if kept.trim().is_empty() {
+        return "duckdb failed; its message quoted the duckdb_setup SQL".to_string();
+    }
+    kept
+}
+
+/// The contents of the string literals in `sql`: single-quoted (with `''`
+/// for a quote, and `E'…'` strings, whose `\'` is a quote too) and
+/// dollar-quoted.
+fn setup_literals(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' => {
+                let escapes = i > 0 && matches!(chars[i - 1], 'E' | 'e');
+                let mut lit = String::new();
+                i += 1;
+                while i < chars.len() {
+                    match chars[i] {
+                        '\\' if escapes && i + 1 < chars.len() => {
+                            lit.push(chars[i + 1]);
+                            i += 2;
+                        }
+                        '\'' if chars.get(i + 1) == Some(&'\'') => {
+                            lit.push('\'');
+                            i += 2;
+                        }
+                        '\'' => break,
+                        c => {
+                            lit.push(c);
+                            i += 1;
+                        }
+                    }
+                }
+                found.push(lit);
+                i += 1;
+            }
+            '$' => {
+                let tag_end = chars[i + 1..]
+                    .iter()
+                    .position(|c| !(c.is_alphanumeric() || *c == '_'))
+                    .map(|n| i + 1 + n);
+                match tag_end {
+                    Some(end) if chars[end] == '$' => {
+                        let tag: String = chars[i..=end].iter().collect();
+                        let rest: String = chars[end + 1..].iter().collect();
+                        match rest.find(&tag) {
+                            Some(close) => {
+                                found.push(rest[..close].to_string());
+                                i = end + 1 + rest[..close].chars().count() + tag.chars().count();
+                            }
+                            None => {
+                                found.push(rest);
+                                i = chars.len();
+                            }
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    found
 }
 
 /// A file with no SQL, given to duckdb's `-init`, so the user's
@@ -432,7 +579,19 @@ mod tests {
                 &[("task", "https://example.org/ViewDefinition/Task")],
                 "SELECT nope FROM task",
             );
-            for (f, v) in [("v", view), ("big", big), ("q", q), ("bad", bad)] {
+            let slow = library(
+                "Slow",
+                false,
+                &[],
+                "SELECT sum(range) FROM range(100000000000)",
+            );
+            for (f, v) in [
+                ("v", view),
+                ("big", big),
+                ("q", q),
+                ("bad", bad),
+                ("slow", slow),
+            ] {
                 fs::write(defs.join(format!("{f}.json")), v.to_string()).unwrap();
             }
             let sources = [defs.display().to_string()];
@@ -456,20 +615,23 @@ mod tests {
         }
 
         fn runner(&self, max_rows: usize, setup: Option<&str>) -> Runner {
+            Runner::new(&self.config(max_rows, setup), &self.data(), "duckdb", &[]).unwrap()
+        }
+
+        fn config(&self, max_rows: usize, setup: Option<&str>) -> QueryConfig {
             let duckdb_setup = setup.map(|sql| {
                 let p = self.dir.path().join("setup.sql");
                 fs::write(&p, sql).unwrap();
                 p
             });
-            let cfg = QueryConfig {
+            QueryConfig {
                 approve: Approve::All,
                 source: Source::Local,
                 duckdb_setup,
                 timeout: Duration::from_secs(30),
                 max_rows,
                 concurrency: 1,
-            };
-            Runner::new(&cfg, &self.data(), "duckdb", &[]).unwrap()
+            }
         }
 
         fn run(&self, runner: &Runner, format: Format, limit: Option<usize>) -> Output {
@@ -554,6 +716,73 @@ mod tests {
     }
 
     #[test]
+    fn a_table_with_no_parquet_files_is_unavailable() {
+        if !have_duckdb("a_table_with_no_parquet_files_is_unavailable") {
+            return;
+        }
+        let w = Warehouse::new();
+        fs::remove_file(w.data().join("parquet/task/country=UGA/part-0.parquet")).unwrap();
+        match w
+            .runner(100, None)
+            .run(&w.catalog, w.lib("Q"), Format::Ndjson, None)
+        {
+            Err(QueryError::Unavailable(m)) => assert!(m.contains("no table task yet"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_query_past_the_timeout_is_stopped() {
+        if !have_duckdb("a_query_past_the_timeout_is_stopped") {
+            return;
+        }
+        let w = Warehouse::new();
+        let mut cfg = w.config(100, None);
+        cfg.timeout = Duration::from_millis(1);
+        let r = Runner::new(&cfg, &w.data(), "duckdb", &[]).unwrap();
+        match r.run(&w.catalog, w.lib("Slow"), Format::Ndjson, None) {
+            Err(QueryError::Sql(m)) => assert!(m.contains("timed out"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // Killed and reaped: a zombie would still take a signal.
+        let pid = r.last_pid.lock().unwrap().unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "duckdb {pid} is still there");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_duckdb_is_found_from_the_working_directory() {
+        if !have_duckdb("a_relative_duckdb_is_found_from_the_working_directory") {
+            return;
+        }
+        let w = Warehouse::new();
+        // A link to duckdb, named by a path relative to the working
+        // directory.
+        let link = w.dir.path().join("tools/duckdb");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|d| d.join("duckdb"))
+            .find(|p| p.is_file())
+            .unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count() - 1);
+        let relative = format!("{up}{}", link.display().to_string().trim_start_matches('/'));
+        let r = Runner::new(&w.config(100, None), &w.data(), &relative, &[]).unwrap();
+        assert!(Path::new(&r.duckdb).is_absolute(), "{}", r.duckdb);
+        assert_eq!(w.run(&r, Format::Ndjson, None).rows, 3);
+        let bare = Runner::new(&w.config(100, None), &w.data(), "duckdb", &[]).unwrap();
+        assert_eq!(bare.duckdb, "duckdb");
+    }
+
+    #[test]
     fn a_missing_table_is_unavailable() {
         if !have_duckdb("a_missing_table_is_unavailable") {
             return;
@@ -590,29 +819,66 @@ mod tests {
             return;
         }
         let w = Warehouse::new();
-        // A bad query, and a bad setup, whose error duckdb prints with the
-        // line that holds the keys.
-        for (setup, lib, quoted) in [
+        let long = "a-long-secret-".repeat(10);
+        let secrets = ["AKIAXYZ", "shh", "supersecretkey", long.as_str()];
+        // A bad query keeps its message; a bad setup, which duckdb quotes
+        // keys and all (a long string cut short), gives none.
+        for (setup, lib, says) in [
             (
-                "CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET 'shh');",
+                "CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET 'shh');".to_string(),
                 "Bad",
                 "nope",
             ),
             (
-                "CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET 'shh' BOGUS);",
+                "CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET 'shh' BOGUS);".to_string(),
                 "Q",
-                "KEY_ID '***'",
+                "the duckdb_setup SQL failed",
+            ),
+            (
+                "CREATE SECRET s (TYPE s3, KEY_ID $$AKIAXYZ$$, SECRET $$supersecretkey$$ BOGUS);"
+                    .to_string(),
+                "Q",
+                "the duckdb_setup SQL failed",
+            ),
+            (
+                format!("CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET '{long}' BOGUS);"),
+                "Q",
+                "the duckdb_setup SQL failed",
             ),
         ] {
-            let r = w.runner(100, Some(setup));
+            let r = w.runner(100, Some(&setup));
             match r.run(&w.catalog, w.lib(lib), Format::Ndjson, None) {
                 Err(QueryError::Sql(m)) => {
-                    assert!(!m.contains("AKIAXYZ") && !m.contains("shh"), "{m}");
-                    assert!(m.contains(quoted), "{m}");
+                    for secret in secrets {
+                        assert!(!m.contains(&secret[..6.min(secret.len())]), "{setup}: {m}");
+                    }
+                    assert!(m.contains(says), "{setup}: {m}");
                 }
-                other => panic!("{other:?}"),
+                other => panic!("{setup}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_query_error_drops_lines_that_quote_the_setup() {
+        let long = "a-long-secret-".repeat(10);
+        let setup = format!(
+            "CREATE SECRET s (KEY_ID $k$AKIAXYZ$k$, SECRET E'it\\'s {long}', REGION 'eu');"
+        );
+        let text = "IO Error: HTTP 403\nLINE 1: ...ecret-a-long-secret-'\nkey AKIAXYZ refused\n\
+                    region eu\nCandidate: nope";
+        assert_eq!(
+            without_setup(text, &setup),
+            "IO Error: HTTP 403\nregion ***\nCandidate: nope"
+        );
+        assert_eq!(
+            without_setup("key AKIAXYZ", &setup),
+            "duckdb failed; its message quoted the duckdb_setup SQL"
+        );
+        assert_eq!(
+            setup_literals("SELECT 'a''b', $$c$$, $1, E'd\\'e', $t$f$$g$t$"),
+            ["a'b", "c", "d'e", "f$$g"]
+        );
     }
 
     #[test]
