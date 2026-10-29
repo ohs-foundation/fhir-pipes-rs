@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use serde_json::{Value, json};
@@ -51,6 +51,8 @@ pub struct QueryApi {
     pub approve: Approve,
     pub metrics: Arc<Metrics>,
     pub stdout: Arc<StdoutQueue>,
+    /// Hides serve's secrets in what is logged.
+    pub redactor: Arc<crate::serve::secrets::Redactor>,
 }
 
 impl QueryApi {
@@ -272,9 +274,14 @@ fn sql_run(pairs: Vec<(String, String)>, headers: &HeaderMap) -> Result<SqlRun, 
 
 async fn run_get(
     State(api): State<Arc<QueryApi>>,
+    method: Method,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    // axum sends HEAD to the GET handler, which would run the query.
+    if method == Method::HEAD {
+        return method_not_allowed().await;
+    }
     let pairs = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
         .into_owned()
         .collect();
@@ -455,11 +462,13 @@ async fn answer(api: Arc<QueryApi>, request: Result<SqlRun, Refusal>) -> Respons
         }
     };
     api.metrics.query_ended(status.as_u16(), seconds);
-    api.stdout.push(format!(
+    // The canonical and a failed query's detail come from the caller or
+    // duckdb, so a secret can be in them.
+    api.stdout.push(api.redactor.redact(&format!(
         "query {canonical} {format} {} {rows} rows {} ms{tail}",
         status.as_u16(),
         (seconds * 1000.0).round() as u64
-    ));
+    )));
     response
 }
 
@@ -725,7 +734,62 @@ mod tests {
             approve,
             metrics: Arc::default(),
             stdout: StdoutQueue::start(Box::new(log.clone())),
+            redactor: Arc::new(
+                crate::serve::secrets::Redactor::new([(
+                    "FHIR_PIPES_QUERY_TOKEN".to_string(),
+                    SECRET.to_string(),
+                )])
+                .0,
+            ),
         })
+    }
+
+    const SECRET: &str = "s3cret-query-token";
+
+    #[tokio::test]
+    async fn the_log_line_hides_secrets() {
+        if !have_duckdb("the_log_line_hides_secrets") {
+            return;
+        }
+        let w = Warehouse::new();
+        let log = Log::default();
+        let api = api(&w, Approve::All, 100, &log);
+        let r = send(&api, get(&[("subjectCanonical", SECRET)])).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND);
+        let line = log.line("query ");
+        assert!(line.contains("***") && !line.contains(SECRET), "{line}");
+    }
+
+    #[tokio::test]
+    async fn head_runs_no_query_but_works_on_discovery_routes() {
+        if !have_duckdb("head_runs_no_query_but_works_on_discovery_routes") {
+            return;
+        }
+        let w = Warehouse::new();
+        let log = Log::default();
+        let api = api(&w, Approve::All, 100, &log);
+        let head = |path: &str| Request::head(path).body(Body::empty()).unwrap();
+        let r = send(
+            &api,
+            head(&format!("/fhir/$sql-run?subjectCanonical={}", enc(Q))),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);
+        let metrics = api
+            .metrics
+            .render(&[], std::path::Path::new("/nonexistent"), false, 0);
+        assert!(!metrics.contains("status=\"200\""), "{metrics}");
+        for path in [
+            "/fhir/metadata",
+            "/fhir/OperationDefinition/fhir-pipes-sql-run",
+            "/fhir/Library",
+        ] {
+            assert_eq!(
+                send(&api, head(path)).await.status,
+                StatusCode::OK,
+                "{path}"
+            );
+        }
     }
 
     struct Reply {

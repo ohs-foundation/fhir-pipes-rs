@@ -153,6 +153,7 @@ fn server(
             approve: q.approve,
             metrics: metrics.clone(),
             stdout: stdout.clone(),
+            redactor: redactor.clone(),
         })
     });
     let job = Arc::new(runner::Job {

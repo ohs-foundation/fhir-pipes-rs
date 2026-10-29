@@ -116,7 +116,7 @@ name or password; put a key in `header` and `value_env`. A mistake in
 
 Every path but `/health` needs the token (the `/fhir` paths of the
 [query API](#queries-sql-run) also take the query token). Responses are JSON, apart from
-`/metrics` and the log.
+`/metrics`, the log and the rows of `$sql-run`, which are NDJSON, JSON or CSV.
 
 | Request | What it does |
 |---|---|
@@ -259,9 +259,9 @@ config approves, and only the catalog's own: a caller cannot send SQL.
 [serve.query]
 approve = "active"        # "active", "listed" or "all"
 # queries = ["https://example.org/Library/CoverageByArea"]   # with "listed"
-source = "local"          # "local", or a URL prefix such as "r2://bucket/warehouse"
+source = "local"          # "local", or a URL-style prefix DuckDB can read, such as "r2://bucket/warehouse"
 # duckdb_setup = "query-setup.sql"   # SQL run before each query, relative to the config
-timeout = 60              # seconds a query may run
+timeout = 60              # seconds each duckdb run may take
 max_rows = 100_000        # most rows one query returns
 concurrency = 4           # queries that may run at once
 ```
@@ -269,12 +269,19 @@ concurrency = 4           # queries that may run at once
 The values shown are the defaults. Only `queries` and `duckdb_setup` have
 none. A mistake in the section stops `serve` at start, with exit status 2:
 an unknown key, a `timeout`, `max_rows` or `concurrency` of 0, a `source`
-that is neither `local` nor a URL, or `queries` without `approve = "listed"`
+that is neither `local` nor has `://` in it, or `queries` without `approve = "listed"`
 (and the reverse).
 
 `serve` builds the query settings from the `fhir-pipes.toml` it was given and
 the same environment variables `refresh` reads, so a config `refresh`
-accepts also starts the query API. The Library sources, `strip_prefix` and
+accepts also starts the query API.
+
+`timeout` applies to each DuckDB run, the setup SQL included. A query that
+a publish overlapped is run again (see [While a refresh
+publishes](#while-a-refresh-publishes)) with a fresh timeout, so one request
+can take up to twice `timeout`. A `source` other than `local` must be a
+URL-style prefix (it must contain `://`) that DuckDB can read; `serve` checks
+no more than that. The Library sources, `strip_prefix` and
 the `duckdb` command are `refresh`'s.
 
 ### Which queries run
@@ -289,8 +296,9 @@ Only a SQLQuery runs. A SQLView or a ViewDefinition never does, whatever
 `approve` says. With `listed`, each entry must be a SQLQuery in the catalog,
 or `serve` does not start.
 
-The catalog is what `refresh`'s `libraries` step reads: the `libraries`
-sources in the config. `serve` loads it at start, and a failure stops
+The catalog is what `refresh` builds: the views directory, the
+`libraries` sources in the config and the built-ins (`Location`,
+`LocationHierarchy`). `serve` loads it at start, and a failure stops
 `serve` with exit status 2. It loads the catalog again after each run that
 succeeded, so a changed Library is served once the refresh that fetched it
 ends. When that load fails, `serve` keeps the old catalog and logs
@@ -333,14 +341,15 @@ every `/fhir` path answers `404`, after the token check.
 | `GET /fhir/OperationDefinition/fhir-pipes-sql-run` | The OperationDefinition of this subset. |
 | `GET /fhir/Library` | A searchset Bundle of the approved SQLQuery Libraries, each with its SQL. It takes no search parameters and answers `400` if given any. |
 
-Any other path under `/fhir` is `404`, and another method on these paths is
-`405`.
+The three discovery routes also answer HEAD. HEAD on `/fhir/$sql-run` is
+`405`, so it never runs a query. Any other path under `/fhir` is `404`, and
+another method on these paths is `405`.
 
 The parameters are:
 
 | Parameter | Type in a Parameters body | |
 |---|---|---|
-| `subjectCanonical` | `valueCanonical` | Required. The Library's url, or `url\|version`. A url alone names a Library only when the catalog has one version of it. |
+| `subjectCanonical` | `valueCanonical` | Required. The Library's url, or `url\|version`. A url alone names a Library only when the catalog has one version of it; with more, it is `404`. |
 | `_format` | `valueCode` | `ndjson`, `json` or `csv`. |
 | `_limit` | `valueInteger` | The most rows to return, at least 1. |
 
@@ -378,11 +387,12 @@ body is at most 64 KB, and its `Content-Type` is `application/fhir+json` or
 
 ### The result
 
-The format is `_format` when given. Otherwise it is the best match to
-`Accept` among `application/x-ndjson`, `application/json` and `text/csv`,
-by q-value (`q` in any case; `q=0` refuses a type). When nothing in
-`Accept` is one of these, or there is no `Accept`, the format is NDJSON.
-`_format` wins over `Accept`.
+The format is `_format` when given; it wins over `Accept`. Otherwise it is
+the best match to `Accept` among `application/x-ndjson`, `application/json`
+and `text/csv`, by q-value (`q` in any case). A type with `q=0`, or with a
+`q` that is not a number, is refused. Of types with the same q, the one named
+first wins. When no supported type is acceptable, or there is no `Accept`,
+the format is NDJSON, even for `Accept: application/x-ndjson;q=0`.
 
 | Format | `Content-Type` | Body |
 |---|---|---|
@@ -409,7 +419,7 @@ a disabled API, which have no body.
 | `404` | The canonical is not in the catalog; a path that is not one of the routes; any `/fhir` path when `[serve.query]` is not set. |
 | `405` | A method the path does not take. |
 | `413` | A POST body over 64 KB. |
-| `415` | A POST that is not JSON. |
+| `415` | A POST with no `Content-Type`, or one other than `application/fhir+json` or `application/json`. Malformed JSON with an accepted `Content-Type` is `400`. |
 | `422` | The query failed or ran past `timeout`, or the `duckdb_setup` SQL failed. |
 | `500` | An error in `serve` itself. |
 | `503` | An input table has no data yet, a refresh is publishing, or `concurrency` queries are already running. |
@@ -423,7 +433,12 @@ a `422` carries fixed text: `the query failed; the serve log has the
 details`, `the duckdb_setup SQL failed` or `the query timed out after <n>
 s`. The details are in `serve`'s log.
 
-Each request makes one line in `serve`'s log:
+Each `$sql-run` request that reaches the handler makes one line in `serve`'s
+log and is counted in `fhir_pipes_queries_total` and
+`fhir_pipes_query_seconds`. A `401`, the `404` of a disabled API, a refused
+method and the discovery routes are neither logged nor counted there. The
+line passes through the same redaction as run output, so a secret in a
+canonical or in DuckDB's message shows as `***`:
 
 ```
 query https://example.org/Library/CoverageByArea csv 200 412 rows 85 ms
