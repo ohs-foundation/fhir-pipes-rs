@@ -42,8 +42,6 @@ const PARAMETERS: [(&str, &str); 3] = [
 ];
 
 /// What the `/fhir` routes share.
-// Built once serve is wired in.
-#[allow(dead_code)]
 pub struct QueryApi {
     /// Swapped whole by `reload`; a query holds the one it started with.
     pub queries: RwLock<Arc<Queries>>,
@@ -57,8 +55,6 @@ pub struct QueryApi {
 
 impl QueryApi {
     /// Build the catalog again; on an error the last one is kept.
-    // Called after each refresh once serve is wired in.
-    #[allow(dead_code)]
     pub fn reload(&self) -> anyhow::Result<()> {
         let queries = Queries::load(&self.settings, &self.approve)?;
         *self.queries.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(queries);
@@ -73,8 +69,6 @@ impl QueryApi {
     }
 }
 
-// Mounted once serve is wired in.
-#[allow(dead_code)]
 pub fn routes(api: Arc<QueryApi>) -> Router {
     // The CapabilityStatement's date: when this serve started.
     let started = chrono::Utc::now().format("%Y-%m-%d").to_string();

@@ -216,6 +216,8 @@ pub struct ServeInputs {
     /// The variable holding the `[database]` connection string, if there is
     /// a `[database]` section.
     pub database_url_env: Option<String>,
+    /// The rest of the config, for the query API's `Settings`.
+    pub file: config::File,
 }
 
 /// The config file `serve` was given, or the one `refresh` would find, read
@@ -233,7 +235,7 @@ pub fn serve_inputs(
             .find(|p| p.exists())
             .context("no config file: pass --config or set FHIR_PIPES_CONFIG")?,
     };
-    let (file, base) = config::load(Some(&path))?;
+    let (mut file, base) = config::load(Some(&path))?;
     let data = match (data, &file.data) {
         (Some(p), _) => p,
         (None, Some(p)) => base.join(p),
@@ -250,7 +252,8 @@ pub fn serve_inputs(
                 .clone()
                 .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into())
         }),
-        serve: file.serve,
+        serve: file.serve.take(),
+        file,
     })
 }
 

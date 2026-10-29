@@ -74,8 +74,6 @@ pub struct ServeConfig {
     pub max_log_bytes: u64,
     pub schedule: Vec<Schedule>,
     pub notify: Vec<Destination>,
-    // Read once the query API is wired in.
-    #[allow(dead_code)]
     pub query: Option<QueryConfig>,
 }
 

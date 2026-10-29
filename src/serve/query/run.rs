@@ -130,8 +130,6 @@ impl Drop for Slot<'_> {
     }
 }
 
-// Built once the query API is wired in.
-#[allow(dead_code)]
 impl Runner {
     /// A runner for the query settings `cfg` over warehouse `data`, running
     /// the `duckdb` command. The setup SQL is read here, once.

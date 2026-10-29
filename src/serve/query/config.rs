@@ -37,8 +37,6 @@ pub enum Source {
     Remote(String),
 }
 
-// Read once the query API is wired in.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct QueryConfig {
     pub approve: Approve,

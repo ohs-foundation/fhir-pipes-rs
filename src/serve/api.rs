@@ -22,10 +22,11 @@ use super::runner::{self, CancelToken, Job};
 use super::store::{RunId, RunRecord, RunRequest, Trigger};
 
 /// The steps a request may name in `only` and `skip`, as `refresh` takes them.
-const STEPS: [&str; 8] = [
+const STEPS: [&str; 9] = [
     "locations",
     "views",
     "tiles",
+    "libraries",
     "manifest",
     "catalog",
     "database",
@@ -48,6 +49,9 @@ pub struct Server {
     pub clock: Arc<dyn super::schedule::Clock>,
     /// Set once serve has been told to stop: no run is accepted after.
     pub stopping: std::sync::atomic::AtomicBool,
+    /// The query API, with `[serve.query]`: its catalog is built again
+    /// after each run.
+    pub query: Option<Arc<super::query::http::QueryApi>>,
 }
 
 /// Why a run was not started.
@@ -111,6 +115,16 @@ impl Server {
             server
                 .metrics
                 .run_ended(&rec, started.elapsed().as_secs_f64());
+            // The run may have changed the Libraries; on an error the last
+            // catalog is kept.
+            if let Some(q) = &server.query
+                && let Err(e) = q.reload()
+            {
+                server.job.stdout.push(format!(
+                    "query catalog not reloaded: {}",
+                    crate::error::message(&e)
+                ));
+            }
             server.job.stdout.push(format!(
                 "{} ended: {}",
                 rec.id.as_str(),
@@ -364,6 +378,7 @@ mod tests {
             current: Mutex::new(None),
             clock: Arc::new(super::super::schedule::SystemClock),
             stopping: Default::default(),
+            query: None,
         })
     }
 

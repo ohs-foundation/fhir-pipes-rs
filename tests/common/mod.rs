@@ -12,6 +12,10 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::Field;
 use serde_json::{Value, json};
 
+pub mod libraries;
+#[cfg(unix)]
+pub mod serve;
+
 pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/refresh")
 }

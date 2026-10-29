@@ -128,8 +128,8 @@ Every path but `/health` needs the token. Responses are JSON, apart from
 | `GET /metrics` | Prometheus metrics |
 | `GET /health` | `ok` |
 
-The steps are `refresh`'s: `locations`, `views`, `tiles`, `manifest`,
-`catalog`, `database`, `hooks`, `push`.
+The steps are `refresh`'s: `locations`, `views`, `tiles`, `libraries`,
+`manifest`, `catalog`, `database`, `hooks`, `push`.
 
 A run's record:
 

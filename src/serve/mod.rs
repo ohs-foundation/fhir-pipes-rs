@@ -20,7 +20,7 @@ pub mod store;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
@@ -41,7 +41,7 @@ pub struct ServeArgs {
     #[arg(long, env = "FHIR_PIPES_DATA")]
     data: Option<PathBuf>,
     /// Address to listen on. Anything but a loopback address needs
-    /// FHIR_PIPES_SERVE_TOKEN.
+    /// FHIR_PIPES_SERVE_TOKEN, and FHIR_PIPES_QUERY_TOKEN with [serve.query].
     #[arg(
         long,
         env = "FHIR_PIPES_SERVE_LISTEN",
@@ -52,16 +52,54 @@ pub struct ServeArgs {
 
 /// The token callers send as `Authorization: Bearer <token>`.
 const TOKEN_ENV: &str = "FHIR_PIPES_SERVE_TOKEN";
+/// The token that opens the `/fhir` paths only.
+const QUERY_TOKEN_ENV: &str = "FHIR_PIPES_QUERY_TOKEN";
 
 #[derive(Clone)]
 struct App {
     token: Option<String>,
+    query_token: Option<String>,
+    /// Whether `[serve.query]` is set: without it, `/fhir` paths are 404.
+    query_enabled: bool,
+}
+
+/// What the query API is built from, loaded at startup.
+struct QueryParts {
+    settings: crate::warehouse::config::Settings,
+    queries: query::catalog::Queries,
+    runner: query::run::Runner,
+}
+
+/// The warehouse settings as `refresh` reads them from the same config,
+/// over the warehouse serve looks after, and the catalog and runner built
+/// from them.
+fn query_parts(
+    inputs: &mut crate::warehouse::ServeInputs,
+    cfg: &query::config::QueryConfig,
+) -> Result<QueryParts> {
+    let settings = crate::warehouse::config::settings(
+        std::mem::take(&mut inputs.file),
+        inputs.base.clone(),
+        crate::warehouse::config::Overrides {
+            data: Some(inputs.data.clone()),
+            ..Default::default()
+        },
+    )?;
+    let queries = query::catalog::Queries::load(&settings, &cfg.approve)?;
+    let runner =
+        query::run::Runner::new(cfg, &inputs.data, &settings.duckdb, &settings.strip_prefix)?;
+    Ok(QueryParts {
+        settings,
+        queries,
+        runner,
+    })
 }
 
 /// The pieces of a serve that the API and the schedule share.
 fn server(
     inputs: &crate::warehouse::ServeInputs,
     cfg: config::ServeConfig,
+    query: Option<QueryParts>,
 ) -> Result<Arc<api::Server>> {
     let store = Arc::new(store::Store::open(inputs.data.join(".serve/runs"))?);
     let (redactor, warnings) =
@@ -106,6 +144,17 @@ fn server(
         crate::redact::SECRET_VARS_ENV.to_string(),
         secret_vars.join(","),
     ));
+    let query = match (query, &cfg.query) {
+        (Some(q), Some(qcfg)) => Some(Arc::new(query::http::QueryApi {
+            queries: RwLock::new(Arc::new(q.queries)),
+            runner: q.runner,
+            settings: q.settings,
+            approve: qcfg.approve.clone(),
+            metrics: metrics.clone(),
+            stdout: stdout.clone(),
+        })),
+        _ => None,
+    };
     let job = Arc::new(runner::Job {
         program: std::env::current_exe().context("finding the fhir-pipes binary")?,
         base_args,
@@ -124,11 +173,12 @@ fn server(
         current: std::sync::Mutex::new(None),
         clock: schedule::clock(),
         stopping: Default::default(),
+        query,
     }))
 }
 
 pub fn run(args: &ServeArgs) -> Result<()> {
-    let inputs =
+    let mut inputs =
         crate::warehouse::serve_inputs(args.config.as_deref(), args.data.clone()).map_err(usage)?;
     let cfg = config::parse(inputs.serve.clone(), &inputs.base).map_err(usage)?;
     let listen: SocketAddr = args
@@ -142,10 +192,24 @@ pub fn run(args: &ServeArgs) -> Result<()> {
             "--listen {listen} is not a loopback address: set {TOKEN_ENV} so callers need a token"
         )));
     }
+    let query_token = std::env::var(QUERY_TOKEN_ENV)
+        .ok()
+        .filter(|t| !t.is_empty());
+    if cfg.query.is_some() && query_token.is_none() && !listen.ip().is_loopback() {
+        return Err(usage(anyhow::anyhow!(
+            "--listen {listen} is not a loopback address: with [serve.query], set \
+             {QUERY_TOKEN_ENV} so query callers need a token"
+        )));
+    }
+    let query = match &cfg.query {
+        Some(q) => Some(query_parts(&mut inputs, q).map_err(usage)?),
+        None => None,
+    };
     let dir = inputs.data.join(".serve");
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let _lock = lock(&dir.join("serve.lock"))?;
-    let server = server(&inputs, cfg)?;
+    let query_enabled = cfg.query.is_some();
+    let server = server(&inputs, cfg, query)?;
     if !server.job.cfg.schedule.is_empty() {
         let s = server.clone();
         std::thread::spawn(move || {
@@ -180,7 +244,11 @@ pub fn run(args: &ServeArgs) -> Result<()> {
         });
     }
 
-    let app = App { token };
+    let app = App {
+        token,
+        query_token,
+        query_enabled,
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -206,7 +274,11 @@ pub fn run(args: &ServeArgs) -> Result<()> {
 }
 
 fn router(app: App, server: Arc<api::Server>) -> Router {
-    api::routes(server)
+    let mut routes = api::routes(server.clone());
+    if let Some(q) = &server.query {
+        routes = routes.merge(query::http::routes(q.clone()));
+    }
+    routes
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(app, auth))
         .route("/health", get(|| async { "ok" }))
@@ -321,18 +393,39 @@ fn stop(server: &api::Server) {
     waiting(&|| !server.job.store.load(&id).is_ok_and(|r| r.pending()));
 }
 
-/// Every path but /health needs the token, checked before anything else
-/// about the request is read.
+/// Every path but /health needs a token, checked before anything else
+/// about the request is read. The `/fhir` paths take the query token or the
+/// serve token, the rest the serve token only; with none of the tokens a
+/// path takes set, it is open (serve then listens only on loopback).
 async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
-    if let Some(token) = &app.token {
+    let path = req.uri().path();
+    let fhir = path == "/fhir" || path.starts_with("/fhir/");
+    let accepted: Vec<&String> = if fhir {
+        app.query_token.iter().chain(&app.token).collect()
+    } else {
+        app.token.iter().collect()
+    };
+    if !accepted.is_empty() {
         let given = req
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        if !given.is_some_and(|g| same(g.as_bytes(), token.as_bytes())) {
+        // Each token is compared, so the time taken does not say which
+        // one matched.
+        let matched = given.is_some_and(|g| {
+            accepted
+                .iter()
+                .fold(false, |m, t| same(g.as_bytes(), t.as_bytes()) | m)
+        });
+        if !matched {
             return StatusCode::UNAUTHORIZED.into_response();
         }
+    }
+    // Only now, so an unauthenticated caller cannot tell whether the query
+    // API is enabled.
+    if fhir && !app.query_enabled {
+        return StatusCode::NOT_FOUND.into_response();
     }
     next.run(req).await
 }
