@@ -124,7 +124,7 @@ impl Server {
                 server
                     .job
                     .stdout
-                    .push(not_reloaded(&e, &server.job.redactor));
+                    .push(not_reloaded(&e, &q.settings, &server.job.redactor));
             }
             server.job.stdout.push(format!(
                 "{} ended: {}",
@@ -146,13 +146,17 @@ impl Server {
     }
 }
 
-/// The line serve prints when the query catalog was not built again: the
-/// error, which can quote a Library source's URL, with URLs' credentials
-/// and serve's secrets hidden.
-fn not_reloaded(e: &anyhow::Error, redactor: &super::secrets::Redactor) -> String {
+/// The line serve prints when the query catalog of `settings` was not
+/// built again: the error, which can quote a Library source's URL, with
+/// URLs' credentials and serve's secrets hidden.
+fn not_reloaded(
+    e: &anyhow::Error,
+    settings: &crate::warehouse::config::Settings,
+    redactor: &super::secrets::Redactor,
+) -> String {
     format!(
         "query catalog not reloaded: {}",
-        redactor.redact(&crate::redact::urls(&crate::error::message(e)))
+        redactor.redact(&super::query::catalog::load_error(e, settings))
     )
 }
 
@@ -405,21 +409,36 @@ mod tests {
             },
         )
         .unwrap();
-        settings.libraries = vec!["https://u:k1-user@127.0.0.1:9/p.tgz?token=k2-query".into()];
-        let err = super::super::query::catalog::Queries::load(
-            &settings,
-            &super::super::query::config::Approve::All,
-        )
-        .err()
-        .unwrap();
-        let err = err.context("serve-secret-k3");
         let (redactor, _) =
             super::super::secrets::Redactor::new([("test".into(), "serve-secret-k3".into())]);
-        let line = not_reloaded(&err, &redactor);
-        assert!(line.starts_with("query catalog not reloaded: "), "{line}");
-        assert!(line.contains("https://127.0.0.1:9/p.tgz"), "{line}");
-        for secret in ["k1-user", "k2-query", "serve-secret-k3"] {
-            assert!(!line.contains(secret), "{secret}: {line}");
+        // Library sources with secrets beside brackets, or behind an
+        // uppercase scheme: (source, the secrets in it).
+        for (source, secrets) in [
+            (
+                "https://u:k1-user@127.0.0.1:9/p.tgz?token=k2-query",
+                &["k1-user", "k2-query"][..],
+            ),
+            ("https://127.0.0.1:9/p(v1).tgz?token=secret1", &["secret1"]),
+            (
+                "https://u:pa(ss)@127.0.0.1:9/p.tgz?token=secret2",
+                &["pa(ss)", "pa%28ss%29", "secret2"],
+            ),
+            ("https://127.0.0.1:9/p.tgz?token=abc(def)", &["abc", "def"]),
+            ("HTTPS://u:plain@127.0.0.1:9/p.tgz", &["plain"]),
+        ] {
+            settings.libraries = vec![source.into()];
+            let err = super::super::query::catalog::Queries::load(
+                &settings,
+                &super::super::query::config::Approve::All,
+            )
+            .err()
+            .unwrap()
+            .context("serve-secret-k3");
+            let line = not_reloaded(&err, &settings, &redactor);
+            assert!(line.starts_with("query catalog not reloaded: "), "{line}");
+            for secret in secrets.iter().chain(&["serve-secret-k3"]) {
+                assert!(!line.contains(secret), "{secret}: {line}");
+            }
         }
     }
 

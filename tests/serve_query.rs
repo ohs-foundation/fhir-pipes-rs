@@ -325,14 +325,14 @@ fn a_library_url_token_is_not_printed() {
     let (_dir, config) = warehouse(QUERY_SECTION);
     let text = fs::read_to_string(&config).unwrap().replacen(
         "libraries = ['libs']",
-        "libraries = ['libs', 'https://u:k1-user@127.0.0.1:9/p.tgz?token=k2-query']",
+        "libraries = ['libs', 'https://u:k1(user)@127.0.0.1:9/p(v1).tgz?token=k2(query)']",
         1,
     );
     fs::write(&config, text).unwrap();
     let (code, stderr) = serve_fails(&config, "127.0.0.1:0", &[]);
     assert_eq!(code, Some(2), "{stderr}");
-    assert!(stderr.contains("https://127.0.0.1:9/p.tgz"), "{stderr}");
-    for secret in ["k1-user", "k2-query"] {
+    assert!(stderr.contains("https://127.0.0.1:9/p(v1).tgz"), "{stderr}");
+    for secret in ["k1", "user", "k2", "query)"] {
         assert!(!stderr.contains(secret), "{secret}: {stderr}");
     }
 }

@@ -84,7 +84,8 @@ fn query_parts(
         inputs.base.clone(),
         crate::warehouse::serve_overrides(inputs.data.clone())?,
     )?;
-    let queries = query::catalog::Queries::load(&settings, &cfg.approve)?;
+    let queries = query::catalog::Queries::load(&settings, &cfg.approve)
+        .map_err(|e| anyhow::anyhow!("{}", query::catalog::load_error(&e, &settings)))?;
     let runner =
         query::run::Runner::new(cfg, &inputs.data, &settings.duckdb, &settings.strip_prefix)?;
     Ok(QueryParts {

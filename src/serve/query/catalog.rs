@@ -95,6 +95,22 @@ impl Queries {
     }
 }
 
+/// An error loading the catalog of `s`, fit to print: each Library source
+/// (and the views directory) that is a URL is hidden exactly, as
+/// `redact::url` writes it, and then any other URL in it.
+pub fn load_error(e: &anyhow::Error, s: &Settings) -> String {
+    let views = s.views.as_ref().map(|p| p.display().to_string());
+    let sources = s
+        .libraries
+        .iter()
+        .map(String::as_str)
+        .chain(views.as_deref());
+    crate::redact::urls(&crate::redact::known_urls(
+        &crate::error::message(e),
+        sources,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
