@@ -1,10 +1,13 @@
 //! The `[serve]` section of fhir-pipes.toml. `refresh` reads the same file
 //! and ignores this section.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
+
+use super::query::config::{self as query_config, QueryConfig};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +21,7 @@ struct ServeFile {
     schedule: Vec<ScheduleFile>,
     #[serde(default)]
     notify: Vec<NotifyFile>,
+    query: Option<toml::Table>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,10 +74,12 @@ pub struct ServeConfig {
     pub max_log_bytes: u64,
     pub schedule: Vec<Schedule>,
     pub notify: Vec<Destination>,
+    pub query: Option<QueryConfig>,
 }
 
-/// The `[serve]` section, or the defaults without one.
-pub fn parse(section: Option<toml::Table>) -> Result<ServeConfig> {
+/// The `[serve]` section, or the defaults without one. `base` is the
+/// config file's directory, for paths in `[serve.query]`.
+pub fn parse(section: Option<toml::Table>, base: &Path) -> Result<ServeConfig> {
     let file: ServeFile = match section {
         Some(t) => toml::Value::Table(t).try_into()?,
         None => ServeFile::default(),
@@ -117,6 +123,10 @@ pub fn parse(section: Option<toml::Table>) -> Result<ServeConfig> {
         };
         notify.push(Destination { name, url, header });
     }
+    let query = file
+        .query
+        .map(|t| query_config::parse(t, base))
+        .transpose()?;
     Ok(ServeConfig {
         retries: file.retries.unwrap_or(2),
         retry_delay: Duration::from_secs(file.retry_delay.unwrap_or(600)),
@@ -125,6 +135,7 @@ pub fn parse(section: Option<toml::Table>) -> Result<ServeConfig> {
         max_log_bytes: file.max_log_bytes.unwrap_or(20_000_000),
         schedule,
         notify,
+        query,
     })
 }
 
@@ -132,13 +143,17 @@ pub fn parse(section: Option<toml::Table>) -> Result<ServeConfig> {
 mod tests {
     use super::*;
 
+    fn parse_in(s: Option<toml::Table>) -> Result<ServeConfig> {
+        parse(s, Path::new("."))
+    }
+
     fn section(text: &str) -> Option<toml::Table> {
         Some(toml::from_str(text).unwrap())
     }
 
     #[test]
     fn the_defaults_are_the_specs() {
-        let c = parse(None).unwrap();
+        let c = parse(None, Path::new(".")).unwrap();
         assert_eq!(c.retries, 2);
         assert_eq!(c.retry_delay, Duration::from_secs(600));
         assert_eq!(c.stop_grace, Duration::from_secs(120));
@@ -147,13 +162,20 @@ mod tests {
     }
 
     #[test]
+    fn a_query_section_is_parsed() {
+        let c = parse_in(section("[query]\napprove = \"all\"")).unwrap();
+        assert!(c.query.is_some());
+        assert!(parse_in(section("retries = 1")).unwrap().query.is_none());
+    }
+
+    #[test]
     fn an_unknown_key_is_refused() {
-        assert!(parse(section("retrys = 1")).is_err());
+        assert!(parse_in(section("retrys = 1")).is_err());
     }
 
     #[test]
     fn a_header_needs_its_variable() {
-        let err = parse(section(
+        let err = parse_in(section(
             "[[notify]]\nname = \"a\"\nurl = \"https://x.example/i\"\nheader = \"x-api-key\"",
         ))
         .unwrap_err()

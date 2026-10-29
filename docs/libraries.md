@@ -17,6 +17,10 @@ The `refresh` command runs the SQLQuery Libraries in its `libraries` step
 (see [refresh.md](refresh.md#libraries)). `libraries build` writes Library
 JSON from SQL files, and `libraries sql` prints the SQL that runs one Library.
 
+`fhir-pipes serve` can also run approved SQLQuery Libraries for a caller and
+return their rows (see [serve.md](serve.md#queries-sql-run)). With the default
+`approve = "active"`, a SQLQuery runs only when its `status` is `active`.
+
 ## Writing a Library
 
 A Library source is a `.sql` file with a `.toml` file of the same name beside

@@ -25,6 +25,11 @@
 //! failed or was killed part way, finishes that publish before anything else:
 //! the database already holds that run's rows, and the warehouse would
 //! otherwise be left with some tables from each run.
+//!
+//! After its last rename, and before it removes `.publishing`, `publish`
+//! writes `.publish-generation` in the warehouse directory: a count of
+//! publishes. `publish_state` reads it with the `.publishing` marker, so a
+//! reader that queries the warehouse can tell that a publish overlapped it.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -40,6 +45,8 @@ const DIR: &str = ".staging";
 const LOCK: &str = ".refresh.lock";
 /// In `.staging` while a publish is under way.
 const PUBLISHING: &str = ".publishing";
+/// In the warehouse directory: how many publishes have completed.
+const GENERATION: &str = ".publish-generation";
 /// The warehouse directories a run stages and swaps in whole.
 const DIRS: [&str; 2] = ["views", "tiles"];
 
@@ -264,6 +271,10 @@ impl Stage {
                 .with_context(|| format!("renaming {} into place", staged.display()))?;
             *published = true;
         }
+        let generation = publish_state(&self.data).generation + 1;
+        let path = self.data.join(GENERATION);
+        crate::fs::atomic_write(&path, generation.to_string())
+            .with_context(|| format!("writing {}", path.display()))?;
         fs::remove_file(self.files.join(PUBLISHING))?;
         self.clear()?;
         Ok((tables, swapped))
@@ -362,6 +373,42 @@ fn recover(dir: &Path, label: &str, managed: impl Fn(&str) -> bool) -> Result<()
     Ok(())
 }
 
+/// Whether a publish is under way in warehouse `data`, and how many have
+/// completed. A query that sees a publish under way before or after it, or a
+/// different generation after than before, may have read two runs' files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishState {
+    pub publishing: bool,
+    pub generation: u64,
+}
+
+/// The publish state of warehouse `data`. An absent, unreadable or unparsable
+/// generation file reads as 0.
+///
+/// The marker is read before the generation. A publish writes the new
+/// generation and then removes the marker, so a reader that finds no marker
+/// reads a generation at least as new as that publish. Reading the
+/// generation first would let a publish finish between the two reads and
+/// report `{publishing: false, generation: N}` for a query that overlapped it.
+pub fn publish_state(data: &Path) -> PublishState {
+    publish_state_with(data, || {})
+}
+
+/// `publish_state`, running `between` after the marker read and before the
+/// generation read, so a test can interleave a publish's last steps.
+fn publish_state_with(data: &Path, between: impl FnOnce()) -> PublishState {
+    let publishing = data.join(DIR).join(PUBLISHING).exists();
+    between();
+    let generation = fs::read_to_string(data.join(GENERATION))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    PublishState {
+        publishing,
+        generation,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +420,66 @@ mod tests {
     fn table(dir: &Path, marker: &str) {
         fs::create_dir_all(dir.join("country=SLE")).unwrap();
         fs::write(dir.join("country=SLE/part-0.parquet"), marker).unwrap();
+    }
+
+    #[test]
+    fn a_publish_bumps_the_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        assert_eq!(
+            publish_state(data),
+            PublishState {
+                publishing: false,
+                generation: 0
+            }
+        );
+        let s = stage(data);
+        table(&s.table("a"), "new a");
+        s.publish(&mut false).unwrap();
+        assert_eq!(
+            publish_state(data),
+            PublishState {
+                publishing: false,
+                generation: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_publish_under_way_is_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".staging")).unwrap();
+        fs::write(dir.path().join(".staging/.publishing"), "").unwrap();
+        assert!(publish_state(dir.path()).publishing);
+    }
+
+    #[test]
+    fn a_publish_finishing_between_the_reads_is_seen_as_under_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
+        fs::create_dir_all(data.join(DIR)).unwrap();
+        fs::write(data.join(GENERATION), "4").unwrap();
+        fs::write(data.join(DIR).join(PUBLISHING), "").unwrap();
+        // The publish's last two steps land between the reader's two reads.
+        let state = publish_state_with(data, || {
+            fs::write(data.join(GENERATION), "5").unwrap();
+            fs::remove_file(data.join(DIR).join(PUBLISHING)).unwrap();
+        });
+        assert_eq!(
+            state,
+            PublishState {
+                publishing: true,
+                generation: 5
+            }
+        );
+        // Read after the publish finished: no marker, new generation.
+        assert_eq!(
+            publish_state(data),
+            PublishState {
+                publishing: false,
+                generation: 5
+            }
+        );
     }
 
     fn marker(dir: &Path) -> String {

@@ -41,17 +41,17 @@
 //! with the step that failed and why.
 
 mod catalog;
-mod config;
+pub(crate) mod config;
 #[cfg(feature = "postgres")]
 mod database;
 mod fhir;
 mod files;
-mod libraries_step;
+pub(crate) mod libraries_step;
 mod manifest;
 pub(crate) mod partition;
 mod push;
 pub(crate) mod sql;
-mod stage;
+pub(crate) mod stage;
 mod status;
 mod tiles;
 mod tools;
@@ -206,6 +206,9 @@ impl Step {
 pub struct ServeInputs {
     /// The config file, as an absolute path, for the refreshes it starts.
     pub config: PathBuf,
+    /// The directory relative settings in the config resolve against: the
+    /// parent of the config file's canonical path.
+    pub base: PathBuf,
     /// The warehouse directory, absolute.
     pub data: PathBuf,
     /// The `[serve]` section.
@@ -216,12 +219,13 @@ pub struct ServeInputs {
 }
 
 /// The config file `serve` was given, or the one `refresh` would find, read
-/// as `refresh` reads it; `data` is `--data` or FHIR_PIPES_DATA.
+/// as `refresh` reads it; `data` is `--data` or FHIR_PIPES_DATA. With the
+/// rest of the config, for the query API's `Settings`.
 #[cfg(unix)]
 pub fn serve_inputs(
     config: Option<&std::path::Path>,
     data: Option<PathBuf>,
-) -> Result<ServeInputs> {
+) -> Result<(ServeInputs, config::File)> {
     let path = match config {
         Some(p) => p.to_path_buf(),
         None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
@@ -230,7 +234,7 @@ pub fn serve_inputs(
             .find(|p| p.exists())
             .context("no config file: pass --config or set FHIR_PIPES_CONFIG")?,
     };
-    let (file, base) = config::load(Some(&path))?;
+    let (mut file, base) = config::load(Some(&path))?;
     let data = match (data, &file.data) {
         (Some(p), _) => p,
         (None, Some(p)) => base.join(p),
@@ -238,16 +242,18 @@ pub fn serve_inputs(
             "no warehouse directory: pass --data, set FHIR_PIPES_DATA, or set `data` in the config"
         ),
     };
-    Ok(ServeInputs {
+    let inputs = ServeInputs {
         config: std::path::absolute(&path)?,
+        base,
         data: std::path::absolute(&data)?,
         database_url_env: file.database.as_ref().map(|d| {
             d.url_env
                 .clone()
                 .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into())
         }),
-        serve: file.serve,
-    })
+        serve: file.serve.take(),
+    };
+    Ok((inputs, file))
 }
 
 fn env_secret(name: &str) -> Option<String> {
@@ -389,38 +395,55 @@ fn failure_hooks(s: &Settings, step: &str, err: &anyhow::Error) {
     }
 }
 
+/// The values refresh takes from its flags and the environment.
+fn overrides(args: &RefreshArgs, profile: Option<&str>) -> config::Overrides {
+    config::Overrides {
+        profile: profile.map(str::to_string),
+        data: args.data.clone(),
+        views: args.views.clone(),
+        input: args.input.clone(),
+        server: args.server.clone(),
+        server_name: args.server_name.clone(),
+        server_kind: args.server_kind,
+        token: args.token.clone(),
+        client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
+        client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
+        token_url: args.token_url.clone(),
+        token_auth: args.token_auth,
+        scope: args.scope.clone(),
+        username: args.username.clone(),
+        password: env_secret("FHIR_PIPES_PASSWORD"),
+        google_auth: args.google_auth,
+        countries: args.countries.clone(),
+        threads: args.threads,
+        reuse_raw: args.reuse_raw,
+        full: args.full,
+        dry_run: args.dry_run,
+    }
+}
+
+/// The overrides a refresh started by `serve` gets from serve's
+/// environment, over the warehouse `data` serve looks after: what the query
+/// API builds its `Settings` with, so it accepts any config refresh does.
+#[cfg(unix)]
+pub fn serve_overrides(data: PathBuf) -> Result<config::Overrides> {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from(["fhir-pipes", "refresh"])?;
+    let crate::cli::Command::Refresh(args) = cli.command else {
+        unreachable!("parsed as refresh")
+    };
+    Ok(config::Overrides {
+        data: Some(data),
+        ..overrides(&args, cli.profile.as_deref())
+    })
+}
+
 /// The settings from the config file and flags, the steps to run and the
 /// tools they need.
 fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSet<Step>, Tools)> {
     let steps = steps(args);
     let (file, base) = config::load(args.config.as_deref())?;
-    let s = config::settings(
-        file,
-        base,
-        config::Overrides {
-            profile: profile.map(str::to_string),
-            data: args.data.clone(),
-            views: args.views.clone(),
-            input: args.input.clone(),
-            server: args.server.clone(),
-            server_name: args.server_name.clone(),
-            server_kind: args.server_kind,
-            token: args.token.clone(),
-            client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
-            client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
-            token_url: args.token_url.clone(),
-            token_auth: args.token_auth,
-            scope: args.scope.clone(),
-            username: args.username.clone(),
-            password: env_secret("FHIR_PIPES_PASSWORD"),
-            google_auth: args.google_auth,
-            countries: args.countries.clone(),
-            threads: args.threads,
-            reuse_raw: args.reuse_raw,
-            full: args.full,
-            dry_run: args.dry_run,
-        },
-    )?;
+    let s = config::settings(file, base, overrides(args, profile))?;
     let mut steps = steps;
     // The libraries step is in every run with library sources.
     if s.libraries.is_empty() {
@@ -1190,6 +1213,22 @@ fn mismatch_report(m: &[(String, WriteSummary)]) -> serde_json::Value {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[cfg(unix)]
+    #[test]
+    fn serve_inputs_base_is_the_real_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("site");
+        let deploy = dir.path().join("deploy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&deploy).unwrap();
+        std::fs::write(real.join("fhir-pipes.toml"), "data = \"w\"\n").unwrap();
+        let link = deploy.join("fhir-pipes.toml");
+        std::os::unix::fs::symlink(real.join("fhir-pipes.toml"), &link).unwrap();
+        let (inputs, _) = serve_inputs(Some(&link), None).unwrap();
+        assert_eq!(inputs.base, real.canonicalize().unwrap());
+        assert_eq!(inputs.config, link);
+    }
 
     fn steps_of(args: &[&str]) -> BTreeSet<Step> {
         let cli =

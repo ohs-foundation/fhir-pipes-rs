@@ -86,7 +86,7 @@ pub(super) fn libraries_step(
 
 /// The Libraries and views of the views directory and the `libraries`
 /// sources.
-pub(super) fn catalog(s: &Settings) -> Result<Catalog> {
+pub(crate) fn catalog(s: &Settings) -> Result<Catalog> {
     let mut sources: Vec<String> = s.views.iter().map(|p| p.display().to_string()).collect();
     sources.extend(s.libraries.iter().cloned());
     Catalog::load(&sources, &s.base_dir, &s.strip_prefix)

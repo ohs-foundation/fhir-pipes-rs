@@ -140,7 +140,7 @@ data to show what each part does.
 | Command | Direction | What it does | Docs |
 |---|---|---|---|
 | `refresh` | out | Build or refresh a SQL-on-FHIR Parquet warehouse | [refresh.md](docs/refresh.md) |
-| `serve` | out | Run refreshes when asked over HTTP or on a schedule, retry failures that may pass, and notify configured destinations (an OpenFn webhook, say) when each run ends; Unix only | [serve.md](docs/serve.md) |
+| `serve` | out | Run refreshes when asked over HTTP or on a schedule, retry failures that may pass, and notify configured destinations (an OpenFn webhook, say) when each run ends; with `[serve.query]`, also run approved SQLQuery Libraries over HTTP (`$sql-run`); Unix only | [serve.md](docs/serve.md) |
 | `views run`, `sql`, `validate`, `lint`, `test` | | Run views over local FHIR files or PostgreSQL, generate their SQL, check them, run SQL-on-FHIR test cases | [below](#running-viewdefinitions-directly) |
 | `export` | out | Download every resource of the given types as NDJSON, by search, Bulk Data `$export` or from a HAPI server's database | [below](#downloading-resources-as-ndjson) |
 | `extract` | out | Copy Locations and Organizations into a local snapshot, incrementally | [locations.md](docs/locations.md) |

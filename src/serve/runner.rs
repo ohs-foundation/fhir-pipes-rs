@@ -394,6 +394,8 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         .env("FHIR_PIPES_RESULT_FILE", &result_file)
         .env("FHIR_PIPES_FAILURE_HOOKS", "off")
         .env("FHIR_PIPES_RUN_ID", rec.id.as_str())
+        // A refresh never needs the query token.
+        .env_remove("FHIR_PIPES_QUERY_TOKEN")
         .envs(job.child_env.iter().map(|(k, v)| (k, v)))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -642,7 +644,7 @@ mod tests {
         let program = dir.join("refresh");
         std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut cfg = crate::serve::config::parse(None).unwrap();
+        let mut cfg = crate::serve::config::parse(None, std::path::Path::new(".")).unwrap();
         cfg.retries = retries;
         cfg.retry_delay = Duration::ZERO;
         cfg.stop_grace = Duration::from_secs(2);
@@ -736,9 +738,13 @@ mod tests {
             r#"[ "$FHIR_PIPES_FAILURE_HOOKS" = off ] && [ -n "$FHIR_PIPES_RUN_ID" ] && echo "$@" > "$(dirname "$FHIR_PIPES_RESULT_FILE")/args""#,
             0,
         );
-        job.cfg.notify = crate::serve::config::parse(Some(
-            toml::from_str("[[notify]]\nname = \"openfn\"\nurl = \"https://x.example/i\"").unwrap(),
-        ))
+        job.cfg.notify = crate::serve::config::parse(
+            Some(
+                toml::from_str("[[notify]]\nname = \"openfn\"\nurl = \"https://x.example/i\"")
+                    .unwrap(),
+            ),
+            std::path::Path::new("."),
+        )
         .unwrap()
         .notify;
         let mut rec = start(&job);
