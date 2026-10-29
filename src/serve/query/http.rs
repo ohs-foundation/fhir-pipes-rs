@@ -612,11 +612,14 @@ async fn libraries(State(api): State<Arc<QueryApi>>, RawQuery(query): RawQuery) 
     let approved = queries.approved();
     let entries: Vec<Value> = approved
         .iter()
-        .zip(full_urls(&approved))
-        .map(|(l, full_url)| {
+        .zip(bundle_ids(&approved))
+        .map(|(l, id)| {
+            // A copy: the catalog's Library keeps its own id.
+            let mut resource = l.json.clone();
+            resource["id"] = json!(id);
             json!({
-                "fullUrl": full_url,
-                "resource": l.json,
+                "fullUrl": format!("{CANONICAL_BASE}/Library/{id}"),
+                "resource": resource,
                 "search": {"mode": "match"},
             })
         })
@@ -632,34 +635,48 @@ async fn libraries(State(api): State<Arc<QueryApi>>, RawQuery(query): RawQuery) 
     )
 }
 
-/// A `fullUrl` for each Library, unique in the list: `<base>/Library/<id>`
-/// when every Library has an id and no two share one, else from the name
-/// and version, with `-<n>` added to any that would still clash.
-fn full_urls(libs: &[&Library]) -> Vec<String> {
-    let ids: Vec<Option<&str>> = libs.iter().map(|l| l.json["id"].as_str()).collect();
-    let unique_ids = ids
+/// An id for each Library in the bundle, unique in it: the Library's own
+/// id when no other in the bundle has the same one, else one made from the
+/// name and version, with `-<n>` added while it is taken. The bundled
+/// resource carries this id and its `fullUrl` ends with it, so they agree.
+fn bundle_ids(libs: &[&Library]) -> Vec<String> {
+    let own: Vec<Option<&str>> = libs.iter().map(|l| l.json["id"].as_str()).collect();
+    let mut ids: Vec<Option<String>> = own
         .iter()
-        .enumerate()
-        .all(|(i, id)| id.is_some_and(|id| !ids[..i].contains(&Some(id))));
-    let mut taken: Vec<String> = Vec::new();
-    for (l, id) in libs.iter().zip(ids) {
-        let key = match (unique_ids, id, &l.version) {
-            (true, Some(id), _) => id.to_string(),
-            (_, _, Some(v)) => format!("{}-{v}", l.name),
-            (_, _, None) => l.name.clone(),
-        };
-        let mut part = key.clone();
+        .map(|id| {
+            id.filter(|id| own.iter().filter(|o| **o == Some(*id)).count() == 1)
+                .map(str::to_string)
+        })
+        .collect();
+    // The ids kept are taken before any is made.
+    let mut taken: Vec<String> = ids.iter().flatten().cloned().collect();
+    for (l, id) in libs.iter().zip(ids.iter_mut()) {
+        if id.is_some() {
+            continue;
+        }
+        let key: String = match &l.version {
+            Some(v) => format!("{}-{v}", l.name),
+            None => l.name.clone(),
+        }
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+        let mut made = key.clone();
         let mut n = 2;
-        while taken.contains(&part) {
-            part = format!("{key}-{n}");
+        while taken.contains(&made) {
+            made = format!("{key}-{n}");
             n += 1;
         }
-        taken.push(part);
+        taken.push(made.clone());
+        *id = Some(made);
     }
-    taken
-        .into_iter()
-        .map(|part| format!("{CANONICAL_BASE}/Library/{part}"))
-        .collect()
+    ids.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -1227,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn full_urls_are_unique() {
+    fn bundle_ids_are_unique_and_keep_a_unique_own_id() {
         let lib = |name: &str, id: Option<&str>, version: Option<&str>| {
             let mut v = crate::serve::query::testing::library(name, false, &[], "SELECT 1");
             if let Some(id) = id {
@@ -1238,31 +1255,73 @@ mod tests {
             }
             crate::library::Library::from_json(&v).unwrap()
         };
-        let base = "https://fhir-pipes.local/fhir/Library";
         let (a, b) = (lib("A", Some("a"), None), lib("B", Some("b"), None));
-        assert_eq!(
-            full_urls(&[&a, &b]),
-            [format!("{base}/a"), format!("{base}/b")]
+        assert_eq!(bundle_ids(&[&a, &b]), ["a", "b"]);
+        // A shared id: each gets its name, with the version; a Library
+        // whose id no other shares keeps it.
+        let (a, b, c) = (
+            lib("A", Some("x"), Some("1")),
+            lib("B", Some("x"), None),
+            lib("C", Some("c"), None),
         );
-        // A shared id, or a Library without one: names, with the version.
-        let (a, b) = (lib("A", Some("x"), Some("1")), lib("B", Some("x"), None));
-        assert_eq!(
-            full_urls(&[&a, &b]),
-            [format!("{base}/A-1"), format!("{base}/B")]
-        );
+        assert_eq!(bundle_ids(&[&a, &b, &c]), ["A-1", "B", "c"]);
+        // A derived id never takes one a Library keeps, nor another's.
+        let (a, b) = (lib("A", None, None), lib("B", Some("A"), None));
+        assert_eq!(bundle_ids(&[&a, &b]), ["A-2", "A"]);
         let (a, b, c) = (
             lib("A", None, Some("1")),
             lib("A", None, Some("1")),
             lib("A-1", None, None),
         );
-        assert_eq!(
-            full_urls(&[&a, &b, &c]),
-            [
-                format!("{base}/A-1"),
-                format!("{base}/A-1-2"),
-                format!("{base}/A-1-3")
-            ]
-        );
+        assert_eq!(bundle_ids(&[&a, &b, &c]), ["A-1", "A-1-2", "A-1-3"]);
+        // Characters an id cannot hold become `-`.
+        let a = lib("A", None, Some("1.0+b/2"));
+        assert_eq!(bundle_ids(&[&a]), ["A-1.0-b-2"]);
+    }
+
+    #[tokio::test]
+    async fn bundled_ids_agree_with_their_full_urls() {
+        if !have_duckdb("bundled_ids_agree_with_their_full_urls") {
+            return;
+        }
+        let w = Warehouse::new();
+        for (file, name, id) in [("x1", "X1", "x"), ("x2", "X2", "x"), ("own", "Own", "own")] {
+            let mut v = crate::serve::query::testing::library(
+                name,
+                false,
+                &[("task", "https://example.org/ViewDefinition/Task")],
+                "SELECT id FROM task",
+            );
+            v["id"] = id.into();
+            w.write(file, &v);
+        }
+        let api = api(&w, Approve::All, 100, &Log::default());
+        let r = send(
+            &api,
+            Request::get("/fhir/Library").body(Body::empty()).unwrap(),
+        )
+        .await;
+        let bundle = r.json();
+        let mut ids = std::collections::BTreeMap::new();
+        for e in bundle["entry"].as_array().unwrap() {
+            let id = e["resource"]["id"].as_str().unwrap().to_string();
+            assert_eq!(
+                e["fullUrl"],
+                format!("https://fhir-pipes.local/fhir/Library/{id}")
+            );
+            ids.insert(e["resource"]["name"].as_str().unwrap().to_string(), id);
+        }
+        assert_eq!(ids["X1"], "X1");
+        assert_eq!(ids["X2"], "X2");
+        assert_eq!(ids["Own"], "own");
+        // The catalog's own copy is unchanged.
+        let queries = api.queries();
+        let x1 = queries
+            .approved()
+            .into_iter()
+            .find(|l| l.name == "X1")
+            .unwrap();
+        assert_eq!(x1.json["id"], "x");
     }
 
     #[test]
