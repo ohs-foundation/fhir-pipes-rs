@@ -16,7 +16,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
 use crate::error::usage;
-use crate::warehouse::sql::sql_path;
+use crate::warehouse::sql::sql_str;
 use resolve::HIERARCHY_TABLE;
 
 pub const SQLVIEW_PROFILE: &str = "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/SQLView";
@@ -120,14 +120,7 @@ fn library_sql(
             }
         }
     };
-    let read = |table: &str| {
-        let files = warehouse.join("parquet").join(table).join("**/*.parquet");
-        format!(
-            "read_parquet({}, hive_partitioning = true, union_by_name = true, \
-             hive_types_autocast = false)",
-            sql_path(&files)
-        )
-    };
+    let root = warehouse.display().to_string();
     // The built-in hierarchy is the table the locations step writes, as in
     // the refresh, whatever the strip prefix. Its own SQL reads the Location
     // view, which writes no table, so it is not composed.
@@ -136,20 +129,46 @@ fn library_sql(
             "-- fhir-pipes reads the {HIERARCHY_TABLE} table the locations step writes; \
              the portable SQL is in views/location/LocationHierarchy.sql\n\
              SELECT * FROM {}",
-            read(HIERARCHY_TABLE)
+            read_table(&root, HIERARCHY_TABLE)
         ));
     }
-    let bind = |a: &resolve::Artifact| -> Result<Option<compose::Bind>> {
-        let table = match a {
-            resolve::Artifact::Library(l) if l.url == resolve::HIERARCHY_URL => {
-                HIERARCHY_TABLE.to_string()
-            }
-            resolve::Artifact::Library(l) if l.kind == Kind::SqlView => return Ok(None),
-            _ => a.table(strip_prefix),
-        };
-        Ok(Some(compose::Bind::Relation(read(&table))))
-    };
+    let bind = |a: &resolve::Artifact| Ok(bind_table(&root, strip_prefix, a));
     compose::compose(lib, "duckdb", &catalog, &bind).map_err(usage)
+}
+
+/// The table an input is read from, or `None` for a SQLView, whose SQL is
+/// inlined. The built-in LocationHierarchy is the table the locations step
+/// writes, whatever the strip prefix.
+pub(crate) fn input_table(a: &resolve::Artifact, strip_prefix: &[String]) -> Option<String> {
+    match a {
+        resolve::Artifact::Library(l) if l.url == resolve::HIERARCHY_URL => {
+            Some(HIERARCHY_TABLE.to_string())
+        }
+        resolve::Artifact::Library(l) if l.kind == Kind::SqlView => None,
+        _ => Some(a.table(strip_prefix)),
+    }
+}
+
+/// `read_parquet` over every file of table `table` in the warehouse at
+/// `root`: a local directory or a remote prefix (`r2://icr/uga`). A
+/// partition directory's value is read as text.
+fn read_table(root: &str, table: &str) -> String {
+    let root = root.trim_end_matches('/');
+    format!(
+        "read_parquet({}, hive_partitioning = true, union_by_name = true, \
+         hive_types_autocast = false)",
+        sql_str(&format!("{root}/parquet/{table}/**/*.parquet"))
+    )
+}
+
+/// The `compose` bind that reads each input but a SQLView from its table in
+/// the warehouse at `root` (`read_table`), and inlines a SQLView.
+pub(crate) fn bind_table(
+    root: &str,
+    strip_prefix: &[String],
+    a: &resolve::Artifact,
+) -> Option<compose::Bind> {
+    input_table(a, strip_prefix).map(|t| compose::Bind::Relation(read_table(root, &t)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
