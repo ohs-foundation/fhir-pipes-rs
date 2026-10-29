@@ -132,7 +132,7 @@ step timings and `type_mismatches` (see [Tables](#tables)).
 - `FHIR_PIPES_RESULT_FILE`: path for this attempt's own result. Set a unique one per attempt, including lock failures, because `last-run.json` may belong to another attempt.
 - `FHIR_PIPES_FAILURE_HOOKS=off`: suppresses the failure hooks, so a supervisor that alerts itself does not send duplicates.
 - `FHIR_PIPES_RUN_ID`: the `RUN_ID` passed to hooks.
-- `FHIR_PIPES_SECRET_VARS`: names of additional variables whose values are redacted from output.
+- `FHIR_PIPES_SECRET_VARS`: comma-separated names of variables whose values (four bytes or longer) are hidden in HTTP error bodies and refresh error summaries. A tool's own output is not filtered.
 
 ### Tables
 

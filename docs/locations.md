@@ -34,7 +34,7 @@ fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY 
 
 ## extract and the snapshot
 
-`extract` pages `Location` and `Organization` searches into a local snapshot, fetches any boundary attachment that is a URL and inlines it as base64, and replaces the snapshot files one at a time. A failure leaves the previous files, but Locations can be updated while Organizations and state are still old. A boundary that cannot be fetched does not stop the run and may leave the URL or older cached geometry; check the extract report.
+`extract` pages `Location` and `Organization` searches into a local snapshot, fetches any boundary attachment that is a URL and inlines it as base64, and replaces the snapshot files one at a time. A failure leaves the previous files, but Locations can be updated while Organizations and state are still old. A boundary that cannot be fetched may leave the URL or older cached geometry; check the extract report. Reaching `--max-consecutive-failures` stops the run.
 
 ```
 snapshot/
