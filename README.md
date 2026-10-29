@@ -2,18 +2,11 @@
 
 # fhir-pipes
 
-Data pipelines into and out of FHIR servers, in one binary with no runtime
-dependencies. It builds a SQL-on-FHIR warehouse of Parquet tables from a FHIR
+fhir-pipes is a high performance rust library/service for pulling data out of and into FHIR servers.  fhir-pipes is available as a binary in linux, windows, osx with no external runtime dependencies. It builds a SQL-on-FHIR warehouse of Parquet tables from a FHIR
 server, downloads resources as NDJSON, turns the Location registry into
 GeoParquet, and loads resources back with version-checked writes. It works
 with HAPI FHIR, Medplum, Aidbox, the Google Cloud Healthcare API and other
 FHIR R4 servers.
-
-fhir-pipes is intended to move into
-[fhir-data-pipes](https://github.com/ohs-foundation/fhir-data-pipes) as a
-lighter replacement for its Java pipeline. The reasoning and the plan are in
-[docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md](docs/notes/2026-10-14-consolidation-with-fhir-data-pipes.md).
-[ROADMAP.md](ROADMAP.md) lists what each release can do and what is next.
 
 ## Install
 
