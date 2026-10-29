@@ -132,7 +132,9 @@ between the two renames of a table's swap leaves the old table as
 `parquet/.<table>.old` (or `.views.old`, `.tiles.old` in the warehouse
 directory); the next run renames it back. While it runs, a refresh holds a lock on `.refresh.lock` in the
 warehouse directory, so a second refresh of the same warehouse waits for the
-first to finish. With `--lock-timeout SECONDS` (or
+first to finish. Each publish adds one to the count in `.publish-generation` in
+the warehouse directory, which `serve`'s query API reads to tell that a publish
+overlapped a query. With `--lock-timeout SECONDS` (or
 `FHIR_PIPES_LOCK_TIMEOUT`), it waits at most that long and then fails (exit
 1) without changing anything; `--lock-timeout 0` fails at once. A scheduler
 that retries a failed run can use it so that retries do not queue up behind
