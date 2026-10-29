@@ -68,7 +68,14 @@ pub enum QueryError {
     /// table is missing, or a refresh published while the query ran.
     Unavailable(String),
     /// duckdb refused or failed the query, or it ran past the timeout.
-    Sql(String),
+    /// `message` is fixed text for the caller, never duckdb's, which can
+    /// quote the setup SQL's keys; `detail` is for serve's log: duckdb's
+    /// error, with what it quotes of the setup SQL taken out as far as
+    /// `without_setup` can.
+    Sql {
+        message: String,
+        detail: String,
+    },
     /// Every slot is running a query.
     Busy,
     Internal(String),
@@ -341,25 +348,30 @@ impl Runner {
         };
         drop(registered);
         let Some(status) = status else {
-            return Err(QueryError::Sql(format!(
-                "timed out after {} s",
-                self.timeout.as_secs()
-            )));
+            let message = format!("the query timed out after {} s", self.timeout.as_secs());
+            return Err(QueryError::Sql {
+                detail: message.clone(),
+                message,
+            });
         };
         if status.success() {
             return Ok(());
         }
-        // An error in the setup SQL can quote it, keys and all, in whole or
-        // cut short, so it is reported without its detail.
-        if self.setup.is_some() && !set_up.exists() {
-            return Err(QueryError::Sql("the duckdb_setup SQL failed".to_string()));
-        }
+        // Told apart on duckdb's own text, before anything is taken out.
         let stderr = fs::read_to_string(&err_path).unwrap_or_default();
-        let message = without_setup(stderr.trim(), self.setup.as_deref().unwrap_or_default());
-        if matches!(self.root, Root::Remote(_)) && message.contains("No files found") {
-            return Err(QueryError::Unavailable(message));
-        }
-        Err(QueryError::Sql(message))
+        let message = if self.setup.is_some() && !set_up.exists() {
+            "the duckdb_setup SQL failed"
+        } else if matches!(self.root, Root::Remote(_)) && stderr.contains("No files found") {
+            return Err(QueryError::Unavailable(
+                "an input table has no files yet".to_string(),
+            ));
+        } else {
+            "the query failed; the serve log has the details"
+        };
+        Err(QueryError::Sql {
+            message: message.to_string(),
+            detail: without_setup(stderr.trim(), self.setup.as_deref().unwrap_or_default()),
+        })
     }
 }
 
@@ -742,7 +754,9 @@ mod tests {
         cfg.timeout = Duration::from_millis(1);
         let r = Runner::new(&cfg, &w.data(), "duckdb", &[]).unwrap();
         match r.run(&w.catalog, w.lib("Slow"), Format::Ndjson, None) {
-            Err(QueryError::Sql(m)) => assert!(m.contains("timed out"), "{m}"),
+            Err(QueryError::Sql { message, .. }) => {
+                assert_eq!(message, "the query timed out after 0 s")
+            }
             other => panic!("{other:?}"),
         }
         // Killed and reaped: a zombie would still take a signal.
@@ -808,7 +822,10 @@ mod tests {
             .runner(100, None)
             .run(&w.catalog, w.lib("Bad"), Format::Ndjson, None)
         {
-            Err(QueryError::Sql(m)) => assert!(m.contains("nope"), "{m}"),
+            Err(QueryError::Sql { message, detail }) => {
+                assert_eq!(message, "the query failed; the serve log has the details");
+                assert!(detail.contains("nope"), "{detail}");
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -821,41 +838,96 @@ mod tests {
         let w = Warehouse::new();
         let long = "a-long-secret-".repeat(10);
         let secrets = ["AKIAXYZ", "shh", "supersecretkey", long.as_str()];
-        // A bad query keeps its message; a bad setup, which duckdb quotes
-        // keys and all (a long string cut short), gives none.
+        let failed = "the query failed; the serve log has the details";
+        let setup_failed = "the duckdb_setup SQL failed";
+        // The caller's message is fixed text whatever duckdb says. A bad
+        // setup, which duckdb quotes keys and all (a long string cut short),
+        // says only that; a setup that runs, with keys duckdb can still
+        // quote in the query's error, gives the query's failure.
         for (setup, lib, says) in [
             (
                 "CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET 'shh');".to_string(),
                 "Bad",
-                "nope",
+                failed,
             ),
             (
                 "CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET 'shh' BOGUS);".to_string(),
                 "Q",
-                "the duckdb_setup SQL failed",
+                setup_failed,
             ),
             (
                 "CREATE SECRET s (TYPE s3, KEY_ID $$AKIAXYZ$$, SECRET $$supersecretkey$$ BOGUS);"
                     .to_string(),
                 "Q",
-                "the duckdb_setup SQL failed",
+                setup_failed,
             ),
             (
                 format!("CREATE SECRET s (TYPE s3, KEY_ID 'AKIAXYZ', SECRET '{long}' BOGUS);"),
                 "Q",
-                "the duckdb_setup SQL failed",
+                setup_failed,
+            ),
+            // Keys the redaction of the log detail can miss: an escaped
+            // E'' string, a literal after a quote in a comment, a literal
+            // over several lines.
+            (
+                "SET VARIABLE v = E'\\x73\\x68\\x68';\nSELECT CAST(getvariable('v') AS INTEGER);"
+                    .to_string(),
+                "Q",
+                setup_failed,
+            ),
+            (
+                "SET VARIABLE v = E'\\x73\\x68\\x68';".to_string(),
+                "Bad",
+                failed,
+            ),
+            (
+                "-- it's\nSET VARIABLE v = 'supersecretkey';\n\
+                 SELECT CAST(getvariable('v') AS INTEGER);"
+                    .to_string(),
+                "Q",
+                setup_failed,
+            ),
+            (
+                "SET VARIABLE v = 'supersecretkey\nAKIAXYZ';\n\
+                 SELECT CAST(getvariable('v') AS INTEGER);"
+                    .to_string(),
+                "Q",
+                setup_failed,
             ),
         ] {
             let r = w.runner(100, Some(&setup));
             match r.run(&w.catalog, w.lib(lib), Format::Ndjson, None) {
-                Err(QueryError::Sql(m)) => {
+                Err(QueryError::Sql { message, .. }) => {
+                    assert_eq!(message, says, "{setup}");
                     for secret in secrets {
-                        assert!(!m.contains(&secret[..6.min(secret.len())]), "{setup}: {m}");
+                        assert!(!message.contains(secret), "{setup}: {message}");
                     }
-                    assert!(m.contains(says), "{setup}: {m}");
                 }
                 other => panic!("{setup}: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn no_files_at_a_remote_source_is_unavailable() {
+        if !have_duckdb("no_files_at_a_remote_source_is_unavailable") {
+            return;
+        }
+        let w = Warehouse::new();
+        // duckdb reads a path as it reads a remote prefix; this one has no
+        // files, and the setup names it, so the line saying so quotes it.
+        let empty = w.dir.path().join("nothing-here");
+        let mut cfg = w.config(
+            100,
+            Some(&format!("SET VARIABLE p = '{}';", empty.display())),
+        );
+        cfg.source = Source::Remote(empty.display().to_string());
+        let r = Runner::new(&cfg, &w.data(), "duckdb", &[]).unwrap();
+        match r.run(&w.catalog, w.lib("Q"), Format::Ndjson, None) {
+            Err(QueryError::Unavailable(m)) => {
+                assert_eq!(m, "an input table has no files yet")
+            }
+            other => panic!("{other:?}"),
         }
     }
 
