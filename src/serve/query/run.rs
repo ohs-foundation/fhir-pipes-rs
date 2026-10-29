@@ -71,8 +71,7 @@ pub enum QueryError {
     /// `message` is fixed text for the caller, never duckdb's, which can
     /// quote the setup SQL's keys; `detail` is for serve's log: for a
     /// failed setup, only the kind of error duckdb gave; for a failed query,
-    /// duckdb's error without the lines that quote the setup SQL (see
-    /// `without_setup`).
+    /// with a setup the same kind alone, without one duckdb's error.
     Sql {
         message: String,
         detail: String,
@@ -482,9 +481,15 @@ impl Runner {
                 detail: "an input table has no files yet".to_string(),
             });
         }
+        // With a setup, a value it computed can be in any part of the
+        // message, so only the kind is kept.
+        let detail = match &self.setup {
+            Some(_) => error_kind(&stderr).unwrap_or("query error").to_string(),
+            None => without_setup(stderr.trim(), ""),
+        };
         Err(QueryError::Sql {
             message: "the query failed; the serve log has the details".to_string(),
-            detail: without_setup(stderr.trim(), self.setup.as_deref().unwrap_or_default()),
+            detail,
         })
     }
 
@@ -516,15 +521,27 @@ const SETUP_FAILED: &str = "the duckdb_setup SQL failed";
 /// value the setup computed from its keys, such as an `E'\x..'` string
 /// decoded, which no match against the setup's text can find.
 fn setup_failure_detail(stderr: &str) -> String {
+    match error_kind(stderr) {
+        Some(kind) => format!("{SETUP_FAILED}: {kind}"),
+        None => SETUP_FAILED.to_string(),
+    }
+}
+
+/// The kind of error duckdb gave: the text before the first `: ` of its
+/// first line (`Conversion Error`), or the `exception_type` when it prints
+/// JSON. `None` when that is not a plain name.
+fn error_kind(stderr: &str) -> Option<&str> {
     let first = stderr.trim().lines().next().unwrap_or_default();
+    let plain = |k: &str| k.chars().all(|c| c.is_ascii_alphabetic() || c == ' ');
+    if first.starts_with('{') {
+        let rest = &first[first.find("\"exception_type\"")? + "\"exception_type\"".len()..];
+        let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+        let kind = rest.strip_prefix('"')?.split_once('"')?.0;
+        return (!kind.is_empty() && plain(kind)).then_some(kind);
+    }
     match first.split_once(": ") {
-        Some((kind, _))
-            if kind.ends_with(" Error")
-                && kind.chars().all(|c| c.is_ascii_alphabetic() || c == ' ') =>
-        {
-            format!("{SETUP_FAILED}: {kind}")
-        }
-        _ => SETUP_FAILED.to_string(),
+        Some((kind, _)) if kind.ends_with(" Error") && plain(kind) => Some(kind),
+        _ => None,
     }
 }
 
@@ -771,6 +788,56 @@ mod tests {
     }
 
     #[test]
+    fn error_kind_reads_text_and_json() {
+        assert_eq!(error_kind("IO Error: x: y\nmore"), Some("IO Error"));
+        assert_eq!(
+            error_kind(r#"{"exception_type":"Conversion","exception_message":"shh"}"#),
+            Some("Conversion")
+        );
+        assert_eq!(error_kind("key=shh Error: x"), None);
+        assert_eq!(error_kind(""), None);
+    }
+
+    #[test]
+    fn with_a_setup_a_failed_query_logs_only_its_kind() {
+        if !have_duckdb("with_a_setup_a_failed_query_logs_only_its_kind") {
+            return;
+        }
+        let w = Warehouse::new();
+        for setup in [
+            "SET VARIABLE v = E'\\x73\\x68\\x68';",
+            "SET VARIABLE v = $$shh$$;",
+        ] {
+            let r = w.runner(100, Some(setup));
+            match r.run(&w.catalog, w.lib("Var"), Format::Ndjson, None) {
+                Err(QueryError::Sql { detail, .. }) => {
+                    assert_eq!(detail, "Conversion Error", "{setup}");
+                    assert!(!detail.contains("shh"), "{setup}: {detail}");
+                }
+                other => panic!("{setup}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn without_a_setup_a_failed_query_logs_duckdbs_message() {
+        if !have_duckdb("without_a_setup_a_failed_query_logs_duckdbs_message") {
+            return;
+        }
+        let w = Warehouse::new();
+        match w
+            .runner(100, None)
+            .run(&w.catalog, w.lib("Bad"), Format::Ndjson, None)
+        {
+            Err(QueryError::Sql { detail, .. }) => {
+                assert!(detail.contains("Binder Error"), "{detail}");
+                assert!(detail.contains("nope"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn setup_secrets_are_redacted_from_errors() {
         if !have_duckdb("setup_secrets_are_redacted_from_errors") {
             return;
@@ -844,7 +911,7 @@ mod tests {
                         assert!(!detail.contains(secret), "{setup}: {detail}");
                     }
                     if says == failed {
-                        assert!(detail.contains("nope"), "{setup}: {detail}");
+                        assert_eq!(detail, "Binder Error", "{setup}: {detail}");
                     } else {
                         assert!(detail.starts_with(setup_failed), "{setup}: {detail}");
                     }

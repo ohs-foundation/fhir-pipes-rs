@@ -451,13 +451,13 @@ query https://example.org/Library/CoverageByArea csv 200 412 rows 85 ms
 query https://example.org/Library/CoverageByArea csv 422 0 rows 31 ms: <detail>
 ```
 
-A line for an error ends in `: <detail>`, which for a failed query is
-DuckDB's message without the lines that quote the setup SQL: a line that
-holds 6 characters of the setup in a row (other than only spaces and
-punctuation) is dropped, and the setup's quoted strings are blanked in the
-rest. For a failed setup it is only the kind of error, such as `the
-duckdb_setup SQL failed: IO Error`, since the message can hold a value the
-setup made from its keys. A result cut at `max_rows` ends in `truncated at <n>`.
+A line for an error ends in `: <detail>`. For a failed query without
+`duckdb_setup`, it is DuckDB's message. With `duckdb_setup` set, it is only
+the error kind, such as `Conversion Error` or `Binder Error` (`query error`
+if none is found), since the message can hold a value the setup made from its
+keys. To see DuckDB's message, run the query by hand: `fhir-pipes libraries
+sql`, then duckdb with the setup. For a failed setup it is the kind too, such
+as `the duckdb_setup SQL failed: IO Error`. A result cut at `max_rows` ends in `truncated at <n>`.
 
 ### While a refresh publishes
 

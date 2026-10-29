@@ -106,6 +106,12 @@ impl Warehouse {
             &[],
             "SELECT sum(range) FROM range(1000000000000000)",
         );
+        let var = library(
+            "Var",
+            false,
+            &[],
+            "SELECT CAST(getvariable('v') AS INTEGER) AS n",
+        );
         let mut w = Warehouse {
             dir,
             catalog: Catalog::default(),
@@ -116,6 +122,7 @@ impl Warehouse {
             ("q", q),
             ("bad", bad),
             ("slow", slow),
+            ("var", var),
         ] {
             w.write(f, &v);
         }
