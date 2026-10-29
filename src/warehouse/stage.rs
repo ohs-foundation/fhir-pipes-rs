@@ -471,7 +471,13 @@ mod tests {
             Err(fs::TryLockError::WouldBlock)
         ));
         drop(s);
-        other.try_lock_shared().unwrap();
+        // A child another test is starting can hold the lock's file for a
+        // moment, until its exec closes it.
+        let started = Instant::now();
+        while let Err(e) = other.try_lock_shared() {
+            assert!(started.elapsed() < Duration::from_secs(5), "{e:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -486,7 +492,9 @@ mod tests {
         assert!(err.contains("still holds .refresh.lock after 0 s"), "{err}");
         assert!(started.elapsed() >= Duration::from_millis(300));
         drop(held);
-        Lock::acquire(dir.path(), Some(Duration::ZERO)).unwrap();
+        // Not ZERO: a child another test is starting can hold the lock's file
+        // for a moment, until its exec closes it.
+        Lock::acquire(dir.path(), Some(Duration::from_secs(5))).unwrap();
     }
 
     #[test]
