@@ -114,7 +114,8 @@ name or password; put a key in `header` and `value_env`. A mistake in
 
 ## The API
 
-Every path but `/health` needs the token. Responses are JSON, apart from
+Every path but `/health` needs the token (the `/fhir` paths of the
+[query API](#queries-sql-run) also take the query token). Responses are JSON, apart from
 `/metrics` and the log.
 
 | Request | What it does |
@@ -235,11 +236,226 @@ a cut cannot leave part of one: `serve` names the ones from its config to
 each refresh in `FHIR_PIPES_SECRET_VARS`. `serve` replaces these values with `***`
 in logs, records and notify bodies: `FHIR_PIPES_TOKEN`, `FHIR_PIPES_CLIENT_SECRET`,
 `FHIR_PIPES_PASSWORD`, `FHIR_PIPES_HAPI_DATABASE_URL`, the variable the
-`[database]` section names, `FHIR_PIPES_SERVE_TOKEN`, each notify
+`[database]` section names, `FHIR_PIPES_SERVE_TOKEN`, `FHIR_PIPES_QUERY_TOKEN`, each notify
 `value_env`, and each notify `url`. A value shorter than 4 characters is
 not replaced, since it would replace ordinary text, and `serve` warns at
 start. Anything else a site's own hooks print is the site's to keep out of
 its logs.
+
+## Queries ($sql-run)
+
+`serve` can run the warehouse's SQLQuery Libraries for a caller and return
+the rows, as the SQL on FHIR `$sql-run` operation does. A dashboard, a
+notebook or an indicator export names a query and gets its result, without
+holding the warehouse's files. The API is off unless the config has a
+`[serve.query]` section.
+
+It is a subset of `$sql-run`. Only SQLQuery Libraries run, only ones the
+config approves, and only the catalog's own: a caller cannot send SQL.
+
+### The query config
+
+```toml
+[serve.query]
+approve = "active"        # "active", "listed" or "all"
+# queries = ["https://example.org/Library/CoverageByArea"]   # with "listed"
+source = "local"          # "local", or a URL prefix such as "r2://bucket/warehouse"
+# duckdb_setup = "query-setup.sql"   # SQL run before each query, relative to the config
+timeout = 60              # seconds a query may run
+max_rows = 100_000        # most rows one query returns
+concurrency = 4           # queries that may run at once
+```
+
+The values shown are the defaults. Only `queries` and `duckdb_setup` have
+none. A mistake in the section stops `serve` at start, with exit status 2:
+an unknown key, a `timeout`, `max_rows` or `concurrency` of 0, a `source`
+that is neither `local` nor a URL, or `queries` without `approve = "listed"`
+(and the reverse).
+
+`serve` builds the query settings from the `fhir-pipes.toml` it was given and
+the same environment variables `refresh` reads, so a config `refresh`
+accepts also starts the query API. The Library sources, `strip_prefix` and
+the `duckdb` command are `refresh`'s.
+
+### Which queries run
+
+| `approve` | Runs |
+|---|---|
+| `active` | Every SQLQuery whose `status` is `active`. A `draft` does not run. |
+| `listed` | The SQLQuery Libraries in `queries`, each given as its url or `url\|version`. |
+| `all` | Every SQLQuery, drafts too. |
+
+Only a SQLQuery runs. A SQLView or a ViewDefinition never does, whatever
+`approve` says. With `listed`, each entry must be a SQLQuery in the catalog,
+or `serve` does not start.
+
+The catalog is what `refresh`'s `libraries` step reads: the `libraries`
+sources in the config. `serve` loads it at start, and a failure stops
+`serve` with exit status 2. It loads the catalog again after each run that
+succeeded, so a changed Library is served once the refresh that fetched it
+ends. When that load fails, `serve` keeps the old catalog and logs
+`query catalog not reloaded: …`. A catalog error shows no credentials from a
+Library source URL.
+
+A SQLQuery whose url contains `|` stops the catalog from loading, since
+`url|version` is how a caller names a version. Change the url.
+
+### Tokens
+
+| Variable | Opens |
+|---|---|
+| `FHIR_PIPES_QUERY_TOKEN` | `/fhir/*` only |
+| `FHIR_PIPES_SERVE_TOKEN` | everything |
+
+Callers send either as `Authorization: Bearer <token>`. A caller of the query
+API holds the query token and cannot start, read or cancel a run.
+
+With `[serve.query]`, a `--listen` address that is not loopback needs
+`FHIR_PIPES_QUERY_TOKEN`, besides `FHIR_PIPES_SERVE_TOKEN`; `serve` refuses to
+start without it.
+
+A path with no token set for it is open, which `serve` allows only on a
+loopback address. So on loopback, setting only `FHIR_PIPES_QUERY_TOKEN`
+leaves the run API (`/run`, `/status`, `/runs`, `/metrics`) open to anything
+on the machine. Set `FHIR_PIPES_SERVE_TOKEN` too.
+
+The query token is not passed to the refreshes `serve` starts, and `serve`
+hides it in logs and records like its other secrets. Without `[serve.query]`,
+every `/fhir` path answers `404`, after the token check.
+
+### The routes
+
+| Request | What it does |
+|---|---|
+| `GET /fhir/$sql-run` | Run a query. Parameters in the query string. |
+| `POST /fhir/$sql-run` | The same, with the parameters in a Parameters resource. |
+| `GET /fhir/metadata` | A CapabilityStatement that lists the operation. |
+| `GET /fhir/OperationDefinition/fhir-pipes-sql-run` | The OperationDefinition of this subset. |
+| `GET /fhir/Library` | A searchset Bundle of the approved SQLQuery Libraries, each with its SQL. It takes no search parameters and answers `400` if given any. |
+
+Any other path under `/fhir` is `404`, and another method on these paths is
+`405`.
+
+The parameters are:
+
+| Parameter | Type in a Parameters body | |
+|---|---|---|
+| `subjectCanonical` | `valueCanonical` | Required. The Library's url, or `url\|version`. A url alone names a Library only when the catalog has one version of it. |
+| `_format` | `valueCode` | `ndjson`, `json` or `csv`. |
+| `_limit` | `valueInteger` | The most rows to return, at least 1. |
+
+Any other parameter is refused with `400`, as is one given twice.
+
+With GET:
+
+```sh
+curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
+  'http://localhost:8090/fhir/$sql-run' \
+  --data-urlencode 'subjectCanonical=https://example.org/Library/CoverageByArea' \
+  --data-urlencode '_format=csv' \
+  --data-urlencode '_limit=1000'
+```
+
+With POST:
+
+```sh
+curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" \
+  -H 'Content-Type: application/fhir+json' \
+  'http://localhost:8090/fhir/$sql-run' -d '{
+    "resourceType": "Parameters",
+    "parameter": [
+      {"name": "subjectCanonical",
+       "valueCanonical": "https://example.org/Library/CoverageByArea"},
+      {"name": "_format", "valueCode": "json"},
+      {"name": "_limit", "valueInteger": 1000}
+    ]
+  }'
+```
+
+A POST takes its parameters in the body only, not in the query string. The
+body is at most 64 KB, and its `Content-Type` is `application/fhir+json` or
+`application/json`.
+
+### The result
+
+The format is `_format` when given. Otherwise it is the best match to
+`Accept` among `application/x-ndjson`, `application/json` and `text/csv`,
+by q-value (`q` in any case; `q=0` refuses a type). When nothing in
+`Accept` is one of these, or there is no `Accept`, the format is NDJSON.
+`_format` wins over `Accept`.
+
+| Format | `Content-Type` | Body |
+|---|---|---|
+| `ndjson` | `application/x-ndjson` | One JSON object per row. |
+| `json` | `application/json` | An array of row objects; `[]` for no rows. |
+| `csv` | `text/csv` | A header line, then the rows. |
+
+A result is cut at `max_rows`, or at the caller's `_limit` if that is less.
+When `max_rows` cut it, the response has `X-Fhir-Pipes-Truncated:
+max_rows=<n>`. A result cut by `_limit` has no such header, since the caller
+asked for it.
+
+### Statuses
+
+Every error body is an OperationOutcome, apart from `401` and the `404` of
+a disabled API, which have no body.
+
+| Status | When |
+|---|---|
+| `200` | The rows. |
+| `400` | A missing, repeated or unknown parameter; a bad `_format` or `_limit`; a body that is not a Parameters resource; a query string on a POST; search parameters on `/fhir/Library`. |
+| `401` | No token, or a wrong one. |
+| `403` | The Library is in the catalog but is not an approved SQLQuery. The text is the same for a SQLView or a ViewDefinition and for a SQLQuery the config does not approve. |
+| `404` | The canonical is not in the catalog; a path that is not one of the routes; any `/fhir` path when `[serve.query]` is not set. |
+| `405` | A method the path does not take. |
+| `413` | A POST body over 64 KB. |
+| `415` | A POST that is not JSON. |
+| `422` | The query failed or ran past `timeout`, or the `duckdb_setup` SQL failed. |
+| `500` | An error in `serve` itself. |
+| `503` | An input table has no data yet, a refresh is publishing, or `concurrency` queries are already running. |
+
+A `503` has `Retry-After: 5`. Its text is fixed: `an input table is not
+available yet; retry later`, `a refresh is publishing; retry later` or `too
+many queries running; retry later`.
+
+A caller never sees DuckDB's error text, which can quote the setup SQL, and
+a `422` carries fixed text: `the query failed; the serve log has the
+details`, `the duckdb_setup SQL failed` or `the query timed out after <n>
+s`. The details are in `serve`'s log.
+
+Each request makes one line in `serve`'s log:
+
+```
+query https://example.org/Library/CoverageByArea csv 200 412 rows 85 ms
+query https://example.org/Library/CoverageByArea csv 422 0 rows 31 ms: <detail>
+```
+
+A line for an error ends in `: <detail>`, which for a failed query is
+DuckDB's message. A result cut at `max_rows` ends in `truncated at <n>`.
+
+### While a refresh publishes
+
+With `source = "local"`, a query reads the Parquet files of the served
+warehouse. A refresh replaces them when it publishes. A query that a publish
+overlapped is run again once; if the second try is overlapped too, the
+answer is `503`.
+
+### A remote source
+
+`source = "r2://…"` or `"s3://…"` reads the Parquet files from object
+storage instead, with `duckdb_setup` to give DuckDB the credentials and
+settings it needs (an `INSTALL httpfs;` and a `CREATE SECRET`, say). The
+setup SQL is read once at start and runs before each query.
+
+A query that runs while `rclone` pushes a refresh to the bucket can read a
+mix of old and new files. `serve` cannot tell, as it does with a local
+warehouse. This is a limit of the remote source.
+
+### Library parameters
+
+A Library's `[[parameter]]` entries are not supported yet. A query takes
+no parameters of its own; `$sql-run` runs it as written. They are planned,
+since dashboards and indicator exports will want one district or month.
 
 ## Metrics
 
@@ -257,6 +473,8 @@ its logs.
   no run is started meanwhile
 - `fhir_pipes_log_lines_dropped_total`
 - `fhir_pipes_table_rows{table}`, from the published `manifest.json`
+- `fhir_pipes_queries_total{status}`: `$sql-run` requests by HTTP status
+- `fhir_pipes_query_seconds`: a histogram of their duration
 
 An alert on `time() - fhir_pipes_last_success_timestamp_seconds` catches a
 warehouse that has stopped refreshing, whatever the reason.
