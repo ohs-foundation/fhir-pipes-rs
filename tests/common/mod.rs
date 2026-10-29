@@ -97,7 +97,7 @@ table_key = "id"
 pub const NOWHERE: &str = "http://127.0.0.1:9/fhir";
 
 /// The environment variables a test's refresh must not inherit.
-const CLEARED: &[&str] = &[
+pub const CLEARED: &[&str] = &[
     "FHIR_PIPES_CONFIG",
     "FHIR_PIPES_DATA",
     "FHIR_PIPES_VIEWS",

@@ -258,3 +258,23 @@ fn a_catalog_that_does_not_reload_is_kept() {
     }
     assert_eq!(sql_run(&s, RANK, Some(TOKEN)).0, 200);
 }
+
+/// The query API's settings are read as refresh reads them, the
+/// environment included: a server password from FHIR_PIPES_PASSWORD.
+#[test]
+fn a_config_refresh_accepts_starts_the_query_api() {
+    let (_dir, config) = warehouse(QUERY_SECTION);
+    let text = fs::read_to_string(&config)
+        .unwrap()
+        .replace("[source]\nfiles = [\"input\"]\n", "")
+        .replace("name = \"test\"\n", "name = \"test\"\nusername = \"me\"\n");
+    assert!(text.contains("username = \"me\"") && !text.contains("[source]"));
+    fs::write(&config, text).unwrap();
+    let s = start_serve(&config, &[("FHIR_PIPES_PASSWORD", "pw")]);
+    assert_eq!(get(&s, "/fhir/metadata", None).0, 200);
+    drop(s);
+    // Without it, serve stops as refresh would.
+    let (code, stderr) = serve_fails(&config, "127.0.0.1:0", &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("FHIR_PIPES_PASSWORD"), "{stderr}");
+}

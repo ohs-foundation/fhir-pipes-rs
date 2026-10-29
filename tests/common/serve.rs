@@ -36,7 +36,10 @@ pub fn serve_command(config: &Path, listen: &str, env: &[(&str, &str)]) -> Comma
         "FHIR_PIPES_RESULT_FILE",
         "FHIR_PIPES_FAILURE_HOOKS",
         "FHIR_PIPES_RUN_ID",
-    ] {
+    ]
+    .iter()
+    .chain(super::CLEARED)
+    {
         c.env_remove(var);
     }
     c.envs(env.iter().copied())

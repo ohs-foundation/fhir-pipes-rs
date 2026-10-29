@@ -80,10 +80,7 @@ fn query_parts(
     let settings = crate::warehouse::config::settings(
         std::mem::take(&mut inputs.file),
         inputs.base.clone(),
-        crate::warehouse::config::Overrides {
-            data: Some(inputs.data.clone()),
-            ..Default::default()
-        },
+        crate::warehouse::serve_overrides(inputs.data.clone())?,
     )?;
     let queries = query::catalog::Queries::load(&settings, &cfg.approve)?;
     let runner =

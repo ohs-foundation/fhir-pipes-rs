@@ -398,36 +398,53 @@ fn failure_hooks(s: &Settings, step: &str, err: &anyhow::Error) {
 
 /// The settings from the config file and flags, the steps to run and the
 /// tools they need.
+/// The values refresh takes from its flags and the environment.
+fn overrides(args: &RefreshArgs, profile: Option<&str>) -> config::Overrides {
+    config::Overrides {
+        profile: profile.map(str::to_string),
+        data: args.data.clone(),
+        views: args.views.clone(),
+        input: args.input.clone(),
+        server: args.server.clone(),
+        server_name: args.server_name.clone(),
+        server_kind: args.server_kind,
+        token: args.token.clone(),
+        client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
+        client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
+        token_url: args.token_url.clone(),
+        token_auth: args.token_auth,
+        scope: args.scope.clone(),
+        username: args.username.clone(),
+        password: env_secret("FHIR_PIPES_PASSWORD"),
+        google_auth: args.google_auth,
+        countries: args.countries.clone(),
+        threads: args.threads,
+        reuse_raw: args.reuse_raw,
+        full: args.full,
+        dry_run: args.dry_run,
+    }
+}
+
+/// The overrides a refresh started by `serve` gets from serve's
+/// environment, over the warehouse `data` serve looks after: what the query
+/// API builds its `Settings` with, so it accepts any config refresh does.
+#[cfg(unix)]
+pub fn serve_overrides(data: PathBuf) -> Result<config::Overrides> {
+    use clap::Parser;
+    let cli = crate::cli::Cli::try_parse_from(["fhir-pipes", "refresh"])?;
+    let crate::cli::Command::Refresh(args) = cli.command else {
+        unreachable!("parsed as refresh")
+    };
+    Ok(config::Overrides {
+        data: Some(data),
+        ..overrides(&args, cli.profile.as_deref())
+    })
+}
+
 fn setup(args: &RefreshArgs, profile: Option<&str>) -> Result<(Settings, BTreeSet<Step>, Tools)> {
     let steps = steps(args);
     let (file, base) = config::load(args.config.as_deref())?;
-    let s = config::settings(
-        file,
-        base,
-        config::Overrides {
-            profile: profile.map(str::to_string),
-            data: args.data.clone(),
-            views: args.views.clone(),
-            input: args.input.clone(),
-            server: args.server.clone(),
-            server_name: args.server_name.clone(),
-            server_kind: args.server_kind,
-            token: args.token.clone(),
-            client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
-            client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
-            token_url: args.token_url.clone(),
-            token_auth: args.token_auth,
-            scope: args.scope.clone(),
-            username: args.username.clone(),
-            password: env_secret("FHIR_PIPES_PASSWORD"),
-            google_auth: args.google_auth,
-            countries: args.countries.clone(),
-            threads: args.threads,
-            reuse_raw: args.reuse_raw,
-            full: args.full,
-            dry_run: args.dry_run,
-        },
-    )?;
+    let s = config::settings(file, base, overrides(args, profile))?;
     let mut steps = steps;
     // The libraries step is in every run with library sources.
     if s.libraries.is_empty() {
