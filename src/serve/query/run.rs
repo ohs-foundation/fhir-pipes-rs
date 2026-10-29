@@ -2,10 +2,13 @@
 //! each input read from the warehouse's Parquet, run it with the `duckdb`
 //! command, and return its rows as NDJSON, JSON or CSV.
 
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -66,15 +69,18 @@ pub enum QueryError {
     },
     /// duckdb refused or failed the query, or it ran past the timeout.
     /// `message` is fixed text for the caller, never duckdb's, which can
-    /// quote the setup SQL's keys; `detail` is for serve's log: duckdb's
-    /// error, with what it quotes of the setup SQL taken out as far as
-    /// `without_setup` can.
+    /// quote the setup SQL's keys; `detail` is for serve's log: for a
+    /// failed setup, only the kind of error duckdb gave; for a failed query,
+    /// duckdb's error without the lines that quote the setup SQL (see
+    /// `without_setup`).
     Sql {
         message: String,
         detail: String,
     },
     /// Every slot is running a query.
     Busy,
+    /// serve is stopping: the query was not run, or was stopped.
+    Stopping,
     Internal(String),
 }
 
@@ -100,6 +106,32 @@ impl Root {
     }
 }
 
+/// How long a duckdb has after SIGTERM, when serve stops, before SIGKILL.
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// The running duckdb processes, and whether serve is stopping. A pid is
+/// removed as its process is reaped, under the same lock, so a pid here is
+/// never someone else's.
+#[derive(Default)]
+struct Children {
+    stopping: bool,
+    pids: BTreeSet<u32>,
+}
+
+fn lock(children: &Mutex<Children>) -> MutexGuard<'_, Children> {
+    children.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Send `sig` to each of `pids`.
+fn signal(pids: &BTreeSet<u32>, sig: i32) {
+    for &pid in pids {
+        // SAFETY: kill(2) on a child that is not yet reaped.
+        unsafe {
+            libc::kill(pid as libc::pid_t, sig);
+        }
+    }
+}
+
 /// Runs SQLQuery Libraries, `concurrency` at once.
 pub struct Runner {
     duckdb: String,
@@ -112,6 +144,11 @@ pub struct Runner {
     concurrency: usize,
     /// How many queries are running.
     running: AtomicUsize,
+    /// The duckdb processes running, which `stop` stops.
+    children: Arc<Mutex<Children>>,
+    /// The variables removed from duckdb's environment: serve's secrets,
+    /// which an approved query could read with `getenv`.
+    hidden_env: Vec<String>,
     /// Run once after the first run of a query, before the publish state is
     /// read again.
     #[cfg(test)]
@@ -171,11 +208,41 @@ impl Runner {
             max_rows: cfg.max_rows,
             concurrency: cfg.concurrency,
             running: AtomicUsize::new(0),
+            children: Arc::default(),
+            hidden_env: crate::redact::SECRET_VARS
+                .iter()
+                .map(|v| v.to_string())
+                .collect(),
             #[cfg(test)]
             after_run: std::sync::Mutex::new(None),
             #[cfg(test)]
             last_pid: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Remove the variables `names` from duckdb's environment too.
+    pub fn hide_env(&mut self, names: impl IntoIterator<Item = String>) {
+        self.hidden_env.extend(names);
+    }
+
+    /// serve is stopping: refuse queries from now on, and SIGTERM the
+    /// running duckdb processes, then SIGKILL those still running after
+    /// `grace`. Returns without waiting.
+    pub fn stop(&self, grace: Duration) {
+        {
+            let mut c = lock(&self.children);
+            c.stopping = true;
+            signal(&c.pids, libc::SIGTERM);
+        }
+        let children = self.children.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            signal(&lock(&children).pids, libc::SIGKILL);
+        });
+    }
+
+    fn stopping(&self) -> bool {
+        lock(&self.children).stopping
     }
 
     /// Run `lib`, at most `limit` rows and never more than `max_rows`.
@@ -188,6 +255,9 @@ impl Runner {
         format: Format,
         limit: Option<usize>,
     ) -> Result<Output, QueryError> {
+        if self.stopping() {
+            return Err(QueryError::Stopping);
+        }
         let _slot = self.slot().ok_or(QueryError::Busy)?;
         let Root::Local(data) = &self.root else {
             return self.attempt(catalog, lib, format, limit);
@@ -195,6 +265,9 @@ impl Runner {
         for _ in 0..2 {
             let before = publish_state(data);
             let result = self.attempt(catalog, lib, format, limit);
+            if matches!(result, Err(QueryError::Stopping)) {
+                return result;
+            }
             #[cfg(test)]
             if let Some(hook) = self.after_run.lock().unwrap().take() {
                 hook();
@@ -244,9 +317,15 @@ impl Runner {
         // duckdb stops at the first error, so without this file the setup
         // is what failed.
         let set_up = tmp.path().join("setup.ok");
-        let mut script = self.setup.clone().unwrap_or_default();
+        // The setup ends with its own line and a `;`, so one whose last
+        // statement has no `;`, or that ends in a `--` comment, still ends
+        // there; an empty statement is nothing to duckdb.
+        let mut script = match &self.setup {
+            Some(setup) => format!("{setup}\n;\n"),
+            None => String::new(),
+        };
         script.push_str(&format!(
-            "\nCOPY (SELECT 1) TO {} (HEADER false);\n\
+            "COPY (SELECT 1) TO {} (HEADER false);\n\
              CREATE TEMP TABLE r AS SELECT * FROM ({sql}) AS q LIMIT {};\n\
              COPY (SELECT count(*) FROM r) TO {} (HEADER false);\n\
              COPY (SELECT * FROM r LIMIT {cap}) TO {} ({});\n",
@@ -309,46 +388,73 @@ impl Runner {
         Ok(())
     }
 
-    /// Run `script` with duckdb in `dir`, killing it after the timeout.
-    /// `set_up` is the file the script writes once the setup SQL has run.
+    /// Run `script` with duckdb in `dir`, killing it after the timeout or
+    /// when serve stops. `set_up` is the file the script writes once the
+    /// setup SQL has run.
     fn duckdb(&self, dir: &Path, script: &str, set_up: &Path) -> Result<(), QueryError> {
         let internal = |what: &str, e: std::io::Error| QueryError::Internal(format!("{what}: {e}"));
         // stderr goes to a file, so a long error cannot fill a pipe and
         // stall duckdb while it is waited for.
         let err_path = dir.join("stderr");
         let err_file = fs::File::create(&err_path).map_err(|e| internal("creating stderr", e))?;
-        let mut child = Command::new(&self.duckdb)
-            .args(["-init", NO_INIT, "-c", script])
+        // The script goes on stdin, not in the arguments, which anyone on
+        // the machine can read (`ps`) and which have a size limit. `-bail`
+        // stops duckdb at the first error, as `-c` did.
+        let mut command = Command::new(&self.duckdb);
+        command
+            .args(["-init", NO_INIT, "-bail"])
             .current_dir(dir)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(err_file)
+            .stderr(err_file);
+        for name in &self.hidden_env {
+            command.env_remove(name);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| internal(&format!("running {}", self.duckdb), e))?;
-        let registered = crate::stop::register(child.id());
+        let pid = child.id();
+        {
+            let mut c = lock(&self.children);
+            if c.stopping {
+                drop(c);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(QueryError::Stopping);
+            }
+            c.pids.insert(pid);
+        }
         #[cfg(test)]
         {
-            *self.last_pid.lock().unwrap() = Some(child.id());
+            *self.last_pid.lock().unwrap() = Some(pid);
         }
+        // Written on a thread of its own: duckdb reads the script as it
+        // runs it, so a long one could block the write past the timeout.
+        // The write fails once duckdb has exited.
+        let writer = child.stdin.take().map(|mut stdin| {
+            let script = script.to_string();
+            std::thread::spawn(move || {
+                let _ = stdin.write_all(script.as_bytes());
+            })
+        });
         let start = Instant::now();
         let status = loop {
-            match child.try_wait() {
+            match self.try_reap(&mut child) {
                 Ok(Some(status)) => break Some(status),
                 Ok(None) if start.elapsed() >= self.timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    self.kill(&mut child);
                     break None;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    drop(registered);
+                    self.kill(&mut child);
                     return Err(internal("waiting for duckdb", e));
                 }
             }
         };
-        drop(registered);
+        if let Some(w) = writer {
+            let _ = w.join();
+        }
         let Some(status) = status else {
             let message = format!("the query timed out after {} s", self.timeout.as_secs());
             return Err(QueryError::Sql {
@@ -359,22 +465,66 @@ impl Runner {
         if status.success() {
             return Ok(());
         }
+        if self.stopping() {
+            return Err(QueryError::Stopping);
+        }
         // Told apart on duckdb's own text, before anything is taken out.
         let stderr = fs::read_to_string(&err_path).unwrap_or_default();
-        let message = if self.setup.is_some() && !set_up.exists() {
-            "the duckdb_setup SQL failed"
-        } else if matches!(self.root, Root::Remote(_)) && stderr.contains("No files found") {
+        if self.setup.is_some() && !set_up.exists() {
+            return Err(QueryError::Sql {
+                message: SETUP_FAILED.to_string(),
+                detail: setup_failure_detail(&stderr),
+            });
+        }
+        if matches!(self.root, Root::Remote(_)) && stderr.contains("No files found") {
             return Err(QueryError::Unavailable {
                 message: NOT_AVAILABLE.to_string(),
                 detail: "an input table has no files yet".to_string(),
             });
-        } else {
-            "the query failed; the serve log has the details"
-        };
+        }
         Err(QueryError::Sql {
-            message: message.to_string(),
+            message: "the query failed; the serve log has the details".to_string(),
             detail: without_setup(stderr.trim(), self.setup.as_deref().unwrap_or_default()),
         })
+    }
+
+    /// `child`'s status once it has exited, reaped under the lock that
+    /// `stop` signals under, so its pid is never signalled once reaped.
+    fn try_reap(&self, child: &mut Child) -> std::io::Result<Option<ExitStatus>> {
+        let mut c = lock(&self.children);
+        let status = child.try_wait();
+        if !matches!(status, Ok(None)) {
+            c.pids.remove(&child.id());
+        }
+        status
+    }
+
+    /// Kill `child` and reap it.
+    fn kill(&self, child: &mut Child) {
+        let mut c = lock(&self.children);
+        let _ = child.kill();
+        let _ = child.wait();
+        c.pids.remove(&child.id());
+    }
+}
+
+/// What a caller is told when the setup SQL failed.
+const SETUP_FAILED: &str = "the duckdb_setup SQL failed";
+
+/// The log's detail for a failed setup: only the kind of error duckdb gave
+/// (`Conversion Error`, `IO Error`, …). The rest of the message can hold a
+/// value the setup computed from its keys, such as an `E'\x..'` string
+/// decoded, which no match against the setup's text can find.
+fn setup_failure_detail(stderr: &str) -> String {
+    let first = stderr.trim().lines().next().unwrap_or_default();
+    match first.split_once(": ") {
+        Some((kind, _))
+            if kind.ends_with(" Error")
+                && kind.chars().all(|c| c.is_ascii_alphabetic() || c == ' ') =>
+        {
+            format!("{SETUP_FAILED}: {kind}")
+        }
+        _ => SETUP_FAILED.to_string(),
     }
 }
 
@@ -393,105 +543,51 @@ fn has_parquet(dir: &Path) -> bool {
     })
 }
 
-/// The shortest run of a setup literal's characters that marks a line of an
+/// The shortest run of the setup's characters that marks a line of an
 /// error as quoting it.
 const QUOTED_RUN: usize = 6;
 
-/// `text` with no part of a string in `setup` (`'…'`, `E'…'`, `$$…$$` or
-/// `$tag$…$tag$`), where a key would be: a line holding `QUOTED_RUN`
-/// characters of a longer string in a row is dropped, since duckdb can cut a
-/// long string short where it quotes it, and a shorter string is blanked.
-fn without_setup(text: &str, setup: &str) -> String {
-    let literals = setup_literals(setup);
-    let quotes = |line: &str| {
-        literals.iter().any(|l| {
-            let chars: Vec<char> = l.chars().collect();
-            chars.len() >= QUOTED_RUN
-                && chars
-                    .windows(QUOTED_RUN)
-                    .any(|w| line.contains(&w.iter().collect::<String>()))
-        })
-    };
-    let mut kept: Vec<String> = Vec::new();
-    for line in text.lines() {
-        if quotes(line) {
-            continue;
-        }
-        let mut line = line.to_string();
-        for l in &literals {
-            if !l.trim().is_empty() {
-                line = line.replace(l.as_str(), "***");
+/// `s` with each run of whitespace made one space.
+fn collapsed(s: &str) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if out.last() != Some(&' ') {
+                out.push(' ');
             }
+        } else {
+            out.push(c);
         }
-        kept.push(line);
     }
+    out
+}
+
+/// `text` without any line that holds `QUOTED_RUN` characters of `setup` in
+/// a row, wherever they are in it (a string, a comment, a keyword), with
+/// whitespace runs made one space in both. The setup is not parsed: a key
+/// can be in any kind of string, and duckdb can quote a long one cut short.
+/// A run of only whitespace and punctuation (`...`, `');  `) is no reason
+/// to drop a line. What is left has the setup's single-quoted strings
+/// blanked, for a key shorter than the run.
+fn without_setup(text: &str, setup: &str) -> String {
+    let chars = collapsed(setup);
+    let runs: HashSet<&[char]> = chars
+        .windows(QUOTED_RUN)
+        .filter(|w| w.iter().any(|c| c.is_alphanumeric()))
+        .collect();
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            !collapsed(line)
+                .windows(QUOTED_RUN)
+                .any(|w| runs.contains(w))
+        })
+        .collect();
     let kept = kept.join("\n");
     if kept.trim().is_empty() {
         return "duckdb failed; its message quoted the duckdb_setup SQL".to_string();
     }
-    kept
-}
-
-/// The contents of the string literals in `sql`: single-quoted (with `''`
-/// for a quote, and `E'…'` strings, whose `\'` is a quote too) and
-/// dollar-quoted.
-fn setup_literals(sql: &str) -> Vec<String> {
-    let chars: Vec<char> = sql.chars().collect();
-    let mut found = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '\'' => {
-                let escapes = i > 0 && matches!(chars[i - 1], 'E' | 'e');
-                let mut lit = String::new();
-                i += 1;
-                while i < chars.len() {
-                    match chars[i] {
-                        '\\' if escapes && i + 1 < chars.len() => {
-                            lit.push(chars[i + 1]);
-                            i += 2;
-                        }
-                        '\'' if chars.get(i + 1) == Some(&'\'') => {
-                            lit.push('\'');
-                            i += 2;
-                        }
-                        '\'' => break,
-                        c => {
-                            lit.push(c);
-                            i += 1;
-                        }
-                    }
-                }
-                found.push(lit);
-                i += 1;
-            }
-            '$' => {
-                let tag_end = chars[i + 1..]
-                    .iter()
-                    .position(|c| !(c.is_alphanumeric() || *c == '_'))
-                    .map(|n| i + 1 + n);
-                match tag_end {
-                    Some(end) if chars[end] == '$' => {
-                        let tag: String = chars[i..=end].iter().collect();
-                        let rest: String = chars[end + 1..].iter().collect();
-                        match rest.find(&tag) {
-                            Some(close) => {
-                                found.push(rest[..close].to_string());
-                                i = end + 1 + rest[..close].chars().count() + tag.chars().count();
-                            }
-                            None => {
-                                found.push(rest);
-                                i = chars.len();
-                            }
-                        }
-                    }
-                    _ => i += 1,
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    found
+    crate::redact::sql_strings(&kept, setup)
 }
 
 /// A file with no SQL, given to duckdb's `-init`, so the user's
@@ -741,10 +837,16 @@ mod tests {
         ] {
             let r = w.runner(100, Some(&setup));
             match r.run(&w.catalog, w.lib(lib), Format::Ndjson, None) {
-                Err(QueryError::Sql { message, .. }) => {
+                Err(QueryError::Sql { message, detail }) => {
                     assert_eq!(message, says, "{setup}");
                     for secret in secrets {
                         assert!(!message.contains(secret), "{setup}: {message}");
+                        assert!(!detail.contains(secret), "{setup}: {detail}");
+                    }
+                    if says == failed {
+                        assert!(detail.contains("nope"), "{setup}: {detail}");
+                    } else {
+                        assert!(detail.starts_with(setup_failed), "{setup}: {detail}");
                     }
                 }
                 other => panic!("{setup}: {other:?}"),
@@ -778,24 +880,115 @@ mod tests {
 
     #[test]
     fn a_query_error_drops_lines_that_quote_the_setup() {
-        let long = "a-long-secret-".repeat(10);
-        let setup = format!(
-            "CREATE SECRET s (KEY_ID $k$AKIAXYZ$k$, SECRET E'it\\'s {long}', REGION 'eu');"
-        );
-        let text = "IO Error: HTTP 403\nLINE 1: ...ecret-a-long-secret-'\nkey AKIAXYZ refused\n\
-                    region eu\nCandidate: nope";
+        // An apostrophe in a comment, a literal over several lines, and a
+        // run of dots that is no reason to drop a line.
+        let setup = "-- it's mine\nSET VARIABLE v = 'supersecretkey\n   AKIAXYZ'; -- ......";
+        let text = "Conversion Error: could not convert\nstring 'supersecretkey  AKIAXYZ'\n\
+                    near XYZ'; -- and\nkey AKIAXY refused\nCandidate: ...... nope";
         assert_eq!(
-            without_setup(text, &setup),
-            "IO Error: HTTP 403\nregion ***\nCandidate: nope"
+            without_setup(text, setup),
+            "Conversion Error: could not convert\nCandidate: ...... nope"
         );
         assert_eq!(
-            without_setup("key AKIAXYZ", &setup),
+            without_setup("key AKIAXYZ", setup),
             "duckdb failed; its message quoted the duckdb_setup SQL"
         );
+        // A quoted literal of the setup shorter than the window is blanked.
         assert_eq!(
-            setup_literals("SELECT 'a''b', $$c$$, $1, E'd\\'e', $t$f$$g$t$"),
-            ["a'b", "c", "d'e", "f$$g"]
+            without_setup("zone eu1 refused", "SET s3_region = 'eu1';"),
+            "zone *** refused"
         );
+        assert_eq!(without_setup("Binder Error: x", ""), "Binder Error: x");
+    }
+
+    #[test]
+    fn a_failed_setup_logs_only_the_kind_of_error() {
+        assert_eq!(
+            setup_failure_detail(
+                "Conversion Error: Could not convert string 'shh' to INT32\nLINE 1: x"
+            ),
+            "the duckdb_setup SQL failed: Conversion Error"
+        );
+        assert_eq!(
+            setup_failure_detail("shh: not an error type"),
+            "the duckdb_setup SQL failed"
+        );
+    }
+
+    /// A fake duckdb that writes its arguments to `args` and runs the real
+    /// one; with `ignore_term`, SIGTERM does not stop it.
+    #[cfg(unix)]
+    fn recording_duckdb(w: &Warehouse, args: &Path, ignore_term: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = w.dir.path().join("fake-duckdb");
+        let trap = if ignore_term { "trap '' TERM\n" } else { "" };
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n{trap}printf '%s\\n' \"$@\" > '{}'\nexec duckdb \"$@\"\n",
+                args.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_script_goes_on_stdin_not_in_the_arguments() {
+        if !have_duckdb("the_script_goes_on_stdin_not_in_the_arguments") {
+            return;
+        }
+        let w = Warehouse::new();
+        let args = w.dir.path().join("args");
+        let fake = recording_duckdb(&w, &args, false);
+        // Setups with no final `;`, one ending in a comment.
+        for setup in [
+            "SET VARIABLE marker = 'setup-text-in-argv'",
+            "SET VARIABLE marker = 'setup-text-in-argv' -- no semicolon",
+        ] {
+            let cfg = w.config(100, Some(setup));
+            let r = Runner::new(&cfg, &w.data(), fake.to_str().unwrap(), &[]).unwrap();
+            assert_eq!(w.run(&r, Format::Ndjson, None).rows, 3, "{setup}");
+            let argv = fs::read_to_string(&args).unwrap();
+            assert!(!argv.contains("setup-text-in-argv"), "{argv}");
+            assert!(!argv.contains("COPY"), "{argv}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_ends_running_queries_and_refuses_new_ones() {
+        if !have_duckdb("stopping_ends_running_queries_and_refuses_new_ones") {
+            return;
+        }
+        let w = Warehouse::new();
+        // A duckdb that SIGTERM does not stop: SIGKILL does, after the grace.
+        let fake = recording_duckdb(&w, &w.dir.path().join("args"), true);
+        let mut cfg = w.config(100, None);
+        cfg.timeout = Duration::from_secs(3600);
+        let r = Runner::new(&cfg, &w.data(), fake.to_str().unwrap(), &[]).unwrap();
+        std::thread::scope(|s| {
+            let running = s.spawn(|| r.run(&w.catalog, w.lib("Slow"), Format::Ndjson, None));
+            let started = Instant::now();
+            while r.last_pid.lock().unwrap().is_none() {
+                assert!(started.elapsed() < Duration::from_secs(10));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            let stopped = Instant::now();
+            r.stop(Duration::from_millis(500));
+            match running.join().unwrap() {
+                Err(QueryError::Stopping) => {}
+                other => panic!("{other:?}"),
+            }
+            assert!(stopped.elapsed() < Duration::from_secs(5));
+        });
+        assert!(matches!(
+            r.run(&w.catalog, w.lib("Q"), Format::Ndjson, None),
+            Err(QueryError::Stopping)
+        ));
     }
 
     #[test]

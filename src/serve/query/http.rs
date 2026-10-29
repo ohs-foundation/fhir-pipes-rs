@@ -53,11 +53,15 @@ pub struct QueryApi {
     pub stdout: Arc<StdoutQueue>,
     /// Hides serve's secrets in what is logged.
     pub redactor: Arc<crate::serve::secrets::Redactor>,
+    /// Held while the catalog is built again: a reload that runs beside
+    /// the next run's waits, so an older catalog never replaces a newer one.
+    pub reloading: std::sync::Mutex<()>,
 }
 
 impl QueryApi {
     /// Build the catalog again; on an error the last one is kept.
     pub fn reload(&self) -> anyhow::Result<()> {
+        let _one = self.reloading.lock().unwrap_or_else(|e| e.into_inner());
         let queries = Queries::load(&self.settings, &self.approve)?;
         *self.queries.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(queries);
         Ok(())
@@ -532,6 +536,11 @@ fn query_refusal(e: QueryError) -> Refusal {
             "transient",
             "too many queries running; retry later",
         ),
+        QueryError::Stopping => refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "transient",
+            "serve is stopping",
+        ),
         QueryError::Internal(m) => Refusal {
             log: Some(m),
             ..internal()
@@ -741,6 +750,7 @@ mod tests {
                 )])
                 .0,
             ),
+            reloading: Default::default(),
         })
     }
 

@@ -113,7 +113,7 @@ pub fn sql_strings(text: &str, sql: &str) -> String {
 }
 
 /// The variables whose values refresh holds as secrets.
-const SECRET_VARS: [&str; 7] = [
+pub(crate) const SECRET_VARS: [&str; 7] = [
     "FHIR_PIPES_TOKEN",
     "FHIR_PIPES_CLIENT_SECRET",
     "FHIR_PIPES_PASSWORD",

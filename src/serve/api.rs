@@ -115,17 +115,6 @@ impl Server {
             server
                 .metrics
                 .run_ended(&rec, started.elapsed().as_secs_f64());
-            // A run that succeeded may have changed the Libraries; on an
-            // error the last catalog is kept.
-            if rec.status == super::store::RunStatus::Succeeded
-                && let Some(q) = &server.query
-                && let Err(e) = q.reload()
-            {
-                server
-                    .job
-                    .stdout
-                    .push(not_reloaded(&e, &q.settings, &server.job.redactor));
-            }
             server.job.stdout.push(format!(
                 "{} ended: {}",
                 rec.id.as_str(),
@@ -137,6 +126,19 @@ impl Server {
             }
             server.metrics.running.store(false, Ordering::SeqCst);
             *server.lock_current() = None;
+            // A run that succeeded may have changed the Libraries; on an
+            // error the last catalog is kept. Last, so that a slow fetch of
+            // a remote Library source delays neither the run's notify nor
+            // the next run.
+            if rec.status == super::store::RunStatus::Succeeded
+                && let Some(q) = &server.query
+                && let Err(e) = q.reload()
+            {
+                server
+                    .job
+                    .stdout
+                    .push(not_reloaded(&e, &q.settings, &server.job.redactor));
+            }
         });
         Ok(id)
     }

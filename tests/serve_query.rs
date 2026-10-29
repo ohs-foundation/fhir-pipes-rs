@@ -224,8 +224,15 @@ fn a_new_query_is_served_after_a_run() {
     let id = s.start_run(r#"{"only": ["libraries"]}"#);
     let r = s.finished(&id);
     assert_eq!(r["status"], "succeeded", "{r}");
-    idle(&s);
-    let (status, body) = sql_run(&s, TOTALS, Some(TOKEN));
+    // The catalog is loaded again after the run's end is recorded.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (status, body) = loop {
+        let (status, body) = sql_run(&s, TOTALS, Some(TOKEN));
+        if status != 404 || Instant::now() > deadline {
+            break (status, body);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert_eq!(status, 200, "{body}");
     let row = &ndjson(&body)[0];
     assert_eq!(
@@ -247,7 +254,6 @@ fn a_catalog_that_does_not_reload_is_kept() {
     fs::write(dir.path().join("libs/bar.json"), bar.to_string()).unwrap();
     let id = s.start_run(r#"{"only": ["libraries"]}"#);
     s.finished(&id);
-    idle(&s);
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -335,4 +341,96 @@ fn a_library_url_token_is_not_printed() {
     for secret in ["k1", "user", "k2", "query)"] {
         assert!(!stderr.contains(secret), "{secret}: {stderr}");
     }
+}
+
+/// A query running when serve gets SIGTERM is stopped: the caller gets
+/// `503`, and serve exits without waiting for the query's timeout.
+#[test]
+fn stopping_serve_stops_a_running_query() {
+    if !have_duckdb("stopping_serve_stops_a_running_query") {
+        return;
+    }
+    let (dir, config) = refreshed();
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{text}timeout = 3600\n")).unwrap();
+    let slow = library(
+        "Slow",
+        false,
+        &[],
+        "SELECT sum(range) FROM range(1000000000000000)",
+    );
+    fs::write(dir.path().join("libs/slow.json"), slow.to_string()).unwrap();
+    let mut s = start_serve(&config, &[]);
+    let url = s.url.clone();
+    let query = std::thread::spawn(move || {
+        let r = client()
+            .get(format!(
+                "{url}/fhir/$sql-run?subjectCanonical=https://example.org/Library/Slow"
+            ))
+            .send()
+            .unwrap();
+        (r.status().as_u16(), r.text().unwrap())
+    });
+    // Time for duckdb to start on the query.
+    std::thread::sleep(Duration::from_secs(2));
+    let stopped = Instant::now();
+    unsafe { libc::kill(s.child.id() as i32, libc::SIGTERM) };
+    let exited = loop {
+        if s.child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if stopped.elapsed() > Duration::from_secs(15) {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        exited,
+        "serve still running {:?} after SIGTERM",
+        stopped.elapsed()
+    );
+    let (status, body) = query.join().unwrap();
+    assert_eq!(status, 503, "{body}");
+    assert!(body.contains("serve is stopping"), "{body}");
+}
+
+/// A query does not see serve's secrets in its environment.
+#[test]
+fn a_query_cannot_read_serves_secrets() {
+    if !have_duckdb("a_query_cannot_read_serves_secrets") {
+        return;
+    }
+    let (dir, config) = warehouse(&format!(
+        "\n[[serve.notify]]\nname = \"hook\"\nurl = \"http://127.0.0.1:9/i\"\n\
+         header = \"x-api-key\"\nvalue_env = \"TEST_WEBHOOK_KEY\"\n{QUERY_SECTION}"
+    ));
+    let env = library(
+        "Env",
+        false,
+        &[],
+        "SELECT getenv('FHIR_PIPES_SERVE_TOKEN') AS s, getenv('FHIR_PIPES_QUERY_TOKEN') AS q, \
+         getenv('TEST_WEBHOOK_KEY') AS k, getenv('FHIR_PIPES_TOKEN') AS p, \
+         getenv('HOME') AS home",
+    );
+    fs::write(dir.path().join("libs/env.json"), env.to_string()).unwrap();
+    let s = start_serve(
+        &config,
+        &[
+            ("FHIR_PIPES_SERVE_TOKEN", TOKEN),
+            ("FHIR_PIPES_QUERY_TOKEN", QUERY_TOKEN),
+            ("TEST_WEBHOOK_KEY", "webhook-key-value"),
+            ("FHIR_PIPES_TOKEN", "refresh-token-value"),
+        ],
+    );
+    let (status, body) = sql_run(&s, "https://example.org/Library/Env", Some(TOKEN));
+    assert_eq!(status, 200, "{body}");
+    let row = &ndjson(&body)[0];
+    for key in ["s", "q", "k", "p"] {
+        assert!(
+            row[key].is_null() || row[key] == "",
+            "{key} is set in the query's environment: {row}"
+        );
+    }
+    // The rest of the environment is there.
+    assert!(row["home"].as_str().is_some_and(|h| !h.is_empty()), "{row}");
 }

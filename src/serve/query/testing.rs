@@ -104,7 +104,7 @@ impl Warehouse {
             "Slow",
             false,
             &[],
-            "SELECT sum(range) FROM range(100000000000)",
+            "SELECT sum(range) FROM range(1000000000000000)",
         );
         let mut w = Warehouse {
             dir,

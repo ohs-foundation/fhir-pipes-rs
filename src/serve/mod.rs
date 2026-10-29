@@ -146,14 +146,19 @@ fn server(
         secret_vars.join(","),
     ));
     let query = query.map(|q| {
+        // A query's duckdb gets none of the secrets a refresh is told of,
+        // nor the tokens, which an approved query could read with `getenv`.
+        let mut runner = q.runner;
+        runner.hide_env(secret_vars.iter().cloned());
         Arc::new(query::http::QueryApi {
             queries: RwLock::new(Arc::new(q.queries)),
-            runner: q.runner,
+            runner,
             settings: q.settings,
             approve: q.approve,
             metrics: metrics.clone(),
             stdout: stdout.clone(),
             redactor: redactor.clone(),
+            reloading: Default::default(),
         })
     });
     let job = Arc::new(runner::Job {
@@ -340,9 +345,10 @@ fn interrupt_unfinished(
     Ok(())
 }
 
-/// Wait for SIGTERM or Ctrl-C, then stop: the current run is interrupted,
-/// given `stop_grace`, and its end written; the notifier gets the rest of
-/// the time, and anything not sent goes at the next start.
+/// Wait for SIGTERM or Ctrl-C, then stop: running queries are stopped and
+/// new ones refused; the current run is interrupted, given `stop_grace`,
+/// and its end written; the notifier gets the rest of the time, and
+/// anything not sent goes at the next start.
 async fn shutdown(server: Arc<api::Server>) {
     use tokio::signal::unix::{SignalKind, signal};
     match signal(SignalKind::terminate()) {
@@ -367,6 +373,9 @@ async fn shutdown(server: Arc<api::Server>) {
 }
 
 fn stop(server: &api::Server) {
+    if let Some(q) = &server.query {
+        q.runner.stop(query::run::STOP_GRACE);
+    }
     let grace = server.job.cfg.stop_grace;
     let deadline = std::time::Instant::now() + grace + std::time::Duration::from_secs(5);
     let current = server
