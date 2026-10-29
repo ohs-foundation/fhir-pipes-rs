@@ -62,6 +62,6 @@ is written, and the conflicting ids are named. Refresh and redo that edit.
 fhir-pipes run --server https://fhir.example/fhir --snapshot snapshot/ --out out/
 ```
 
-This pulls the new versions and rebuilds the dataset. Reopen the layer in QGIS.
+This pulls the new versions and rebuilds the dataset. Discard the old GeoJSON and export a fresh copy before editing again: `diff` applies its columns to the refreshed snapshot and could overwrite newer server fields.
 To edit a subset only, select features and tick "Save only selected features"
 when exporting.

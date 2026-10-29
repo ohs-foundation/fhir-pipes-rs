@@ -41,8 +41,8 @@ holding the warehouse after `--lock-timeout`).
 | `push` | `rclone sync` of the configured directories and files; only with `--push` | rclone |
 
 `locations` runs first, then `views` and `tiles` side by side, then
-`libraries`, the manifest, the catalog and the database. The tables are then
-swapped in together, and the hooks and the push run last.
+`libraries`, the manifest, the catalog and the database. The tables and files are then
+published one by one (a direct reader may briefly see data from different runs), and the hooks and the push run last.
 
 Every step except `push` runs by default. `--only views,tiles` picks steps
 (the steps that depend on them are added), `--skip tiles` leaves some out, and
@@ -139,7 +139,7 @@ step timings and `type_mismatches` (see [Tables](#tables)).
 Each ViewDefinition writes `parquet/<table>/<column>=<value>/part-0.parquet`.
 The table is the view's name in snake case minus a configured prefix
 (`IcrIndicatorValue` to `indicator_value`); it must not be `locations` or
-`location_hierarchy`.
+`location_hierarchy`. Dates and dateTimes use native types: partial dates are floored, date columns drop the time, and a value that does not fit its column becomes null with a warning.
 
 Every row gets a partition column (default `country`), looked up through
 another table by the first `[[partition.lookup]]` rule whose `key` column the
@@ -165,8 +165,10 @@ The inputs are NDJSON, a Bundle, a JSON resource or an array of them (`.gz` is
 read as gzip). A path that does not exist, or a pattern that matches nothing,
 stops the run. The resources are split by type into `raw/<name>/<Type>.ndjson`
 (`name` is `--server-name` or `server.name`, `files` by default). The steps
-then run as for a server. Without Location resources, `locations` and `tiles`
-are skipped. The manifest's `server` is `null`.
+then run as for a server. File inputs replace the raw dataset: supply the complete
+set each run, because a missing resource type gives empty view tables. Without
+Location resources, existing Location tables stay; `tiles` is skipped only when
+there is no `locations` table. The manifest's `server` is `null`.
 
 ## Catalog
 
@@ -224,9 +226,11 @@ Library a PostgreSQL view from its `postgresql` SQL. Views and the privileges
 granted on them are kept across runs.
 
 All tables are replaced in one transaction, so a reader sees the previous
-run's rows until the commit, then all of the new run's. If anything fails, the
-database keeps the previous run. A run without the `views` step (for example
-`--only libraries`) loads only the derived tables and the SQLViews.
+run's rows until the commit, then all of the new run's. A failure before the
+commit rolls back; a failure during or after it (for example `ANALYZE`) may leave
+the new rows committed, so check `committed`. A run without the `views` step
+(for example `--only libraries`) loads only the derived tables and the SQLViews,
+unless `--only` names `database`.
 
 With `mode = "upsert"`, a run rewrites only the rows of the resources that
 changed since the last load, using a change log in `raw/<server>/.changes.json`.

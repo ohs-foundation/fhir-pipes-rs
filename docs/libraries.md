@@ -92,7 +92,7 @@ runs: pin it to a URL you control, or use a local `.tgz`. A Library's SQL must
 be one statement. This does not make an untrusted Library safe to run.
 
 A canonical resolves from the built-ins, then (for `refresh`) the views
-directory, then each source in order. The first match wins. A missing
+directory, then each source in order. The first match wins for the same URL and version. A canonical with several versions needs an explicit `|version`, and a built-in cannot be redefined. A missing
 dependency or a cycle stops the step before any SQL runs.
 
 ## Built-ins

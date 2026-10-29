@@ -103,7 +103,7 @@ fhir-pipes dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndj
 `--source data-values` reads raw data values and computes each value itself,
 in the same shape as analytics. Only SUM and AVERAGE_SUM_ORG_UNIT data
 elements and simple indicator expressions are supported; anything else is
-refused, naming the indicator. `--updated-since DATE` (with `--previous`)
+refused, naming the indicator. `--locations` must then include the data-entry units and their complete parent chains up to the requested levels, or totals are undercounted. `--updated-since DATE` (with `--previous`)
 recomputes only the periods holding data values changed since then.
 
 ## Example
@@ -112,6 +112,7 @@ The Sierra Leone demo instance is open:
 
 ```sh
 export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-41-10
+export FHIR_PIPES_PROFILE=examples/profiles/icr.toml
 export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
 fhir-pipes dhis2 locations --instance sl-demo --id-prefix sle --country-code SLE --out sl-locations.ndjson
 fhir-pipes dhis2 measures --instance sl-demo --indicator-group srxUNt2w5jn --out sl-measures.ndjson

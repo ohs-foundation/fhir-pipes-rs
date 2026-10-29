@@ -34,7 +34,7 @@ fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY 
 
 ## extract and the snapshot
 
-`extract` pages `Location` and `Organization` searches into a local snapshot, fetches any boundary attachment that is a URL and inlines it as base64, and swaps the new files in only when all of it succeeds. A failure leaves the previous snapshot untouched.
+`extract` pages `Location` and `Organization` searches into a local snapshot, fetches any boundary attachment that is a URL and inlines it as base64, and replaces the snapshot files one at a time. A failure leaves the previous files, but Locations can be updated while Organizations and state are still old. A boundary that cannot be fetched does not stop the run and may leave the URL or older cached geometry; check the extract report.
 
 ```
 snapshot/
@@ -85,7 +85,7 @@ Rows are sorted along a Hilbert curve and each row group carries its bounding bo
 
 `run` takes the extract and transform options together. `inspect --out DIR` prints a summary of every Parquet file under `DIR` (rows, row groups, size, geometry types).
 
-By default a Location produces a row only if it has a usable geometry and a resolved place in the hierarchy. A Location with no geometry, an unparseable boundary, a `partOf` cycle or a chain deeper than twelve levels, or a repeated id is reported and produces no row. A Location with both a boundary and a position is one row: the polygon is the geometry and the position is kept in its own columns.
+By default a Location produces a row only if it has a usable geometry and a resolved place in the hierarchy. A Location with no geometry, a `partOf` cycle or a chain deeper than twelve levels, or a repeated id is reported and produces no row. A Location with both a boundary and a position is one row: the polygon is the geometry and the position is kept in its own columns. An unparseable boundary is reported; a valid position is then used as point geometry.
 
 To add geometry to a row written with `--keep-without-geometry`, draw a point or polygon on it, then `diff` and `load`. A point becomes the `position`; a polygon becomes the boundary.
 
@@ -113,7 +113,7 @@ Only these columns are writable. `diff` refuses a file with a column that is nei
 
 **Derived hierarchy. Rebuilt on every transform, ignored by `diff`:** `depth`, `admin_level`, `tier`, `path`, `ancestor_ids`, `admin0_name` to `admin4_name`, `admin0_code` to `admin4_code`, `country`, `geom_type` (`polygon` or `point`), `lon`, `lat`, `bbox`, `quadkey`, `quadkey_level` (with a profile that names a spatial index extension), and `overlays_admin_unit_ids` (with a profile that names an overlays extension). An admin unit deeper than level 4 is reported as `admin_level_beyond_columns`. With `--keep-without-geometry`, `geom_type`, `lon`, `lat` and `bbox` are nullable and rows with null geometry land in `geom_type=null/` directories.
 
-**Lossless fallback:** `fhir_json` is the complete Location with the boundary attachment removed, and `organization_json` is the complete paired Organization (null if none). Any field not modelled as a column is still there, and `diff` keeps those fields from the snapshot, so an unknown extension survives a round trip through QGIS.
+**Lossless fallback:** `fhir_json` is the complete Location with the boundary attachment removed, and `organization_json` is the complete paired Organization (null if none). Any field not modelled as a column is still there, and `diff` keeps those fields from the snapshot, so an unknown extension survives a round trip through QGIS. The `identifier` and `organization_identifier` columns keep only system and value: leave them out of an edit unless you are replacing the identifiers.
 
 In ICR a facility is a Location paired with an Organization (`org-<location id>`) that carries the registry codes. A missing Organization is reported as `organization_missing`, and a differing name as `organization_name_mismatch`.
 
@@ -274,7 +274,7 @@ Produces the `ICRTargetPopulation` Group for each admin unit: a head count scope
 | Option | Default | What it does |
 |---|---|---|
 | `--raster` | required | A single-band float GeoTIFF in EPSG:4326, local or an http(s) URL (fetched once into `SNAPSHOT/rasters/`). WorldPop constrained 100 m grids are the intended input. Projected, PixelIsPoint and multi-band files are refused. |
-| `--level N` | required | The admin level to measure. |
+| `--level N` | required unless `--type` | The admin level to measure; ancestors get roll-ups. `--type CODE` instead measures matching Locations, with no roll-up. |
 | `--year YYYY` | required | The raster's reference year. Part of the Group id and the default `estimate-date` (`YYYY-01-01`). |
 | `--source` | `worldpop` | The `denominator-source` code. |
 | `--planning-denominator` | off | Mark the Groups as the figures campaigns plan against. The IG expects one per geography; fhir-pipes cannot check this across runs. |
