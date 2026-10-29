@@ -75,6 +75,26 @@ fn test_stop() -> bool {
     false
 }
 
+// The tools each unit test's thread has registered: a test's stop reaches
+// only these, not the tools of the tests running beside it.
+#[cfg(test)]
+thread_local! {
+    static TEST_TOOLS: std::cell::RefCell<BTreeSet<u32>> =
+        const { std::cell::RefCell::new(BTreeSet::new()) };
+}
+
+/// Whether a stop on this thread reaches `pid` (every tool, outside the
+/// unit tests).
+#[cfg(test)]
+fn reaches(pid: u32) -> bool {
+    TEST_TOOLS.with(|t| t.borrow().contains(&pid))
+}
+
+#[cfg(not(test))]
+fn reaches(_pid: u32) -> bool {
+    true
+}
+
 /// Whether a stop has been asked for.
 pub fn requested() -> bool {
     REQUESTED.load(Ordering::SeqCst) || test_stop()
@@ -129,6 +149,8 @@ pub struct Registered(u32);
 
 pub fn register(pid: u32) -> Registered {
     lock_tools().insert(pid);
+    #[cfg(test)]
+    TEST_TOOLS.with(|t| t.borrow_mut().insert(pid));
     // A tool started after the stop reached the others gets it too, unless
     // it is one the stop allows (a failure hook).
     if tools_stopped() && EXEMPT.load(Ordering::SeqCst) == 0 {
@@ -155,6 +177,8 @@ impl Drop for Exempt {
 impl Drop for Registered {
     fn drop(&mut self) {
         lock_tools().remove(&self.0);
+        #[cfg(test)]
+        TEST_TOOLS.with(|t| t.borrow_mut().remove(&self.0));
     }
 }
 
@@ -188,7 +212,11 @@ fn stop_tools() {
     if TOOLS_STOPPED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let pids: Vec<u32> = lock_tools().iter().copied().collect();
+    let pids: Vec<u32> = lock_tools()
+        .iter()
+        .copied()
+        .filter(|p| reaches(*p))
+        .collect();
     for pid in pids {
         terminate(pid);
     }
@@ -253,7 +281,8 @@ pub fn reset_for_test() {
     HOLDS.store(0, Ordering::SeqCst);
     EXEMPT.store(0, Ordering::SeqCst);
     TOOLS_STOPPED.store(false, Ordering::SeqCst);
-    lock_tools().clear();
+    let mine = TEST_TOOLS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    lock_tools().retain(|p| !mine.contains(p));
 }
 
 #[cfg(test)]
