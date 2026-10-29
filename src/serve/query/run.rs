@@ -58,7 +58,12 @@ pub struct Output {
 pub enum QueryError {
     /// The data is not there to read yet, or is being replaced: an input
     /// table is missing, or a refresh published while the query ran.
-    Unavailable(String),
+    /// `message` is fixed text for the caller; `detail`, which can name
+    /// tables, is for serve's log.
+    Unavailable {
+        message: String,
+        detail: String,
+    },
     /// duckdb refused or failed the query, or it ran past the timeout.
     /// `message` is fixed text for the caller, never duckdb's, which can
     /// quote the setup SQL's keys; `detail` is for serve's log: duckdb's
@@ -72,6 +77,9 @@ pub enum QueryError {
     Busy,
     Internal(String),
 }
+
+/// What a caller is told when an input table is not there to read.
+const NOT_AVAILABLE: &str = "an input table is not available yet; retry later";
 
 /// Where the warehouse's Parquet is read from.
 #[derive(Debug)]
@@ -183,13 +191,12 @@ impl Runner {
         limit: Option<usize>,
     ) -> Result<Output, QueryError> {
         let _slot = self.slot().ok_or(QueryError::Busy)?;
-        let cap = limit.unwrap_or(usize::MAX).min(self.max_rows);
         let Root::Local(data) = &self.root else {
-            return self.attempt(catalog, lib, format, cap);
+            return self.attempt(catalog, lib, format, limit);
         };
         for _ in 0..2 {
             let before = publish_state(data);
-            let result = self.attempt(catalog, lib, format, cap);
+            let result = self.attempt(catalog, lib, format, limit);
             #[cfg(test)]
             if let Some(hook) = self.after_run.lock().unwrap().take() {
                 hook();
@@ -199,9 +206,11 @@ impl Runner {
                 return result;
             }
         }
-        Err(QueryError::Unavailable(
-            "a refresh is publishing; retry".to_string(),
-        ))
+        let message = "a refresh is publishing; retry later".to_string();
+        Err(QueryError::Unavailable {
+            detail: message.clone(),
+            message,
+        })
     }
 
     /// A slot to run a query in, or `None` when all are taken.
@@ -214,14 +223,15 @@ impl Runner {
             .map(|_| Slot(&self.running))
     }
 
-    /// Run `lib` once, at most `cap` rows.
+    /// Run `lib` once, at most `limit` rows and never more than `max_rows`.
     fn attempt(
         &self,
         catalog: &Catalog,
         lib: &Library,
         format: Format,
-        cap: usize,
+        limit: Option<usize>,
     ) -> Result<Output, QueryError> {
+        let cap = limit.unwrap_or(usize::MAX).min(self.max_rows);
         if let Root::Local(data) = &self.root {
             self.check_inputs(data, catalog, lib)?;
         }
@@ -265,7 +275,8 @@ impl Runner {
         Ok(Output {
             body,
             rows,
-            truncated_at: (n > cap && cap == self.max_rows).then_some(self.max_rows),
+            truncated_at: (n > cap && limit.is_none_or(|l| l > self.max_rows))
+                .then_some(self.max_rows),
         })
     }
 
@@ -286,10 +297,13 @@ impl Runner {
                 (None, Artifact::View(_)) => {}
                 (Some(table), _) => {
                     if !has_parquet(&data.join("parquet").join(&table)) {
-                        return Err(QueryError::Unavailable(format!(
-                            "Library {} input {} has no table {table} yet",
-                            lib.name, dep.label
-                        )));
+                        return Err(QueryError::Unavailable {
+                            message: NOT_AVAILABLE.to_string(),
+                            detail: format!(
+                                "Library {} input {} has no table {table} yet",
+                                lib.name, dep.label
+                            ),
+                        });
                     }
                 }
             }
@@ -352,9 +366,10 @@ impl Runner {
         let message = if self.setup.is_some() && !set_up.exists() {
             "the duckdb_setup SQL failed"
         } else if matches!(self.root, Root::Remote(_)) && stderr.contains("No files found") {
-            return Err(QueryError::Unavailable(
-                "an input table has no files yet".to_string(),
-            ));
+            return Err(QueryError::Unavailable {
+                message: NOT_AVAILABLE.to_string(),
+                detail: "an input table has no files yet".to_string(),
+            });
         } else {
             "the query failed; the serve log has the details"
         };
@@ -547,6 +562,9 @@ mod tests {
         let out = w.run(&r, Format::Ndjson, Some(1));
         assert_eq!((out.rows, out.truncated_at), (1, None));
         assert_eq!(lines(&out.body).len(), 1);
+        // The caller's _limit cut it, not max_rows, even at max_rows.
+        let out = w.run(&r, Format::Ndjson, Some(2));
+        assert_eq!((out.rows, out.truncated_at), (2, None));
     }
 
     #[test]
@@ -560,7 +578,10 @@ mod tests {
             .runner(100, None)
             .run(&w.catalog, w.lib("Q"), Format::Ndjson, None)
         {
-            Err(QueryError::Unavailable(m)) => assert!(m.contains("no table task yet"), "{m}"),
+            Err(QueryError::Unavailable { message, detail }) => {
+                assert_eq!(message, "an input table is not available yet; retry later");
+                assert!(detail.contains("no table task yet"), "{detail}");
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -629,7 +650,10 @@ mod tests {
             .runner(100, None)
             .run(&w.catalog, w.lib("Q"), Format::Ndjson, None)
         {
-            Err(QueryError::Unavailable(m)) => assert!(m.contains("no table task yet"), "{m}"),
+            Err(QueryError::Unavailable { message, detail }) => {
+                assert_eq!(message, "an input table is not available yet; retry later");
+                assert!(detail.contains("no table task yet"), "{detail}");
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -746,8 +770,9 @@ mod tests {
         cfg.source = Source::Remote(empty.display().to_string());
         let r = Runner::new(&cfg, &w.data(), "duckdb", &[]).unwrap();
         match r.run(&w.catalog, w.lib("Q"), Format::Ndjson, None) {
-            Err(QueryError::Unavailable(m)) => {
-                assert_eq!(m, "an input table has no files yet")
+            Err(QueryError::Unavailable { message, detail }) => {
+                assert_eq!(message, "an input table is not available yet; retry later");
+                assert_eq!(detail, "an input table has no files yet");
             }
             other => panic!("{other:?}"),
         }
@@ -788,7 +813,9 @@ mod tests {
             .runner(100, None)
             .run(&w.catalog, w.lib("Q"), Format::Ndjson, None)
         {
-            Err(QueryError::Unavailable(m)) => assert!(m.contains("publishing"), "{m}"),
+            Err(QueryError::Unavailable { message, .. }) => {
+                assert_eq!(message, "a refresh is publishing; retry later")
+            }
             other => panic!("{other:?}"),
         }
         fs::remove_file(&marker).unwrap();

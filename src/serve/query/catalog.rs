@@ -22,8 +22,8 @@ pub enum Lookup<'a> {
 pub struct Queries {
     pub catalog: Catalog,
     approve: Approve,
-    /// For `Listed`: the `url|version` of each listed Library.
-    listed: Vec<String>,
+    /// For `Listed`: the url and version of each listed Library.
+    listed: Vec<(String, Option<String>)>,
 }
 
 impl Queries {
@@ -31,13 +31,25 @@ impl Queries {
     /// With `Listed`, each entry must be a SQLQuery in it.
     pub fn load(s: &Settings, approve: &Approve) -> Result<Queries> {
         let catalog = crate::warehouse::libraries_step::catalog(s)?;
+        // `url|version` is how a caller names a version, so such a url
+        // could not be named.
+        if let Some(l) = catalog
+            .libraries()
+            .into_iter()
+            .find(|l| l.kind == Kind::SqlQuery && l.url.contains('|'))
+        {
+            bail!(
+                "SQLQuery {} has a | in its url, which $sql-run cannot name; change the url",
+                l.url
+            );
+        }
         let mut listed = Vec::new();
         if let Approve::Listed(entries) = approve {
             for entry in entries {
                 let (url, version) = split_canonical(entry);
                 match catalog.get(&url, version.as_deref()) {
                     Ok(Artifact::Library(l)) if l.kind == Kind::SqlQuery => {
-                        listed.push(canonical(l));
+                        listed.push((l.url.clone(), l.version.clone()));
                     }
                     Ok(_) => bail!("[serve.query] queries: {entry} is not a SQLQuery Library"),
                     Err(e) => bail!("[serve.query] queries: {entry}: {e:#}"),
@@ -74,17 +86,12 @@ impl Queries {
         lib.kind == Kind::SqlQuery
             && match &self.approve {
                 Approve::Active => lib.status.as_deref() == Some("active"),
-                Approve::Listed(_) => self.listed.contains(&canonical(lib)),
+                Approve::Listed(_) => self
+                    .listed
+                    .iter()
+                    .any(|(url, version)| *url == lib.url && *version == lib.version),
                 Approve::All => true,
             }
-    }
-}
-
-/// `url|version`, or the url alone.
-fn canonical(lib: &Library) -> String {
-    match &lib.version {
-        Some(v) => format!("{}|{v}", lib.url),
-        None => lib.url.clone(),
     }
 }
 
@@ -154,6 +161,25 @@ mod tests {
                 .to_string();
             assert!(err.contains(entry), "{err}");
         }
+    }
+
+    #[test]
+    fn a_sqlquery_url_with_a_bar_is_refused() {
+        if !have_duckdb("a_sqlquery_url_with_a_bar_is_refused") {
+            return;
+        }
+        let w = Warehouse::new();
+        let mut v = library("A", false, &[], "SELECT 1 AS x");
+        v["url"] = "https://example.org/Library/A|1".into();
+        w.write("a", &v);
+        let err = Queries::load(&w.settings(), &Approve::All)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("SQLQuery https://example.org/Library/A|1 has a |"),
+            "{err}"
+        );
     }
 
     #[test]

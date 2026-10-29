@@ -12,7 +12,7 @@ use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use serde_json::{Value, json};
 
 use super::catalog::{Lookup, Queries};
@@ -75,20 +75,49 @@ impl QueryApi {
 // Mounted once serve is wired in.
 #[allow(dead_code)]
 pub fn routes(api: Arc<QueryApi>) -> Router {
+    // The CapabilityStatement's date: when this serve started.
+    let started = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    // Paths and methods under /fhir that are not ours answer with an
+    // OperationOutcome. These are routes, not a router fallback, so that
+    // these routes merge into serve's router, which has its own fallback.
     Router::new()
         .route(
             "/fhir/$sql-run",
             get(run_get)
                 .post(run_post)
-                .layer(DefaultBodyLimit::max(MAX_BODY)),
+                .layer(DefaultBodyLimit::max(MAX_BODY))
+                .fallback(method_not_allowed),
         )
-        .route("/fhir/metadata", get(metadata))
+        .route(
+            "/fhir/metadata",
+            get(move || metadata(started.clone())).fallback(method_not_allowed),
+        )
         .route(
             &format!("/fhir/OperationDefinition/{OPERATION_ID}"),
-            get(operation_definition),
+            get(operation_definition).fallback(method_not_allowed),
         )
-        .route("/fhir/Library", get(libraries))
+        .route("/fhir/Library", get(libraries).fallback(method_not_allowed))
+        .route("/fhir", any(not_found))
+        .route("/fhir/{*rest}", any(not_found))
         .with_state(api)
+}
+
+async fn not_found() -> Response {
+    refusal(
+        StatusCode::NOT_FOUND,
+        "not-found",
+        "no such path; this server has $sql-run, metadata, OperationDefinition and Library",
+    )
+    .response()
+}
+
+async fn method_not_allowed() -> Response {
+    refusal(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "not-supported",
+        "this path does not take that method",
+    )
+    .response()
 }
 
 /// A request refused or a query that failed: the status, the
@@ -152,29 +181,40 @@ fn format_code(f: Format) -> &'static str {
     }
 }
 
-/// The format `Accept` asks for: the first media type it names that we
-/// write, else NDJSON.
+/// The format `Accept` asks for: of the media types we write, the one with
+/// the highest `q` above 0, the first named on a tie. With none, NDJSON,
+/// the specification's default.
 fn accepted(headers: &HeaderMap) -> Format {
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    accept
-        .split(',')
-        .map(|t| {
-            t.split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-        })
-        .find_map(|t| match t.as_str() {
-            "application/json" => Some(Format::Json),
-            "text/csv" => Some(Format::Csv),
-            "application/x-ndjson" => Some(Format::Ndjson),
-            _ => None,
-        })
-        .unwrap_or(Format::Ndjson)
+    let mut best: Option<(f32, Format)> = None;
+    for item in accept.split(',') {
+        let mut parts = item.split(';');
+        let format = match parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "application/json" => Format::Json,
+            "text/csv" => Format::Csv,
+            "application/x-ndjson" => Format::Ndjson,
+            _ => continue,
+        };
+        // A q that does not parse makes the type unacceptable.
+        let q = parts
+            .filter_map(|p| p.trim().strip_prefix("q="))
+            .map(|q| q.trim().parse::<f32>().unwrap_or(0.0))
+            .next_back()
+            .unwrap_or(1.0);
+        if q > 0.0 && best.is_none_or(|(b, _)| q > b) {
+            best = Some((q, format));
+        }
+    }
+    best.map_or(Format::Ndjson, |(_, f)| f)
 }
 
 /// Check the (name, value) pairs of a request. `_format` wins over
@@ -286,8 +326,9 @@ fn posted(
             bad_request(format!("reading the body: {e}"))
         }
     })?;
-    let v: Value = serde_json::from_slice(&body)
-        .map_err(|e| bad_request(format!("the body is not JSON: {e}")))?;
+    let v = serde_json::from_slice::<Strict>(&body)
+        .map_err(|e| bad_request(format!("the body is not JSON: {e}")))?
+        .0;
     if v["resourceType"] != "Parameters" {
         return Err(bad_request("the body must be a Parameters resource"));
     }
@@ -308,6 +349,75 @@ fn posted(
         pairs.push((name.to_string(), value));
     }
     Ok(pairs)
+}
+
+/// A JSON value with no object member named twice: `Value` keeps the last
+/// of two, which would hide the first from the checks.
+struct Strict(Value);
+
+impl<'de> serde::Deserialize<'de> for Strict {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Strict, D::Error> {
+        d.deserialize_any(StrictVisitor).map(Strict)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> serde::de::Visitor<'de> for StrictVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::String(v.to_string()))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Value, E> {
+        Ok(Value::String(v))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Strict(v)) = seq.next_element()? {
+            items.push(v);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut members = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let Strict(v) = map.next_value()?;
+            if members.insert(key.clone(), v).is_some() {
+                return Err(serde::de::Error::custom(format!(
+                    "member {key:?} is given more than once"
+                )));
+            }
+        }
+        Ok(Value::Object(members))
+    }
 }
 
 /// Run a checked request, or refuse it; log it and count it either way.
@@ -404,11 +514,14 @@ fn query_refusal(e: QueryError) -> Refusal {
             log: Some(detail),
             ..refusal(StatusCode::UNPROCESSABLE_ENTITY, "processing", message)
         },
-        QueryError::Unavailable(m) => refusal(StatusCode::SERVICE_UNAVAILABLE, "transient", m),
+        QueryError::Unavailable { message, detail } => Refusal {
+            log: Some(detail),
+            ..refusal(StatusCode::SERVICE_UNAVAILABLE, "transient", message)
+        },
         QueryError::Busy => refusal(
             StatusCode::SERVICE_UNAVAILABLE,
             "transient",
-            "every query slot is in use; retry",
+            "too many queries running; retry later",
         ),
         QueryError::Internal(m) => Refusal {
             log: Some(m),
@@ -421,15 +534,17 @@ fn operation_url() -> String {
     format!("{CANONICAL_BASE}/OperationDefinition/{OPERATION_ID}")
 }
 
-async fn metadata() -> Response {
+/// The CapabilityStatement; `date` is the day serve started (UTC).
+async fn metadata(date: String) -> Response {
     fhir(
         StatusCode::OK,
         json!({
             "resourceType": "CapabilityStatement",
             "status": "active",
-            "date": "2026-10-29",
+            "date": date,
             "kind": "instance",
             "software": {"name": "fhir-pipes", "version": env!("CARGO_PKG_VERSION")},
+            "implementation": {"description": "fhir-pipes serve", "url": CANONICAL_BASE},
             "fhirVersion": "4.0.1",
             "format": ["json"],
             "rest": [{
@@ -473,12 +588,32 @@ async fn operation_definition() -> Response {
     )
 }
 
-async fn libraries(State(api): State<Arc<QueryApi>>) -> Response {
+/// The approved SQLQueries. No search parameter is supported, so any is
+/// refused rather than ignored.
+async fn libraries(State(api): State<Arc<QueryApi>>, RawQuery(query): RawQuery) -> Response {
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
+        let names: Vec<String> = url::form_urlencoded::parse(q.as_bytes())
+            .map(|(n, _)| n.into_owned())
+            .collect();
+        return bad_request(format!(
+            "unsupported search parameter(s): {}; /fhir/Library lists every approved \
+             SQLQuery and takes none",
+            names.join(", ")
+        ))
+        .response();
+    }
     let queries = api.queries();
     let entries: Vec<Value> = queries
         .approved()
         .iter()
-        .map(|l| json!({"resource": l.json}))
+        .map(|l| {
+            let id = l.json["id"].as_str().unwrap_or(&l.name);
+            json!({
+                "fullUrl": format!("{CANONICAL_BASE}/Library/{id}"),
+                "resource": l.json,
+                "search": {"mode": "match"},
+            })
+        })
         .collect();
     fhir(
         StatusCode::OK,
@@ -671,6 +806,22 @@ mod tests {
             (vec![subject], "text/html, text/csv;q=0.9", "text/csv"),
             (vec![subject], "*/*", "application/x-ndjson"),
             (
+                vec![subject],
+                "application/json;q=0, text/csv;q=1",
+                "text/csv",
+            ),
+            (
+                vec![subject],
+                "text/csv;q=0.5, application/json;q=0.8",
+                "application/json",
+            ),
+            (vec![subject], "text/csv, application/json", "text/csv"),
+            (
+                vec![subject],
+                "application/json;q=0",
+                "application/x-ndjson",
+            ),
+            (
                 vec![subject, ("_format", "json")],
                 "text/csv",
                 "application/json",
@@ -817,8 +968,23 @@ mod tests {
         let r = send(&all, get(&[("subjectCanonical", Q)])).await;
         assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(r.headers["retry-after"], "5");
-        r.says();
+        assert_eq!(r.says(), "too many queries running; retry later");
         drop(held);
+
+        // Which table is missing goes to the log only.
+        let parquet = w.data().join("parquet/task/country=UGA/part-0.parquet");
+        let kept = std::fs::read(&parquet).unwrap();
+        std::fs::remove_file(&parquet).unwrap();
+        let r = send(&all, get(&[("subjectCanonical", Q)])).await;
+        assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.headers["retry-after"], "5");
+        assert_eq!(r.says(), "an input table is not available yet; retry later");
+        let line = log.line("no table task yet");
+        assert!(
+            line.contains(&format!("query {Q} ndjson 503 0 rows ")),
+            "{line}"
+        );
+        std::fs::write(&parquet, kept).unwrap();
 
         let r = send(
             &all,
@@ -840,6 +1006,47 @@ mod tests {
         let r = send(&all, post(json!({"resourceType": "Patient"}))).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST);
         assert!(r.says().contains("Parameters"), "{}", r.says());
+
+        // A repeated member would hide what the first one said.
+        for body in [
+            format!(
+                r#"{{"resourceType": "Parameters",
+                    "parameter": [{{"name": "patient", "valueString": "x"}}],
+                    "parameter": [{{"name": "subjectCanonical", "valueCanonical": "{Q}"}}]}}"#
+            ),
+            format!(
+                r#"{{"resourceType": "Parameters", "parameter": [
+                    {{"name": "patient", "name": "subjectCanonical", "valueCanonical": "{Q}"}}]}}"#
+            ),
+        ] {
+            let r = send(
+                &all,
+                Request::post("/fhir/$sql-run")
+                    .header("content-type", "application/fhir+json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST);
+            assert!(r.says().contains("more than once"), "{}", r.says());
+        }
+
+        // Other paths and methods under /fhir answer with an OperationOutcome.
+        for (method, path, status) in [
+            ("GET", "/fhir/Patient", StatusCode::NOT_FOUND),
+            ("GET", "/fhir", StatusCode::NOT_FOUND),
+            ("DELETE", "/fhir/metadata", StatusCode::METHOD_NOT_ALLOWED),
+            ("PUT", "/fhir/$sql-run", StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let r = send(&all, req).await;
+            assert_eq!(r.status, status, "{method} {path}");
+            r.says();
+        }
     }
 
     #[tokio::test]
@@ -880,11 +1087,17 @@ mod tests {
         assert_eq!(r.headers["x-fhir-pipes-truncated"], "max_rows=1");
         assert_eq!(lines(&r.body), rows()[..1]);
         assert!(log.line("query ").ends_with(" ms truncated at 1"));
-        // Cut by the caller's _limit, under max_rows: no header.
-        let api = api_with(&w, Approve::All, 2, &log);
-        let r = send(&api, get(&[("subjectCanonical", Q), ("_limit", "1")])).await;
-        assert_eq!(lines(&r.body).len(), 1);
-        assert!(r.headers.get("x-fhir-pipes-truncated").is_none());
+        // Cut by the caller's _limit, under or at max_rows: no header.
+        for (max_rows, limit) in [(2, "1"), (1, "1")] {
+            let api = api_with(&w, Approve::All, max_rows, &log);
+            let r = send(&api, get(&[("subjectCanonical", Q), ("_limit", limit)])).await;
+            assert_eq!(r.status, StatusCode::OK, "{max_rows} {limit}");
+            assert_eq!(lines(&r.body).len(), 1);
+            assert!(
+                r.headers.get("x-fhir-pipes-truncated").is_none(),
+                "{max_rows} {limit}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -904,6 +1117,13 @@ mod tests {
         assert_eq!(cs["resourceType"], "CapabilityStatement");
         assert_eq!(cs["fhirVersion"], "4.0.1");
         assert_eq!(cs["rest"][0]["mode"], "server");
+        assert_eq!(
+            cs["date"],
+            chrono::Utc::now().format("%Y-%m-%d").to_string()
+        );
+        assert_eq!(cs["software"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(cs["implementation"]["url"], "https://fhir-pipes.local/fhir");
+        assert_eq!(cs["implementation"]["description"], "fhir-pipes serve");
         let op = &cs["rest"][0]["operation"][0];
         assert_eq!(op["name"], "sql-run");
         let definition = op["definition"].as_str().unwrap();
@@ -947,7 +1167,16 @@ mod tests {
         );
         assert_eq!(bundle["entry"][0]["resource"]["url"], Q);
         assert_eq!(bundle["entry"][0]["resource"]["status"], "active");
+        assert_eq!(
+            bundle["entry"][0]["fullUrl"],
+            "https://fhir-pipes.local/fhir/Library/Q"
+        );
+        assert_eq!(bundle["entry"][0]["search"]["mode"], "match");
         assert!(bundle["entry"][1].is_null());
+        // It takes no search parameters.
+        let r = send(&api, get("/fhir/Library?name=Q")).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST);
+        assert!(r.says().contains("name"), "{}", r.says());
     }
 
     #[test]
