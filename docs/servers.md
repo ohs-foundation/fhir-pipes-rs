@@ -1,207 +1,90 @@
 # Servers
 
 fhir-pipes reads any FHIR R4 server through its API: paged searches with
-`_lastUpdated` and `Bundle.link`, and the system-level Bulk Data `$export`
-with `--bulk`. Some servers page or count in ways that need other search
-parameters. `--server-kind` names the server so that `export`, `extract`,
-`run` and `refresh` send them. In `refresh` it can also be
-`FHIR_PIPES_SERVER_KIND` or `server.kind`:
+`_lastUpdated` and `Bundle.link`, and the system-level Bulk Data `$export` with
+`--bulk` (in HAPI, `hapi.fhir.bulk_export_enabled=true`). Tested: HAPI FHIR, Medplum,
+Aidbox and the Google Cloud Healthcare API.
+
+## Connecting to a server
+
+`--server` is the FHIR base URL. It cannot carry a user name or password; use
+the options below. Credentials go only to the `--server` origin.
+
+| Auth | Flags | Environment variables |
+|---|---|---|
+| Bearer token | `--token` | `FHIR_PIPES_TOKEN` |
+| OAuth client credentials | `--client-id`, `--client-secret`, `--token-url`, `--token-auth post\|basic`, `--scope` | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET`, `FHIR_PIPES_TOKEN_URL`, `FHIR_PIPES_TOKEN_AUTH`, `FHIR_PIPES_SCOPE` |
+| Username and password (HTTP Basic) | `--username`, `--password` | `FHIR_PIPES_USERNAME`, `FHIR_PIPES_PASSWORD` |
+| Google Application Default Credentials | `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` |
+
+- A fixed token is not renewed: a longer run fails with a 401. Basic auth needs HTTPS.
+- Client credentials are renewed a minute before expiry. `--token-auth post`
+  (default) sends the client in the form body; `basic` in a Basic header.
+  `--scope` adds a `scope`, such as `system/*.read`.
+- `refresh` reads the client secret and password only from the environment.
+
+`--server-kind` (in `refresh` also `FHIR_PIPES_SERVER_KIND` or `server.kind`)
+adds the search parameters some servers need:
 
 | Kind | What changes |
 |---|---|
-| `generic` (default) | Nothing. |
-| `hapi` | Nothing: HAPI FHIR searches as `generic` does. |
-| `medplum` | Every page asks for `_sort=_lastUpdated`. A count from 1,000,000 on is taken as an estimate. `_lastUpdated` windows are halved until they hold fewer than 1,000,000 resources. With `--bulk`, `Binary/<id>` output files are read from the FHIR base with the token. |
-| `aidbox` | Every page asks for `_total=none`. `_lastUpdated` windows are halved until they hold at most 50,000 resources, and a larger type is paged in windows even with `--concurrency 1`. |
+| `generic` (default), `hapi` | Nothing. |
+| `medplum` | Pages ask for `_sort=_lastUpdated`; large types are split into `_lastUpdated` windows. With `--bulk`, `Binary/<id>` output files are read from the FHIR base with the token. |
+| `aidbox` | Pages ask for `_total=none`; types over 50,000 resources are split into `_lastUpdated` windows. |
 
-The kind's parameters are added to the first page of each search and kept on
-the server's next links. The kind does not change authentication or
-`--hapi-db`.
-
-The token or other credentials go only to the `--server` origin: the same
-scheme, host and port. A boundary file on another host is fetched without
-them. A Bulk Data output file gets them wherever it is when the manifest says
-`requiresAccessToken`. A next link to another origin stops the run. That
-usually means the server does not know its public URL; behind a proxy, HAPI
-needs `X-Forwarded-Host` and `X-Forwarded-Proto`.
-
-`--server` (and `server.base` in `refresh`) cannot carry a user name or
-password: request URLs are built from it, and errors and reports print them.
-Use `--username` and `--password` instead. With credentials, a `--server` on
-plain `http://` to another machine gets a warning. URLs of Bulk Data output
-files are printed and reported without their query, which for signed storage
-URLs is the signature.
-
-The files `export` and `extract` write the resources into are readable only
-by their owner on Unix (mode 0600), since they can hold patient data. Copy
-or share them on purpose.
-
-The window limits are targets, not guarantees. The windows' counts
-must add up to the type's before any halving, and past the usual number of
-windows (eight per `--concurrency`), halving stops at a window whose halves
-do not count up to it. A server whose window counts do not add up is paged
-as one stream.
-
-```sh
-fhir-pipes export --server https://api.medplum.com/fhir/R4 --server-kind medplum \
-  --client-id $MEDPLUM_CLIENT_ID --token-url https://api.medplum.com/oauth2/token \
-  --type Patient --type Observation --out raw/
-```
-
-The database route (`--hapi-db`) is for HAPI only. Medplum and Aidbox are read
-through the FHIR API.
+A next link to another origin stops the run; behind a proxy, HAPI needs
+`X-Forwarded-Host` and `X-Forwarded-Proto`. Files `export` and `extract` write
+are mode 0600 on Unix, since they can hold patient data.
 
 ## HAPI FHIR
 
-Use `generic` or `hapi`; they are the same. `export --bulk` needs
-`hapi.fhir.bulk_export_enabled=true`. HAPI does not list deletions in a bulk
-export, so a type whose count differs after an incremental export is exported
-again in full. See also
-[Reading a HAPI server's database](../README.md#reading-a-hapi-servers-database).
-
+Use `generic` or `hapi`. HAPI does not list deletions in a bulk export, so a
+type whose count differs after an incremental export is exported again in full.
+`--hapi-db` reads HAPI's database directly (HAPI only).
 ## Google Cloud Healthcare API
 
-Use `generic`. The FHIR base is the store's URL, or the store path
-`projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>`, and `--google-auth`
-gets tokens from Google Application Default Credentials. See
-[Google Cloud Healthcare API](../README.md#google-cloud-healthcare-api).
+Use `generic` and `--google-auth`. `--server` is the store URL or the store
+path `projects/<p>/locations/<l>/datasets/<d>/fhirStores/<s>`.
+
+Credentials are found in Google's usual order: the key file named by
+`GOOGLE_APPLICATION_CREDENTIALS`, then gcloud's application default credentials,
+then the metadata server on Compute Engine, Cloud Run and GKE. The account needs
+`roles/healthcare.fhirResourceReader` to read and
+`roles/healthcare.fhirResourceEditor` to write (`load`, `sync`).
+
+```sh
+export GOOGLE_APPLICATION_CREDENTIALS=$HOME/keys/fhir-reader.json
+fhir-pipes export --google-auth \
+  --server projects/my-project/locations/us-central1/datasets/health/fhirStores/main \
+  --type Patient --type Observation --out raw/
+```
 
 ## Medplum
 
-The FHIR base is `https://api.medplum.com/fhir/R4` for the hosted service, or
-`<server>/fhir/R4` for a self-hosted one. Use `--server-kind medplum`.
+The FHIR base is `https://api.medplum.com/fhir/R4`, or `<server>/fhir/R4` when
+self-hosted. Use `--server-kind medplum`.
 
-**Client.** Create a ClientApplication in the project (Project admin,
-Clients), and give it an AccessPolicy that allows reading each type you
-export. For `--bulk`, the policy must also allow reading `AsyncJob` (the
-export's status) and `Binary` (the output files). For example:
-
-```json
-{
-  "resourceType": "AccessPolicy",
-  "name": "fhir-pipes export",
-  "resource": [
-    {"resourceType": "Patient", "readonly": true},
-    {"resourceType": "Observation", "readonly": true},
-    {"resourceType": "AsyncJob", "readonly": true},
-    {"resourceType": "Binary", "readonly": true}
-  ]
-}
-```
-
-Pass the ClientApplication's id and secret with `--client-id` and
-`--client-secret` (or `FHIR_PIPES_CLIENT_ID` and `FHIR_PIPES_CLIENT_SECRET`),
-and `--token-url https://api.medplum.com/oauth2/token` (or
-`<server>/oauth2/token`). fhir-pipes gets its token with the
-client-credentials grant.
-
-**Paging.** Medplum pages by `_offset` and refuses an offset over 10,000
-(HTTP 400, "Search offset exceeds maximum"), so without the kind a type stops
-at about 11,000 resources. With `_sort=_lastUpdated` and a `_count` of 20 or
-more, Medplum gives `_cursor` next links instead, which have no limit.
-
-**Counts.** Medplum counts exactly below its `accurateCountThreshold`
-(1,000,000 by default; a self-hosted server can change it) and estimates from
-there on. fhir-pipes does not compare an estimate with the file: the count
-check after an incremental search is skipped, with a warning, so a resource
-deleted from such a type stays in the file until a full download. Windowed
-downloads halve each window until it holds fewer than 1,000,000, so its count
-is exact. A window is never cut below one second, so a second holding a
-million or more stays one window, with an estimated count.
-
-**Bulk export.** A system-level `$export` covers the whole project. The
-output files are listed as `Binary/<id>`, relative to the FHIR base, and need
-the access token even though the manifest says `requiresAccessToken: false`;
-with `--server-kind medplum` fhir-pipes reads them that way. An export with
-`_since` does not list deleted resources, so the count check after the merge
-finds the difference and the type is exported again in full.
-
-**Rate limits.** Medplum limits requests per IP address per minute (6,000 on
-the hosted free plan, 60,000 on paid plans and by default when self-hosted),
-and FHIR interactions per user per minute (50,000 points by default; a search
-costs 20 points, so about 2,500 searches a minute). A self-hosted server sets
-them with `defaultRateLimit` and `defaultFhirQuota`
-(`MEDPLUM_DEFAULT_RATE_LIMIT`, `MEDPLUM_DEFAULT_FHIR_QUOTA`). A 429 answer
-carries `RateLimit` headers (`"fhirInteractions";r=0;t=45`) and no
-`Retry-After`; fhir-pipes waits for the `t=` of the spent limit.
-
-Checked against a self-hosted Medplum 5.2.5: search of 12,499 Observations as
-one stream (13 pages) and in 12 windows, incremental search, and bulk export
-in full and with `_since`.
+- Create a ClientApplication whose AccessPolicy allows reading each exported
+  type (and `AsyncJob` and `Binary` for `--bulk`). Use its id and secret as
+  client credentials with `--token-url <server>/oauth2/token`.
+- Medplum estimates counts from 1,000,000 resources, so the count check after an
+  incremental search is skipped with a warning.
 
 ## Aidbox
 
-The FHIR base is `<aidbox>/fhir`. The root (`<aidbox>/Patient`) answers in
-Aidbox's own format, which fhir-pipes does not read. Use
-`--server-kind aidbox`.
+The FHIR base is `<aidbox>/fhir`. Use `--server-kind aidbox`.
 
-**Client.** Create a Client resource with a secret and the `basic` grant type,
-and an AccessPolicy that lets it read:
-
-```json
-{
-  "resourceType": "Client",
-  "id": "fhir-pipes",
-  "secret": "<secret>",
-  "grant_types": ["basic"]
-}
-```
-
-```json
-{
-  "resourceType": "AccessPolicy",
-  "id": "fhir-pipes-read",
-  "engine": "matcho",
-  "matcho": {"client": {"id": "fhir-pipes"}, "request-method": "get"}
-}
-```
-
-Pass the client id and secret with `--username` and `--password` (or
-`FHIR_PIPES_USERNAME` and `FHIR_PIPES_PASSWORD`). For the client-credentials
-grant instead (`grant_types: ["client_credentials"]`), pass `--client-id`,
-`--client-secret`, `--token-url <aidbox>/auth/token` and `--token-auth basic`
-(`server.token_auth = "basic"` in `refresh`): Aidbox documents only the token
-request with the id and secret in a Basic header.
-
-**Paging.** By default Aidbox counts the whole result on every page
-(`_total=accurate`), which is slow on a large type and counts against its
-search timeout. With the kind, every page asks for `_total=none`. Aidbox pages
-with an offset (`_page`), which slows down deep into a large result, so a
-type of more than 50,000 resources is split into `_lastUpdated` windows, even
-with `--concurrency 1`, and each window holding more than 50,000 is halved.
-50,000 is a target, not a guarantee: a window is never cut below one second,
-so a second holding more than 50,000 resources stays one window.
-
-**Bulk export.** `$export` needs a storage provider for its files:
-`BOX_FHIR_BULK_STORAGE_PROVIDER` set to `gcp`, `aws` or `azure`, with the
-matching account resource (for example `AwsAccount`, which also works with
-MinIO). Without it the kick-off answers 500 "storage-type not specified", and
-fhir-pipes says which setting is missing. The output files are signed URLs,
-downloaded without the token. Aidbox runs one export at a time and answers a
-second kick-off with 429; fhir-pipes waits and asks again until
-`--bulk-timeout`.
-
-Not yet checked against a real Aidbox server, which needs a licence: the
-largest `_count`, `_sort=_lastUpdated` (windows need it; without it the type
-is paged as one stream), `Retry-After` and `X-Progress` on the status URL,
-what `transactionTime` means, and whether deleted resources are listed.
+- Create a Client with a secret and the `basic` grant type, and an AccessPolicy
+  that lets it read. Pass the id and secret as `--username` and `--password`.
+  For the client-credentials grant instead, use `--token-url <aidbox>/auth/token`
+  and `--token-auth basic`.
+- `$export` needs a storage provider: set `BOX_FHIR_BULK_STORAGE_PROVIDER` to
+  `gcp`, `aws` or `azure` with the matching account resource.
 
 ## Tests against real servers
 
-`cargo test --test export_servers` runs the fakes, and also a real server
-when the environment names one:
-
-| Server | Environment |
-|---|---|
-| Medplum | `FHIR_PIPES_TEST_MEDPLUM_URL` (the FHIR base), `FHIR_PIPES_TEST_MEDPLUM_CLIENT_ID`, `FHIR_PIPES_TEST_MEDPLUM_CLIENT_SECRET`; `FHIR_PIPES_TEST_MEDPLUM_TOKEN_URL` if not `/oauth2/token` on the same host |
-| Aidbox | `FHIR_PIPES_TEST_AIDBOX_URL` (the `/fhir` base), `FHIR_PIPES_TEST_AIDBOX_USERNAME`, `FHIR_PIPES_TEST_AIDBOX_PASSWORD`; `FHIR_PIPES_TEST_AIDBOX_BULK=1` to check `$export` too |
-
-`FHIR_PIPES_TEST_MEDPLUM_TYPES` and `FHIR_PIPES_TEST_AIDBOX_TYPES`
-(comma-separated, default `Patient`) name the types downloaded. Each test
-exports by search twice (the second run must not download in full) and, for
-Medplum, by `$export`, whose files must hold the same ids.
-
-A local Medplum for these tests runs from the `medplum/medplum-server` image
-with PostgreSQL and Redis (Apache-2.0), started with
-`node packages/server/dist/index.js env` and the `MEDPLUM_*` settings from
-Medplum's self-hosting guide.
+`cargo test --test export_servers` runs the fakes, and a real server when
+`FHIR_PIPES_TEST_MEDPLUM_URL` (with `..._CLIENT_ID`, `..._CLIENT_SECRET`) or
+`FHIR_PIPES_TEST_AIDBOX_URL` (with `..._USERNAME`, `..._PASSWORD`,
+optionally `..._BULK=1`) is set. `FHIR_PIPES_TEST_MEDPLUM_TYPES` and `FHIR_PIPES_TEST_AIDBOX_TYPES`
+name the types downloaded (default `Patient`).
