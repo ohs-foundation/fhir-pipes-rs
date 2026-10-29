@@ -51,7 +51,7 @@ mod manifest;
 pub(crate) mod partition;
 mod push;
 pub(crate) mod sql;
-mod stage;
+pub(crate) mod stage;
 mod status;
 mod tiles;
 mod tools;
