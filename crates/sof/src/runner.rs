@@ -62,8 +62,6 @@ where
 {
     let generated = SqlGenerator::new().generate(view)?;
 
-    tracing::debug!(sql = %generated.sql, "Executing view");
-
     let wrapped = format!("SELECT to_jsonb(t) FROM ({}) t", generated.sql);
     let rows: Vec<(Value,)> = sqlx_core::query_as::query_as(AssertSqlSafe(wrapped))
         .fetch_all(executor)

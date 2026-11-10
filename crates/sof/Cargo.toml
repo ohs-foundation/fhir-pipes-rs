@@ -39,9 +39,6 @@ tokio = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 
-# Tracing
-tracing = { workspace = true }
-
 [features]
 default = []
 parquet = ["dep:arrow", "dep:parquet", "dep:chrono"]
