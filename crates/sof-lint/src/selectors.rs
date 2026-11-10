@@ -19,8 +19,8 @@ enum Step {
     Collapse,
     /// `ofType(T)` — narrows a choice; deeper navigation is not resolved.
     OfType,
-    /// Any other function. `where()` keeps the collection; everything else ends
-    /// resolvable navigation.
+    /// Any other function. `where()` and `tail()` keep the collection;
+    /// everything else ends resolvable navigation.
     Func(String),
 }
 
@@ -210,7 +210,7 @@ fn validate_steps(
             }
             Step::Collapse => pending_array = false,
             Step::OfType => resolvable = false,
-            Step::Func(name) if name == "where" => {}
+            Step::Func(name) if name == "where" || name == "tail" => {}
             Step::Func(_) => resolvable = false,
         }
     }
@@ -367,7 +367,7 @@ fn linearize(expr: &ExpressionNode, out: &mut Vec<Step>) -> bool {
 
 fn push_func(name: &str, out: &mut Vec<Step>) {
     match name {
-        "first" | "last" | "single" | "tail" => out.push(Step::Collapse),
+        "first" | "last" | "single" => out.push(Step::Collapse),
         "ofType" => out.push(Step::OfType),
         other => out.push(Step::Func(other.to_string())),
     }
