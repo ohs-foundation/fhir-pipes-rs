@@ -189,7 +189,8 @@ pub fn merge_file(
     }
 
     // Removed when dropped by an error return before the commit.
-    let file = AtomicFile::create_at(&files.existing, files.tmp.clone())?;
+    // Private like the file export writes: it can hold patient data.
+    let file = AtomicFile::create_private_at(&files.existing, files.tmp.clone())?;
     let mut out = std::io::BufWriter::new(file);
     let mut stats = MergeStats {
         total: 0,
@@ -349,6 +350,15 @@ mod tests {
         );
         assert!(!snap.incoming_organizations().exists());
         assert!(!snap.organizations_tmp().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(snap.organizations())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the merged file can hold patient data");
+        }
     }
     use crate::report::Report;
     use std::collections::HashMap;

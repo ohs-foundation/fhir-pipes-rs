@@ -264,18 +264,20 @@ impl Profile {
         let Some(spec) = spec.filter(|s| !s.is_empty()) else {
             return Ok(Profile::base());
         };
+        // For messages: a URL can carry a key.
+        let shown = crate::redact::url(spec);
         if spec.starts_with("http://") {
             return Err(PipesError::Usage(format!(
-                "--profile {spec}: profiles are fetched over https only"
+                "--profile {shown}: profiles are fetched over https only"
             )));
         }
         let text = if spec.starts_with("https://") {
             fetch(spec)?
         } else {
             std::fs::read_to_string(spec)
-                .map_err(|e| PipesError::Usage(format!("--profile {spec}: {e}")))?
+                .map_err(|e| PipesError::Usage(format!("--profile {shown}: {e}")))?
         };
-        Profile::parse(&text, spec)
+        Profile::parse(&text, &shown)
     }
 
     /// The profile for a command that works from a snapshot: `spec` if given,
@@ -292,8 +294,9 @@ impl Profile {
                     && copy != p.text
                 {
                     eprintln!(
-                        "fhir-pipes: warning: --profile {spec} differs from {}, the profile \
+                        "fhir-pipes: warning: --profile {} differs from {}, the profile \
                          this snapshot was last transformed with; using --profile",
+                        crate::redact::url(spec),
                         copy_path.display()
                     );
                 }
@@ -520,8 +523,12 @@ fn valid_column_name(name: &str) -> bool {
 
 fn fetch(url: &str) -> Result<String> {
     let body = fetch_bytes(url, "--profile", Duration::from_secs(60))?;
-    String::from_utf8(body)
-        .map_err(|_| PipesError::Usage(format!("--profile {url}: not UTF-8 text")))
+    String::from_utf8(body).map_err(|_| {
+        PipesError::Usage(format!(
+            "--profile {}: not UTF-8 text",
+            crate::redact::url(url)
+        ))
+    })
 }
 
 /// The body of `url`, unauthenticated, with the usual retries; an error
@@ -535,7 +542,7 @@ pub(crate) fn fetch_bytes(url: &str, flag: &str, timeout: Duration) -> Result<Ve
     client
         .get(url)
         .map(|f| f.body)
-        .map_err(|e| PipesError::Environment(format!("{flag} {url}: {e}")))
+        .map_err(|e| PipesError::Environment(format!("{flag} {}: {e}", crate::redact::url(url))))
 }
 
 #[cfg(test)]

@@ -5,21 +5,13 @@
 use serde_json::Value;
 
 use super::config::ServeConfig;
+// The variables whose values are secrets, besides the `[database]`
+// section's and each notify destination's: the same list refresh uses.
+use crate::redact::SECRET_VARS;
 
 /// A value shorter than this is not replaced: it would replace ordinary
 /// text everywhere.
 pub const MIN_SECRET: usize = 4;
-
-/// The variables whose values are secrets, besides the `[database]`
-/// section's and each notify destination's.
-const SECRET_VARS: [&str; 6] = [
-    "FHIR_PIPES_TOKEN",
-    "FHIR_PIPES_CLIENT_SECRET",
-    "FHIR_PIPES_PASSWORD",
-    "FHIR_PIPES_HAPI_DATABASE_URL",
-    "FHIR_PIPES_SERVE_TOKEN",
-    "FHIR_PIPES_QUERY_TOKEN",
-];
 
 #[derive(Debug, Default)]
 pub struct Redactor {

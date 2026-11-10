@@ -60,7 +60,13 @@ fn read_body(resp: Response, limit: u64) -> std::result::Result<Vec<u8>, FetchEr
     decoded(resp)
         .take(limit.saturating_add(1))
         .read_to_end(&mut body)
-        .map_err(|e| FetchError::Transport(format!("reading body: {e}")))?;
+        .map_err(|e| {
+            // A read error can quote the URL, which can carry a key.
+            FetchError::Transport(format!(
+                "reading body: {}",
+                crate::redact::urls(&e.to_string())
+            ))
+        })?;
     if body.len() as u64 > limit {
         return Err(FetchError::Transport(format!(
             "the response is larger than {} MB once decoded; not read",
