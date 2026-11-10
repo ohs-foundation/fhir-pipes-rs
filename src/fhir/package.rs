@@ -38,7 +38,8 @@ pub fn read_json_files(
     let read = read_any(spec, flag, &mut each);
     if let Some(first) = skipped.first() {
         eprintln!(
-            "warning: {flag} {spec}: {} JSON file(s) could not be read and were skipped, the first {first}",
+            "warning: {flag} {}: {} JSON file(s) could not be read and were skipped, the first {first}",
+            crate::redact::url(spec),
             skipped.len()
         );
     }
@@ -132,12 +133,14 @@ type Visit<'a> = dyn FnMut(&str, std::result::Result<&str, String>) + 'a;
 fn read_any(spec: &str, flag: &str, visit: &mut Visit) -> Result<()> {
     if spec.starts_with("http://") {
         return Err(PipesError::Usage(format!(
-            "{flag} {spec}: packages are fetched over https only"
+            "{flag} {}: packages are fetched over https only",
+            crate::redact::url(spec)
         )));
     }
     if spec.starts_with("https://") {
         let bytes = crate::profile::fetch_bytes(spec, flag, Duration::from_secs(120))?;
-        return read_tgz(&bytes, spec, flag, visit);
+        // For messages: a URL can carry a key.
+        return read_tgz(&bytes, &crate::redact::url(spec), flag, visit);
     }
     let path = Path::new(spec);
     if path.is_dir() {

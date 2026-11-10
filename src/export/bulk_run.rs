@@ -123,7 +123,10 @@ pub(super) fn export_bulk(
 /// DELETE a bulk export's status URL, saying so when that fails.
 pub(super) fn cancel(client: &FhirClient, status_url: &str) {
     if let Err(e) = bulk::delete(client, status_url) {
-        eprintln!("cancelling the bulk export at {status_url}: {e}");
+        eprintln!(
+            "cancelling the bulk export at {}: {e}",
+            crate::redact::url(status_url)
+        );
     }
 }
 
@@ -377,7 +380,11 @@ fn manifest_errors(
                     errors.push(bulk::Issue {
                         severity: "error".into(),
                         code: "unknown".into(),
-                        text: line.chars().take(500).collect(),
+                        // Masked before the cut, which could split a secret.
+                        text: crate::redact::known_secrets(line)
+                            .chars()
+                            .take(500)
+                            .collect(),
                     });
                 }
                 for issue in found {
@@ -428,7 +435,7 @@ fn deleted_ids(
                 let Ok(bundle) = serde_json::from_str::<Value>(line) else {
                     report.add(
                         "bulk_deleted_unparsed",
-                        &format!("{} line {n}", f.url),
+                        &format!("{} line {n}", crate::redact::url(&f.url)),
                         "not JSON",
                     );
                     return Ok(());
