@@ -40,7 +40,8 @@ pub enum ColumnValue {
 #[derive(Debug, Clone, Default)]
 pub struct InputRow {
     pub id: Option<String>,
-    /// Only writable columns, keyed by README column name. Absent means untouched.
+    /// Only writable columns, keyed by column name (the writable group in
+    /// docs/locations.md, "Columns"). Absent means untouched.
     pub columns: BTreeMap<String, ColumnValue>,
     /// Writable columns whose value could not be read (reported as
     /// input_column_type and left out of `columns`). diff still checks their
@@ -254,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn writable_columns_are_the_readme_second_group() {
+    fn writable_columns_are_the_docs_writable_group() {
         assert!(is_writable("name"));
         assert!(is_writable("position_longitude"));
         assert!(is_writable("identifier"));

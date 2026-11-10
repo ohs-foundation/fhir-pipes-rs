@@ -448,7 +448,9 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         s.pgid = None;
         status
     };
-    // Every process that held the pipes is gone, so both streams end.
+    // Both streams end once every process that holds the pipes has exited.
+    // A process that left the group (setsid) or outlived the wait above
+    // still holds them, and `finish` waits for it with no time limit.
     let stderr_tail = capture.finish();
     log.lock().unwrap_or_else(|e| e.into_inner()).close();
     let exit = status.map(ExitKind::from).unwrap_or(ExitKind::Code(1));

@@ -3,7 +3,6 @@
 //! fetched_at, sha256 of the bin, verified on read). Written temp-then-rename,
 //! bin before meta, so a meta file is the commit marker. Nothing here aborts a
 //! run: every failure is an `Err(String)` the caller reports as `cache_error`.
-//! Same layout as the Python cache, so directories are interchangeable.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

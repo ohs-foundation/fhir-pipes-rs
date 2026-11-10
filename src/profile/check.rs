@@ -135,7 +135,6 @@ impl Ig {
         )
     }
 
-    /// Identifier systems sliced in the IG's profiles of `resource_type`.
     /// Identifier systems sliced in the IG's profiles of `resource_type`:
     /// a pattern or fixed `system` on the slice's `system` element, or a
     /// patternIdentifier / fixedIdentifier on the slice itself.
@@ -431,7 +430,6 @@ impl Checker<'_> {
         }
     }
 
-    /// The code systems of the IG ValueSet an element is bound to.
     /// The code systems of the ValueSet an element is bound to, following the
     /// IG's ValueSets it imports. `None` when the binding is absent or leads
     /// to a ValueSet the IG does not contain: then nothing is known.

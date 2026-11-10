@@ -60,7 +60,9 @@ enum ViewsCommand {
         #[arg(long, conflicts_with = "db")]
         input: Option<PathBuf>,
         /// PostgreSQL connection URL, for a database holding FHIR resources as
-        /// JSONB.
+        /// JSONB: one table per resource type, named as the type in lower case,
+        /// with `resource` (JSONB) and `status` columns. Rows whose status is
+        /// `deleted` are skipped.
         #[arg(long, env = "FHIR_PIPES_DATABASE_URL")]
         db: Option<String>,
         /// Output format: csv, ndjson, json or parquet.
@@ -116,9 +118,9 @@ enum ViewsCommand {
         #[arg(long, conflicts_with = "json")]
         sarif: bool,
     },
-    /// Check a ViewDefinition's FHIRPath selectors against the FHIR R4 and R5
-    /// core types built in (FH01–FH05), or against a FHIR package with
-    /// --package (FH01–FH10); with --shareable, also against the
+    /// Check a ViewDefinition's structure and its FHIRPath selectors against
+    /// the FHIR R4 and R5 core types built in, or against a FHIR package with
+    /// --package (FH01–FH10 either way); with --shareable, also against the
     /// ShareableViewDefinition subset (FH11). Exits non-zero on an error.
     Lint {
         /// The ViewDefinition JSON file.

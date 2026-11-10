@@ -1,9 +1,10 @@
 # Commands and flags
 
-The binary has the same commands and flags in every build. Two options need
-a Cargo feature: `views run --db` needs `postgres` (in the release binaries),
-and `views lint --package` needs `fhir-packages` (not in the release
-binaries). Without the feature the command exits 2 and names it.
+The binary has the same commands and flags in every build. Some options need
+a Cargo feature. `views run --db`, `export --hapi-db` (and `refresh` with
+`fetch = "hapi-db"`) and `refresh` with `[database]` need `postgres` (in the
+release binaries). `views lint --package` needs `fhir-packages` (not in the
+release binaries). Without the feature the command exits 2 and names it.
 
 `--profile FILE|URL` (or `FHIR_PIPES_PROFILE`) is accepted by every command.
 Most commands read and write an NDJSON path ending in `.gz` as gzip, every
@@ -44,7 +45,7 @@ warehouse from `fhir-pipes.toml` (or `--config`, `FHIR_PIPES_CONFIG`).
 | Flag | Meaning |
 |---|---|
 | `--check` | print resolved settings, steps and tools found, then exit; changes nothing |
-| `--only STEPS`, `--skip STEPS` | comma-separated: `locations, views, tiles, manifest, catalog, database, hooks, push` |
+| `--only STEPS`, `--skip STEPS` | comma-separated: `locations, views, tiles, libraries, manifest, catalog, database, hooks, push` |
 | `--full` | download everything again instead of only changes |
 | `--reuse-raw` | rerun on the last download in `raw/<name>/` |
 | `--input PATH` (repeat) | read NDJSON/Bundle/JSON files, directories or globs instead of a server |
@@ -55,8 +56,6 @@ warehouse from `fhir-pipes.toml` (or `--config`, `FHIR_PIPES_CONFIG`).
 | `--countries` | countries to build tiles for |
 | `--threads` | default: number of CPUs |
 
-`refresh --server-kind` and `FHIR_PIPES_SERVER_KIND` are newer than the
-other kind flags; on a binary without them, use `server.kind` in the config.
 See [refresh-config.md](refresh-config.md).
 
 ## views
@@ -130,7 +129,8 @@ since the last sync to it. The auth options are the sink's. State is in
 
 ## import, population
 
-All offline, and all need a profile.
+All need a profile. All work offline, except `population --raster URL`, which
+downloads the raster.
 
 - `import location-boundaries --in FILE.geojson --country NAME=CODE --level LEVEL=NAME_PROP[:CODE_PROP] … --out UNITS.ndjson [--alias LEVEL=PROP] [--code-system URI] [--dissolve-parents] [--report FILE]`
 - `import location-sites --in SITES.csv --boundaries UNITS.ndjson --type CODE --name-col C --lat-col C --lon-col C --id-col C --parent LEVEL=COLUMN … --out SITES.ndjson [--paired-org] [--identifier SYSTEM=COL] [--where COL=VALUE] [--spatial-index quadkey:18]`
@@ -152,6 +152,35 @@ Auth: `--dhis2-token` (`FHIR_PIPES_DHIS2_TOKEN`) or `--dhis2-user` and
 `profile check --profile FILE|URL --ig PACKAGE_OR_DIR`: compare a profile
 with its IG (a `package.tgz` path or https URL, a directory of JSON
 resources, or `name#version` in `~/.fhir/packages`). Exit 1 on errors.
+
+## libraries
+
+- `libraries build SRC --out DIR`: each `<file>.sql` in SRC with a
+  `<file>.toml` beside it becomes `DIR/Library-<name>.json`, where `<name>` is
+  the `name` key in the `.toml`. `<file>.duckdb.sql` and
+  `<file>.postgresql.sql` add dialect SQL. A `.sql` with no `.toml` is skipped
+  with a warning.
+- `libraries sql LIBRARY [--sources SRC …] [--warehouse DIR] [--strip-prefix P …]`:
+  print the DuckDB SQL that runs one Library over a warehouse (default `.`).
+  LIBRARY is a Library JSON file or a canonical (`url` or `url|version`).
+  A source is a directory of JSON, a package `.tgz` (path or https URL) or
+  `name#version` in `~/.fhir/packages`.
+
+A Library's SQL runs with fhir-pipes' file and network access. Use only
+sources the user trusts. See docs/libraries.md.
+
+## serve
+
+`serve [--config FILE] [--data DIR] [--listen ADDR]`: runs refreshes for
+another system, on request over HTTP (`POST /run`) or on a `[[serve.schedule]]`
+cron, keeps a record of each run in `DATA/.serve/runs/`, and posts a summary to
+each `[[serve.notify]]` destination when a run ends. `--listen`
+(`FHIR_PIPES_SERVE_LISTEN`) defaults to `127.0.0.1:8090`. Callers send
+`Authorization: Bearer $FHIR_PIPES_SERVE_TOKEN`; without that variable `serve`
+refuses a non-loopback address. With `[serve.query]` it also answers
+`/fhir/$sql-run` for approved SQLQuery Libraries (`FHIR_PIPES_QUERY_TOKEN`).
+Unix only. Do not also run `refresh` from cron on the same warehouse. See
+docs/serve.md.
 
 ## terminology
 

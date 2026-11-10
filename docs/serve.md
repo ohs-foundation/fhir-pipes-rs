@@ -44,6 +44,7 @@ retries = 2               # attempts after the first
 retry_delay = 600         # seconds between attempts
 stop_grace = 120          # seconds a stopping refresh gets before SIGKILL
 keep_runs = 100           # finished runs kept
+max_log_bytes = 20_000_000  # bytes of output kept in a run's log
 
 [[serve.schedule]]
 cron = "0 */6 * * *"      # five fields, UTC
@@ -58,6 +59,9 @@ value_env = "OPENFN_WEBHOOK_KEY"  # the variable holding the header's value
 
 The scalar settings shown are defaults; the schedule and notify entries are examples. A notify `url` must be `http` or `https`
 with no user name or password; put a key in `header` and `value_env`.
+A run's log holds the output of all its attempts. Once it reaches
+`max_log_bytes`, later lines are dropped and the log ends with a line saying how
+many bytes were dropped.
 
 ## The API
 
@@ -85,7 +89,8 @@ The steps are `refresh`'s: `locations`, `views`, `tiles`, `libraries`,
   `catalog`). Failures in the database step, publish, hooks or push, config
   errors, signals from outside `serve` and cancelled runs are not retried.
 - **Notify.** When a run ends, `serve` posts a JSON summary (`event_id`,
-  `run_id`, `status`, `attempts`, `result`) to each `[[serve.notify]]`
+  `run_id`, `trigger` (`api` or `schedule`), `status`, `attempts`, `result`
+  (the last attempt's) and `run_url` (`/runs/<run id>`)) to each `[[serve.notify]]`
   destination. Delivery is at least once: ignore an `event_id` already seen.
 - **Alerts.** Refreshes under `serve` run with failure hooks off, since each
   retry would run them. Use a notify destination for failure alerts.
@@ -176,8 +181,10 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: applic
 | `401` | No token, or a wrong one. |
 | `403` | The Library is in the catalog but is not an approved SQLQuery. |
 | `404` | The canonical is not in the catalog, or a url alone matches more than one version. |
+| `405` | A method the path does not take, including `HEAD`. |
 | `413`, `415` | A POST body over 64 KB; a `Content-Type` other than `application/fhir+json` or `application/json`. |
 | `422` | The query or the `duckdb_setup` SQL failed, or ran past `timeout`. |
+| `500` | An internal failure; `serve`'s log has the details. |
 | `503` | An input table has no data yet, a refresh is publishing, `concurrency` queries are running, or `serve` is stopping. `Retry-After: 5`. |
 
 ### Limits

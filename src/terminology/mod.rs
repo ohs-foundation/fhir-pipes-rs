@@ -9,9 +9,9 @@
 //! The content comes from the packages alone; no terminology server is
 //! called. A value set is taken from its `expansion` when the package has
 //! one, or else expanded from its `compose`: codes listed by the value set,
-//! every code of a code system the packages hold in full, `is-a` and
-//! `descendent-of` filters over such a code system's hierarchy, and other
-//! value sets it includes. Anything else (a code system the packages do not
+//! every code of a code system the packages hold in full, `is-a`,
+//! `descendent-of` and `is-not-a` filters over such a code system's
+//! hierarchy, and other value sets it includes. Anything else (a code system the packages do not
 //! hold, another filter) fails the command, as the page requires, rather than
 //! give a table with members missing.
 

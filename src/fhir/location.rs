@@ -45,13 +45,13 @@ pub fn reference(resource_type: &str, id: &str) -> Value {
     json!({"reference": format!("{resource_type}/{id}")})
 }
 
-/// `{"system": .., "value": ..}`.
 /// A Location's `position` as (longitude, latitude), when both are numbers.
 pub fn position_of(obj: &Map<String, Value>) -> Option<(f64, f64)> {
     let p = obj.get("position")?.as_object()?;
     Some((p.get("longitude")?.as_f64()?, p.get("latitude")?.as_f64()?))
 }
 
+/// `{"system": .., "value": ..}`.
 pub fn identifier(system: &str, value: &str) -> Value {
     json!({"system": system, "value": value})
 }

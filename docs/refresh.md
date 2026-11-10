@@ -55,16 +55,16 @@ After the first run, `locations` and `views` download only what changed since
 the last refresh. `--full` downloads everything again. `--reuse-raw` uses the files in
 `raw/<server>/` where they exist; missing or empty view inputs are fetched. The views step keeps
 `server.concurrency` requests in flight (default 4); see the
-[README](export.md#parallel-downloads). With `fetch = "bulk"` in `[server]`
+[export.md](export.md#parallel-downloads). With `fetch = "bulk"` in `[server]`
 it uses a Bulk Data `$export` instead of search (`bulk_timeout` in seconds,
-default 14400); see the [README](export.md#bulk-data-export). The
+default 14400); see the [export.md](export.md#bulk-data-export). The
 `locations` step always uses search.
 
 ### Reading the HAPI server's database
 
 With `fetch = "hapi-db"`, the views step reads the types the views use from
 the PostgreSQL database of a HAPI FHIR JPA server instead of its API (see the
-[README](export.md#reading-a-hapi-servers-database)). The connection string
+[export.md](export.md#reading-a-hapi-servers-database)). The connection string
 comes only from `FHIR_PIPES_HAPI_DATABASE_URL`.
 
 ### What a failed run leaves behind
@@ -286,7 +286,7 @@ when present). Paths in the file are relative to the file.
 | `libraries` | | none: the `libraries` step does not run |
 | `server.base` | `--server`, `FHIR_PIPES_SERVER` | `http://localhost:3447/fhir` |
 | `server.name` | `--server-name` | `hapi-local`; `files` with a file source |
-| `server.kind` | `--server-kind` | `generic`; `medplum` or `aidbox`. See [servers.md](servers.md) |
+| `server.kind` | `--server-kind` | `generic`; `hapi`, `medplum` or `aidbox`. See [servers.md](servers.md) |
 | `server.fetch`, `server.concurrency` | | `search` (or `bulk`, `hapi-db`); 4 |
 | `source.files` | `--input` (repeatable) | none: resources come from the server |
 | | `--reuse-raw`, `--full`, `--threads` | download again; only what changed; number of CPUs |
@@ -319,15 +319,18 @@ run = ["sh", "-c", "curl -fsS -X POST --data-binary @\"$DATA/last-run.json\" \"$
 ```
 
 Other sections: `[tables] strip_prefix`, `[tools]` (paths of `duckdb`,
-`tippecanoe`, `rclone`), `[tiles] countries`, `[catalog]` and `[database]` (below).
+`tippecanoe`, `rclone`), `[tiles] countries`, `[catalog]` and `[database]` (above).
 
 ### Hooks
 
 A hook runs in the config file's directory with `DATA` (the warehouse
-directory), `FHIR_BASE` and `SERVER_NAME` set. `on` says when:
+directory), `FHIR_BASE`, `SERVER_NAME` and `RUN_ID` set. `RUN_ID` is the value
+of `FHIR_PIPES_RUN_ID`, or empty when that is not set. `on` says when:
 
 - `on = "success"`, the default: after the tables, manifest and catalog are
-  swapped in, with `STATUS=succeeded`. A hook that fails stops the run, which
+  swapped in, with `STATUS=succeeded` and `REFRESHED_AT` (the refresh time
+  written to the manifest, or the start of the hooks step's run when the
+  manifest step did not run). A hook that fails stops the run, which
   then fails at `hooks`.
 - `on = "failure"`: after a failed run, with `STATUS=failed`, `FAILED_STEP`,
   `ERROR` and `EXIT_CODE`. If it fails, that is only a warning; the run still

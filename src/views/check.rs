@@ -8,8 +8,8 @@ use fhir_pipes_sof_lint::{Finding, Severity};
 use super::diagnostic;
 use crate::error::usage;
 
-/// Findings from checking `view`'s selectors and generated SQL against a
-/// FHIR package (FH01–FH10). The package is read as every package is
+/// Findings from checking `view`'s structure and selectors against a FHIR
+/// package (FH01–FH10). The package is read as every package is
 /// (`fhir::package`); a name with `version` is `name#version` in the local
 /// FHIR package cache, or downloaded from the FHIR package registry.
 #[cfg(feature = "fhir-packages")]
