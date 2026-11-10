@@ -451,6 +451,8 @@ fn sigterm_while_downloading_leaves_the_previous_warehouse() {
 /// publish ends.
 #[test]
 #[cfg(unix)]
+// FHIR_PIPES_TEST_PAUSE works in debug builds only.
+#[cfg(debug_assertions)]
 fn sigterm_before_publish_finishes_the_publish() {
     let (dir, config) = setup_with_raw("");
     let data = dir.path().join("data");
@@ -478,6 +480,8 @@ fn sigterm_before_publish_finishes_the_publish() {
 /// A second signal does not wait for anything.
 #[test]
 #[cfg(unix)]
+// FHIR_PIPES_TEST_PAUSE works in debug builds only.
+#[cfg(debug_assertions)]
 fn a_second_sigterm_exits_at_once() {
     let (dir, config) = setup_with_raw("");
     let data = dir.path().join("data");

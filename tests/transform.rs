@@ -6,8 +6,21 @@ use assert_cmd::prelude::*;
 /// These fixtures are ICR-shaped: run with the example ICR profile.
 const ICR_PROFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml");
 
-fn fixture_snapshot() -> std::path::PathBuf {
+/// The tracked snapshot fixture: read it, but transform a copy, since
+/// transform writes its profile copy into the snapshot.
+fn fixture_source() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot")
+}
+
+/// A copy of the snapshot fixture, without the profile copy of an earlier run.
+fn fixture_snapshot() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        fixture_source().join("locations.ndjson"),
+        dir.path().join("locations.ndjson"),
+    )
+    .unwrap();
+    dir
 }
 
 #[test]
@@ -17,7 +30,7 @@ fn transform_writes_dataset_and_report() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .assert()
@@ -69,7 +82,7 @@ fn transform_rejects_bad_partition_key_with_exit_2() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .args(["--partition-by", "country,nope"])
@@ -88,7 +101,7 @@ fn transform_rejects_an_out_path_that_is_a_file() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(&out_file)
         .assert()
@@ -105,7 +118,7 @@ fn a_stale_report_is_replaced() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .assert()
@@ -129,7 +142,7 @@ fn a_failed_transform_removes_the_stale_report_and_keeps_the_dataset() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .assert()
@@ -154,7 +167,7 @@ fn duckdb_reads_the_output_when_available() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .assert()
@@ -211,7 +224,7 @@ fn inspect_summarises_a_written_dataset() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .args(["--row-group-size", "2"])
@@ -271,7 +284,7 @@ fn inspect_ignores_stale_staging_and_backup_dirs() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .assert()
@@ -395,8 +408,7 @@ fn facility_rows_carry_their_organization() {
     let dir = tempfile::tempdir().unwrap();
     let snap = dir.path().join("snapshot");
     std::fs::create_dir_all(&snap).unwrap();
-    let mut locations =
-        std::fs::read_to_string(fixture_snapshot().join("locations.ndjson")).unwrap();
+    let mut locations = std::fs::read_to_string(fixture_source().join("locations.ndjson")).unwrap();
     locations.push_str(&facility("paired", "org-paired", 3.4));
     locations.push('\n');
     locations.push_str(&facility("lonely", "org-gone", 3.5));
@@ -525,7 +537,7 @@ fn transform(out: &Path, extra: &[&str]) -> String {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out)
         .args(extra)
@@ -686,7 +698,7 @@ fn transform_writes_the_hierarchy_table() {
         .unwrap()
         .env("FHIR_PIPES_PROFILE", ICR_PROFILE)
         .args(["transform", "locations", "--snapshot"])
-        .arg(fixture_snapshot())
+        .arg(fixture_snapshot().path())
         .arg("--out")
         .arg(out.path())
         .arg("--hierarchy-out")
