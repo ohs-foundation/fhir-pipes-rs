@@ -767,7 +767,11 @@ fn sigterm_while_waiting_for_the_lock_stops() {
 #[cfg(unix)]
 fn a_push_that_replaces_catalog_duckdb_is_published() {
     let tools = tempfile::tempdir().unwrap();
-    let duckdb = script(tools.path(), "duckdb", "cat > /dev/null; : > \"$1\"");
+    let duckdb = script(
+        tools.path(),
+        "duckdb",
+        "cat > /dev/null; for a; do db=$a; done; : > \"$db\"",
+    );
     let rclone = rclone(
         tools.path(),
         "case \"$*\" in *catalog.duckdb*) exit 1;; esac; exit 0",

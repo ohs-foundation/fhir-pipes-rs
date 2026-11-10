@@ -380,12 +380,24 @@ pub fn build<R: Row>(
             .paired_org
             .as_ref()
             .map(|prefix| format!("{prefix}{id}"));
-        if !is_valid_id(id) || org_id.as_deref().is_some_and(|o| !is_valid_id(o)) {
+        if !is_valid_id(id) {
             report.add(
                 "invalid_id",
                 &format!("row {number}"),
                 &format!(
                     "{:?} value {id:?} is not a valid FHIR id; row skipped",
+                    opts.id_col
+                ),
+            );
+            continue;
+        }
+        if let Some(o) = org_id.as_deref().filter(|o| !is_valid_id(o)) {
+            report.add(
+                "invalid_id",
+                &format!("row {number}"),
+                &format!(
+                    "{:?} value {id:?} makes the Organization id {o:?}, which is not a \
+                     valid FHIR id; row skipped",
                     opts.id_col
                 ),
             );
@@ -1122,6 +1134,20 @@ mod tests {
         assert!(out.is_empty());
         assert_eq!(report.count("missing_field"), 1);
         assert_eq!(report.count("invalid_id"), 1);
+    }
+
+    #[test]
+    fn an_organization_id_too_long_is_named_as_the_problem() {
+        let shape = icr_shape();
+        let mut opts = options(&shape);
+        opts.paired_org = Some("org-".into());
+        let id = "a".repeat(62);
+        let mut report = Report::default();
+        let out = run_build(&[row(&[("globalid", id.as_str())])], &opts, &mut report);
+        assert!(out.is_empty());
+        assert_eq!(report.count("invalid_id"), 1);
+        let detail = &report.issues[0].detail;
+        assert!(detail.contains("Organization id"), "{detail}");
     }
 
     #[test]

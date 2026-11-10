@@ -49,6 +49,10 @@ pub fn rebuild(
     }
     let position_before = position_of(&obj);
     apply_position(&mut obj, row, &id, report);
+    // A point moved in a GIS moves the position through its geometry.
+    if let Some(geom) = &row.geometry {
+        apply_geometry(&mut obj, &id, snapshot, geom, profile, report);
+    }
     let position_after = position_of(&obj);
     if position_after != position_before
         && let Some(url) = profile.location.spatial_index_extension.as_deref()
@@ -61,9 +65,6 @@ pub fn rebuild(
             }
             None => remove_all_cells(&mut obj, url),
         }
-    }
-    if let Some(geom) = &row.geometry {
-        apply_geometry(&mut obj, &id, snapshot, geom, profile, report);
     }
     Value::Object(obj)
 }
@@ -765,6 +766,38 @@ pub(super) mod tests {
             cell("quadkey", 18, &crate::fhir::spatial::quadkey(9.9, 10.5, 18))
         );
         assert_eq!(report.count("malformed_field"), 4);
+    }
+
+    #[test]
+    fn a_point_moved_through_its_geometry_refreshes_spatial_index_cells() {
+        let url = icr().location.spatial_index_extension.unwrap();
+        let cell = |lon: f64, lat: f64| {
+            json!({"url": url, "extension": [
+                {"url": "system", "valueCode": "quadkey"},
+                {"url": "level", "valueUnsignedInt": 18},
+                {"url": "cell", "valueString": crate::fhir::spatial::quadkey(lon, lat, 18)},
+            ]})
+        };
+        let base = json!({"resourceType":"Location","id":"a","extension":[cell(3.25, 6.25)],
+            "position":{"longitude":3.25,"latitude":6.25}});
+        let mut report = Report::default();
+        let snapshot = Location::parse(&base, &icr(), &mut report).unwrap();
+        // A GIS export: the geometry moved, the position columns did not.
+        let out = rebuild(
+            &base,
+            Some(&snapshot),
+            &geom_row(
+                geo::Geometry::Point(geo::Point::new(9.9, 10.5)),
+                &[
+                    ("position_longitude", ColumnValue::Number(3.25)),
+                    ("position_latitude", ColumnValue::Number(6.25)),
+                ],
+            ),
+            &icr(),
+            &mut report,
+        );
+        assert_eq!(out["position"], json!({"longitude":9.9,"latitude":10.5}));
+        assert_eq!(out["extension"], json!([cell(9.9, 10.5)]));
     }
 
     const SQUARE: &str = r#"{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}"#;

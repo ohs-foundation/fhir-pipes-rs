@@ -144,6 +144,34 @@ fn a_local_catalog_duckdb_is_built_once_the_tables_are_in_place() {
     );
 }
 
+/// A `~/.duckdbrc` is not run by the duckdb refresh starts: here one that
+/// writes an error, which the catalog build would take as a failure.
+#[test]
+fn a_duckdbrc_does_not_reach_the_catalog_build() {
+    if !have_duckdb("a_duckdbrc_does_not_reach_the_catalog_build") {
+        return;
+    }
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let (dir, config) = setup(
+        &server.url_str("/fhir"),
+        "\n[catalog]\nduckdb_file = true\n",
+    );
+    let home = dir.path().join("home");
+    fs::create_dir(&home).unwrap();
+    fs::write(
+        home.join(".duckdbrc"),
+        "SELECT error('the duckdbrc ran');\n",
+    )
+    .unwrap();
+    cmd(&config)
+        .args(["--only", "views"])
+        .env("HOME", &home)
+        .assert()
+        .success()
+        .stdout(has("   catalog.duckdb"));
+}
+
 /// With a base_url, catalog.duckdb is built during the push, after the tables
 /// are uploaded, and its views read the uploaded copy.
 #[test]
@@ -207,6 +235,34 @@ fn the_pushed_catalog_reads_the_uploaded_tables() {
             "3"
         );
     }
+}
+
+/// A dry run builds no catalog.duckdb, so it says the file would be built
+/// and uploaded rather than failing on it.
+#[test]
+#[cfg(unix)]
+fn a_dry_run_push_skips_a_catalog_file_not_built_yet() {
+    let server = Server::run();
+    serve_types(&server, &["Observation", "Patient"]);
+    let dir = tempfile::tempdir().unwrap();
+    let mirror = dir.path().join("mirror");
+    let rclone = fake_rclone(dir.path());
+    let (_root, config) = setup(
+        &server.url_str("/fhir"),
+        &format!(
+            "\n[tools]\nrclone = '{}'\n\n[push]\nremote = \"r\"\nbucket = \"bkt\"\nfiles = [\"manifest.json\"]\n\n[catalog]\nbase_url = '{}'\nduckdb_file = true\n",
+            rclone.display(),
+            mirror.display()
+        ),
+    );
+    let log = dir.path().join("rclone.log");
+    cmd(&config)
+        .args(["--only", "views", "--push", "--dry-run"])
+        .env("MIRROR", &mirror)
+        .env("LOG", &log)
+        .assert()
+        .success()
+        .stdout(has("catalog.duckdb (would be built and uploaded)"));
 }
 
 /// A relative --data, and a table named after a SQL keyword.

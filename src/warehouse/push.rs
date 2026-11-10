@@ -103,7 +103,12 @@ pub fn push(s: &Settings, published: &mut bool) -> Result<()> {
         }
         for file in files {
             let src = s.data.join(file);
-            if !(src.is_file() || s.dry_run) {
+            if !src.is_file() {
+                // A dry run has built nothing yet: rclone would fail on a
+                // file that is not there.
+                if s.dry_run {
+                    println!("   {file} (would be built and uploaded)");
+                }
                 continue;
             }
             let mut cmd = Command::new(&s.rclone);

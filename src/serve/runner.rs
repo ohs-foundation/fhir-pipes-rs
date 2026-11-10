@@ -20,7 +20,7 @@ const SAVE_RETRY: Duration = Duration::from_secs(30);
 
 /// The failed steps after which an attempt is tried again: they change
 /// nothing outside the warehouse's staging and raw downloads.
-pub const RETRYABLE: [&str; 9] = [
+pub const RETRYABLE: [&str; 10] = [
     "lock",
     "tools",
     "start",
@@ -28,6 +28,7 @@ pub const RETRYABLE: [&str; 9] = [
     "locations",
     "views",
     "tiles",
+    "libraries",
     "manifest",
     "catalog",
 ];
@@ -574,6 +575,19 @@ mod tests {
         assert!(!live_member("42 (sleep) Z 1 7 7 0", 7), "a zombie");
         assert!(!live_member("42 (sleep) S 7 8 8 0", 7), "another group");
         assert!(!live_member("garbage", 7));
+    }
+
+    #[test]
+    fn every_step_before_the_database_is_retried() {
+        // STEPS is in run order: those before the database are retried,
+        // the rest are not.
+        let database = super::super::api::STEPS
+            .iter()
+            .position(|s| *s == "database")
+            .unwrap();
+        for (i, step) in super::super::api::STEPS.iter().enumerate() {
+            assert_eq!(RETRYABLE.contains(step), i < database, "{step}");
+        }
     }
 
     #[test]

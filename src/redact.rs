@@ -112,13 +112,17 @@ pub fn sql_strings(text: &str, sql: &str) -> String {
     out
 }
 
+/// The variable that holds a PostgreSQL URL: `views run --db`'s, and the
+/// `[database]` section's when it names no `url_env`.
+pub const DATABASE_URL_ENV: &str = "FHIR_PIPES_DATABASE_URL";
+
 /// The variables whose values refresh holds as secrets.
 pub(crate) const SECRET_VARS: [&str; 7] = [
     "FHIR_PIPES_TOKEN",
     "FHIR_PIPES_CLIENT_SECRET",
     "FHIR_PIPES_PASSWORD",
     "FHIR_PIPES_HAPI_DATABASE_URL",
-    "FHIR_PIPES_DATABASE_URL",
+    DATABASE_URL_ENV,
     "FHIR_PIPES_SERVE_TOKEN",
     "FHIR_PIPES_QUERY_TOKEN",
 ];

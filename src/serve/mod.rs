@@ -108,6 +108,7 @@ fn server(
     cfg: config::ServeConfig,
     query: Option<QueryParts>,
     smart: Option<query::http::Smart>,
+    profile: Option<&str>,
 ) -> Result<Arc<api::Server>> {
     let store = Arc::new(store::Store::open(inputs.data.join(".serve/runs"))?);
     let (redactor, warnings) =
@@ -139,6 +140,10 @@ fn server(
     // cut an error short; a notify URL is given to them in a variable of
     // its own.
     let mut child_env = Vec::new();
+    // `serve --profile` reaches each refresh as the variable would.
+    if let Some(p) = profile.filter(|p| !p.is_empty()) {
+        child_env.push(("FHIR_PIPES_PROFILE".to_string(), p.to_string()));
+    }
     let mut secret_vars: Vec<String> = inputs.database_url_env.iter().cloned().collect();
     for (i, d) in cfg.notify.iter().enumerate() {
         if let Some((_, env)) = &d.header {
@@ -191,7 +196,7 @@ fn server(
     }))
 }
 
-pub fn run(args: &ServeArgs) -> Result<()> {
+pub fn run(args: &ServeArgs, profile: Option<&str>) -> Result<()> {
     let (inputs, file) =
         crate::warehouse::serve_inputs(args.config.as_deref(), args.data.clone()).map_err(usage)?;
     let cfg = config::parse(inputs.serve.clone(), &inputs.base).map_err(usage)?;
@@ -252,7 +257,7 @@ pub fn run(args: &ServeArgs) -> Result<()> {
              token_endpoint, so there is no /fhir/.well-known/smart-configuration"
         );
     }
-    let server = server(&inputs, cfg, query, smart)?;
+    let server = server(&inputs, cfg, query, smart, profile)?;
     if !server.job.cfg.schedule.is_empty() {
         let s = server.clone();
         std::thread::spawn(move || {
