@@ -54,7 +54,7 @@ pub(crate) mod sql;
 pub(crate) mod stage;
 mod status;
 mod tiles;
-mod tools;
+pub(crate) mod tools;
 mod views_step;
 
 use std::collections::BTreeSet;
@@ -249,7 +249,7 @@ pub fn serve_inputs(
         database_url_env: file.database.as_ref().map(|d| {
             d.url_env
                 .clone()
-                .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into())
+                .unwrap_or_else(|| crate::redact::DATABASE_URL_ENV.into())
         }),
         serve: file.serve.take(),
     };
@@ -1152,8 +1152,8 @@ fn refresh(
     if let Some(m) = &mismatches {
         report["type_mismatches"] = mismatch_report(m);
     }
-    std::fs::write(
-        s.raw_dir().join("last-refresh.json"),
+    crate::fs::atomic_write(
+        &s.raw_dir().join("last-refresh.json"),
         serde_json::to_string_pretty(&report)?,
     )?;
     if s.upsert() {

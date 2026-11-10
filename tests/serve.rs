@@ -282,6 +282,34 @@ fn runs_and_log_are_served() {
     let st: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(st["last"]["id"], id);
     assert!(st["current"].is_null());
+    // A run with no log file has an empty log, tailed or not.
+    fs::remove_file(data(&config).join(format!(".serve/runs/{id}/log"))).unwrap();
+    assert_eq!(s.get(&format!("/runs/{id}/log")), (200, String::new()));
+    assert_eq!(
+        s.get(&format!("/runs/{id}/log?tail=2")),
+        (200, String::new())
+    );
+}
+
+#[test]
+fn serve_profile_reaches_the_refreshes() {
+    let (dir, config) = setup_with_raw("\n[serve]\nretries = 0\n");
+    let missing = dir.path().join("no-such-profile.toml");
+    let missing = missing.to_str().unwrap();
+    let s = start_serve_with(
+        &config,
+        &[
+            ("FHIR_PIPES_SERVE_TOKEN", TOKEN),
+            ("FHIR_PIPES_REUSE_RAW", "true"),
+        ],
+        &["--profile", missing],
+    );
+    // The locations step is the one that reads the profile.
+    let id = s.start_run(r#"{"only": ["locations"]}"#);
+    let r = s.finished(&id);
+    assert_eq!(r["status"], "failed", "{r}");
+    let (_, log) = s.get(&format!("/runs/{id}/log"));
+    assert!(log.contains("no-such-profile.toml"), "{log}");
 }
 
 #[test]
@@ -747,7 +775,8 @@ fn a_cancel_during_the_publish_lets_it_finish() {
     let duckdb = tools.path().join("duckdb");
     fs::write(
         &duckdb,
-        "#!/bin/sh\necho $$ > duckdb.pid\ncat > /dev/null\nsleep 2\n: > \"$1\"\n",
+        // The database file is the last argument, after `-init`.
+        "#!/bin/sh\necho $$ > duckdb.pid\ncat > /dev/null\nsleep 2\nfor a; do db=$a; done\n: > \"$db\"\n",
     )
     .unwrap();
     fs::set_permissions(&duckdb, fs::Permissions::from_mode(0o755)).unwrap();

@@ -33,7 +33,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use arrow::datatypes::{DataType, TimeUnit};
@@ -133,7 +133,7 @@ pub fn build_duckdb(s: &Settings, c: &Catalog) -> Result<()> {
     // DuckDB runs in the warehouse directory, so relative paths in the views
     // resolve against it; the database is named relative to it too, since
     // s.data may itself be relative.
-    let mut child = Command::new(&s.duckdb)
+    let mut child = super::tools::duckdb_command(&s.duckdb)
         .arg(format!("{DUCKDB_FILE}.tmp"))
         .current_dir(&s.data)
         .stdin(Stdio::piped())

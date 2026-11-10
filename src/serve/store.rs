@@ -180,7 +180,15 @@ impl Store {
         for _ in 0..16 {
             let dir = self.run_dir(&record.id);
             match std::fs::create_dir(&dir) {
-                Ok(()) => return self.save(record),
+                Ok(()) => {
+                    // A directory with no record would be listed as a run
+                    // that cannot be read.
+                    let saved = self.save(record);
+                    if saved.is_err() {
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
+                    return saved;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     record.id = record.id.redraw();
                 }

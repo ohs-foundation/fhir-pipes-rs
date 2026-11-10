@@ -280,7 +280,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
 /// The admin levels of the admin-unit polygons in `poly` (a duckdb list of
 /// files), lowest first.
 fn admin_levels(s: &Settings, poly: &str) -> Result<Vec<u32>> {
-    let out = tools::output(Command::new(&s.duckdb).args([
+    let out = tools::output(tools::duckdb_command(&s.duckdb).args([
         "-csv",
         "-noheader",
         "-c",

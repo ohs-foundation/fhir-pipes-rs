@@ -202,11 +202,26 @@ pub fn build_dir(src: &Path, out: &Path) -> Result<usize> {
     fs::create_dir_all(out)
         .with_context(|| format!("creating {}", out.display()))
         .map_err(usage)?;
+    // Every source is built before any is written: two with the same name
+    // would write the same file.
+    let mut built: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut names: std::collections::HashMap<String, &Path> = std::collections::HashMap::new();
     for path in &paths {
         let lib = build_source(path)?;
-        let name = lib["name"].as_str().unwrap_or_default();
+        let name = lib["name"].as_str().unwrap_or_default().to_string();
+        if let Some(first) = names.insert(name.clone(), path) {
+            return Err(usage(anyhow::anyhow!(
+                "{} and {} both have name = {name:?}; each would be written to \
+                 Library-{name}.json. Give one another name",
+                first.display(),
+                path.display()
+            )));
+        }
+        built.push((name, lib));
+    }
+    for (name, lib) in &built {
         let dest = out.join(format!("Library-{name}.json"));
-        let text = serde_json::to_string_pretty(&lib)? + "\n";
+        let text = serde_json::to_string_pretty(lib)? + "\n";
         fs::write(&dest, text).with_context(|| format!("writing {}", dest.display()))?;
     }
     Ok(paths.len())

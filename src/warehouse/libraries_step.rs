@@ -15,7 +15,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
@@ -316,26 +315,14 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A file with no SQL, given to duckdb's `-init`.
-const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
-
-/// duckdb for a Library's SQL. `-init` with an empty file keeps duckdb from
-/// running the user's `~/.duckdbrc` first, which could change settings or
-/// the output format the step reads, or run statements of its own.
-fn duckdb_command(s: &Settings) -> Command {
-    let mut c = Command::new(&s.duckdb);
-    c.args(["-init", NO_INIT]);
-    c
-}
-
-/// Run a SQL script with `duckdb_command`, discarding its result table.
+/// Run a SQL script with duckdb, discarding its result table.
 fn duckdb(s: &Settings, sql: &str) -> Result<()> {
-    tools::output(duckdb_command(s).args(["-c", sql])).map(|_| ())
+    tools::duckdb(&s.duckdb, sql)
 }
 
 /// The column names of `sql`'s result.
 fn columns(s: &Settings, sql: &str) -> Result<Vec<String>> {
-    let out = tools::output(duckdb_command(s).args([
+    let out = tools::output(tools::duckdb_command(&s.duckdb).args([
         "-noheader",
         "-list",
         "-c",

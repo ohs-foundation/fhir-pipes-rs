@@ -63,6 +63,32 @@ fn run_writes_csv_to_stdout() {
 }
 
 #[test]
+fn run_with_input_ignores_the_database_variable() {
+    views()
+        .env("FHIR_PIPES_DATABASE_URL", "postgres://127.0.0.1:9/none")
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .arg("--input")
+        .arg(fixtures().join("raw/Observation.ndjson"))
+        .assert()
+        .success()
+        .stdout(contains("o2,loc-kono,5,2026-02-03T04:05:06Z"));
+}
+
+#[test]
+fn run_with_input_and_db_typed_is_a_usage_error() {
+    views()
+        .arg("run")
+        .arg(fixtures().join("views/Binary-IcrObs.json"))
+        .arg("--input")
+        .arg(fixtures().join("raw/Observation.ndjson"))
+        .args(["--db", "postgres://127.0.0.1:9/none"])
+        .assert()
+        .code(2)
+        .stderr(contains("--input and --db"));
+}
+
+#[test]
 fn run_streams_ndjson() {
     views()
         .arg("run")

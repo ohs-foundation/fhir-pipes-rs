@@ -81,8 +81,8 @@ The steps are `refresh`'s: `locations`, `views`, `tiles`, `libraries`,
 
 - **Retries.** A failed attempt is tried again after `retry_delay`, up to
   `retries` times, only when it failed before the database step (at `lock`,
-  `tools`, `start`, `files`, `locations`, `views`, `tiles`, `manifest` or
-  `catalog`). Failures in the database step, publish, hooks or push, config
+  `tools`, `start`, `files`, `locations`, `views`, `tiles`, `libraries`,
+  `manifest` or `catalog`). Failures in the database step, publish, hooks or push, config
   errors, signals from outside `serve` and cancelled runs are not retried.
 - **Notify.** When a run ends, `serve` posts a JSON summary (`event_id`,
   `run_id`, `status`, `attempts`, `result`) to each `[[serve.notify]]`

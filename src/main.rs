@@ -78,7 +78,7 @@ fn run(cli: cli::Cli) -> anyhow::Result<()> {
         cli::Command::Import(cmd) => import::run(&cmd, profile),
         cli::Command::Refresh(args) => warehouse::run(&args, profile),
         #[cfg(unix)]
-        cli::Command::Serve(args) => serve::run(&args),
+        cli::Command::Serve(args) => serve::run(&args, profile),
         cli::Command::Views(args) => views::run(&args),
         cli::Command::Libraries(args) => library::run(&args),
         cli::Command::Terminology(command) => terminology::run(&command),

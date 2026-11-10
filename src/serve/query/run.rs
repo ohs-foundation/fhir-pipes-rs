@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -399,9 +399,9 @@ impl Runner {
         // The script goes on stdin, not in the arguments, which anyone on
         // the machine can read (`ps`) and which have a size limit. `-bail`
         // stops duckdb at the first error, as `-c` did.
-        let mut command = Command::new(&self.duckdb);
+        let mut command = crate::warehouse::tools::duckdb_command(&self.duckdb);
         command
-            .args(["-init", NO_INIT, "-bail"])
+            .arg("-bail")
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -607,10 +607,6 @@ fn without_setup(text: &str, setup: &str) -> String {
     crate::redact::sql_strings(&kept, setup)
 }
 
-/// A file with no SQL, given to duckdb's `-init`, so the user's
-/// `~/.duckdbrc` does not run first.
-const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,7 +711,7 @@ mod tests {
         }
         // Killed and reaped: a zombie would still take a signal.
         let pid = r.last_pid.lock().unwrap().unwrap();
-        let alive = Command::new("kill")
+        let alive = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stderr(Stdio::null())
             .status()

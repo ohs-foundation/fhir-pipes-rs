@@ -659,7 +659,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         database: file.database.map(|d| Database {
             url_env: d
                 .url_env
-                .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into()),
+                .unwrap_or_else(|| crate::redact::DATABASE_URL_ENV.into()),
             schema: d.schema.unwrap_or_else(|| "public".into()),
             tables: d.tables,
             mode: d.mode.unwrap_or_default(),

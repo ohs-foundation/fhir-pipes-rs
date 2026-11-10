@@ -179,5 +179,7 @@ fn refresh_recomputes_a_present_cell_and_a_bad_scheme_is_a_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicates::str::contains("scheme must be one of"));
+        .stderr(predicates::str::contains(
+            "scheme must be one of quadkey, geohash, got",
+        ));
 }
