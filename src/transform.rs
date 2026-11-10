@@ -8,11 +8,9 @@ use crate::index::build_index;
 use crate::index::partition::parse_keys;
 use crate::profile::Profile;
 use crate::report::write_json;
-use crate::snapshot::ORGANIZATIONS_FILE;
+use crate::snapshot::{LOCATIONS_FILE, ORGANIZATIONS_FILE};
 use crate::write::dataset::write_dataset;
 use crate::write::hierarchy::write_hierarchy;
-
-pub const SNAPSHOT_FILE: &str = "locations.ndjson";
 
 /// `--out` must either not exist yet or already be a directory.
 pub fn check_out_dir(out: &Path) -> Result<()> {
@@ -34,7 +32,7 @@ pub fn run_transform(args: &TransformArgs, profile: Option<&str>) -> anyhow::Res
 /// both of its steps).
 pub fn transform_with(args: &TransformArgs, profile: &Profile) -> Result<()> {
     check_out_dir(&args.out)?;
-    let ndjson = args.snapshot.join(SNAPSHOT_FILE);
+    let ndjson = args.snapshot.join(LOCATIONS_FILE);
     if !ndjson.is_file() {
         return Err(PipesError::Usage(format!(
             "snapshot file not found: {}",

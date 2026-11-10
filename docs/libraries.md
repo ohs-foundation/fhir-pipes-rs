@@ -63,7 +63,8 @@ fhir-pipes libraries build <src> --out <dir>
 ```
 
 Writes `Library-<name>.json` in `<dir>` for every `*.sql` file in `<src>` that
-has a `.toml` file beside it. A `.sql` file with no `.toml` is not built, and a
+has a `.toml` file beside it. `<name>` is the `name` key in the `.toml`, not the
+file name. A `.sql` file with no `.toml` is not built, and a
 warning names it.
 
 ## libraries sql

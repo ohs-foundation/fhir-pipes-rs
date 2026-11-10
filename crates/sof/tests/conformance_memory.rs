@@ -3,10 +3,9 @@
 //! Runs the official `sql-on-fhir-v2` content tests through the database-free
 //! [`fhir_pipes_sof::execute`] evaluator and compares the produced rows against
 //! each test's expectation. Unlike `tests/conformance.rs` this needs no
-//! PostgreSQL — it runs whenever the test-case checkout is present (the sibling
-//! `../fhir-test-cases/sql-on-fhir`, overridable with `SOF_TEST_CASES_DIR`).
+//! PostgreSQL. The test cases are the vendored `tests/spec` suite; override the
+//! directory with `SOF_TEST_CASES_DIR`.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use fhir_pipes_sof::{ViewDefinition, execute, execute_parallel};
@@ -217,15 +216,9 @@ fn test_cases_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("SOF_TEST_CASES_DIR") {
         return Some(PathBuf::from(d));
     }
-    // Prefer the vendored official reference suite (see tests/spec/SOURCE.md).
+    // The vendored official reference suite (see tests/spec/SOURCE.md).
     let vendored = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/spec");
-    if vendored.is_dir() {
-        return Some(vendored);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../fhir-test-cases/sql-on-fhir")
-        .canonicalize()
-        .ok()
+    vendored.is_dir().then_some(vendored)
 }
 
 fn multiset_eq(a: &[Value], b: &[Value]) -> bool {
@@ -285,5 +278,4 @@ fn report(outcomes: &[Outcome]) {
             println!("  [{}] {}: {}", o.file, o.title, d);
         }
     }
-    let _ = BTreeSet::<()>::new();
 }

@@ -54,7 +54,7 @@ pub(crate) mod sql;
 pub(crate) mod stage;
 mod status;
 mod tiles;
-mod tools;
+pub(crate) mod tools;
 mod views_step;
 
 use std::collections::BTreeSet;
@@ -135,8 +135,10 @@ pub struct RefreshArgs {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     google_auth: Option<bool>,
-    /// Run only these steps (comma-separated). The manifest is added when a
-    /// data step is among them.
+    /// Run only these steps (comma-separated). With locations or views,
+    /// libraries is added; with a data step (locations, views, tiles,
+    /// libraries), manifest and catalog are added; with locations, views or
+    /// libraries, database is added.
     #[arg(long, value_delimiter = ',')]
     only: Vec<Step>,
     /// Leave out these steps (comma-separated).
@@ -228,10 +230,7 @@ pub fn serve_inputs(
 ) -> Result<(ServeInputs, config::File)> {
     let path = match config {
         Some(p) => p.to_path_buf(),
-        None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists())
+        None => config::default_file()
             .context("no config file: pass --config or set FHIR_PIPES_CONFIG")?,
     };
     let (mut file, base) = config::load(Some(&path))?;
@@ -249,7 +248,7 @@ pub fn serve_inputs(
         database_url_env: file.database.as_ref().map(|d| {
             d.url_env
                 .clone()
-                .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into())
+                .unwrap_or_else(|| crate::redact::DATABASE_URL_ENV.into())
         }),
         serve: file.serve.take(),
     };
@@ -1008,7 +1007,6 @@ fn refresh(
     // The commit window (stop.rs): from the database step, which may commit
     // the new rows, to the end of the publish, a stop is held back so the
     // files follow the database.
-    #[allow(unused_mut)]
     let mut window: Option<crate::stop::Hold> = None;
     #[cfg(feature = "postgres")]
     if steps.contains(&Step::Database)
@@ -1152,8 +1150,8 @@ fn refresh(
     if let Some(m) = &mismatches {
         report["type_mismatches"] = mismatch_report(m);
     }
-    std::fs::write(
-        s.raw_dir().join("last-refresh.json"),
+    crate::fs::atomic_write(
+        &s.raw_dir().join("last-refresh.json"),
         serde_json::to_string_pretty(&report)?,
     )?;
     if s.upsert() {

@@ -454,15 +454,21 @@ impl Settings {
     }
 }
 
+/// The config file in the current directory when none is named:
+/// fhir-pipes.toml, else fhir-warehouse.toml, the name the file had before
+/// fhir-pipes.
+pub fn default_file() -> Option<PathBuf> {
+    ["fhir-pipes.toml", "fhir-warehouse.toml"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+}
+
 /// Read a config file, or the empty config when there is none.
 pub fn load(path: Option<&Path>) -> Result<(File, PathBuf)> {
     let found = match path {
         Some(p) => Some(p.to_path_buf()),
-        // fhir-warehouse.toml is the name the file had before fhir-pipes.
-        None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists()),
+        None => default_file(),
     };
     let Some(path) = found else {
         return Ok((File::default(), std::env::current_dir()?));
@@ -659,7 +665,7 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
         database: file.database.map(|d| Database {
             url_env: d
                 .url_env
-                .unwrap_or_else(|| "FHIR_PIPES_DATABASE_URL".into()),
+                .unwrap_or_else(|| crate::redact::DATABASE_URL_ENV.into()),
             schema: d.schema.unwrap_or_else(|| "public".into()),
             tables: d.tables,
             mode: d.mode.unwrap_or_default(),

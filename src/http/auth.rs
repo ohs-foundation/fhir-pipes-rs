@@ -323,7 +323,7 @@ impl FhirClient {
         anywhere: bool,
     ) -> std::result::Result<RequestBuilder, FetchError> {
         let (client, built) = request.build_split();
-        let mut built = built.map_err(|e| FetchError::Transport(e.to_string()))?;
+        let mut built = built.map_err(|e| FetchError::Transport(e.without_url().to_string()))?;
         if anywhere || self.origin.as_ref() == Some(&built.url().origin()) {
             let headers = built.headers_mut();
             headers.insert(AUTHORIZATION, auth.clone());

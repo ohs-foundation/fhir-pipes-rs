@@ -126,4 +126,3 @@ parquet = { version = "59", default-features = false, features = ["arrow", "snap
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytes = "1"
 thiserror = "2.0"
-tracing = "0.1"

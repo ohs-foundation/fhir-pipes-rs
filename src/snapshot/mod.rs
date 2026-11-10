@@ -1,5 +1,6 @@
 //! The snapshot directory: locations.ndjson, state.json, the boundary cache,
-//! and the in-progress incoming file. See README "The snapshot".
+//! and the in-progress incoming file. See docs/locations.md, "extract and the
+//! snapshot".
 
 pub mod index;
 pub mod instant;
@@ -128,7 +129,8 @@ mod tests {
             std::path::PathBuf::from("/x/.incoming-organizations.ndjson")
         );
 
-        // A plan 2 state file has no organization fields and must still load.
+        // A state file written before the organization fields existed must
+        // still load.
         let old = r#"{"server":"s","watermark":"2026-01-01T00:00:00Z","count":1,"kiln_version":"0.2.0","completed_at":"2026-01-01T00:00:00Z"}"#;
         let st: State = serde_json::from_str(old).unwrap();
         assert_eq!(st.organization_watermark, None);

@@ -10,11 +10,10 @@
 //! last run ended without its exit status.
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::config::Settings;
@@ -150,12 +149,11 @@ impl Status {
         }
     }
 
+    /// Through a temporary file, fsynced, so a crash leaves the old record
+    /// or the new one.
     fn write(&self) -> Result<()> {
-        let tmp = self.path.with_file_name(format!(".{FILE}.tmp"));
-        fs::write(&tmp, serde_json::to_string_pretty(&self.record)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &self.path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), self.path.display()))
+        crate::fs::atomic_write(&self.path, serde_json::to_string_pretty(&self.record)?)?;
+        Ok(())
     }
 }
 

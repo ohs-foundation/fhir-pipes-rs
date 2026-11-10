@@ -686,7 +686,7 @@ async fn read_rows(
                 if message.contains("permission denied for large object") {
                     message.push_str(
                         "; resources HAPI stored as large objects need SELECT on \
-                         pg_catalog.pg_largeobject for this role (see the README)",
+                         pg_catalog.pg_largeobject for this role (see docs/export.md)",
                     );
                 }
                 PipesError::Environment(message)

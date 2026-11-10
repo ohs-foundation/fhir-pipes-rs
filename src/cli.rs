@@ -103,7 +103,8 @@ pub enum Command {
     #[command(subcommand)]
     Import(crate::import::ImportCommand),
     /// A value set or concept map from FHIR packages as a table SQL can join
-    /// to, as SQL on FHIR's Terminology in SQL page defines it (offline)
+    /// to, as SQL on FHIR's Terminology in SQL page defines it (no
+    /// terminology server; a --package https URL is downloaded)
     #[command(subcommand)]
     Terminology(crate::terminology::TerminologyCommand),
 }

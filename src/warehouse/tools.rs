@@ -100,9 +100,21 @@ fn failed(shown: &str, status: std::process::ExitStatus) -> anyhow::Error {
     }
 }
 
+/// A file with no SQL, given to duckdb's `-init`.
+const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
+/// `duckdb` with `-init` an empty file, so the user's `~/.duckdbrc` does not
+/// run first: it could change settings or the output format a step reads,
+/// or run statements of its own. Every duckdb fhir-pipes starts is made here.
+pub fn duckdb_command(duckdb: &str) -> Command {
+    let mut c = Command::new(duckdb);
+    c.args(["-init", NO_INIT]);
+    c
+}
+
 /// Run a duckdb SQL script, discarding its result table.
 pub fn duckdb(duckdb: &str, sql: &str) -> Result<()> {
-    output(Command::new(duckdb).args(["-c", sql])).map(|_| ())
+    output(duckdb_command(duckdb).args(["-c", sql])).map(|_| ())
 }
 
 fn show(cmd: &Command) -> String {

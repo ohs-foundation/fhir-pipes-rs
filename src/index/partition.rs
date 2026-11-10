@@ -160,8 +160,12 @@ fn render(value: &str, letters: bool) -> (String, bool) {
     while !result.is_char_boundary(cut) {
         cut -= 1;
     }
-    // Not inside a `%XX`: every `%` in the name starts one.
-    if let Some(p) = result[cut.saturating_sub(2)..cut].find('%') {
+    // Not inside a `%XX`: every `%` in the name starts one. Bytes, since
+    // two bytes back can be inside a multi-byte character.
+    if let Some(p) = result.as_bytes()[cut.saturating_sub(2)..cut]
+        .iter()
+        .position(|&b| b == b'%')
+    {
         cut -= 2 - p;
     }
     let digest = Sha256::digest(value.as_bytes());
@@ -326,6 +330,13 @@ mod tests {
         // Cut on a character boundary, and not inside an escape.
         let (s, _) = render(&"é".repeat(150), false);
         assert!(s.len() <= MAX_SEGMENT);
+        // 3- and 4-byte characters at every offset of the cut.
+        for pad in 0..4 {
+            for c in ["€", "😀"] {
+                let (s, _) = render(&("x".repeat(pad) + &c.repeat(100)), false);
+                assert!(s.len() <= MAX_SEGMENT, "{pad} {c}");
+            }
+        }
         for n in 0..3 {
             let (s, _) = render(&("x".repeat(n) + &"/".repeat(100)), false);
             let name = s.split('~').next().unwrap();

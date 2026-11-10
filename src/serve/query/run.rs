@@ -2,11 +2,11 @@
 //! each input read from the warehouse's Parquet, run it with the `duckdb`
 //! command, and return its rows as NDJSON, JSON or CSV.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -399,9 +399,9 @@ impl Runner {
         // The script goes on stdin, not in the arguments, which anyone on
         // the machine can read (`ps`) and which have a size limit. `-bail`
         // stops duckdb at the first error, as `-c` did.
-        let mut command = Command::new(&self.duckdb);
+        let mut command = crate::warehouse::tools::duckdb_command(&self.duckdb);
         command
-            .args(["-init", NO_INIT, "-bail"])
+            .arg("-bail")
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -485,7 +485,8 @@ impl Runner {
         // message, so only the kind is kept.
         let detail = match &self.setup {
             Some(_) => error_kind(&stderr).unwrap_or("query error").to_string(),
-            None => without_setup(stderr.trim(), ""),
+            None if stderr.trim().is_empty() => "duckdb failed with no message".to_string(),
+            None => stderr.trim().to_string(),
         };
         Err(QueryError::Sql {
             message: "the query failed; the serve log has the details".to_string(),
@@ -559,57 +560,6 @@ fn has_parquet(dir: &Path) -> bool {
         }
     })
 }
-
-/// The shortest run of the setup's characters that marks a line of an
-/// error as quoting it.
-const QUOTED_RUN: usize = 6;
-
-/// `s` with each run of whitespace made one space.
-fn collapsed(s: &str) -> Vec<char> {
-    let mut out: Vec<char> = Vec::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_whitespace() {
-            if out.last() != Some(&' ') {
-                out.push(' ');
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// `text` without any line that holds `QUOTED_RUN` characters of `setup` in
-/// a row, wherever they are in it (a string, a comment, a keyword), with
-/// whitespace runs made one space in both. The setup is not parsed: a key
-/// can be in any kind of string, and duckdb can quote a long one cut short.
-/// A run of only whitespace and punctuation (`...`, `');  `) is no reason
-/// to drop a line. What is left has the setup's single-quoted strings
-/// blanked, for a key shorter than the run.
-fn without_setup(text: &str, setup: &str) -> String {
-    let chars = collapsed(setup);
-    let runs: HashSet<&[char]> = chars
-        .windows(QUOTED_RUN)
-        .filter(|w| w.iter().any(|c| c.is_alphanumeric()))
-        .collect();
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|line| {
-            !collapsed(line)
-                .windows(QUOTED_RUN)
-                .any(|w| runs.contains(w))
-        })
-        .collect();
-    let kept = kept.join("\n");
-    if kept.trim().is_empty() {
-        return "duckdb failed; its message quoted the duckdb_setup SQL".to_string();
-    }
-    crate::redact::sql_strings(&kept, setup)
-}
-
-/// A file with no SQL, given to duckdb's `-init`, so the user's
-/// `~/.duckdbrc` does not run first.
-const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 #[cfg(test)]
 mod tests {
@@ -715,7 +665,7 @@ mod tests {
         }
         // Killed and reaped: a zombie would still take a signal.
         let pid = r.last_pid.lock().unwrap().unwrap();
-        let alive = Command::new("kill")
+        let alive = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stderr(Stdio::null())
             .status()
@@ -943,29 +893,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn a_query_error_drops_lines_that_quote_the_setup() {
-        // An apostrophe in a comment, a literal over several lines, and a
-        // run of dots that is no reason to drop a line.
-        let setup = "-- it's mine\nSET VARIABLE v = 'supersecretkey\n   AKIAXYZ'; -- ......";
-        let text = "Conversion Error: could not convert\nstring 'supersecretkey  AKIAXYZ'\n\
-                    near XYZ'; -- and\nkey AKIAXY refused\nCandidate: ...... nope";
-        assert_eq!(
-            without_setup(text, setup),
-            "Conversion Error: could not convert\nCandidate: ...... nope"
-        );
-        assert_eq!(
-            without_setup("key AKIAXYZ", setup),
-            "duckdb failed; its message quoted the duckdb_setup SQL"
-        );
-        // A quoted literal of the setup shorter than the window is blanked.
-        assert_eq!(
-            without_setup("zone eu1 refused", "SET s3_region = 'eu1';"),
-            "zone *** refused"
-        );
-        assert_eq!(without_setup("Binder Error: x", ""), "Binder Error: x");
     }
 
     #[test]

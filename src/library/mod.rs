@@ -33,9 +33,10 @@ pub struct LibrariesArgs {
 
 #[derive(clap::Subcommand, Debug)]
 enum LibrariesCommand {
-    /// Build Library JSON from .sql files: each `<name>.sql` with a
-    /// `<name>.toml` beside it becomes `Library-<name>.json` in --out.
-    /// `<name>.duckdb.sql` and `<name>.postgresql.sql` add dialect content.
+    /// Build Library JSON from .sql files: each `<file>.sql` with a
+    /// `<file>.toml` beside it becomes `Library-<name>.json` in --out, where
+    /// `<name>` is the `name` key in the .toml, not the file name.
+    /// `<file>.duckdb.sql` and `<file>.postgresql.sql` add dialect content.
     Build {
         /// A directory of .sql and .toml files.
         src: PathBuf,
@@ -185,6 +186,21 @@ pub struct Dependency {
     /// The canonical URL, without any `|version`.
     pub canonical: String,
     pub version: Option<String>,
+}
+
+/// `url|version`, or the url alone.
+pub(crate) fn versioned(url: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("{url}|{v}"),
+        None => url.to_string(),
+    }
+}
+
+impl Dependency {
+    /// `canonical|version`, or the canonical alone.
+    pub fn versioned(&self) -> String {
+        versioned(&self.canonical, self.version.as_deref())
+    }
 }
 
 #[derive(Debug, Clone)]

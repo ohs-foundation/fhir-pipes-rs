@@ -22,7 +22,7 @@ use super::runner::{self, CancelToken, Job};
 use super::store::{RunId, RunRecord, RunRequest, Trigger};
 
 /// The steps a request may name in `only` and `skip`, as `refresh` takes them.
-const STEPS: [&str; 9] = [
+pub(super) const STEPS: [&str; 9] = [
     "locations",
     "views",
     "tiles",
@@ -301,15 +301,19 @@ async fn log(
     if !server.job.store.run_dir(&id).join("run.json").is_file() {
         return not_found();
     }
-    let got = tokio::task::spawn_blocking(move || match q.tail {
-        Some(n) => super::output::tail(&path, n.min(MAX_TAIL)),
-        None => std::fs::read_to_string(&path).or_else(|e| {
+    let got = tokio::task::spawn_blocking(move || {
+        let read = match q.tail {
+            Some(n) => super::output::tail(&path, n.min(MAX_TAIL)),
+            None => std::fs::read_to_string(&path),
+        };
+        // A run that has not written its log yet has an empty one.
+        read.or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Ok(String::new())
             } else {
                 Err(e)
             }
-        }),
+        })
     })
     .await;
     match got {

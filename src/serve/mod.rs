@@ -101,6 +101,7 @@ fn server(
     inputs: &crate::warehouse::ServeInputs,
     cfg: config::ServeConfig,
     query: Option<QueryParts>,
+    profile: Option<&str>,
 ) -> Result<Arc<api::Server>> {
     let store = Arc::new(store::Store::open(inputs.data.join(".serve/runs"))?);
     let (redactor, warnings) =
@@ -132,6 +133,10 @@ fn server(
     // cut an error short; a notify URL is given to them in a variable of
     // its own.
     let mut child_env = Vec::new();
+    // `serve --profile` reaches each refresh as the variable would.
+    if let Some(p) = profile.filter(|p| !p.is_empty()) {
+        child_env.push(("FHIR_PIPES_PROFILE".to_string(), p.to_string()));
+    }
     let mut secret_vars: Vec<String> = inputs.database_url_env.iter().cloned().collect();
     for (i, d) in cfg.notify.iter().enumerate() {
         if let Some((_, env)) = &d.header {
@@ -183,7 +188,7 @@ fn server(
     }))
 }
 
-pub fn run(args: &ServeArgs) -> Result<()> {
+pub fn run(args: &ServeArgs, profile: Option<&str>) -> Result<()> {
     let (inputs, file) =
         crate::warehouse::serve_inputs(args.config.as_deref(), args.data.clone()).map_err(usage)?;
     let cfg = config::parse(inputs.serve.clone(), &inputs.base).map_err(usage)?;
@@ -221,7 +226,7 @@ pub fn run(args: &ServeArgs) -> Result<()> {
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let _lock = lock(&dir.join("serve.lock"))?;
     let query_enabled = cfg.query.is_some();
-    let server = server(&inputs, cfg, query)?;
+    let server = server(&inputs, cfg, query, profile)?;
     if !server.job.cfg.schedule.is_empty() {
         let s = server.clone();
         std::thread::spawn(move || {
@@ -234,7 +239,7 @@ pub fn run(args: &ServeArgs) -> Result<()> {
                         ..Default::default()
                     };
                     match s.start(store::Trigger::Schedule, request) {
-                        Ok(_) => schedule::Fired::Started,
+                        Ok(_) => {}
                         Err(api::Refused::Busy(id)) => {
                             s.metrics.schedule_skipped();
                             s.job.stdout.push(format!(
@@ -242,13 +247,11 @@ pub fn run(args: &ServeArgs) -> Result<()> {
                                 at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                                 id.as_str()
                             ));
-                            schedule::Fired::Skipped
                         }
                         Err(api::Refused::Unrecorded(e)) => {
                             eprintln!("fhir-pipes: error: a scheduled run was not started: {e}");
-                            schedule::Fired::Refused
                         }
-                        Err(api::Refused::Stopping) => schedule::Fired::Refused,
+                        Err(api::Refused::Stopping) => {}
                     }
                 },
                 None,

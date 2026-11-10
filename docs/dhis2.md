@@ -84,9 +84,14 @@ days old. `--max-analytics-age 7d` refuses the run instead.
 ### Resuming and comparing with an earlier run
 
 - `--resume` continues a failed or stopped run from `OUT.ndjson.resume`. It is
-  refused if the arguments (other than `--concurrency`), the DHIS2 URL, an org
-  unit count, the analytics build time, or the `--locations` or `--previous`
-  file have changed. Run without `--resume` to start over.
+  refused if anything that shapes the batches has changed: the DHIS2 URL, the
+  instance, the indicators, `--level`, `--period`, `--range`, `--root`,
+  `--breakdown`, `--chunk`, `--max-rows`, `--campaign`, `--source`,
+  `--updated-since`, the `--changed` path, an org unit count, the analytics
+  build time (not with `--source data-values`), or the `--locations` or
+  `--previous` file. Other options, such as `--concurrency`, `--timeout`,
+  `--retries`, `--max-analytics-age`, `--removed` and `--report`, may change.
+  Run without `--resume` to start over.
 - `--previous PREV.ndjson` compares with an earlier run. `--out` still gets
   every report, so it can be the baseline for the next run. `--changed FILE`
   gets the new and changed reports to load. `--removed FILE` gets the ids of

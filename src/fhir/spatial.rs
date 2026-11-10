@@ -17,7 +17,9 @@ use serde_json::{Map, Value, json};
 use crate::error::{PipesError, Result};
 use crate::report::Report;
 
-pub const SCHEMES: [&str; 3] = ["quadkey", "h3", "geohash"];
+/// The schemes `--spatial-index` computes. h3 is a known scheme but is
+/// refused with its own message: it is not computed yet.
+pub const SCHEMES: [&str; 2] = ["quadkey", "geohash"];
 const MAX_MERCATOR_LAT: f64 = 85.051_128_78;
 const GEOHASH_ALPHABET: &[u8] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 

@@ -133,6 +133,17 @@ mod tests {
     }
 
     #[test]
+    fn tail_keeps_the_collection() {
+        // tail() returns every item but the first, so it can be many.
+        let f = lint_view(&view("name.tail().family", false), &provider());
+        assert_eq!(codes(&f), vec!["FH04"]);
+        let f = lint_view(&view("name.tail()", false), &provider());
+        assert_eq!(codes(&f), vec!["FH04"]);
+        let f = lint_view(&view("name.tail().family", true), &provider());
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
     fn narrowed_array_is_clean() {
         let f = lint_view(&view("name.first().family", false), &provider());
         assert!(f.is_empty(), "{f:?}");
@@ -169,7 +180,7 @@ mod tests {
     fn reference_navigated_to_primitive_is_clean() {
         // .reference is a primitive string leaf on Reference; not modelled here,
         // so navigation past Reference is unresolved and must not false-positive.
-        let f = lint_view(&view("gender", false), &provider());
+        let f = lint_view(&view("managingOrganization.reference", false), &provider());
         assert!(f.is_empty(), "{f:?}");
     }
 

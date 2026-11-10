@@ -50,8 +50,7 @@ const ORGANIZATION_KEYS: [OrganizationKey; 5] = [
     OrganizationKey::Name,
 ];
 
-const ORG_UNIT_FIELDS: &str =
-    "id,code,name,shortName,level,parent[id],openingDate,closedDate,geometry";
+const ORG_UNIT_FIELDS: &str = "id,code,name,shortName,level,parent[id],closedDate,geometry";
 
 #[derive(Debug, Clone, Default)]
 pub struct OrgUnit {
@@ -369,9 +368,9 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
     }
 }
 
-/// Every Location and Organization for `units`, top level first, then by id.
-/// The resources for `units`, parents first, handed to `emit` as each unit
-/// is built.
+/// Every Location and Organization for `units`, handed to `emit` as each
+/// unit is built: by level, top level first (so parents come first), then
+/// by id. Units below the facility level are skipped and reported.
 pub fn build(
     units: &[OrgUnit],
     opts: &Options,

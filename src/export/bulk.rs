@@ -294,15 +294,18 @@ pub fn wait(client: &FhirClient, status_url: &str, deadline: Instant) -> Result<
                 // the export's.
                 let gateway = found.is_empty() && status >= 500;
                 if !(transient || gateway) {
-                    // Cut for display only, after the body was classified.
-                    let text: String = if found.is_empty() {
+                    // Cut for display only, after the body was classified,
+                    // and after secrets are masked: a cut secret could no
+                    // longer be found.
+                    let text = if found.is_empty() {
                         String::from_utf8_lossy(&got.body).into_owned()
                     } else {
                         join_issues(&found)
-                    }
-                    .chars()
-                    .take(DISPLAY_CAP)
-                    .collect();
+                    };
+                    let text: String = crate::redact::known_secrets(&text)
+                        .chars()
+                        .take(DISPLAY_CAP)
+                        .collect();
                     return Ok(Polled::Failed(format!("HTTP {status}: {text}")));
                 }
                 got.retry_after()

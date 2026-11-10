@@ -109,7 +109,7 @@ fn a_bad_cron_is_a_config_error() {
     assert!(stderr.contains("every day"), "{stderr}");
 }
 
-// ---- The API, runs and notify (Task B6) ----
+// ---- The API, runs and notify ----
 
 use httptest::{Expectation, Server as HttpServer, matchers::*, responders::*};
 use serde_json::Value;
@@ -282,6 +282,34 @@ fn runs_and_log_are_served() {
     let st: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(st["last"]["id"], id);
     assert!(st["current"].is_null());
+    // A run with no log file has an empty log, tailed or not.
+    fs::remove_file(data(&config).join(format!(".serve/runs/{id}/log"))).unwrap();
+    assert_eq!(s.get(&format!("/runs/{id}/log")), (200, String::new()));
+    assert_eq!(
+        s.get(&format!("/runs/{id}/log?tail=2")),
+        (200, String::new())
+    );
+}
+
+#[test]
+fn serve_profile_reaches_the_refreshes() {
+    let (dir, config) = setup_with_raw("\n[serve]\nretries = 0\n");
+    let missing = dir.path().join("no-such-profile.toml");
+    let missing = missing.to_str().unwrap();
+    let s = start_serve_with(
+        &config,
+        &[
+            ("FHIR_PIPES_SERVE_TOKEN", TOKEN),
+            ("FHIR_PIPES_REUSE_RAW", "true"),
+        ],
+        &["--profile", missing],
+    );
+    // The locations step is the one that reads the profile.
+    let id = s.start_run(r#"{"only": ["locations"]}"#);
+    let r = s.finished(&id);
+    assert_eq!(r["status"], "failed", "{r}");
+    let (_, log) = s.get(&format!("/runs/{id}/log"));
+    assert!(log.contains("no-such-profile.toml"), "{log}");
 }
 
 #[test]
@@ -498,7 +526,7 @@ fn no_secret_in_records_logs_stdout_or_notify() {
     }
 }
 
-// ---- The schedule (Task B7) ----
+// ---- The schedule ----
 
 #[test]
 fn a_schedule_fires() {
@@ -529,7 +557,7 @@ fn a_schedule_fires() {
     }
 }
 
-// ---- Restart and shutdown (Task B8) ----
+// ---- Restart and shutdown ----
 
 fn read_pid(path: &Path) -> i32 {
     let started = Instant::now();
@@ -615,7 +643,7 @@ fn sigterm_stops_the_child_and_exits() {
     assert!(r["finished_at"].is_string(), "{r}");
 }
 
-// ---- Fixes from the final review ----
+// ---- --data, shutdown, cancel during the publish, recovery and secrets ----
 
 /// --data wins over FHIR_PIPES_DATA for serve and for the refreshes it starts.
 #[test]
@@ -747,7 +775,8 @@ fn a_cancel_during_the_publish_lets_it_finish() {
     let duckdb = tools.path().join("duckdb");
     fs::write(
         &duckdb,
-        "#!/bin/sh\necho $$ > duckdb.pid\ncat > /dev/null\nsleep 2\n: > \"$1\"\n",
+        // The database file is the last argument, after `-init`.
+        "#!/bin/sh\necho $$ > duckdb.pid\ncat > /dev/null\nsleep 2\nfor a; do db=$a; done\n: > \"$db\"\n",
     )
     .unwrap();
     fs::set_permissions(&duckdb, fs::Permissions::from_mode(0o755)).unwrap();
