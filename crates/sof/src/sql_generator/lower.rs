@@ -437,7 +437,7 @@ impl Lower {
     /// A function applied to the current context (`name(...)` with no object).
     fn func_root(&self, name: &str, args: &[ExpressionNode], ctx: &str) -> Result<String, Error> {
         let seed = self.dialect.build_array1(ctx);
-        self.apply_on_coll(name, &seed, args, ctx)
+        self.apply_on_coll(name, &seed, args)
     }
 
     /// A method call `object.name(args)`.
@@ -463,7 +463,7 @@ impl Lower {
             }
             _ => {
                 let oc = self.coll(object, ctx)?;
-                self.apply_on_coll(name, &oc, args, ctx)
+                self.apply_on_coll(name, &oc, args)
             }
         }
     }
@@ -474,7 +474,6 @@ impl Lower {
         name: &str,
         coll: &str,
         args: &[ExpressionNode],
-        _ctx: &str,
     ) -> Result<String, Error> {
         match name {
             "first" | "single" => Ok(self.index(coll, 0)),
@@ -646,10 +645,10 @@ impl Lower {
         let string_bound = match hint {
             BoundaryType::Date => date_bound(d, &t, low),
             BoundaryType::DateTime => datetime_bound(d, &t, low),
-            BoundaryType::Time => time_bound(d, &t, low),
+            BoundaryType::Time => time_bound(&t, low),
             BoundaryType::Unknown => format!(
                 "CASE WHEN position(':' in {t}) > 0 THEN {} ELSE {} END",
-                time_bound(d, &t, low),
+                time_bound(&t, low),
                 date_bound(d, &t, low)
             ),
         };
