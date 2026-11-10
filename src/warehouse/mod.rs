@@ -230,10 +230,7 @@ pub fn serve_inputs(
 ) -> Result<(ServeInputs, config::File)> {
     let path = match config {
         Some(p) => p.to_path_buf(),
-        None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists())
+        None => config::default_file()
             .context("no config file: pass --config or set FHIR_PIPES_CONFIG")?,
     };
     let (mut file, base) = config::load(Some(&path))?;
@@ -1010,7 +1007,6 @@ fn refresh(
     // The commit window (stop.rs): from the database step, which may commit
     // the new rows, to the end of the publish, a stop is held back so the
     // files follow the database.
-    #[allow(unused_mut)]
     let mut window: Option<crate::stop::Hold> = None;
     #[cfg(feature = "postgres")]
     if steps.contains(&Step::Database)

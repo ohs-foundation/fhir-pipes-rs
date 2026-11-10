@@ -239,7 +239,7 @@ pub fn run(args: &ServeArgs, profile: Option<&str>) -> Result<()> {
                         ..Default::default()
                     };
                     match s.start(store::Trigger::Schedule, request) {
-                        Ok(_) => schedule::Fired::Started,
+                        Ok(_) => {}
                         Err(api::Refused::Busy(id)) => {
                             s.metrics.schedule_skipped();
                             s.job.stdout.push(format!(
@@ -247,13 +247,11 @@ pub fn run(args: &ServeArgs, profile: Option<&str>) -> Result<()> {
                                 at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                                 id.as_str()
                             ));
-                            schedule::Fired::Skipped
                         }
                         Err(api::Refused::Unrecorded(e)) => {
                             eprintln!("fhir-pipes: error: a scheduled run was not started: {e}");
-                            schedule::Fired::Refused
                         }
-                        Err(api::Refused::Stopping) => schedule::Fired::Refused,
+                        Err(api::Refused::Stopping) => {}
                     }
                 },
                 None,

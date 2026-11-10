@@ -52,10 +52,7 @@ impl Artifact {
 
     /// `url|version`, or the url alone.
     pub fn canonical(&self) -> String {
-        match self.version() {
-            Some(v) => format!("{}|{v}", self.url()),
-            None => self.url().to_string(),
-        }
+        super::versioned(self.url(), self.version())
     }
 
     fn name(&self) -> &str {
@@ -276,10 +273,7 @@ impl Catalog {
         state[i] = Visit::Open;
         path.push(i);
         for dep in &lib.depends_on {
-            let resource = match &dep.version {
-                Some(v) => format!("{}|{v}", dep.canonical),
-                None => dep.canonical.clone(),
-            };
+            let resource = dep.versioned();
             let what = || format!("Library {} depends-on {} ({resource})", lib.name, dep.label);
             // Only the built-in hierarchy reads the Location view.
             if dep.canonical == LOCATION_URL && lib.url != HIERARCHY_URL {

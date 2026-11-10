@@ -82,22 +82,12 @@ pub fn next_fire(schedules: &[Schedule], after: DateTime<Utc>) -> Option<(DateTi
         .min_by_key(|(at, _)| *at)
 }
 
-/// What a scheduled time did.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Fired {
-    Started,
-    /// A run was current: the time is skipped.
-    Skipped,
-    /// The run could not be recorded.
-    Refused,
-}
-
 /// Fire each scheduled time from now on through `start`, `times` of them
 /// (forever with `None`).
 pub fn run(
     schedules: &[Schedule],
     clock: &dyn Clock,
-    mut start: impl FnMut(DateTime<Utc>, Mode) -> Fired,
+    mut start: impl FnMut(DateTime<Utc>, Mode),
     times: Option<usize>,
 ) {
     let mut after = clock.now();
@@ -181,15 +171,7 @@ mod tests {
         // Started at 01:30: 01:00 has passed and is not run; 02:00 is next.
         let clock = Manual(Mutex::new(utc(1, 30, 0)));
         let mut fired = Vec::new();
-        run(
-            &s,
-            &clock,
-            |at, _| {
-                fired.push(at);
-                Fired::Started
-            },
-            Some(2),
-        );
+        run(&s, &clock, |at, _| fired.push(at), Some(2));
         assert_eq!(fired, [utc(2, 0, 0), utc(3, 0, 0)]);
     }
 
@@ -197,17 +179,9 @@ mod tests {
     fn a_scheduled_time_during_a_run_is_skipped() {
         let s = [schedule("0 * * * *", Mode::Incremental)];
         let clock = Manual(Mutex::new(utc(1, 30, 0)));
-        let mut results = vec![Fired::Skipped, Fired::Started];
+        // The first time finds a run under way and starts nothing.
         let mut fired = Vec::new();
-        run(
-            &s,
-            &clock,
-            |at, _| {
-                fired.push(at);
-                results.remove(0)
-            },
-            Some(2),
-        );
+        run(&s, &clock, |at, _| fired.push(at), Some(2));
         // The skipped 02:00 is not tried again: the next is 03:00.
         assert_eq!(fired, [utc(2, 0, 0), utc(3, 0, 0)]);
     }

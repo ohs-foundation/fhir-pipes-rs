@@ -188,6 +188,21 @@ pub struct Dependency {
     pub version: Option<String>,
 }
 
+/// `url|version`, or the url alone.
+pub(crate) fn versioned(url: &str, version: Option<&str>) -> String {
+    match version {
+        Some(v) => format!("{url}|{v}"),
+        None => url.to_string(),
+    }
+}
+
+impl Dependency {
+    /// `canonical|version`, or the canonical alone.
+    pub fn versioned(&self) -> String {
+        versioned(&self.canonical, self.version.as_deref())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Library {
     pub url: String,

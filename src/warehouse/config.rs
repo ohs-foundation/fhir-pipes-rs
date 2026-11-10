@@ -454,15 +454,21 @@ impl Settings {
     }
 }
 
+/// The config file in the current directory when none is named:
+/// fhir-pipes.toml, else fhir-warehouse.toml, the name the file had before
+/// fhir-pipes.
+pub fn default_file() -> Option<PathBuf> {
+    ["fhir-pipes.toml", "fhir-warehouse.toml"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+}
+
 /// Read a config file, or the empty config when there is none.
 pub fn load(path: Option<&Path>) -> Result<(File, PathBuf)> {
     let found = match path {
         Some(p) => Some(p.to_path_buf()),
-        // fhir-warehouse.toml is the name the file had before fhir-pipes.
-        None => ["fhir-pipes.toml", "fhir-warehouse.toml"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists()),
+        None => default_file(),
     };
     let Some(path) = found else {
         return Ok((File::default(), std::env::current_dir()?));

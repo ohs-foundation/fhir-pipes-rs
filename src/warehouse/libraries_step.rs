@@ -137,15 +137,9 @@ fn other_tables(s: &Settings, views: &[crate::views::run::View]) -> BTreeMap<Str
     taken
 }
 
-/// The table an input is read from, or `None` for a SQLView, whose SQL is
-/// inlined. The built-in LocationHierarchy is the table the locations step
-/// writes.
+/// The table an input is read from: `library::input_table`.
 fn input_table(s: &Settings, a: &Artifact) -> Option<String> {
-    match a {
-        Artifact::Library(l) if l.url == HIERARCHY_URL => Some(HIERARCHY_TABLE.to_string()),
-        Artifact::Library(l) if l.kind == Kind::SqlView => None,
-        _ => Some(a.table(&s.strip_prefix)),
-    }
+    crate::library::input_table(a, &s.strip_prefix)
 }
 
 /// Every table `lib` reads, through the SQLViews it inlines, must be there,
@@ -197,10 +191,7 @@ pub(super) fn missing(
     } else {
         format!(" (read by {})", query.name)
     };
-    let canonical = match &dep.version {
-        Some(v) => format!("{}|{v}", dep.canonical),
-        None => dep.canonical.clone(),
-    };
+    let canonical = dep.versioned();
     let why = match input {
         Artifact::Library(l) if l.url == HIERARCHY_URL => {
             "the locations step writes it; run the locations step"
