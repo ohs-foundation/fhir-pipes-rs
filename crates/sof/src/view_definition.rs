@@ -223,6 +223,22 @@ impl SelectColumn {
     }
 }
 
+/// Error if two output columns share a name. The in-memory compile and the SQL
+/// generator both call this, so they reject a view with the same message.
+pub(crate) fn check_unique_column_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), Error> {
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            return Err(Error::InvalidViewDefinition(format!(
+                "column `{name}` is defined more than once"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn output_columns_of<'a>(
     select: &'a SelectColumn,
     mismatch: &mut dyn FnMut(),
