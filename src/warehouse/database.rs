@@ -57,9 +57,9 @@ use sqlx_postgres::PgConnection;
 
 use crate::error::usage;
 use crate::export::changes::Changes;
+use crate::library::Kind;
 use crate::library::compose::{Bind, compose};
 use crate::library::resolve::{Artifact, Catalog, HIERARCHY_TABLE, HIERARCHY_URL};
-use crate::library::{Kind, Library};
 use crate::views::run::View;
 
 use super::config::{Database, Mode, Settings};
@@ -190,19 +190,14 @@ pub fn sql_views(s: &Settings, catalog: &Catalog, schema: &str) -> Result<Vec<Sq
         out.push(SqlView {
             library: lib.name.clone(),
             create: format!("CREATE VIEW {} AS\n{select}", qualified(schema, &name)),
-            comment: format!("{SQLVIEW_COMMENT}{}", canonical(lib)),
+            comment: format!(
+                "{SQLVIEW_COMMENT}{}",
+                crate::library::versioned(&lib.url, lib.version.as_deref())
+            ),
             name,
         });
     }
     Ok(out)
-}
-
-/// `url|version`, or the url alone.
-fn canonical(lib: &Library) -> String {
-    match &lib.version {
-        Some(v) => format!("{}|{v}", lib.url),
-        None => lib.url.clone(),
-    }
 }
 
 /// The table, in the target schema, where upsert records which load wrote

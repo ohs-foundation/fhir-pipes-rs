@@ -216,11 +216,11 @@ pub fn merge_file(
                     stats.removed += 1;
                     continue;
                 }
-                Some((id, updated)) => {
+                // Not an incoming id, so never looked up in `old_ids`.
+                Some((_, updated)) => {
                     if let Some(u) = updated {
                         stats.watermark = later(stats.watermark.as_deref(), &u);
                     }
-                    old_ids.insert(id);
                 }
                 None => report.add(
                     files.unparsed_kind,

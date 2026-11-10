@@ -10,7 +10,7 @@ use crate::cli::{
     DEFAULT_CONCURRENCY, DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_PARTITION_BY, DEFAULT_RETRIES,
     DEFAULT_ROW_GROUP_SIZE, DEFAULT_TIMEOUT_SECS, ExportArgs, ExtractArgs, RunArgs, TransformArgs,
 };
-use crate::transform::SNAPSHOT_FILE;
+use crate::snapshot::LOCATIONS_FILE;
 
 use super::config::{Fetch, Settings};
 
@@ -23,7 +23,7 @@ use super::config::{Fetch, Settings};
 /// an extract. Returns whether the server was contacted.
 pub fn locations(s: &Settings, out: &Path) -> Result<bool> {
     let snapshot = s.raw_dir().join("locations");
-    if s.reuse_raw && snapshot.join(SNAPSHOT_FILE).is_file() {
+    if s.reuse_raw && snapshot.join(LOCATIONS_FILE).is_file() {
         println!(
             "== locations (--reuse-raw: {} → {}, no extract)",
             snapshot.display(),

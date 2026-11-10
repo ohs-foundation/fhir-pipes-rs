@@ -31,9 +31,9 @@ use crate::fhir::ndjson::{LineAccess, Output, is_gz};
 use crate::fs::AtomicFile;
 use crate::profile::Profile;
 use crate::report::{Report, write_report};
+use crate::snapshot::LOCATIONS_FILE;
 use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::snapshot::index::index_by_id;
-use crate::transform::SNAPSHOT_FILE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
@@ -263,7 +263,7 @@ fn finish(out: Output<AtomicFile>, tmp: &Path) -> Result<()> {
 }
 
 pub fn run_diff(args: &DiffArgs, profile: Option<&str>) -> anyhow::Result<()> {
-    let ndjson = args.snapshot.join(SNAPSHOT_FILE);
+    let ndjson = args.snapshot.join(LOCATIONS_FILE);
     if !ndjson.is_file() {
         return Err(
             PipesError::Usage(format!("snapshot file not found: {}", ndjson.display())).into(),

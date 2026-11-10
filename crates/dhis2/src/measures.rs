@@ -27,7 +27,7 @@ use fhir_pipes::report::Report;
 
 const INDICATOR_FIELDS: &str = "id,code,name,description,numerator,numeratorDescription,\
 denominator,denominatorDescription,decimals,annualized,lastUpdated,\
-indicatorType[name,factor,number],indicatorGroups[id,name]";
+indicatorType[name,factor],indicatorGroups[id,name]";
 const DATA_ELEMENT_FIELDS: &str =
     "id,code,name,description,aggregationType,lastUpdated,dataElementGroups[id,name,groupSets[id]]";
 const DATA_SET_FIELDS: &str = "id,code,name,description,periodType,lastUpdated";
