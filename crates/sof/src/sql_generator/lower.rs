@@ -456,6 +456,7 @@ impl Lower {
                     .to_json_scalar(&format!("NOT ({})", self.bool(object, ctx)?)),
             )),
             "lowBoundary" | "highBoundary" => {
+                no_boundary_precision(name, args)?;
                 let hint = boundary_hint(object);
                 let oc = self.coll(object, ctx)?;
                 Ok(self.boundary(&oc, name == "lowBoundary", hint))
@@ -512,8 +513,10 @@ impl Lower {
             }
             "getReferenceKey" => self.reference_key(coll, args.first()),
             "getResourceKey" => self.resource_key(coll),
-            "lowBoundary" => Ok(self.boundary(coll, true, BoundaryType::Unknown)),
-            "highBoundary" => Ok(self.boundary(coll, false, BoundaryType::Unknown)),
+            "lowBoundary" | "highBoundary" => {
+                no_boundary_precision(name, args)?;
+                Ok(self.boundary(coll, name == "lowBoundary", BoundaryType::Unknown))
+            }
             "toString" => Ok(coll.to_string()),
             other => Err(Error::InvalidPath(format!(
                 "unsupported function {other}()"
@@ -981,4 +984,16 @@ impl Lower {
 /// from a view goes through this.
 pub(super) fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The SQL lowering has no precision support for `lowBoundary`/`highBoundary`.
+/// Fail on a precision argument rather than return the default boundary.
+fn no_boundary_precision(name: &str, args: &[ExpressionNode]) -> Result<(), Error> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::InvalidPath(format!(
+            "{name}(precision) is not supported in SQL"
+        )))
+    }
 }
