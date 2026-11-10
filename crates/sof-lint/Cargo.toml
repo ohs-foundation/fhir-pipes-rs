@@ -29,6 +29,3 @@ packages = [
     "dep:banshee_hir",
     "dep:banshee_parser",
 ]
-
-[dev-dependencies]
-tokio = { workspace = true }

@@ -101,19 +101,16 @@ fn walk(expr: &ExpressionNode, location: &str, allowed: &[String], out: &mut Vec
         }
         ExpressionNode::UnaryOperation(u) => {
             // All three unary operators (not, -, +) are in the subset.
-            let _ = &u.operator;
             walk(&u.operand, location, allowed, out);
         }
-        ExpressionNode::Union(_) => {
+        ExpressionNode::Union(u) => {
             out.push(finding(
                 Severity::Error,
                 location,
                 "collection union `|` is not in the Shareable FHIRPath subset".into(),
             ));
-            if let ExpressionNode::Union(u) = expr {
-                walk(&u.left, location, allowed, out);
-                walk(&u.right, location, allowed, out);
-            }
+            walk(&u.left, location, allowed, out);
+            walk(&u.right, location, allowed, out);
         }
         ExpressionNode::TypeCheck(t) => {
             out.push(finding(

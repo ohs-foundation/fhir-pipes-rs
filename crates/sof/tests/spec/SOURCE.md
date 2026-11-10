@@ -6,5 +6,9 @@ Vendored: 2026-06-04
 License: see upstream (Apache-2.0 / CC0)
 
 These are the official reference content tests + `tests.schema.json`.
-They are the source of truth for conformance. Refresh with `just update-spec-tests`.
+They are the source of truth for conformance. To refresh, copy the content
+test files (`*.json` and `tests.schema.json`) from the upstream repository at a
+newer commit into this directory and update the commit above. Run them with
+`cargo test -p fhir-pipes-sof --test conformance_memory` (see
+[CONFORMANCE.md](../../CONFORMANCE.md) for the DuckDB and PostgreSQL runs).
 Do NOT hand-edit the `*.json` test files.

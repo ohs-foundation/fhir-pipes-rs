@@ -135,14 +135,9 @@ impl CompiledView {
                 "ViewDefinition produces no columns".to_string(),
             ));
         }
-        let mut seen = std::collections::HashSet::new();
-        for (name, _) in &shape {
-            if !seen.insert(name.clone()) {
-                return Err(Error::InvalidViewDefinition(format!(
-                    "column `{name}` is defined more than once"
-                )));
-            }
-        }
+        crate::view_definition::check_unique_column_names(
+            shape.iter().map(|(name, _)| name.as_str()),
+        )?;
 
         // Compile every where, forEach, repeat and column path now (constants,
         // ofType rewrite, parse), so per-resource evaluation runs the compiled
