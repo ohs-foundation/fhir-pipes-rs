@@ -28,7 +28,7 @@ fhir-pipes import location-sites --in SITES.csv --boundaries UNITS.ndjson --type
 fhir-pipes population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY --out GROUPS.ndjson
 ```
 
-`--help` on each command lists every flag. `AUTH`, timeouts and retries work as for every command; see [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server). `--server-kind` (`generic` by default; `medplum` or `aidbox`) adds the search parameters those servers need; see [servers.md](servers.md).
+`--help` on each command lists every flag. `AUTH`, timeouts and retries work as for every command; see [Connecting to a FHIR server](../README.md#connecting-to-a-fhir-server). `--server-kind` (`generic` by default; `hapi`, `medplum` or `aidbox`) adds the search parameters those servers need; see [servers.md](servers.md).
 
 `extract`, `run` and `load` contact FHIR; `population` can download a raster. `transform locations`, `inspect`, `diff` and `import` work on files.
 
@@ -83,7 +83,7 @@ Rows are sorted along a Hilbert curve and each row group carries its bounding bo
 | `--keep-without-geometry` | off | Also write Locations with no point and no usable boundary, with null geometry columns. Otherwise they are reported as `no_geometry` and left out. |
 | `--hierarchy-out DIR` | | Also write the `location_hierarchy` table. |
 
-`run` takes the extract and transform options together. `inspect --out DIR` prints a summary of every Parquet file under `DIR` (rows, row groups, size, geometry types).
+`run` takes the extract and transform options together. `inspect --out DIR` prints a summary of every Parquet file in the dataset under `DIR/locations` (rows, row groups, size, geometry types). Other files in `DIR`, such as a `location_hierarchy` table, are not listed.
 
 By default a Location produces a row only if it has a usable geometry and a resolved place in the hierarchy. A Location with no geometry, a `partOf` cycle or a chain deeper than twelve levels, or a repeated id is reported and produces no row. A Location with both a boundary and a position is one row: the polygon is the geometry and the position is kept in its own columns. An unparseable boundary is reported; a valid position is then used as point geometry.
 
@@ -205,7 +205,7 @@ fhir-pipes import location-sites --profile examples/profiles/icr.toml \
 | Spatial index extension | `[location] spatial_index_extension` (needed for `--spatial-index`) |
 | Organization id prefix | `[organization] id_prefix` |
 
-For a country whose IG is not ICR's, write a profile first ([profiles.md](profiles.md)). `import` needs at least `[location] type_systems` and `admin_unit_type`.
+For a country whose IG is not ICR's, write a profile first ([profiles.md](profiles.md)). Both `import` commands need at least `[location] type_systems`; `import location-boundaries` also needs `[location] admin_unit_type`.
 
 ### Example: a new country
 

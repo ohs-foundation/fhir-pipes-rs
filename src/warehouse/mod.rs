@@ -135,8 +135,10 @@ pub struct RefreshArgs {
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     google_auth: Option<bool>,
-    /// Run only these steps (comma-separated). The manifest is added when a
-    /// data step is among them.
+    /// Run only these steps (comma-separated). With locations or views,
+    /// libraries is added; with a data step (locations, views, tiles,
+    /// libraries), manifest and catalog are added; with locations, views or
+    /// libraries, database is added.
     #[arg(long, value_delimiter = ',')]
     only: Vec<Step>,
     /// Leave out these steps (comma-separated).

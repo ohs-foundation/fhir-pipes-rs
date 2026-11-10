@@ -1,4 +1,5 @@
-//! `fhir-pipes inspect`: describe every parquet file under OUT.
+//! `fhir-pipes inspect`: describe every parquet file in the dataset under
+//! OUT/locations. Other files under OUT are not read.
 
 use std::path::{Path, PathBuf};
 
@@ -36,9 +37,9 @@ fn parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         .map_err(|e| PipesError::io(dir, e))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
-    // `PathBuf`'s `Ord` compares component-by-component, not the raw string,
-    // so this already orders `part-2` before `part-10`; do not "simplify" it
-    // to a string sort.
+    // `PathBuf`'s `Ord` compares component by component, so `a/b` sorts
+    // before `a-b/c` where a raw string sort would not. Each component is
+    // compared as bytes: `part-10` sorts before `part-2`.
     entries.sort();
     for path in entries {
         let meta = std::fs::symlink_metadata(&path).map_err(|e| PipesError::io(&path, e))?;

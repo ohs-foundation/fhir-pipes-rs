@@ -17,15 +17,18 @@ found, and changes nothing.
 | `locations` | extract Locations into `raw/<name>/locations`, transform to `parquet/locations` | |
 | `views` | download the types the views read (incrementally), run the views, write tables | |
 | `tiles` | `tiles/*.pmtiles` from the Location table | duckdb (spatial), tippecanoe |
+| `libraries` | run each SQLQuery Library over this run's tables and write its result as a table; only with `libraries` in the config | duckdb |
 | `manifest` | `manifest.json` | |
 | `catalog` | `catalog.sql` (DuckDB views), optional `catalog.spark.sql`; only with `[catalog]` | duckdb only for `duckdb_file` |
-| `database` | the view tables into PostgreSQL; only with `[database]` | |
+| `database` | the view tables, `location_hierarchy` and the SQLQuery results into PostgreSQL, and the SQLViews as views; only with `[database]` | |
 | `hooks` | `[[hooks]]` commands, in order | the commands |
 | `push` | `rclone sync`; only with `--push` | rclone |
 
-By default every step except `push` runs. `--only views` picks steps; the
-manifest, catalog and database are added when a data step is picked, and
-every step not picked, including `hooks`, is left out.
+By default every step except `push` runs. `--only views` picks steps, and
+the steps that depend on them are added: `libraries` with `locations` or
+`views`; `manifest` and `catalog` with any of `locations`, `views`, `tiles`,
+`libraries`; `database` with `locations`, `views` or `libraries`. Every other
+step, including `hooks`, is left out.
 `--skip tiles` leaves one out. The tiles step expects ICR-shaped columns;
 with another profile, use `--skip tiles`.
 
@@ -48,6 +51,7 @@ names the step that failed.
   parquet/<table>/<partition>=<value>/part-0.parquet
   views/<name>.json                the views that were run
   manifest.json                    time, server, row count per table, views
+  last-run.json                    how the last run went, or that one is running
   catalog.sql                      with [catalog]
   tiles/                           with the tiles step
 ```
@@ -79,6 +83,7 @@ SELECT * FROM read_parquet('warehouse/parquet/patient_flat/*/*.parquet', hive_pa
 | `server.google_auth` | `--google-auth`, `FHIR_PIPES_GOOGLE_AUTH` | false |
 | `source.files` | `--input` (repeat) | none: read from the server |
 | `tiles.countries` | `--countries` | every country |
+| `libraries` | | none: no `libraries` step |
 
 Secrets that stay in the environment only: `FHIR_PIPES_TOKEN`,
 `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET`, `FHIR_PIPES_PASSWORD`,
@@ -96,7 +101,7 @@ views = "views"
 [server]
 base = "https://fhir.example.org/fhir"
 name = "prod"
-kind = "generic"            # "medplum" or "aidbox" for those servers
+kind = "generic"            # "hapi", "medplum" or "aidbox" for those servers
 fetch = "search"            # "bulk" for $export, "hapi-db" for HAPI's database
 concurrency = 4
 # token_url = "https://auth.example.org/realms/x/protocol/openid-connect/token"
@@ -134,10 +139,34 @@ server is never contacted. The resources are split into `raw/<name>/`.
   `FHIR_PIPES_HAPI_DATABASE_URL`. HAPI only. The `locations` step still
   uses search, so `server.base` is still needed for it.
 
+## Libraries
+
+`libraries = ["../libraries/out", "example.analytics#0.1.0", "https://example.org/libs.tgz"]`
+(top level, before any section) lists Library sources: directories of JSON,
+`name#version` in `~/.fhir/packages`, or a package `.tgz` (an https one is
+downloaded on every run). The `libraries` step runs each SQLQuery after the
+Libraries it depends on and writes `parquet/<table>/`. A source's SQL runs with
+the refresh's file access: use only sources the user trusts.
+
+## How the last run went
+
+`last-run.json` in the data directory has `status` (`running`, `succeeded`,
+`failed`), `started_at`, `committed` (whether the database commit happened),
+`published`, and for a failure `failed_step`, `error` and `exit_code`. A run
+that fails before it gets the lock does not write it.
+
+## serve
+
+`fhir-pipes serve` reads the same file plus a `[serve]` section (`retries`,
+`retry_delay`, `stop_grace`, `keep_runs`, `max_log_bytes`), `[[serve.schedule]]`
+(`cron`, `mode`), `[[serve.notify]]` (`name`, `url`, `header`, `value_env`) and
+`[serve.query]` for `$sql-run`. See docs/serve.md.
+
 ## PostgreSQL
 
 With `[database]`, the database step loads every view table (not the
-Location table) in one transaction: create if missing, `DELETE`, `COPY`.
+Location table), `location_hierarchy` and each SQLQuery Library's result in
+one transaction, and makes each SQLView a PostgreSQL view: create if missing, `DELETE`, `COPY`.
 Readers see the old rows until the commit. The connection string comes
 only from the variable `url_env` names (default `FHIR_PIPES_DATABASE_URL`).
 Its `sslmode` sets TLS; managed databases usually need `require` or more.
