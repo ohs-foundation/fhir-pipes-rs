@@ -138,11 +138,6 @@ impl Warehouse {
         files
     }
 
-    /// LocationHierarchy's portable SQL (views/location/LocationHierarchy.sql)
-    /// with the label `location` bound to this warehouse's Location Parquet,
-    /// composed as fhir-pipes composes a Library: the input in a CTE named
-    /// by the label. `libraries sql` does not print this for the built-in:
-    /// it reads the `location_hierarchy` table, as the refresh does.
     /// What `libraries sql` prints for LocationHierarchy: a read of this
     /// warehouse's `location_hierarchy`, without the trailing `;`.
     fn printed_sql(&self) -> String {
@@ -160,6 +155,11 @@ impl Warehouse {
         text.trim_end().trim_end_matches(';').to_string()
     }
 
+    /// LocationHierarchy's portable SQL (views/location/LocationHierarchy.sql)
+    /// with the label `location` bound to this warehouse's Location Parquet,
+    /// composed as fhir-pipes composes a Library: the input in a CTE named
+    /// by the label. `libraries sql` does not print this for the built-in:
+    /// it reads the `location_hierarchy` table, as the refresh does.
     fn library_sql(&self) -> String {
         let sql = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("views/location/LocationHierarchy.sql"),

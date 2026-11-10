@@ -109,7 +109,7 @@ fn a_bad_cron_is_a_config_error() {
     assert!(stderr.contains("every day"), "{stderr}");
 }
 
-// ---- The API, runs and notify (Task B6) ----
+// ---- The API, runs and notify ----
 
 use httptest::{Expectation, Server as HttpServer, matchers::*, responders::*};
 use serde_json::Value;
@@ -526,7 +526,7 @@ fn no_secret_in_records_logs_stdout_or_notify() {
     }
 }
 
-// ---- The schedule (Task B7) ----
+// ---- The schedule ----
 
 #[test]
 fn a_schedule_fires() {
@@ -557,7 +557,7 @@ fn a_schedule_fires() {
     }
 }
 
-// ---- Restart and shutdown (Task B8) ----
+// ---- Restart and shutdown ----
 
 fn read_pid(path: &Path) -> i32 {
     let started = Instant::now();
@@ -643,7 +643,7 @@ fn sigterm_stops_the_child_and_exits() {
     assert!(r["finished_at"].is_string(), "{r}");
 }
 
-// ---- Fixes from the final review ----
+// ---- --data, shutdown, cancel during the publish, recovery and secrets ----
 
 /// --data wins over FHIR_PIPES_DATA for serve and for the refreshes it starts.
 #[test]
