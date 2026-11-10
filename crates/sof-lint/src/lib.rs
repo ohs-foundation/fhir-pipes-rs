@@ -7,8 +7,10 @@
 //! fhir-pipes-sof, with no package. With the `packages` feature, [`lint`]
 //! checks against a FHIR package instead: it adapts the package's
 //! StructureDefinitions (via `octofhir-fhirschema`) into the analysis
-//! engine's `SchemaProvider` contract, so generated SQL can also be validated
-//! against the shape of a resource. Reading the package is the caller's:
+//! engine's `SchemaProvider` contract. Both also run the structural checks
+//! (FH06–FH10, [`validate_structure`]). [`lint_sql`] can analyse generated
+//! SQL against the same provider, but neither `lint_core` nor `lint` calls
+//! it. Reading the package is the caller's:
 //! fhir-pipes reads it as it reads every package, with `fhir::package`.
 
 mod finding;

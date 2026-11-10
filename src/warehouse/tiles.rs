@@ -276,7 +276,6 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The countries to build: those asked for, else every `country=` partition.
 /// The admin levels of the admin-unit polygons in `poly` (a duckdb list of
 /// files), lowest first.
 fn admin_levels(s: &Settings, poly: &str) -> Result<Vec<u32>> {
@@ -310,6 +309,7 @@ fn admin_layer(profile: &Profile, level: u32) -> String {
         .unwrap_or_else(|| format!("admin{level}"))
 }
 
+/// The countries to build: those asked for, else every `country=` partition.
 fn countries(locations: &Path, wanted: &[String]) -> Result<Vec<String>> {
     let present: Vec<String> = fs::read_dir(locations)
         .map(|it| {

@@ -1,5 +1,6 @@
 //! The snapshot directory: locations.ndjson, state.json, the boundary cache,
-//! and the in-progress incoming file. See README "The snapshot".
+//! and the in-progress incoming file. See docs/locations.md, "extract and the
+//! snapshot".
 
 pub mod index;
 pub mod instant;

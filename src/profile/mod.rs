@@ -85,7 +85,7 @@ pub struct LocationProfile {
     /// `meta.profile` of the Locations `import` writes; else `[dhis2]
     /// location_profile`.
     pub profile: Option<String>,
-    /// The identifier system of the admin codes `import admin` writes; else
+    /// The identifier system of the admin codes `import location-boundaries` writes; else
     /// `[dhis2] country_code_system`.
     pub admin_code_system: Option<String>,
     #[serde(default, rename = "column")]
@@ -100,7 +100,7 @@ pub struct OrganizationProfile {
     /// Prefix of the id of an Organization diff creates (`org-`).
     #[serde(default = "default_org_prefix")]
     pub id_prefix: String,
-    /// `meta.profile` of the facility Organizations `import sites` writes;
+    /// `meta.profile` of the facility Organizations `import location-sites` writes;
     /// else `[dhis2] facility_organization_profile`.
     pub profile: Option<String>,
     #[serde(default, rename = "column")]
