@@ -8,9 +8,8 @@
 //!
 //! The harness is opt-in: it runs only when `SOF_CONFORMANCE_DB` points at a
 //! reachable PostgreSQL instance, so the default `cargo test` (and CI without a
-//! database) skips it cleanly. The test-case directory defaults to the sibling
-//! `fhir-test-cases/sql-on-fhir` checkout and can be overridden with
-//! `SOF_TEST_CASES_DIR`.
+//! database) skips it cleanly. The test cases are the vendored `tests/spec`
+//! suite; override the directory with `SOF_TEST_CASES_DIR`.
 
 #![cfg(feature = "postgres")]
 
@@ -24,28 +23,6 @@ use sqlx_core::error::Error as SqlxError;
 use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_postgres::PgConnection;
 
-const SETUP_SQL: &str = r#"
-CREATE OR REPLACE FUNCTION fhir_ref_id(reference TEXT) RETURNS TEXT
-LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
-  SELECT CASE
-    WHEN reference IS NULL OR reference = '' THEN NULL
-    WHEN reference LIKE '#%' OR reference LIKE 'urn:%' OR reference LIKE '%://%' THEN NULL
-    WHEN array_length(string_to_array(ltrim(reference, '/'), '/'), 1) < 2 THEN NULL
-    ELSE (string_to_array(ltrim(reference, '/'), '/'))[2]
-  END;
-$$;
-
-CREATE OR REPLACE FUNCTION fhir_ref_type(reference TEXT) RETURNS TEXT
-LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
-  SELECT CASE
-    WHEN reference IS NULL OR reference = '' THEN NULL
-    WHEN reference LIKE '#%' OR reference LIKE 'urn:%' OR reference LIKE '%://%' THEN NULL
-    WHEN array_length(string_to_array(ltrim(reference, '/'), '/'), 1) < 2 THEN NULL
-    ELSE (string_to_array(ltrim(reference, '/'), '/'))[1]
-  END;
-$$;
-"#;
-
 struct Outcome {
     file: String,
     title: String,
@@ -53,9 +30,8 @@ struct Outcome {
     detail: String,
 }
 
-/// Both DB-backed tests share the `conf` schema and the helper functions, so
-/// they must not run concurrently (`CREATE OR REPLACE FUNCTION` races with
-/// "tuple concurrently updated"). Serialize them.
+/// Both DB-backed tests share the `conf` schema, so they must not run
+/// concurrently. Serialize them.
 static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -81,10 +57,6 @@ async fn sql_on_fhir_conformance() {
     let mut conn = PgConnection::connect(&db_url)
         .await
         .expect("connect to SOF_CONFORMANCE_DB");
-    sqlx_core::raw_sql::raw_sql(SETUP_SQL)
-        .execute(&mut conn)
-        .await
-        .expect("install helper functions");
 
     let mut outcomes = Vec::new();
     for file in &files {
@@ -100,7 +72,7 @@ async fn sql_on_fhir_conformance() {
 }
 
 /// Extra cases not in the official suite (e.g. contained-resource keying),
-/// run against PostgreSQL through the same generator + helper path. Gated on
+/// run against PostgreSQL through the same generator. Gated on
 /// `SOF_CONFORMANCE_DB` exactly like the main suite.
 #[tokio::test]
 async fn extra_cases() {
@@ -123,10 +95,6 @@ async fn extra_cases() {
     let mut conn = PgConnection::connect(&db_url)
         .await
         .expect("connect to SOF_CONFORMANCE_DB");
-    sqlx_core::raw_sql::raw_sql(SETUP_SQL)
-        .execute(&mut conn)
-        .await
-        .expect("install helper functions");
 
     let mut outcomes = Vec::new();
     for file in &files {
@@ -150,15 +118,8 @@ fn test_cases_dir() -> PathBuf {
     if let Ok(d) = std::env::var("SOF_TEST_CASES_DIR") {
         return PathBuf::from(d);
     }
-    // Prefer the vendored official reference suite (see tests/spec/SOURCE.md).
-    let vendored = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/spec");
-    if vendored.is_dir() {
-        return vendored;
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../fhir-test-cases/sql-on-fhir")
-        .canonicalize()
-        .expect("default test-cases dir not found; set SOF_TEST_CASES_DIR")
+    // The vendored official reference suite (see tests/spec/SOURCE.md).
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/spec")
 }
 
 async fn run_file(conn: &mut PgConnection, path: &PathBuf, outcomes: &mut Vec<Outcome>) {
