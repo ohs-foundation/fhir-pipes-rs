@@ -15,6 +15,7 @@ pub mod api;
 pub mod calendar;
 pub mod expression;
 pub mod locations;
+pub mod maps;
 pub mod measures;
 pub mod raw;
 pub mod reports;

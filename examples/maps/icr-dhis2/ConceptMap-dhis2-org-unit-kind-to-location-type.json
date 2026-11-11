@@ -1,0 +1,34 @@
+{
+  "resourceType": "ConceptMap",
+  "id": "dhis2-org-unit-kind-to-location-type",
+  "url": "https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-location-type",
+  "name": "DHIS2OrgUnitKindToLocationType",
+  "title": "DHIS2 org unit kind to ICR location type",
+  "status": "draft",
+  "group": [
+    {
+      "source": "https://healthcampaigns.org/fhir/dhis2/CodeSystem/org-unit-kind",
+      "target": "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs",
+      "element": [
+        {
+          "code": "admin-unit",
+          "target": [
+            {
+              "code": "admin-unit",
+              "equivalence": "equivalent"
+            }
+          ]
+        },
+        {
+          "code": "facility",
+          "target": [
+            {
+              "code": "facility",
+              "equivalence": "equivalent"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

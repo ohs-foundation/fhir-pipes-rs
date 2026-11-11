@@ -1,0 +1,36 @@
+{
+  "resourceType": "ConceptMap",
+  "id": "dhis2-org-unit-kind-to-physical-type",
+  "url": "https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-physical-type",
+  "name": "DHIS2OrgUnitKindToPhysicalType",
+  "title": "DHIS2 org unit kind to location physical type",
+  "status": "draft",
+  "group": [
+    {
+      "source": "https://healthcampaigns.org/fhir/dhis2/CodeSystem/org-unit-kind",
+      "target": "http://terminology.hl7.org/CodeSystem/location-physical-type",
+      "element": [
+        {
+          "code": "admin-unit",
+          "target": [
+            {
+              "code": "jdn",
+              "display": "Jurisdiction",
+              "equivalence": "equivalent"
+            }
+          ]
+        },
+        {
+          "code": "facility",
+          "target": [
+            {
+              "code": "si",
+              "display": "Site",
+              "equivalence": "equivalent"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

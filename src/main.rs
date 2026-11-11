@@ -14,6 +14,7 @@ mod index;
 mod inspect;
 mod library;
 mod load;
+mod mapping;
 mod population;
 mod profile;
 mod raster;
@@ -82,5 +83,6 @@ fn run(cli: cli::Cli) -> anyhow::Result<()> {
         cli::Command::Views(args) => views::run(&args),
         cli::Command::Libraries(args) => library::run(&args),
         cli::Command::Terminology(command) => terminology::run(&command),
+        cli::Command::Map(command) => mapping::cli::run(&command),
     }
 }

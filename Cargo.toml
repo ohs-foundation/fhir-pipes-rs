@@ -58,6 +58,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tempfile = "3"
 fhir-pipes-sof = { workspace = true, features = ["parquet"] }
 fhir-pipes-sof-lint = { workspace = true }
+# FHIR Mapping Language: `map run`, and `dhis2 … --maps`. The engine gets its
+# FHIRPath from the engine in crates/sof, so its own `fhirpath` feature is off.
+fml-syntax = "0.2.7"
+fml-model = "0.2.7"
+fml-check = { version = "0.2.7", features = ["fhirschema"] }
+fml-engine = "0.2.7"
+octofhir-fhirpath = { workspace = true }
 # views (formerly the octofhir-sof command-line tool)
 tokio = { workspace = true }
 sqlx-postgres = { workspace = true, optional = true }
@@ -105,7 +112,7 @@ fhir-pipes-sof = { path = "crates/sof" }
 fhir-pipes-sof-lint = { path = "crates/sof-lint" }
 # 0.4.56 is the first release without an HTTP client (octofhir/fhirpath-rs#175).
 octofhir-fhirpath = { version = "0.4.57", default-features = false }
-octofhir-fhirschema = "0.3.29"
+octofhir-fhirschema = "0.3.35"
 banshee_hir = "0.2.3"
 banshee_parser = "0.2.3"
 serde = { version = "1.0", features = ["derive"] }
