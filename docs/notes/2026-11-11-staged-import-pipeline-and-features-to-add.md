@@ -53,19 +53,26 @@ reason codes).
 Artefacts for this one mapping: 4 logical models, 3 staging maps, 1
 ConceptMap, 3 ViewDefinitions, 1 SQLQuery Library, 1 final map.
 
-## Work needed in fhir-pipes
+## Work in fhir-pipes
 
-- **A map command.** Run an FML map over every line of an NDJSON file and
-  write NDJSON. In the test this was a loop over the `fml` binary, one record
-  per call. A bulk run should use the `fml-engine` library.
+Done on the `feat/dhis2-fml-maps` branch (see [maps.md](../maps.md)):
+
+- **A map command.** `fhir-pipes map run` runs an FML map over every line of
+  an NDJSON file with the `fml-engine` library, and `map check` type-checks a
+  folder of maps.
+- **No FHIRPath upgrade.** `fml-engine` takes its FHIRPath through a small
+  trait. fhir-pipes implements it with the engine the views use, so
+  `octofhir-fhirpath` stays at 0.4.57. The fml crates need Rust 1.98 or
+  later.
+- **The DHIS2 import through maps.** `dhis2 locations`, `measures` and
+  `reports` take `--maps`. The example ICR maps write the same resources as
+  the built-in mapping, and the DHIS2 tests run both ways.
+
+Still needed for the staged pipeline:
+
 - **Library results as map input.** Read a SQLQuery result table as the input
   of the final map. In the test the Parquet rows were exported to JSON with
   DuckDB and the columns renamed by hand.
-- **The FHIRPath upgrade.** `fml-engine` needs `octofhir-fhirpath` 0.5.x and
-  Rust 1.98 or later. In a scratch copy the upgrade from 0.4.57 needed one
-  match arm in `crates/sof/src/eval/rewrite.rs` and one in
-  `crates/sof-lint/src/shareable.rs`. The FHIRPath suites then had 30 new
-  failures to triage and 345 listed failures that now pass.
 - **A lighter run mode.** `refresh` writes its warehouse layout, which is more
   than an import needs.
 

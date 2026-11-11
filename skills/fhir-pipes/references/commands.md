@@ -164,3 +164,17 @@ needs (for example the IG and `hl7.fhir.r4.core#4.0.1`). `--output` and
 `--out` as for `views run`. Exits 2 when the packages cannot give every member
 (SNOMED CT, LOINC, unsupported filters): it never writes a partial table. See
 docs/terminology.md.
+
+## map
+
+`map check --maps DIR [--maps DIR ...]`: syntax and type errors of the FHIR
+Mapping Language maps (`*.map`) in the folders, checked against the logical
+models and profiles (StructureDefinition JSON) beside them. Exit 1 on errors.
+
+`map run --maps DIR [--map NAME] --in RECORDS.ndjson --out RESOURCES.ndjson`:
+run one map over every record. A `Bundle` target is written as its entries'
+resources. ConceptMap JSON in the folders serves `translate()`.
+
+`dhis2 locations|measures|reports --maps DIR` writes the resources with maps
+instead of the built-in mapping; examples/maps/icr-dhis2 holds the ICR maps.
+See docs/maps.md.

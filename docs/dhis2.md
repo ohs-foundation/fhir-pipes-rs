@@ -22,6 +22,7 @@ fhir-pipes dhis2 reports   --dhis2 URL --instance NAME --indicator-group UID --l
 | `--dhis2-user` / `--dhis2-password`, `$FHIR_PIPES_DHIS2_USER` / `$FHIR_PIPES_DHIS2_PASSWORD` | Basic authentication |
 | `--instance` | A short name for the instance: letters, digits and hyphens, up to 16 characters, such as `sl-demo` |
 | `--profile`, `$FHIR_PIPES_PROFILE` | A profile with a `[dhis2]` section. Without one the command stops with exit 2. See [profiles.md](profiles.md) |
+| `--maps DIR`, `$FHIR_PIPES_DHIS2_MAPS` | Write the resources with FHIR Mapping Language maps in this folder instead of the built-in mapping. See [maps.md](maps.md#maps-for-the-dhis2-import) |
 
 Use a read-only DHIS2 user. Keep
 `--instance` the same across runs: it prefixes every id and tags what is

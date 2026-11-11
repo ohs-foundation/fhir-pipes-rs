@@ -80,6 +80,7 @@ Run `fhir-pipes <command> --help` for every option.
 | `libraries build`, `libraries sql` | SQL on FHIR Libraries: build Library JSON from SQL files, print the SQL to run one | [libraries.md](docs/libraries.md) |
 | `profile check` | Compare a profile with its IG | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
 | `terminology valueset`, `conceptmap` | A value set or concept map from FHIR packages as a table | [terminology.md](docs/terminology.md) |
+| `map run`, `map check` | Run and type-check FHIR Mapping Language maps over NDJSON records | [maps.md](docs/maps.md) |
 
 An implementation guide's extra Location and Organization columns come from a
 profile (`--profile`, `FHIR_PIPES_PROFILE` or `profile =` in

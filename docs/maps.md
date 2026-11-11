@@ -1,0 +1,127 @@
+# Maps
+
+`fhir-pipes map` runs [FHIR Mapping Language](https://build.fhir.org/ig/HL7/mapping-language-ig/)
+(FML) maps: a map turns a record described by a StructureDefinition into FHIR
+resources. The record does not have to be FHIR. A logical model describes
+its fields, and ConceptMaps translate its codes.
+
+```sh
+fhir-pipes map check --maps maps/
+fhir-pipes map run   --maps maps/ --in records.ndjson --out resources.ndjson
+```
+
+`fhir-pipes dhis2 --maps` uses the same engine to write Locations, Measures
+and MeasureReports; see [Maps for the DHIS2 import](#maps-for-the-dhis2-import).
+
+## A folder of maps
+
+`--maps` is a folder, read with its subfolders, and can be repeated. It holds:
+
+| File | What it is |
+|---|---|
+| `*.map`, `*.fml` | A map, in FML |
+| `StructureMap` JSON | A compiled map |
+| `StructureDefinition` JSON | A logical model the maps read, or a profile or extension they write |
+| `ConceptMap` JSON | A code translation, used by `translate()` in a map |
+
+Other files are ignored. The FHIR R4 core definitions are built in.
+
+A map names the types it reads and writes with `uses`, and its first group is
+where it starts:
+
+```
+/// url = 'https://example.org/StructureMap/FacilityToLocation'
+/// name = 'FacilityToLocation'
+
+uses "https://example.org/StructureDefinition/Facility" alias Facility as source
+uses "http://hl7.org/fhir/StructureDefinition/Location" alias Location as target
+
+group Facility(source src : Facility, target loc : Location) {
+  src.code as c -> loc.id = c "id";
+  src.name as n -> loc.name = n "name";
+  src where closed.exists() -> loc.status = 'inactive' "closed";
+}
+```
+
+A map that writes more than one resource per record uses a `Bundle` as its
+target and puts each resource in an entry.
+
+## map run
+
+Runs one map over every line of an NDJSON file.
+
+| Option | Meaning |
+|---|---|
+| `--maps DIR` (repeatable) | The folders of maps, definitions and ConceptMaps |
+| `--map NAME` | The map to run, by name or canonical URL. Not needed when the folders hold one map |
+| `--in FILE` | NDJSON, one record per line. A record with no `resourceType` is read as the map's source type |
+| `--out FILE` | NDJSON of the resources written |
+
+For a `Bundle` target the output is the resources in its entries, one per
+line; for any other target it is the target. A record the map fails on stops
+the run, naming the line. A value the engine leaves out, such as a code a
+ConceptMap has no target for, is printed as a warning with its line.
+
+## map check
+
+Reports syntax errors and type errors in every FML file of the folders: an
+element that does not exist on the type it is read from or written to, an
+unknown variable, a wrong type, a call to a group that does not exist. It
+checks against the logical models and profiles in the folders, so a field
+misspelt on either side of a rule is found before anything runs. It exits 1
+when there are errors.
+
+## Maps for the DHIS2 import
+
+By default `fhir-pipes dhis2` writes its resources with a mapping built into
+the binary, taking systems and profile URLs from the profile's `[dhis2]`
+section. With `--maps` (or `$FHIR_PIPES_DHIS2_MAPS`, comma-separated) the
+resources are written by maps instead, so the mapping can be read, changed
+and published with an implementation guide without a new fhir-pipes release.
+
+```sh
+fhir-pipes dhis2 locations --dhis2 URL --instance sl-demo --id-prefix sle \
+  --maps examples/maps/icr-dhis2 --out sl-locations.ndjson
+```
+
+fhir-pipes still does everything a map cannot: it reads the DHIS2 API,
+checks each record, and works out the values that depend on other records or
+on the run. It hands the map one prepared record at a time. The record's
+logical model is built in:
+
+| Command | Record | What fhir-pipes prepares |
+|---|---|---|
+| `dhis2 locations` | [DHIS2OrgUnit](../src/dhis2/models/StructureDefinition-DHIS2OrgUnit.json) | The id prefix, facility or admin unit from the level, the parent only when it was exported, the boundary (merged from the children for a unit with none), the point, the org unit groups |
+| `dhis2 measures` | [DHIS2Indicator](../src/dhis2/models/StructureDefinition-DHIS2Indicator.json) | Indicators, data elements and reporting rates in one shape, the date in the server's time zone |
+| `dhis2 reports` | [DHIS2Value](../src/dhis2/models/StructureDefinition-DHIS2Value.json) | The report id, the Location the org unit maps to, the period's dates, counts as whole numbers, the score, and each breakdown with its options |
+
+For each command the folders must hold exactly one map whose first group
+reads that record type. The map for `dhis2 reports` must write one
+MeasureReport with the record's `id`, and put the period extension first.
+
+[examples/maps/icr-dhis2](../examples/maps/icr-dhis2) holds the maps and
+ConceptMaps for the Integrated Campaign Registry. They write the same
+resources as the built-in mapping with `examples/profiles/icr.toml`; the
+tests run the DHIS2 import both ways and compare. Copy them to start a
+mapping for another implementation guide.
+
+Notes:
+
+- The profile is still needed. `dhis2 reports` finds each org unit's Location
+  by the identifier system the profile's `[dhis2] base` gives, so the maps
+  and the profile have to agree on it.
+- A map states its systems, profiles and codes itself. The profile's URL
+  settings for the built-in mapping are not passed to it.
+- A map writes a resource's elements in the order FHIR defines them. For a
+  Measure that puts `subjectCodeableConcept` before `date`, where the
+  built-in mapping puts it after `topic`. The content is the same.
+- `dhis2 reports --resume` is refused when `--maps` differs from the
+  interrupted run's.
+
+## Limits
+
+- A map sees one record. Anything that needs several records, such as
+  grouping or a lookup in another file, has to be done before the map runs.
+- Maps are read as FHIR R4.
+- The engine is [fml-rs](https://github.com/octofhir/fml-rs), first released
+  in November 2026.
