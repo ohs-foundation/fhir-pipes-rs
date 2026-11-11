@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::api::{Dhis2, under};
+use super::maps::{ORG_UNIT_MODEL, RecordMap, record_type};
 use super::{Instance, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
@@ -152,15 +153,32 @@ fn identifiers(unit: &OrgUnit, opts: &Options) -> Vec<Value> {
     out
 }
 
-/// The Location (and, at the facility level, its Organization) for one org
-/// unit. `parent_known` says whether the parent is in the export.
-pub fn resources(
-    unit: &OrgUnit,
-    opts: &Options,
+/// What one org unit becomes, decided once for both ways of writing it:
+/// the built-in mapping and a `--maps` map.
+struct Prepared<'a> {
+    unit: &'a OrgUnit,
+    id: String,
+    facility: bool,
+    /// A Polygon or MultiPolygon geometry as GeoJSON text.
+    boundary: Option<String>,
+    /// Longitude and latitude of a Point geometry.
+    position: Option<(f64, f64)>,
+    /// The parent's UID, when the parent is in the export.
+    parent: Option<&'a str>,
+    /// `--country-code`, on the top unit.
+    country_code: Option<&'a str>,
+    groups: &'a [GroupType],
+}
+
+/// Checks one org unit and works out what it becomes; `None`, reported,
+/// when its id would not be a valid FHIR id.
+fn prepare<'a>(
+    unit: &'a OrgUnit,
+    opts: &'a Options,
     parent_known: bool,
     is_top: bool,
     report: &mut Report,
-) -> Vec<Value> {
+) -> Option<Prepared<'a>> {
     let id = location_id(opts.prefix, &unit.id);
     if !is_valid_id(&id) {
         report.add(
@@ -168,10 +186,9 @@ pub fn resources(
             &unit.id,
             &format!("{id:?} is not a valid FHIR id; org unit skipped"),
         );
-        return Vec::new();
+        return None;
     }
-    let facility = unit.level == opts.facility_level;
-    let mut extension = Vec::new();
+    let mut boundary = None;
     let mut position = None;
     match unit
         .geometry
@@ -181,15 +198,7 @@ pub fn resources(
     {
         None => {}
         Some("Polygon" | "MultiPolygon") => {
-            let geojson = unit
-                .geometry
-                .as_ref()
-                .map(Value::to_string)
-                .unwrap_or_default();
-            extension.push(boundary_extension(
-                &opts.instance.boundary_extension,
-                geojson.as_bytes(),
-            ));
+            boundary = unit.geometry.as_ref().map(Value::to_string);
         }
         Some("Point") => {
             let c = unit
@@ -216,8 +225,46 @@ pub fn resources(
             &format!("{other} geometry is not a boundary or a point; left out"),
         ),
     }
+    let parent = match &unit.parent {
+        Some(p) if parent_known => Some(p.as_str()),
+        Some(p) if !is_top => {
+            report.add(
+                "parent_not_exported",
+                &unit.id,
+                &format!(
+                    "parent org unit {p} is not in the export; Location written without partOf"
+                ),
+            );
+            None
+        }
+        _ => None,
+    };
+    Some(Prepared {
+        unit,
+        id,
+        facility: unit.level == opts.facility_level,
+        boundary,
+        position,
+        parent,
+        country_code: opts.country_code.filter(|_| is_top),
+        groups: opts.groups.get(&unit.id).map_or(&[], Vec::as_slice),
+    })
+}
+
+/// The Location (and, at the facility level, its Organization) for one org
+/// unit, by the built-in mapping. The Organization comes first so a
+/// transaction creates it before the Location that refers to it.
+fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
+    let unit = p.unit;
+    let id = &p.id;
+    let facility = p.facility;
+    let extension: Vec<Value> = p
+        .boundary
+        .iter()
+        .map(|geojson| boundary_extension(&opts.instance.boundary_extension, geojson.as_bytes()))
+        .collect();
     let mut ids = identifiers(unit, opts);
-    if is_top && let Some(cc) = opts.country_code {
+    if let Some(cc) = p.country_code {
         ids.push(identifier(&opts.instance.urls.country_code_system, cc));
     }
     // run_locations checked both are in the profile.
@@ -232,31 +279,12 @@ pub fn resources(
             PhysicalType::Jurisdiction,
         )
     };
-    let group_types: Vec<Value> = opts
-        .groups
-        .get(&unit.id)
-        .into_iter()
-        .flatten()
-        .map(|g| g.concept(opts.instance))
-        .collect();
+    let group_types: Vec<Value> = p.groups.iter().map(|g| g.concept(opts.instance)).collect();
     let org_id = format!("{}{id}", opts.instance.org_id_prefix);
-    let parent = match &unit.parent {
-        Some(p) if parent_known => Some(location_id(opts.prefix, p)),
-        Some(p) if !is_top => {
-            report.add(
-                "parent_not_exported",
-                &unit.id,
-                &format!(
-                    "parent org unit {p} is not in the export; Location written without partOf"
-                ),
-            );
-            None
-        }
-        _ => None,
-    };
+    let parent = p.parent.map(|uid| location_id(opts.prefix, uid));
     let meta = |profile: &str| json!({"profile": [profile], "tag": [opts.instance.tag()]});
     let loc = NewLocation {
-        id: &id,
+        id,
         meta: Some(meta(&opts.instance.urls.location_profile)),
         extension,
         identifier: ids,
@@ -276,7 +304,7 @@ pub fn resources(
         type_code,
         extra_types: group_types.clone(),
         physical_type: Some(physical),
-        position,
+        position: p.position,
         managing_organization: facility.then_some(org_id.as_str()),
         part_of: parent.as_deref(),
     }
@@ -297,6 +325,57 @@ pub fn resources(
     }
     out.push(loc);
     out
+}
+
+/// The org unit as a `DHIS2OrgUnit` record (models/), the input of a
+/// `--maps` map.
+fn record(p: &Prepared, opts: &Options) -> Value {
+    let unit = p.unit;
+    let mut r = json!({
+        "resourceType": record_type(ORG_UNIT_MODEL),
+        "instance": opts.instance.name,
+        "idPrefix": opts.prefix,
+        "uid": unit.id,
+    });
+    if let Some(code) = &unit.code {
+        r["code"] = json!(code);
+    }
+    r["name"] = json!(unit.name);
+    if let Some(short) = &unit.short_name {
+        r["shortName"] = json!(short);
+    }
+    r["level"] = json!(unit.level);
+    r["kind"] = json!(if p.facility { "facility" } else { "admin-unit" });
+    if let Some(parent) = p.parent {
+        r["parentUid"] = json!(parent);
+    }
+    if let Some(closed) = &unit.closed_date {
+        r["closedDate"] = json!(closed);
+    }
+    if let Some(boundary) = &p.boundary {
+        r["boundary"] = json!(boundary);
+    }
+    if let Some((lon, lat)) = p.position {
+        r["longitude"] = json!(lon);
+        r["latitude"] = json!(lat);
+    }
+    if let Some(cc) = p.country_code {
+        r["countryCode"] = json!(cc);
+    }
+    if !p.groups.is_empty() {
+        r["group"] = p
+            .groups
+            .iter()
+            .map(|g| {
+                let mut group = json!({"uid": g.group, "name": g.name});
+                if !g.sets.is_empty() {
+                    group["set"] = json!(g.sets);
+                }
+                group
+            })
+            .collect();
+    }
+    r
 }
 
 /// A unit's Polygon or MultiPolygon geometry; `None` for any other kind. One
@@ -375,6 +454,7 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
 pub fn build(
     units: &[OrgUnit],
     opts: &Options,
+    maps: Option<&RecordMap>,
     report: &mut Report,
     mut emit: impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
@@ -395,7 +475,14 @@ pub fn build(
             continue;
         }
         let parent_known = unit.parent.as_deref().is_some_and(|p| known.contains(p));
-        for resource in resources(unit, opts, parent_known, unit.level == top, report) {
+        let Some(p) = prepare(unit, opts, parent_known, unit.level == top, report) else {
+            continue;
+        };
+        let written = match maps {
+            Some(map) => map.run(&record(&p, opts), &unit.id, report)?,
+            None => built_in(&p, opts),
+        };
+        for resource in written {
             emit(resource)?;
         }
     }
@@ -485,6 +572,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
             "--id-prefix must be letters, digits and hyphens, at most {MAX_PREFIX_LEN} characters, got {prefix:?}"
         )));
     }
+    let maps = RecordMap::load(&args.conn.maps, ORG_UNIT_MODEL)?;
     let api = Dhis2::connect(&args.conn)?;
     eprintln!(
         "DHIS2 {} ({})",
@@ -590,7 +678,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     // Written as built; the file is renamed into place at the end.
     let mut out = NdjsonWriter::create(&args.out)?;
     let mut organizations = 0usize;
-    build(&units, &opts, &mut report, |resource| {
+    build(&units, &opts, maps.as_ref(), &mut report, |resource| {
         if resource["resourceType"] == "Organization" {
             organizations += 1;
         }
@@ -634,7 +722,7 @@ mod tests {
 
     fn build_all(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Value> {
         let mut out = Vec::new();
-        build(units, opts, report, |r| {
+        build(units, opts, None, report, |r| {
             out.push(r);
             Ok(())
         })
@@ -680,6 +768,93 @@ mod tests {
                 ),
             ]),
         }
+    }
+
+    /// The example ICR maps (examples/maps/icr-dhis2).
+    fn icr_maps() -> RecordMap {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        RecordMap::load(&[dir], ORG_UNIT_MODEL).unwrap().unwrap()
+    }
+
+    #[test]
+    fn the_example_map_writes_what_the_built_in_mapping_writes() {
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let square = json!({"type":"Polygon","coordinates":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0],[0.0,0.0]]]});
+        let mut units = vec![
+            // The top unit: no geometry of its own, the country code.
+            unit("top", 1, None, None),
+            // A district with a boundary, in a group that is in no set.
+            unit("d", 2, Some("top"), Some(square)),
+            // A facility with a point, in a group of one set.
+            unit(
+                "f",
+                3,
+                Some("d"),
+                Some(json!({"type":"Point","coordinates":[-11.4197, 8.1039]})),
+            ),
+            // A closed facility with no code, a short name, and a group in two sets.
+            OrgUnit {
+                id: "g".into(),
+                code: None,
+                name: "Njandama MCHP".into(),
+                short_name: Some("Njandama".into()),
+                level: 3,
+                parent: Some("d".into()),
+                closed_date: Some("2024-06-30T00:00:00.000".into()),
+                geometry: None,
+            },
+            // A short name that repeats the name, a parent that is not exported,
+            // and a geometry that is neither a boundary nor a point.
+            OrgUnit {
+                id: "h".into(),
+                code: Some("OU_h".into()),
+                name: "Bo".into(),
+                short_name: Some("Bo".into()),
+                level: 2,
+                parent: Some("elsewhere".into()),
+                closed_date: None,
+                geometry: Some(json!({"type":"LineString","coordinates":[]})),
+            },
+            // Below the facility level: skipped by both.
+            unit("x", 4, Some("f"), None),
+        ];
+        let mut o = opts(&instance);
+        o.groups.insert(
+            "g".to_string(),
+            vec![
+                GroupType {
+                    group: "uYxK4wmcPqA".to_string(),
+                    name: "CHP".to_string(),
+                    sets: vec!["J5jldMd8OHv".to_string(), "Bpx0589u8y0".to_string()],
+                },
+                GroupType {
+                    group: "oRVt7g429ZO".to_string(),
+                    name: "Public facilities".to_string(),
+                    sets: vec![],
+                },
+            ],
+        );
+        let mut filled = Report::default();
+        fill_missing_boundaries(&mut units, o.facility_level, &mut filled);
+
+        let mut built_in_report = Report::default();
+        let expected = build_all(&units, &o, &mut built_in_report);
+        let maps = icr_maps();
+        let mut mapped_report = Report::default();
+        let mut mapped = Vec::new();
+        build(&units, &o, Some(&maps), &mut mapped_report, |r| {
+            mapped.push(r);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(expected.len(), 7, "5 Locations and 2 Organizations");
+        assert_eq!(mapped.len(), expected.len());
+        for (m, e) in mapped.iter().zip(&expected) {
+            // The same resource, key for key and in the same order.
+            assert_eq!(m.to_string(), e.to_string());
+        }
+        assert_eq!(mapped_report.summary(), built_in_report.summary());
     }
 
     #[test]

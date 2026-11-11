@@ -1,0 +1,715 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "DHIS2Value",
+  "url": "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value",
+  "name": "DHIS2Value",
+  "title": "DHIS2 value of one item, org unit and period",
+  "status": "draft",
+  "description": "One value fhir-pipes dhis2 reports writes a MeasureReport for, as it prepares it for a map: the value of one indicator, data element or reporting rate at one org unit for one period or date range, with its breakdowns.",
+  "fhirVersion": "4.0.1",
+  "kind": "logical",
+  "abstract": false,
+  "type": "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Element",
+  "derivation": "specialization",
+  "snapshot": {
+    "element": [
+      {
+        "id": "DHIS2Value",
+        "path": "DHIS2Value",
+        "short": "DHIS2 value of one item, org unit and period",
+        "definition": "One value fhir-pipes dhis2 reports writes a MeasureReport for, as it prepares it for a map: the value of one indicator, data element or reporting rate at one org unit for one period or date range, with its breakdowns.",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "DHIS2Value.instance",
+        "path": "DHIS2Value.instance",
+        "short": "Short name of the DHIS2 instance (--instance)",
+        "definition": "Short name of the DHIS2 instance (--instance)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.id",
+        "path": "DHIS2Value.id",
+        "short": "The report's id: INSTANCE-<item>-<org unit>-<period>",
+        "definition": "The report's id: INSTANCE-<item>-<org unit>-<period>",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.indicatorKey",
+        "path": "DHIS2Value.indicatorKey",
+        "short": "The analytics item as it appears in FHIR ids; its Measure is INSTANCE-<indicatorKey>",
+        "definition": "The analytics item as it appears in FHIR ids; its Measure is INSTANCE-<indicatorKey>",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.locationId",
+        "path": "DHIS2Value.locationId",
+        "short": "Id of the Location the org unit maps to (--locations)",
+        "definition": "Id of the Location the org unit maps to (--locations)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.locationName",
+        "path": "DHIS2Value.locationName",
+        "short": "Name of that Location",
+        "definition": "Name of that Location",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.period",
+        "path": "DHIS2Value.period",
+        "short": "The DHIS2 period (2025Q1), or the date range",
+        "definition": "The DHIS2 period (2025Q1), or the date range",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.periodStart",
+        "path": "DHIS2Value.periodStart",
+        "short": "First day of the period",
+        "definition": "First day of the period",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "date"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.periodEnd",
+        "path": "DHIS2Value.periodEnd",
+        "short": "Last day of the period",
+        "definition": "Last day of the period",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "date"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.date",
+        "path": "DHIS2Value.date",
+        "short": "When DHIS2 last built its analytics tables",
+        "definition": "When DHIS2 last built its analytics tables",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "dateTime"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.reporter",
+        "path": "DHIS2Value.reporter",
+        "short": "The DHIS2 system's name",
+        "definition": "The DHIS2 system's name",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.campaign",
+        "path": "DHIS2Value.campaign",
+        "short": "--campaign, a reference such as CarePlan/bgd-mr-sia-2026",
+        "definition": "--campaign, a reference such as CarePlan/bgd-mr-sia-2026",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.source",
+        "path": "DHIS2Value.source",
+        "short": "Where the value came from: dhis2-analytics or dhis2-data-values (--source)",
+        "definition": "Where the value came from: dhis2-analytics or dhis2-data-values (--source)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.initialPopulation",
+        "path": "DHIS2Value.initialPopulation",
+        "short": "The count of a plain number (a cohort)",
+        "definition": "The count of a plain number (a cohort)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.numerator",
+        "path": "DHIS2Value.numerator",
+        "short": "The numerator, rounded to a whole number",
+        "definition": "The numerator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.denominator",
+        "path": "DHIS2Value.denominator",
+        "short": "The denominator, rounded to a whole number",
+        "definition": "The denominator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.score",
+        "path": "DHIS2Value.score",
+        "short": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "definition": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier",
+        "path": "DHIS2Value.stratifier",
+        "short": "A breakdown of the value (--breakdown)",
+        "definition": "A breakdown of the value (--breakdown)",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.dimension",
+        "path": "DHIS2Value.stratifier.dimension",
+        "short": "UID of the category, org unit group set or data element group set",
+        "definition": "UID of the category, org unit group set or data element group set",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.name",
+        "path": "DHIS2Value.stratifier.name",
+        "short": "Name of the dimension",
+        "definition": "Name of the dimension",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum",
+        "path": "DHIS2Value.stratifier.stratum",
+        "short": "One option of the dimension, sorted by name",
+        "definition": "One option of the dimension, sorted by name",
+        "min": 1,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.option",
+        "path": "DHIS2Value.stratifier.stratum.option",
+        "short": "UID of the option",
+        "definition": "UID of the option",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.name",
+        "path": "DHIS2Value.stratifier.stratum.name",
+        "short": "Name of the option",
+        "definition": "Name of the option",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.initialPopulation",
+        "path": "DHIS2Value.stratifier.stratum.initialPopulation",
+        "short": "The count of a plain number (a cohort)",
+        "definition": "The count of a plain number (a cohort)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.numerator",
+        "path": "DHIS2Value.stratifier.stratum.numerator",
+        "short": "The numerator, rounded to a whole number",
+        "definition": "The numerator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.denominator",
+        "path": "DHIS2Value.stratifier.stratum.denominator",
+        "short": "The denominator, rounded to a whole number",
+        "definition": "The denominator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.score",
+        "path": "DHIS2Value.stratifier.stratum.score",
+        "short": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "definition": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      }
+    ]
+  },
+  "differential": {
+    "element": [
+      {
+        "id": "DHIS2Value",
+        "path": "DHIS2Value",
+        "short": "DHIS2 value of one item, org unit and period",
+        "definition": "One value fhir-pipes dhis2 reports writes a MeasureReport for, as it prepares it for a map: the value of one indicator, data element or reporting rate at one org unit for one period or date range, with its breakdowns.",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "DHIS2Value.instance",
+        "path": "DHIS2Value.instance",
+        "short": "Short name of the DHIS2 instance (--instance)",
+        "definition": "Short name of the DHIS2 instance (--instance)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.id",
+        "path": "DHIS2Value.id",
+        "short": "The report's id: INSTANCE-<item>-<org unit>-<period>",
+        "definition": "The report's id: INSTANCE-<item>-<org unit>-<period>",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.indicatorKey",
+        "path": "DHIS2Value.indicatorKey",
+        "short": "The analytics item as it appears in FHIR ids; its Measure is INSTANCE-<indicatorKey>",
+        "definition": "The analytics item as it appears in FHIR ids; its Measure is INSTANCE-<indicatorKey>",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.locationId",
+        "path": "DHIS2Value.locationId",
+        "short": "Id of the Location the org unit maps to (--locations)",
+        "definition": "Id of the Location the org unit maps to (--locations)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.locationName",
+        "path": "DHIS2Value.locationName",
+        "short": "Name of that Location",
+        "definition": "Name of that Location",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.period",
+        "path": "DHIS2Value.period",
+        "short": "The DHIS2 period (2025Q1), or the date range",
+        "definition": "The DHIS2 period (2025Q1), or the date range",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.periodStart",
+        "path": "DHIS2Value.periodStart",
+        "short": "First day of the period",
+        "definition": "First day of the period",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "date"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.periodEnd",
+        "path": "DHIS2Value.periodEnd",
+        "short": "Last day of the period",
+        "definition": "Last day of the period",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "date"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.date",
+        "path": "DHIS2Value.date",
+        "short": "When DHIS2 last built its analytics tables",
+        "definition": "When DHIS2 last built its analytics tables",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "dateTime"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.reporter",
+        "path": "DHIS2Value.reporter",
+        "short": "The DHIS2 system's name",
+        "definition": "The DHIS2 system's name",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.campaign",
+        "path": "DHIS2Value.campaign",
+        "short": "--campaign, a reference such as CarePlan/bgd-mr-sia-2026",
+        "definition": "--campaign, a reference such as CarePlan/bgd-mr-sia-2026",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.source",
+        "path": "DHIS2Value.source",
+        "short": "Where the value came from: dhis2-analytics or dhis2-data-values (--source)",
+        "definition": "Where the value came from: dhis2-analytics or dhis2-data-values (--source)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.initialPopulation",
+        "path": "DHIS2Value.initialPopulation",
+        "short": "The count of a plain number (a cohort)",
+        "definition": "The count of a plain number (a cohort)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.numerator",
+        "path": "DHIS2Value.numerator",
+        "short": "The numerator, rounded to a whole number",
+        "definition": "The numerator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.denominator",
+        "path": "DHIS2Value.denominator",
+        "short": "The denominator, rounded to a whole number",
+        "definition": "The denominator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.score",
+        "path": "DHIS2Value.score",
+        "short": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "definition": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier",
+        "path": "DHIS2Value.stratifier",
+        "short": "A breakdown of the value (--breakdown)",
+        "definition": "A breakdown of the value (--breakdown)",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.dimension",
+        "path": "DHIS2Value.stratifier.dimension",
+        "short": "UID of the category, org unit group set or data element group set",
+        "definition": "UID of the category, org unit group set or data element group set",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.name",
+        "path": "DHIS2Value.stratifier.name",
+        "short": "Name of the dimension",
+        "definition": "Name of the dimension",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum",
+        "path": "DHIS2Value.stratifier.stratum",
+        "short": "One option of the dimension, sorted by name",
+        "definition": "One option of the dimension, sorted by name",
+        "min": 1,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.option",
+        "path": "DHIS2Value.stratifier.stratum.option",
+        "short": "UID of the option",
+        "definition": "UID of the option",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.name",
+        "path": "DHIS2Value.stratifier.stratum.name",
+        "short": "Name of the option",
+        "definition": "Name of the option",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.initialPopulation",
+        "path": "DHIS2Value.stratifier.stratum.initialPopulation",
+        "short": "The count of a plain number (a cohort)",
+        "definition": "The count of a plain number (a cohort)",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.numerator",
+        "path": "DHIS2Value.stratifier.stratum.numerator",
+        "short": "The numerator, rounded to a whole number",
+        "definition": "The numerator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.denominator",
+        "path": "DHIS2Value.stratifier.stratum.denominator",
+        "short": "The denominator, rounded to a whole number",
+        "definition": "The denominator, rounded to a whole number",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Value.stratifier.stratum.score",
+        "path": "DHIS2Value.stratifier.stratum.score",
+        "short": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "definition": "The DHIS2 value divided by the indicator's factor (45.18 % is 0.4518)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      }
+    ]
+  }
+}

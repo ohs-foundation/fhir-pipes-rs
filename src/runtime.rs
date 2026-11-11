@@ -1,5 +1,5 @@
 //! The Tokio runtime for the binary's async parts outside `views` (the HAPI
-//! database export and the refresh database load): one current-thread
+//! database export, the refresh database load and the maps): one current-thread
 //! runtime per thread, built on first use and kept for the run. `views`
 //! runs on a multi-thread runtime of its own, since it uses
 //! `block_in_place`; view evaluation keeps its runtimes in sof.

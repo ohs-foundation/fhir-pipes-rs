@@ -1,0 +1,507 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "DHIS2OrgUnit",
+  "url": "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2OrgUnit",
+  "name": "DHIS2OrgUnit",
+  "title": "DHIS2 organisation unit",
+  "status": "draft",
+  "description": "One DHIS2 organisation unit as fhir-pipes dhis2 locations prepares it for a map: the unit's own fields, and the values that depend on other units or on the run.",
+  "fhirVersion": "4.0.1",
+  "kind": "logical",
+  "abstract": false,
+  "type": "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2OrgUnit",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Element",
+  "derivation": "specialization",
+  "snapshot": {
+    "element": [
+      {
+        "id": "DHIS2OrgUnit",
+        "path": "DHIS2OrgUnit",
+        "short": "DHIS2 organisation unit",
+        "definition": "One DHIS2 organisation unit as fhir-pipes dhis2 locations prepares it for a map: the unit's own fields, and the values that depend on other units or on the run.",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "DHIS2OrgUnit.instance",
+        "path": "DHIS2OrgUnit.instance",
+        "short": "Short name of the DHIS2 instance (--instance)",
+        "definition": "Short name of the DHIS2 instance (--instance)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.idPrefix",
+        "path": "DHIS2OrgUnit.idPrefix",
+        "short": "Prefix of the FHIR ids (--id-prefix)",
+        "definition": "Prefix of the FHIR ids (--id-prefix)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.uid",
+        "path": "DHIS2OrgUnit.uid",
+        "short": "The org unit's UID",
+        "definition": "The org unit's UID",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.code",
+        "path": "DHIS2OrgUnit.code",
+        "short": "The org unit's code",
+        "definition": "The org unit's code",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.name",
+        "path": "DHIS2OrgUnit.name",
+        "short": "Name; the UID when DHIS2 has none",
+        "definition": "Name; the UID when DHIS2 has none",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.shortName",
+        "path": "DHIS2OrgUnit.shortName",
+        "short": "Short name",
+        "definition": "Short name",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.level",
+        "path": "DHIS2OrgUnit.level",
+        "short": "Level in the org unit tree; 1 is the top",
+        "definition": "Level in the org unit tree; 1 is the top",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.kind",
+        "path": "DHIS2OrgUnit.kind",
+        "short": "facility at the facility level (--facility-level), admin-unit above it",
+        "definition": "facility at the facility level (--facility-level), admin-unit above it",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.parentUid",
+        "path": "DHIS2OrgUnit.parentUid",
+        "short": "UID of the parent, when the parent is in this export",
+        "definition": "UID of the parent, when the parent is in this export",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.closedDate",
+        "path": "DHIS2OrgUnit.closedDate",
+        "short": "When the unit closed",
+        "definition": "When the unit closed",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "dateTime"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.boundary",
+        "path": "DHIS2OrgUnit.boundary",
+        "short": "Boundary as GeoJSON text (Polygon or MultiPolygon); for an admin unit with none, the union of its children's",
+        "definition": "Boundary as GeoJSON text (Polygon or MultiPolygon); for an admin unit with none, the union of its children's",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.longitude",
+        "path": "DHIS2OrgUnit.longitude",
+        "short": "Longitude of a Point geometry",
+        "definition": "Longitude of a Point geometry",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.latitude",
+        "path": "DHIS2OrgUnit.latitude",
+        "short": "Latitude of a Point geometry",
+        "definition": "Latitude of a Point geometry",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.countryCode",
+        "path": "DHIS2OrgUnit.countryCode",
+        "short": "--country-code, on the top unit only",
+        "definition": "--country-code, on the top unit only",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group",
+        "path": "DHIS2OrgUnit.group",
+        "short": "An org unit group the unit is in (--group-set, --org-unit-group)",
+        "definition": "An org unit group the unit is in (--group-set, --org-unit-group)",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group.uid",
+        "path": "DHIS2OrgUnit.group.uid",
+        "short": "The group's UID",
+        "definition": "The group's UID",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group.name",
+        "path": "DHIS2OrgUnit.group.name",
+        "short": "The group's name",
+        "definition": "The group's name",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group.set",
+        "path": "DHIS2OrgUnit.group.set",
+        "short": "UID of each group set the group was asked for under; none for a group in no set",
+        "definition": "UID of each group set the group was asked for under; none for a group in no set",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      }
+    ]
+  },
+  "differential": {
+    "element": [
+      {
+        "id": "DHIS2OrgUnit",
+        "path": "DHIS2OrgUnit",
+        "short": "DHIS2 organisation unit",
+        "definition": "One DHIS2 organisation unit as fhir-pipes dhis2 locations prepares it for a map: the unit's own fields, and the values that depend on other units or on the run.",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "DHIS2OrgUnit.instance",
+        "path": "DHIS2OrgUnit.instance",
+        "short": "Short name of the DHIS2 instance (--instance)",
+        "definition": "Short name of the DHIS2 instance (--instance)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.idPrefix",
+        "path": "DHIS2OrgUnit.idPrefix",
+        "short": "Prefix of the FHIR ids (--id-prefix)",
+        "definition": "Prefix of the FHIR ids (--id-prefix)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.uid",
+        "path": "DHIS2OrgUnit.uid",
+        "short": "The org unit's UID",
+        "definition": "The org unit's UID",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.code",
+        "path": "DHIS2OrgUnit.code",
+        "short": "The org unit's code",
+        "definition": "The org unit's code",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.name",
+        "path": "DHIS2OrgUnit.name",
+        "short": "Name; the UID when DHIS2 has none",
+        "definition": "Name; the UID when DHIS2 has none",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.shortName",
+        "path": "DHIS2OrgUnit.shortName",
+        "short": "Short name",
+        "definition": "Short name",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.level",
+        "path": "DHIS2OrgUnit.level",
+        "short": "Level in the org unit tree; 1 is the top",
+        "definition": "Level in the org unit tree; 1 is the top",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.kind",
+        "path": "DHIS2OrgUnit.kind",
+        "short": "facility at the facility level (--facility-level), admin-unit above it",
+        "definition": "facility at the facility level (--facility-level), admin-unit above it",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.parentUid",
+        "path": "DHIS2OrgUnit.parentUid",
+        "short": "UID of the parent, when the parent is in this export",
+        "definition": "UID of the parent, when the parent is in this export",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.closedDate",
+        "path": "DHIS2OrgUnit.closedDate",
+        "short": "When the unit closed",
+        "definition": "When the unit closed",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "dateTime"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.boundary",
+        "path": "DHIS2OrgUnit.boundary",
+        "short": "Boundary as GeoJSON text (Polygon or MultiPolygon); for an admin unit with none, the union of its children's",
+        "definition": "Boundary as GeoJSON text (Polygon or MultiPolygon); for an admin unit with none, the union of its children's",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.longitude",
+        "path": "DHIS2OrgUnit.longitude",
+        "short": "Longitude of a Point geometry",
+        "definition": "Longitude of a Point geometry",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.latitude",
+        "path": "DHIS2OrgUnit.latitude",
+        "short": "Latitude of a Point geometry",
+        "definition": "Latitude of a Point geometry",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.countryCode",
+        "path": "DHIS2OrgUnit.countryCode",
+        "short": "--country-code, on the top unit only",
+        "definition": "--country-code, on the top unit only",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group",
+        "path": "DHIS2OrgUnit.group",
+        "short": "An org unit group the unit is in (--group-set, --org-unit-group)",
+        "definition": "An org unit group the unit is in (--group-set, --org-unit-group)",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group.uid",
+        "path": "DHIS2OrgUnit.group.uid",
+        "short": "The group's UID",
+        "definition": "The group's UID",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group.name",
+        "path": "DHIS2OrgUnit.group.name",
+        "short": "The group's name",
+        "definition": "The group's name",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2OrgUnit.group.set",
+        "path": "DHIS2OrgUnit.group.set",
+        "short": "UID of each group set the group was asked for under; none for a group in no set",
+        "definition": "UID of each group set the group was asked for under; none for a group in no set",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      }
+    ]
+  }
+}

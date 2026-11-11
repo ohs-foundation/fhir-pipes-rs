@@ -14,13 +14,13 @@ mod index;
 mod inspect;
 mod library;
 mod load;
+mod mapping;
 mod population;
 mod profile;
 mod raster;
 mod redact;
 mod report;
 mod run;
-#[cfg(feature = "postgres")]
 mod runtime;
 #[cfg(unix)]
 mod serve;
@@ -82,5 +82,6 @@ fn run(cli: cli::Cli) -> anyhow::Result<()> {
         cli::Command::Views(args) => views::run(&args),
         cli::Command::Libraries(args) => library::run(&args),
         cli::Command::Terminology(command) => terminology::run(&command),
+        cli::Command::Map(command) => mapping::cli::run(&command),
     }
 }

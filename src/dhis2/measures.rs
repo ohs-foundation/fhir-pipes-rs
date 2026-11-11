@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 
 use super::Instance;
 use super::api::{Dhis2, ServerInfo, in_filter};
+use super::maps::{INDICATOR_MODEL, RecordMap, record_type};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::write_ndjson;
@@ -327,6 +328,71 @@ pub fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value
     m
 }
 
+/// The item as a `DHIS2Indicator` record (models/), the input of a `--maps`
+/// map.
+pub fn record(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
+    let mut r = json!({
+        "resourceType": record_type(INDICATOR_MODEL),
+        "instance": instance.name,
+        "kind": match ind.kind {
+            Kind::Indicator => "indicator",
+            Kind::DataElement => "data-element",
+            Kind::ReportingRate => "reporting-rate",
+        },
+        "uid": ind.uid(),
+        "key": ind.fhir_key(),
+    });
+    let mut set = |key: &str, value: Option<Value>| {
+        if let Some(v) = value {
+            r[key] = v;
+        }
+    };
+    set("code", ind.code.as_deref().map(Value::from));
+    set("name", Some(json!(ind.name)));
+    set("description", ind.description.as_deref().map(Value::from));
+    set("numerator", Some(json!(ind.numerator)));
+    set(
+        "numeratorDescription",
+        ind.numerator_description.as_deref().map(Value::from),
+    );
+    set("denominator", Some(json!(ind.denominator)));
+    set(
+        "denominatorDescription",
+        ind.denominator_description.as_deref().map(Value::from),
+    );
+    set("factor", Some(json!(ind.factor)));
+    set("typeName", ind.type_name.as_deref().map(Value::from));
+    set("annualized", Some(json!(ind.annualized)));
+    set("decimals", ind.decimals.map(Value::from));
+    set(
+        "date",
+        ind.last_updated
+            .as_deref()
+            .and_then(|t| info.timestamp(t))
+            .map(Value::from),
+    );
+    set("publisher", info.system_name.as_deref().map(Value::from));
+    if !ind.groups.is_empty() {
+        let groups: Vec<Value> = ind
+            .groups
+            .iter()
+            .map(|g| {
+                let mut group = json!({});
+                if let Some(id) = &g.id {
+                    group["uid"] = json!(id);
+                }
+                group["name"] = json!(g.name);
+                if !g.sets.is_empty() {
+                    group["set"] = json!(g.sets);
+                }
+                group
+            })
+            .collect();
+        set("group", Some(Value::Array(groups)));
+    }
+    r
+}
+
 /// One topic per group, coded so a reader can regroup items the way DHIS2
 /// does: by indicator group, by data element group, or by the groups of a
 /// data element group set (one topic per set the group is in).
@@ -593,13 +659,21 @@ pub fn fetch_indicators(
 pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_out(&args.out)?;
     let instance = Instance::new(&args.conn.instance, profile)?;
+    let maps = RecordMap::load(&args.conn.maps, INDICATOR_MODEL)?;
     let api = Dhis2::connect(&args.conn)?;
     let indicators = fetch_indicators(&api, &args.select)?;
-    let report = Report::default();
-    let measures: Vec<Value> = indicators
-        .values()
-        .map(|ind| measure(ind, &instance, &api.info))
-        .collect();
+    let mut report = Report::default();
+    let mut measures: Vec<Value> = Vec::with_capacity(indicators.len());
+    for ind in indicators.values() {
+        match &maps {
+            Some(map) => measures.extend(map.run(
+                &record(ind, &instance, &api.info),
+                &ind.id,
+                &mut report,
+            )?),
+            None => measures.push(measure(ind, &instance, &api.info)),
+        }
+    }
     let n = write_ndjson(&args.out, &measures)?;
     let mut by_scoring: BTreeMap<&str, usize> = BTreeMap::new();
     for ind in indicators.values() {
@@ -634,6 +708,63 @@ mod tests {
                "numerator":"#{fbfJHSPpUQD}","numeratorDescription":"ANC 1st visit",
                "denominator":"#{h0xKKjijTdI}","denominatorDescription":"Expected pregnancies",
                "indicatorGroups":[{"id":"oehv9EO3vP7","name":"ANC"}]})
+    }
+
+    /// The example ICR maps (examples/maps/icr-dhis2).
+    fn icr_maps() -> RecordMap {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        RecordMap::load(&[dir], INDICATOR_MODEL).unwrap().unwrap()
+    }
+
+    #[test]
+    fn the_example_map_writes_what_the_built_in_mapping_writes() {
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let info = ServerInfo {
+            system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
+            utc: true,
+            ..Default::default()
+        };
+        let mut ratio = Indicator::parse(&anc1()).unwrap();
+        ratio.factor = 1000.0;
+        ratio.decimals = Some(1);
+        ratio.description = Some("Per thousand".into());
+        ratio.code = None;
+        let mut no_group_id = Indicator::parse(&anc1()).unwrap();
+        no_group_id.groups[0].id = None;
+        let items = [
+            // A percent: proportion, with both populations.
+            Indicator::parse(&anc1()).unwrap(),
+            ratio,
+            no_group_id,
+            // A plain number: cohort, with one population.
+            Indicator::parse(&json!({"id":"dy1a1mseGR7","name":"ANC visits total",
+                "indicatorType":{"name":"Number","factor":1},"numerator":"#{a}+#{b}","denominator":" 1 "}))
+            .unwrap(),
+            // Nothing but an id.
+            Indicator::parse(&json!({"id": "x"})).unwrap(),
+            // A data element in a group of two sets, and in a group of none.
+            Indicator::from_data_element(&json!({"id":"s46m5MS0hxu","code":"DE_359706","name":"BCG doses given",
+                "aggregationType":"SUM","lastUpdated":"2024-01-02T03:04:05.000",
+                "dataElementGroups":[{"id":"h9cuJOkOwY2","name":"Immunisation","groupSets":[{"id":"XY1vwCQskjX"},{"id":"jp826jAJHUc"}]},
+                                     {"id":"SriP0jBXMr6","name":"All"}]}))
+            .unwrap(),
+            Indicator::from_data_set(
+                &json!({"id":"QX4ZTUbOt3a","code":"DS_1","name":"Reproductive Health","periodType":"Monthly"}),
+            )
+            .unwrap(),
+        ];
+        let maps = icr_maps();
+        for ind in &items {
+            let mut report = Report::default();
+            let mapped = maps
+                .run(&record(ind, &instance, &info), &ind.id, &mut report)
+                .unwrap();
+            assert_eq!(mapped.len(), 1, "{}", ind.id);
+            // The same Measure. The map writes the keys in the order FHIR
+            // defines them, so subjectCodeableConcept comes before date.
+            assert_eq!(mapped[0], measure(ind, &instance, &info), "{}", ind.id);
+            assert_eq!(report.summary(), Report::default().summary(), "{}", ind.id);
+        }
     }
 
     #[test]

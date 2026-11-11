@@ -106,6 +106,10 @@ pub enum Command {
     /// to, as SQL on FHIR's Terminology in SQL page defines it (offline)
     #[command(subcommand)]
     Terminology(crate::terminology::TerminologyCommand),
+    /// Run and check FHIR Mapping Language maps: turn records described by a
+    /// logical model into FHIR resources (offline)
+    #[command(subcommand)]
+    Map(crate::mapping::cli::MapCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -202,6 +206,14 @@ pub struct Dhis2Conn {
         requires = "user"
     )]
     pub password: Option<String>,
+    /// Write the resources with FHIR Mapping Language maps instead of the built-in mapping: a folder of maps (*.map), ConceptMaps and StructureDefinitions (JSON); repeatable, or comma-separated in $FHIR_PIPES_DHIS2_MAPS. The map whose first group reads the command's record type is run: DHIS2OrgUnit (locations), DHIS2Indicator (measures), DHIS2Value (reports)
+    #[arg(
+        long = "maps",
+        value_name = "DIR",
+        env = "FHIR_PIPES_DHIS2_MAPS",
+        value_delimiter = ','
+    )]
+    pub maps: Vec<PathBuf>,
     /// Attempts per request
     #[arg(long, default_value_t = DEFAULT_RETRIES)]
     pub retries: usize,
