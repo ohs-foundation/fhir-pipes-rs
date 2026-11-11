@@ -1,0 +1,585 @@
+{
+  "resourceType": "StructureDefinition",
+  "id": "DHIS2Indicator",
+  "url": "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Indicator",
+  "name": "DHIS2Indicator",
+  "title": "DHIS2 indicator, data element or reporting rate",
+  "status": "draft",
+  "description": "One item fhir-pipes dhis2 measures writes a Measure for, as it prepares it for a map: an indicator, a data element (a count: #{uid} over 1) or a data set's reporting rate (actual over expected reports, in percent).",
+  "fhirVersion": "4.0.1",
+  "kind": "logical",
+  "abstract": false,
+  "type": "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Indicator",
+  "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Element",
+  "derivation": "specialization",
+  "snapshot": {
+    "element": [
+      {
+        "id": "DHIS2Indicator",
+        "path": "DHIS2Indicator",
+        "short": "DHIS2 indicator, data element or reporting rate",
+        "definition": "One item fhir-pipes dhis2 measures writes a Measure for, as it prepares it for a map: an indicator, a data element (a count: #{uid} over 1) or a data set's reporting rate (actual over expected reports, in percent).",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "DHIS2Indicator.instance",
+        "path": "DHIS2Indicator.instance",
+        "short": "Short name of the DHIS2 instance (--instance)",
+        "definition": "Short name of the DHIS2 instance (--instance)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.kind",
+        "path": "DHIS2Indicator.kind",
+        "short": "indicator, data-element or reporting-rate",
+        "definition": "indicator, data-element or reporting-rate",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.uid",
+        "path": "DHIS2Indicator.uid",
+        "short": "UID of the indicator, the data element, or the reporting rate's data set",
+        "definition": "UID of the indicator, the data element, or the reporting rate's data set",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.key",
+        "path": "DHIS2Indicator.key",
+        "short": "The analytics item as it appears in FHIR ids: the UID, or <uid>.REPORTING-RATE",
+        "definition": "The analytics item as it appears in FHIR ids: the UID, or <uid>.REPORTING-RATE",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.code",
+        "path": "DHIS2Indicator.code",
+        "short": "The item's code",
+        "definition": "The item's code",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.name",
+        "path": "DHIS2Indicator.name",
+        "short": "Name",
+        "definition": "Name",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.description",
+        "path": "DHIS2Indicator.description",
+        "short": "Description",
+        "definition": "Description",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.numerator",
+        "path": "DHIS2Indicator.numerator",
+        "short": "Numerator, as a DHIS2 expression",
+        "definition": "Numerator, as a DHIS2 expression",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.numeratorDescription",
+        "path": "DHIS2Indicator.numeratorDescription",
+        "short": "What the numerator is",
+        "definition": "What the numerator is",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.denominator",
+        "path": "DHIS2Indicator.denominator",
+        "short": "Denominator, as a DHIS2 expression; 1 for a plain number",
+        "definition": "Denominator, as a DHIS2 expression; 1 for a plain number",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.denominatorDescription",
+        "path": "DHIS2Indicator.denominatorDescription",
+        "short": "What the denominator is",
+        "definition": "What the denominator is",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.factor",
+        "path": "DHIS2Indicator.factor",
+        "short": "The indicator type's factor: 100 for a percent, 1 for a data element",
+        "definition": "The indicator type's factor: 100 for a percent, 1 for a data element",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.typeName",
+        "path": "DHIS2Indicator.typeName",
+        "short": "The indicator type's name, or what kind of data element or reporting rate it is",
+        "definition": "The indicator type's name, or what kind of data element or reporting rate it is",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.annualized",
+        "path": "DHIS2Indicator.annualized",
+        "short": "Whether DHIS2 annualizes the value",
+        "definition": "Whether DHIS2 annualizes the value",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "boolean"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.decimals",
+        "path": "DHIS2Indicator.decimals",
+        "short": "Decimals DHIS2 shows the value with",
+        "definition": "Decimals DHIS2 shows the value with",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.date",
+        "path": "DHIS2Indicator.date",
+        "short": "When the item last changed, in the server's time zone",
+        "definition": "When the item last changed, in the server's time zone",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "dateTime"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.publisher",
+        "path": "DHIS2Indicator.publisher",
+        "short": "The DHIS2 system's name",
+        "definition": "The DHIS2 system's name",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group",
+        "path": "DHIS2Indicator.group",
+        "short": "An indicator group or data element group the item is in",
+        "definition": "An indicator group or data element group the item is in",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group.uid",
+        "path": "DHIS2Indicator.group.uid",
+        "short": "The group's UID",
+        "definition": "The group's UID",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group.name",
+        "path": "DHIS2Indicator.group.name",
+        "short": "The group's name",
+        "definition": "The group's name",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group.set",
+        "path": "DHIS2Indicator.group.set",
+        "short": "UID of each data element group set the group is in",
+        "definition": "UID of each data element group set the group is in",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      }
+    ]
+  },
+  "differential": {
+    "element": [
+      {
+        "id": "DHIS2Indicator",
+        "path": "DHIS2Indicator",
+        "short": "DHIS2 indicator, data element or reporting rate",
+        "definition": "One item fhir-pipes dhis2 measures writes a Measure for, as it prepares it for a map: an indicator, a data element (a count: #{uid} over 1) or a data set's reporting rate (actual over expected reports, in percent).",
+        "min": 0,
+        "max": "*"
+      },
+      {
+        "id": "DHIS2Indicator.instance",
+        "path": "DHIS2Indicator.instance",
+        "short": "Short name of the DHIS2 instance (--instance)",
+        "definition": "Short name of the DHIS2 instance (--instance)",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.kind",
+        "path": "DHIS2Indicator.kind",
+        "short": "indicator, data-element or reporting-rate",
+        "definition": "indicator, data-element or reporting-rate",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.uid",
+        "path": "DHIS2Indicator.uid",
+        "short": "UID of the indicator, the data element, or the reporting rate's data set",
+        "definition": "UID of the indicator, the data element, or the reporting rate's data set",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.key",
+        "path": "DHIS2Indicator.key",
+        "short": "The analytics item as it appears in FHIR ids: the UID, or <uid>.REPORTING-RATE",
+        "definition": "The analytics item as it appears in FHIR ids: the UID, or <uid>.REPORTING-RATE",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.code",
+        "path": "DHIS2Indicator.code",
+        "short": "The item's code",
+        "definition": "The item's code",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.name",
+        "path": "DHIS2Indicator.name",
+        "short": "Name",
+        "definition": "Name",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.description",
+        "path": "DHIS2Indicator.description",
+        "short": "Description",
+        "definition": "Description",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.numerator",
+        "path": "DHIS2Indicator.numerator",
+        "short": "Numerator, as a DHIS2 expression",
+        "definition": "Numerator, as a DHIS2 expression",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.numeratorDescription",
+        "path": "DHIS2Indicator.numeratorDescription",
+        "short": "What the numerator is",
+        "definition": "What the numerator is",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.denominator",
+        "path": "DHIS2Indicator.denominator",
+        "short": "Denominator, as a DHIS2 expression; 1 for a plain number",
+        "definition": "Denominator, as a DHIS2 expression; 1 for a plain number",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.denominatorDescription",
+        "path": "DHIS2Indicator.denominatorDescription",
+        "short": "What the denominator is",
+        "definition": "What the denominator is",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.factor",
+        "path": "DHIS2Indicator.factor",
+        "short": "The indicator type's factor: 100 for a percent, 1 for a data element",
+        "definition": "The indicator type's factor: 100 for a percent, 1 for a data element",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "decimal"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.typeName",
+        "path": "DHIS2Indicator.typeName",
+        "short": "The indicator type's name, or what kind of data element or reporting rate it is",
+        "definition": "The indicator type's name, or what kind of data element or reporting rate it is",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.annualized",
+        "path": "DHIS2Indicator.annualized",
+        "short": "Whether DHIS2 annualizes the value",
+        "definition": "Whether DHIS2 annualizes the value",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "boolean"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.decimals",
+        "path": "DHIS2Indicator.decimals",
+        "short": "Decimals DHIS2 shows the value with",
+        "definition": "Decimals DHIS2 shows the value with",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "integer"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.date",
+        "path": "DHIS2Indicator.date",
+        "short": "When the item last changed, in the server's time zone",
+        "definition": "When the item last changed, in the server's time zone",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "dateTime"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.publisher",
+        "path": "DHIS2Indicator.publisher",
+        "short": "The DHIS2 system's name",
+        "definition": "The DHIS2 system's name",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group",
+        "path": "DHIS2Indicator.group",
+        "short": "An indicator group or data element group the item is in",
+        "definition": "An indicator group or data element group the item is in",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "BackboneElement"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group.uid",
+        "path": "DHIS2Indicator.group.uid",
+        "short": "The group's UID",
+        "definition": "The group's UID",
+        "min": 0,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group.name",
+        "path": "DHIS2Indicator.group.name",
+        "short": "The group's name",
+        "definition": "The group's name",
+        "min": 1,
+        "max": "1",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
+      {
+        "id": "DHIS2Indicator.group.set",
+        "path": "DHIS2Indicator.group.set",
+        "short": "UID of each data element group set the group is in",
+        "definition": "UID of each data element group set the group is in",
+        "min": 0,
+        "max": "*",
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      }
+    ]
+  }
+}

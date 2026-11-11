@@ -1,0 +1,36 @@
+{
+  "resourceType": "ConceptMap",
+  "id": "dhis2-value-source-to-report-source",
+  "url": "https://icr.healthcampaigns.org/ConceptMap/dhis2-value-source-to-report-source",
+  "name": "DHIS2ValueSourceToReportSource",
+  "title": "DHIS2 value source to ICR report source",
+  "status": "draft",
+  "group": [
+    {
+      "source": "https://healthcampaigns.org/fhir/dhis2/CodeSystem/value-source",
+      "target": "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs",
+      "element": [
+        {
+          "code": "dhis2-analytics",
+          "target": [
+            {
+              "code": "dhis2-analytics",
+              "display": "DHIS2 analytics",
+              "equivalence": "equivalent"
+            }
+          ]
+        },
+        {
+          "code": "dhis2-data-values",
+          "target": [
+            {
+              "code": "dhis2-data-values",
+              "display": "DHIS2 data values",
+              "equivalence": "equivalent"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::cli::ReportSource;
 use crate::dhis2::Instance;
 use crate::dhis2::api::ServerInfo;
+use crate::dhis2::maps::{VALUE_MODEL, record_type};
 use crate::dhis2::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fhir_key};
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
@@ -131,17 +132,14 @@ pub fn measure_report(
     source: ReportSource,
     report: &mut Report,
 ) -> Option<Value> {
-    let id = report_id(instance, row);
-    if !is_valid_id(&id) {
-        report.add("invalid_id", &id, "not a valid FHIR id; row skipped");
-        return None;
-    }
-    let (populations, score) = figures(row, ind, &id, report)?;
+    let id = valid_report_id(instance, row, report)?;
+    let figures = figures(row, ind, &id, report)?;
+    let populations = figures.populations();
     let mut group = json!({});
     if !populations.is_empty() {
         group["population"] = Value::Array(populations);
     }
-    group["measureScore"] = json!({"value": score});
+    group["measureScore"] = json!({"value": figures.score});
     let pe = period_value(&row.pe);
     let mut extension = vec![json!({"url": instance.urls.period_extension, "valueString": pe})];
     if let Some(c) = campaign {
@@ -181,6 +179,106 @@ pub fn measure_report(
     Some(r)
 }
 
+/// The row as a `DHIS2Value` record (models/), the input of a `--maps` map,
+/// or `None` after reporting why there is none. Breakdowns are added to its
+/// `stratifier` afterwards.
+#[allow(clippy::too_many_arguments)]
+pub fn value_record(
+    row: &AnalyticsRow,
+    ind: &Indicator,
+    location: &Target,
+    period: &(String, String),
+    instance: &Instance,
+    info: &ServerInfo,
+    campaign: Option<&str>,
+    source: ReportSource,
+    report: &mut Report,
+) -> Option<Value> {
+    let id = valid_report_id(instance, row, report)?;
+    let figures = figures(row, ind, &id, report)?;
+    let mut r = json!({
+        "resourceType": record_type(VALUE_MODEL),
+        "instance": instance.name,
+        "id": id,
+        "indicatorKey": ind.fhir_key(),
+        "locationId": location.id,
+    });
+    if let Some(name) = &location.name {
+        r["locationName"] = json!(name);
+    }
+    r["period"] = json!(period_value(&row.pe));
+    r["periodStart"] = json!(period.0);
+    r["periodEnd"] = json!(period.1);
+    if let Some(d) = info
+        .last_analytics
+        .as_deref()
+        .and_then(|t| info.timestamp(t))
+    {
+        r["date"] = json!(d);
+    }
+    if let Some(name) = &info.system_name {
+        r["reporter"] = json!(name);
+    }
+    if let Some(c) = campaign {
+        r["campaign"] = json!(c);
+    }
+    r["source"] = json!(source.coding().0);
+    figures.write(&mut r);
+    Some(r)
+}
+
+/// The report id of a row, or `None`, reported, when it is not a valid FHIR id.
+fn valid_report_id(instance: &Instance, row: &AnalyticsRow, report: &mut Report) -> Option<String> {
+    let id = report_id(instance, row);
+    if !is_valid_id(&id) {
+        report.add("invalid_id", &id, "not a valid FHIR id; row skipped");
+        return None;
+    }
+    Some(id)
+}
+
+/// The counts and score of one analytics row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Figures {
+    /// The count of a plain number (a cohort).
+    pub initial: Option<i64>,
+    pub numerator: Option<i64>,
+    pub denominator: Option<i64>,
+    /// The DHIS2 value divided by the indicator's factor.
+    pub score: f64,
+}
+
+impl Figures {
+    /// The populations of a MeasureReport group or stratum.
+    fn populations(&self) -> Vec<Value> {
+        [
+            self.initial
+                .map(|n| population("initial-population", "Initial Population", n)),
+            self.numerator
+                .map(|n| population("numerator", "Numerator", n)),
+            self.denominator
+                .map(|n| population("denominator", "Denominator", n)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The counts and score as fields of a `DHIS2Value` record or stratum.
+    fn write(&self, record: &mut Value) {
+        if let Some(n) = self.initial {
+            record["initialPopulation"] = json!(n);
+        }
+        if let Some(n) = self.numerator {
+            record["numerator"] = json!(n);
+        }
+        if let Some(n) = self.denominator {
+            record["denominator"] = json!(n);
+        }
+        record["score"] = json!(self.score);
+    }
+}
+
 /// The populations and score of one analytics row (a whole report, or one
 /// stratum of it); `None` after reporting why there are none. `key` names
 /// the report in the run report.
@@ -189,7 +287,7 @@ pub fn figures(
     ind: &Indicator,
     id: &str,
     report: &mut Report,
-) -> Option<(Vec<Value>, f64)> {
+) -> Option<Figures> {
     let Ok(value) = row.value.trim().parse::<f64>() else {
         report.add(
             "bad_number",
@@ -203,32 +301,32 @@ pub fn figures(
         return None;
     }
     let score = ((value / ind.factor) * 1e10).round() / 1e10;
-    let populations: Vec<Value> = match ind.scoring() {
-        // A data element row has no numerator column: its value is the count.
-        Scoring::Cohort => count(
-            if row.numerator.trim().is_empty() {
-                &row.value
-            } else {
-                &row.numerator
-            },
-            id,
-            "count",
-            report,
-        )
-        .map(|n| population("initial-population", "Initial Population", n))
-        .into_iter()
-        .collect(),
-        _ => [
-            count(&row.numerator, id, "numerator", report)
-                .map(|n| population("numerator", "Numerator", n)),
-            count(&row.denominator, id, "denominator", report)
-                .map(|n| population("denominator", "Denominator", n)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
+    let mut figures = Figures {
+        initial: None,
+        numerator: None,
+        denominator: None,
+        score,
     };
-    Some((populations, score))
+    match ind.scoring() {
+        // A data element row has no numerator column: its value is the count.
+        Scoring::Cohort => {
+            figures.initial = count(
+                if row.numerator.trim().is_empty() {
+                    &row.value
+                } else {
+                    &row.numerator
+                },
+                id,
+                "count",
+                report,
+            );
+        }
+        _ => {
+            figures.numerator = count(&row.numerator, id, "numerator", report);
+            figures.denominator = count(&row.denominator, id, "denominator", report);
+        }
+    }
+    Some(figures)
 }
 
 /// One stratum: a breakdown option with its own populations and score.
@@ -242,7 +340,8 @@ pub fn stratum(
 ) -> Option<Value> {
     let option = row.option.as_deref()?;
     let key = format!("{}/{breakdown}:{option}", report_id(instance, row));
-    let (populations, score) = figures(row, ind, &key, report)?;
+    let figures = figures(row, ind, &key, report)?;
+    let populations = figures.populations();
     let name = names.get(option).map(String::as_str).unwrap_or(option);
     let mut s = json!({
         "value": {"coding": [{"system": instance.dimension_system(Some(breakdown)), "code": option, "display": name}], "text": name},
@@ -250,7 +349,26 @@ pub fn stratum(
     if !populations.is_empty() {
         s["population"] = Value::Array(populations);
     }
-    s["measureScore"] = json!({"value": score});
+    s["measureScore"] = json!({"value": figures.score});
+    Some(s)
+}
+
+/// One stratum of a `DHIS2Value` record: a breakdown option with its own
+/// counts and score.
+pub fn stratum_record(
+    row: &AnalyticsRow,
+    ind: &Indicator,
+    breakdown: &str,
+    names: &HashMap<String, String>,
+    instance: &Instance,
+    report: &mut Report,
+) -> Option<Value> {
+    let option = row.option.as_deref()?;
+    let key = format!("{}/{breakdown}:{option}", report_id(instance, row));
+    let figures = figures(row, ind, &key, report)?;
+    let name = names.get(option).map(String::as_str).unwrap_or(option);
+    let mut s = json!({"option": option, "name": name});
+    figures.write(&mut s);
     Some(s)
 }
 
@@ -467,6 +585,189 @@ mod tests {
         assert_eq!(s["population"][0]["count"], 50);
         assert_eq!(s["measureScore"]["value"], 0.25);
         assert!(parse_analytics(&v, Some("J5jldMd8OHv")).is_err());
+    }
+
+    #[test]
+    fn the_example_map_writes_what_the_built_in_mapping_writes() {
+        use crate::dhis2::maps::RecordMap;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let maps = RecordMap::load(&[dir], VALUE_MODEL).unwrap().unwrap();
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let info = ServerInfo {
+            system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
+            last_analytics: Some("2026-10-12T02:07:00.052".into()),
+            utc: true,
+            ..Default::default()
+        };
+        let bare = ServerInfo::default();
+        let row = |value: &str, numerator: &str, denominator: &str| AnalyticsRow {
+            dx: "tUIlpyeeX9N".into(),
+            pe: "2025Q1".into(),
+            ou: "O6uvpzGd5pu".into(),
+            value: value.into(),
+            numerator: numerator.into(),
+            denominator: denominator.into(),
+            option: None,
+        };
+        let named = Target {
+            id: "sle-O6uvpzGd5pu".into(),
+            name: Some("Bo".into()),
+        };
+        let period = ("2025-01-01".to_string(), "2025-03-31".to_string());
+        let count = Indicator::parse(
+            &json!({"id":"tUIlpyeeX9N","indicatorType":{"factor":1},"numerator":"#{a}","denominator":"1"}),
+        )
+        .unwrap();
+        let element =
+            Indicator::from_data_element(&json!({"id": "tUIlpyeeX9N", "name": "BCG doses given"}))
+                .unwrap();
+        let rate = Indicator::from_data_set(&json!({"id": "tUIlpyeeX9N", "name": "RCH"})).unwrap();
+        let analytics = ReportSource::Analytics;
+        let values = ReportSource::DataValues;
+        // (row, item, Location, server, campaign, source)
+        let cases = [
+            // A percent with both counts, a named Location and a campaign.
+            (
+                row("45.18", "4518", "10000"),
+                penta3(),
+                &named,
+                &info,
+                Some("CarePlan/c1"),
+                analytics,
+            ),
+            // Counts that are not whole numbers, and one DHIS2 left blank.
+            (
+                row("12.5", "1.4", ""),
+                penta3(),
+                &loc(),
+                &bare,
+                None,
+                values,
+            ),
+            // A plain number: its numerator is the count.
+            (
+                row("88039.0", "88039.0", "1.0"),
+                count,
+                &named,
+                &info,
+                None,
+                analytics,
+            ),
+            // A data element: no numerator column, the value is the count.
+            (row("7", "", ""), element, &loc(), &info, None, values),
+            // A reporting rate: a key with a hyphen in the id and the Measure.
+            (
+                row("93.3", "28", "30"),
+                rate,
+                &named,
+                &info,
+                None,
+                analytics,
+            ),
+        ];
+        for (row, ind, location, info, campaign, source) in &cases {
+            let mut row = row.clone();
+            row.dx = ind.id.clone();
+            let mut built_in_report = Report::default();
+            let mut expected = measure_report(
+                &row,
+                ind,
+                location,
+                &period,
+                &instance,
+                info,
+                *campaign,
+                *source,
+                &mut built_in_report,
+            )
+            .unwrap();
+            let mut mapped_report = Report::default();
+            let mut record = value_record(
+                &row,
+                ind,
+                location,
+                &period,
+                &instance,
+                info,
+                *campaign,
+                *source,
+                &mut mapped_report,
+            )
+            .unwrap();
+
+            // Two breakdowns, the first with two options, attached as the writer does.
+            let names: HashMap<String, String> = [
+                ("fMZEcRHuamy", "Location Fixed/Outreach"),
+                ("qkPbeWaFsnU", "Fixed"),
+                ("wbrDrL2aYEc", "Outreach"),
+                ("J5jldMd8OHv", "Facility Type"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            // The option of the second breakdown has no name: its UID stands in.
+            let breakdowns = [
+                (
+                    "fMZEcRHuamy",
+                    vec![
+                        ("qkPbeWaFsnU", "25.0", "50.0", "200.0"),
+                        ("wbrDrL2aYEc", "10", "", "3"),
+                    ],
+                ),
+                ("J5jldMd8OHv", vec![("CXw2yu5fodb", "1.5", "3", "2")]),
+            ];
+            for (dimension, options) in &breakdowns {
+                let mut strata = Vec::new();
+                let mut records = Vec::new();
+                for (option, value, numerator, denominator) in options {
+                    let mut r = row.clone();
+                    r.option = Some(option.to_string());
+                    r.value = value.to_string();
+                    r.numerator = numerator.to_string();
+                    r.denominator = denominator.to_string();
+                    strata.extend(stratum(
+                        &r,
+                        ind,
+                        dimension,
+                        &names,
+                        &instance,
+                        &mut built_in_report,
+                    ));
+                    records.extend(stratum_record(
+                        &r,
+                        ind,
+                        dimension,
+                        &names,
+                        &instance,
+                        &mut mapped_report,
+                    ));
+                }
+                let name = &names[*dimension];
+                let stratifier = json!({
+                    "code": [{"coding": [{"system": instance.dimension_system(None), "code": dimension, "display": name}], "text": name}],
+                    "stratum": strata,
+                });
+                match expected["group"][0]
+                    .get_mut("stratifier")
+                    .and_then(Value::as_array_mut)
+                {
+                    Some(list) => list.push(stratifier),
+                    None => expected["group"][0]["stratifier"] = json!([stratifier]),
+                }
+                let stratifier = json!({"dimension": dimension, "name": name, "stratum": records});
+                match record.get_mut("stratifier").and_then(Value::as_array_mut) {
+                    Some(list) => list.push(stratifier),
+                    None => record["stratifier"] = json!([stratifier]),
+                }
+            }
+
+            let id = expected["id"].as_str().unwrap().to_string();
+            let mapped = maps.run(&record, &id, &mut mapped_report).unwrap();
+            assert_eq!(mapped.len(), 1, "{id}");
+            // The same MeasureReport, key for key and in the same order.
+            assert_eq!(mapped[0].to_string(), expected.to_string(), "{id}");
+            assert_eq!(mapped_report.summary(), built_in_report.summary(), "{id}");
+        }
     }
 
     #[test]

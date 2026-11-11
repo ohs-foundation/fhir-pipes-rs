@@ -47,6 +47,7 @@ use serde_json::{Value, json};
 
 use super::Instance;
 use super::api::{Dhis2, ServerInfo, check_analytics_age};
+use super::maps::{RecordMap, VALUE_MODEL};
 use super::measures::{fetch_indicators, fhir_key};
 use super::rerun::{Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
@@ -123,6 +124,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         )));
     }
 
+    let maps = RecordMap::load(&args.conn.maps, VALUE_MODEL)?;
     let api = Dhis2::connect(&args.conn)?;
     if !from_values {
         match &api.info.last_analytics {
@@ -184,6 +186,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         mapping: &mapping,
         campaign: args.campaign.as_deref(),
         source: args.source,
+        maps: maps.as_ref(),
         state,
         checkpoint: checkpoint.clone(),
         tally: Tally::default(),
@@ -365,7 +368,7 @@ fn fingerprint(
     plan: &Planned,
 ) -> Value {
     let from_values = args.source == ReportSource::DataValues;
-    json!({
+    let mut plan = json!({
         "dhis2": crate::redact::url(&args.conn.url),
         "instance": instance.name,
         "source": args.source.code(),
@@ -384,7 +387,19 @@ fn fingerprint(
         "locations": file_stamp(&args.locations),
         "previous": args.previous.as_deref().map(file_stamp),
         "changed": args.changed.as_ref().map(|p| p.display().to_string()),
-    })
+    });
+    // Only with --maps, so a run without it resumes a checkpoint written
+    // before the option existed.
+    if !args.conn.maps.is_empty() {
+        plan["maps"] = json!(
+            args.conn
+                .maps
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+    plan
 }
 
 /// With `--resume`, the checkpoint of the interrupted run at `--out`, if

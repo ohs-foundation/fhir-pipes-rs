@@ -20,8 +20,17 @@ use crate::report::Report;
 pub const ORG_UNIT_MODEL: &str =
     "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2OrgUnit";
 
+pub const INDICATOR_MODEL: &str =
+    "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Indicator";
+pub const VALUE_MODEL: &str =
+    "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value";
+
 /// The logical models of the records fhir-pipes prepares.
-const MODELS: [&str; 1] = [include_str!("models/StructureDefinition-DHIS2OrgUnit.json")];
+const MODELS: [&str; 3] = [
+    include_str!("models/StructureDefinition-DHIS2OrgUnit.json"),
+    include_str!("models/StructureDefinition-DHIS2Indicator.json"),
+    include_str!("models/StructureDefinition-DHIS2Value.json"),
+];
 
 /// The map for one kind of record.
 pub struct RecordMap {

@@ -26,8 +26,18 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_DHIS2_TOKEN",
         "FHIR_PIPES_DHIS2_USER",
         "FHIR_PIPES_DHIS2_PASSWORD",
+        "FHIR_PIPES_DHIS2_MAPS",
     ] {
         c.env_remove(var);
+    }
+    // tests/dhis2_maps.rs runs this file again as a module: every command
+    // then writes its resources with the example ICR maps, not the built-in
+    // mapping, and every test here has to pass the same way.
+    if module_path!().starts_with("dhis2_maps") {
+        c.env(
+            "FHIR_PIPES_DHIS2_MAPS",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/examples/maps/icr-dhis2"),
+        );
     }
     c
 }

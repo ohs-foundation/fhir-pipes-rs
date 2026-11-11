@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::dhis2::Instance;
 use crate::dhis2::api::{Dhis2, ServerInfo};
+use crate::dhis2::maps::RecordMap;
 use crate::dhis2::measures::Indicator;
 use crate::dhis2::rerun::{Change, Checkpoint, Previous};
 use crate::error::{PipesError, Result};
@@ -21,7 +22,7 @@ use crate::fhir::ndjson::NdjsonWriter;
 use crate::work::InOrder;
 
 use super::analytics::{Analytics, AnalyticsRow, Fetched, Values, fetch_unit};
-use super::build::{Target, measure_report, report_id, stratum};
+use super::build::{Target, measure_report, report_id, stratum, stratum_record, value_record};
 use super::periods::period_value;
 use super::plan::Unit;
 
@@ -92,6 +93,9 @@ pub(super) struct Writer<'a> {
     pub(super) campaign: Option<&'a str>,
     /// Analytics or data values, written in the source extension.
     pub(super) source: ReportSource,
+    /// `--maps`: the map that writes each MeasureReport from a `DHIS2Value`
+    /// record, instead of the built-in mapping.
+    pub(super) maps: Option<&'a RecordMap>,
     pub(super) state: Checkpoint,
     pub(super) checkpoint: PathBuf,
     pub(super) tally: Tally,
@@ -173,7 +177,13 @@ impl<'a> Writer<'a> {
                     );
                     continue;
                 };
-                if let Some(r) = measure_report(
+                // With --maps, `out` holds DHIS2Value records until they are written.
+                let make = if self.maps.is_some() {
+                    value_record
+                } else {
+                    measure_report
+                };
+                if let Some(r) = make(
                     row,
                     ind,
                     location,
@@ -198,7 +208,12 @@ impl<'a> Writer<'a> {
                     let Some((ind, _)) = self.target(row) else {
                         continue;
                     };
-                    if let Some(st) = stratum(
+                    let make = if self.maps.is_some() {
+                        stratum_record
+                    } else {
+                        stratum
+                    };
+                    if let Some(st) = make(
                         row,
                         ind,
                         b,
@@ -225,6 +240,15 @@ impl<'a> Writer<'a> {
                 );
                 continue;
             };
+            if self.maps.is_some() {
+                list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                let stratifier = json!({"dimension": b, "name": name, "stratum": list});
+                match r.get_mut("stratifier").and_then(Value::as_array_mut) {
+                    Some(existing) => existing.push(stratifier),
+                    None => r["stratifier"] = json!([stratifier]),
+                }
+                continue;
+            }
             list.sort_by(|a, b| {
                 a["value"]["text"]
                     .as_str()
@@ -251,6 +275,22 @@ impl<'a> Writer<'a> {
             {
                 continue;
             }
+            let mapped;
+            let r = match self.maps {
+                Some(map) => {
+                    let id = r["id"].as_str().unwrap_or_default();
+                    let mut written = map.run(r, id, &mut self.state.report)?;
+                    if written.len() != 1 || written[0]["id"] != r["id"] {
+                        return Err(PipesError::Usage(format!(
+                            "the --maps map must write one MeasureReport with the record's id for {id}; it wrote {}",
+                            written.len()
+                        )));
+                    }
+                    mapped = written.remove(0);
+                    &mapped
+                }
+                None => r,
+            };
             let change = self.tally.add(r, self.previous.as_mut());
             self.out.write(r)?;
             if let (Some(w), Some(Change::New | Change::Changed)) = (self.changed.as_mut(), change)
