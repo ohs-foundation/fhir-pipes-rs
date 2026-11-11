@@ -880,6 +880,13 @@ fn a_successful_run_publishes_every_table_and_leaves_nothing_staged() {
     let mut files = warehouse(&data);
     // The one new file: the lock a run holds on the warehouse.
     assert!(files.remove(".refresh.lock").is_some());
+    // And the count of publishes, which a reader of the warehouse checks.
+    assert!(files.remove(".publish-generation").is_some());
+    let generation = std::fs::read_to_string(data.join(".publish-generation")).unwrap();
+    assert!(
+        generation.trim().parse::<u64>().unwrap() >= 1,
+        "{generation}"
+    );
     let tops: std::collections::BTreeSet<&str> = files
         .keys()
         .map(|k| {

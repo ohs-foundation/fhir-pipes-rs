@@ -21,6 +21,21 @@ pub struct Metrics {
     /// destination → failed tries.
     notify_failures: Mutex<BTreeMap<String, u64>>,
     pub running: AtomicBool,
+    /// HTTP status → `$sql-run` requests answered so.
+    queries: Mutex<BTreeMap<u16, u64>>,
+    query_seconds: Mutex<Histogram>,
+}
+
+/// The upper bounds of `fhir_pipes_query_seconds`' buckets, but `+Inf`.
+const QUERY_BUCKETS: [f64; 7] = [0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0];
+
+/// Durations: how many fell at or under each of `QUERY_BUCKETS`, their sum
+/// and their count.
+#[derive(Default)]
+struct Histogram {
+    buckets: [u64; QUERY_BUCKETS.len()],
+    sum: f64,
+    count: u64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -51,6 +66,19 @@ impl Metrics {
             rec.attempts.len().saturating_sub(1) as u64,
             Ordering::Relaxed,
         );
+    }
+
+    /// A `$sql-run` request has been answered with `status` after `seconds`.
+    pub fn query_ended(&self, status: u16, seconds: f64) {
+        *lock(&self.queries).entry(status).or_default() += 1;
+        let mut h = lock(&self.query_seconds);
+        for (bound, n) in QUERY_BUCKETS.iter().zip(h.buckets.iter_mut()) {
+            if seconds <= *bound {
+                *n += 1;
+            }
+        }
+        h.sum += seconds;
+        h.count += 1;
     }
 
     pub fn schedule_skipped(&self) {
@@ -139,6 +167,23 @@ impl Metrics {
         );
         let _ = writeln!(o, "# TYPE fhir_pipes_log_lines_dropped_total counter");
         let _ = writeln!(o, "fhir_pipes_log_lines_dropped_total {log_lines_dropped}");
+        let _ = writeln!(o, "# TYPE fhir_pipes_queries_total counter");
+        for (status, n) in lock(&self.queries).iter() {
+            let _ = writeln!(o, "fhir_pipes_queries_total{{status=\"{status}\"}} {n}");
+        }
+        let _ = writeln!(o, "# TYPE fhir_pipes_query_seconds histogram");
+        let h = lock(&self.query_seconds);
+        for (bound, n) in QUERY_BUCKETS.iter().zip(h.buckets) {
+            let _ = writeln!(o, "fhir_pipes_query_seconds_bucket{{le=\"{bound}\"}} {n}");
+        }
+        let _ = writeln!(
+            o,
+            "fhir_pipes_query_seconds_bucket{{le=\"+Inf\"}} {}",
+            h.count
+        );
+        let _ = writeln!(o, "fhir_pipes_query_seconds_sum {}", h.sum);
+        let _ = writeln!(o, "fhir_pipes_query_seconds_count {}", h.count);
+        drop(h);
         let _ = writeln!(o, "# TYPE fhir_pipes_table_rows gauge");
         let tables = std::fs::read_to_string(manifest)
             .ok()
@@ -164,4 +209,34 @@ pub fn name(v: &impl serde::Serialize) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queries_are_counted_by_status() {
+        let m = Metrics::default();
+        m.query_ended(200, 0.2);
+        m.query_ended(200, 3.0);
+        m.query_ended(422, 0.05);
+        let text = m.render(&[], Path::new("/nonexistent/manifest.json"), false, 0);
+        for line in [
+            "# TYPE fhir_pipes_queries_total counter",
+            "fhir_pipes_queries_total{status=\"200\"} 2",
+            "fhir_pipes_queries_total{status=\"422\"} 1",
+            "# TYPE fhir_pipes_query_seconds histogram",
+            "fhir_pipes_query_seconds_bucket{le=\"0.1\"} 1",
+            "fhir_pipes_query_seconds_bucket{le=\"0.5\"} 2",
+            "fhir_pipes_query_seconds_bucket{le=\"1\"} 2",
+            "fhir_pipes_query_seconds_bucket{le=\"5\"} 3",
+            "fhir_pipes_query_seconds_bucket{le=\"60\"} 3",
+            "fhir_pipes_query_seconds_bucket{le=\"+Inf\"} 3",
+            "fhir_pipes_query_seconds_sum 3.25",
+            "fhir_pipes_query_seconds_count 3",
+        ] {
+            assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+        }
+    }
 }

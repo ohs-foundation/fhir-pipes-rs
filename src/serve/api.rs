@@ -22,10 +22,11 @@ use super::runner::{self, CancelToken, Job};
 use super::store::{RunId, RunRecord, RunRequest, Trigger};
 
 /// The steps a request may name in `only` and `skip`, as `refresh` takes them.
-const STEPS: [&str; 8] = [
+const STEPS: [&str; 9] = [
     "locations",
     "views",
     "tiles",
+    "libraries",
     "manifest",
     "catalog",
     "database",
@@ -48,6 +49,9 @@ pub struct Server {
     pub clock: Arc<dyn super::schedule::Clock>,
     /// Set once serve has been told to stop: no run is accepted after.
     pub stopping: std::sync::atomic::AtomicBool,
+    /// The query API, with `[serve.query]`: its catalog is built again
+    /// after each run.
+    pub query: Option<Arc<super::query::http::QueryApi>>,
 }
 
 /// Why a run was not started.
@@ -122,6 +126,19 @@ impl Server {
             }
             server.metrics.running.store(false, Ordering::SeqCst);
             *server.lock_current() = None;
+            // A run that succeeded may have changed the Libraries; on an
+            // error the last catalog is kept. Last, so that a slow fetch of
+            // a remote Library source delays neither the run's notify nor
+            // the next run.
+            if rec.status == super::store::RunStatus::Succeeded
+                && let Some(q) = &server.query
+                && let Err(e) = q.reload()
+            {
+                server
+                    .job
+                    .stdout
+                    .push(not_reloaded(&e, &q.settings, &server.job.redactor));
+            }
         });
         Ok(id)
     }
@@ -129,6 +146,20 @@ impl Server {
     fn current_id(&self) -> Option<RunId> {
         self.lock_current().as_ref().map(|(id, _)| id.clone())
     }
+}
+
+/// The line serve prints when the query catalog of `settings` was not
+/// built again: the error, which can quote a Library source's URL, with
+/// URLs' credentials and serve's secrets hidden.
+fn not_reloaded(
+    e: &anyhow::Error,
+    settings: &crate::warehouse::config::Settings,
+    redactor: &super::secrets::Redactor,
+) -> String {
+    format!(
+        "query catalog not reloaded: {}",
+        redactor.redact(&super::query::catalog::load_error(e, settings))
+    )
 }
 
 pub fn routes(server: Arc<Server>) -> axum::Router {
@@ -338,7 +369,7 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let store = Arc::new(super::super::store::Store::open(dir.join("runs")).unwrap());
         let stdout = super::super::output::StdoutQueue::start(Box::new(std::io::sink()));
-        let cfg = super::super::config::parse(None).unwrap();
+        let cfg = super::super::config::parse(None, std::path::Path::new(".")).unwrap();
         let notifier = Notifier::start(
             store.clone(),
             vec![],
@@ -364,7 +395,53 @@ mod tests {
             current: Mutex::new(None),
             clock: Arc::new(super::super::schedule::SystemClock),
             stopping: Default::default(),
+            query: None,
         })
+    }
+
+    #[test]
+    fn a_reload_error_hides_urls_credentials_and_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = crate::warehouse::config::settings(
+            Default::default(),
+            dir.path().to_path_buf(),
+            crate::warehouse::config::Overrides {
+                data: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (redactor, _) =
+            super::super::secrets::Redactor::new([("test".into(), "serve-secret-k3".into())]);
+        // Library sources with secrets beside brackets, or behind an
+        // uppercase scheme: (source, the secrets in it).
+        for (source, secrets) in [
+            (
+                "https://u:k1-user@127.0.0.1:9/p.tgz?token=k2-query",
+                &["k1-user", "k2-query"][..],
+            ),
+            ("https://127.0.0.1:9/p(v1).tgz?token=secret1", &["secret1"]),
+            (
+                "https://u:pa(ss)@127.0.0.1:9/p.tgz?token=secret2",
+                &["pa(ss)", "pa%28ss%29", "secret2"],
+            ),
+            ("https://127.0.0.1:9/p.tgz?token=abc(def)", &["abc", "def"]),
+            ("HTTPS://u:plain@127.0.0.1:9/p.tgz", &["plain"]),
+        ] {
+            settings.libraries = vec![source.into()];
+            let err = super::super::query::catalog::Queries::load(
+                &settings,
+                &super::super::query::config::Approve::All,
+            )
+            .err()
+            .unwrap()
+            .context("serve-secret-k3");
+            let line = not_reloaded(&err, &settings, &redactor);
+            assert!(line.starts_with("query catalog not reloaded: "), "{line}");
+            for secret in secrets.iter().chain(&["serve-secret-k3"]) {
+                assert!(!line.contains(secret), "{secret}: {line}");
+            }
+        }
     }
 
     #[test]

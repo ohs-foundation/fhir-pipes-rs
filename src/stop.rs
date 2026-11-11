@@ -12,7 +12,7 @@
 //!
 //! On Windows `install` does nothing, so Ctrl-C ends the process as before.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -35,7 +35,7 @@ static HOLDS: AtomicUsize = AtomicUsize::new(0);
 static EXEMPT: AtomicUsize = AtomicUsize::new(0);
 /// Whether the registered tools have been sent SIGTERM for this stop.
 static TOOLS_STOPPED: AtomicBool = AtomicBool::new(false);
-static TOOLS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+static TOOLS: Mutex<BTreeMap<u32, Owner>> = Mutex::new(BTreeMap::new());
 
 /// Handle SIGTERM and SIGINT from now on. Idempotent.
 pub fn install() {
@@ -73,6 +73,15 @@ fn test_stop() -> bool {
 #[cfg(not(test))]
 fn test_stop() -> bool {
     false
+}
+
+// The thread that registered each tool, in the unit tests (`None` outside
+// them): a test's stop reaches only its own tools, not those of the tests
+// running beside it.
+type Owner = Option<std::thread::ThreadId>;
+
+fn current() -> Owner {
+    cfg!(test).then(|| std::thread::current().id())
 }
 
 /// Whether a stop has been asked for.
@@ -128,7 +137,7 @@ impl Drop for Hold {
 pub struct Registered(u32);
 
 pub fn register(pid: u32) -> Registered {
-    lock_tools().insert(pid);
+    lock_tools().insert(pid, current());
     // A tool started after the stop reached the others gets it too, unless
     // it is one the stop allows (a failure hook).
     if tools_stopped() && EXEMPT.load(Ordering::SeqCst) == 0 {
@@ -158,7 +167,7 @@ impl Drop for Registered {
     }
 }
 
-fn lock_tools() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
+fn lock_tools() -> std::sync::MutexGuard<'static, BTreeMap<u32, Owner>> {
     TOOLS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -167,7 +176,7 @@ fn on_signal() {
         eprintln!("fhir-pipes: stopping (a second signal stops at once)");
         request();
     } else {
-        for pid in lock_tools().iter() {
+        for pid in lock_tools().keys() {
             signal(*pid, Sig::Kill);
         }
         eprintln!("fhir-pipes: stopped at once");
@@ -188,7 +197,12 @@ fn stop_tools() {
     if TOOLS_STOPPED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let pids: Vec<u32> = lock_tools().iter().copied().collect();
+    let me = current();
+    let pids: Vec<u32> = lock_tools()
+        .iter()
+        .filter(|(_, owner)| **owner == me)
+        .map(|(pid, _)| *pid)
+        .collect();
     for pid in pids {
         terminate(pid);
     }
@@ -201,9 +215,10 @@ fn stop_tools() {
 /// the stop does not reach, gets none.
 fn terminate(pid: u32) {
     signal(pid, Sig::Term);
+    let owner = current();
     std::thread::spawn(move || {
         std::thread::sleep(tool_grace());
-        if lock_tools().contains(&pid) {
+        if lock_tools().get(&pid) == Some(&owner) {
             signal(pid, Sig::Kill);
         }
     });
@@ -253,7 +268,8 @@ pub fn reset_for_test() {
     HOLDS.store(0, Ordering::SeqCst);
     EXEMPT.store(0, Ordering::SeqCst);
     TOOLS_STOPPED.store(false, Ordering::SeqCst);
-    lock_tools().clear();
+    let me = current();
+    lock_tools().retain(|_, owner| *owner != me);
 }
 
 #[cfg(test)]

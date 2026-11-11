@@ -87,6 +87,8 @@ assert_cmd = "2"
 libc = "0.2"
 predicates = "3"
 httptest = "0.16"
+# Router tests call the router as a service (`oneshot`); in the tree through axum.
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = true
