@@ -88,7 +88,7 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 
 impl MapPackage {
     /// Loads every folder in `dirs`, after the StructureDefinitions in
-    /// `built_in` (JSON text), which a folder may not redefine.
+    /// `built_in` (JSON text). A folder's copy of a built-in one is not used.
     pub fn load(dirs: &[PathBuf], built_in: &[&str]) -> Result<Self> {
         let mut definitions = PackageDefinitions::new(CoreDefinitions::new(Release::R4));
         for text in built_in {
@@ -148,10 +148,11 @@ impl MapPackage {
                         Some("StructureDefinition") => {
                             let url = resource.get("url").and_then(Value::as_str).unwrap_or("");
                             if built_in_urls.iter().any(|u| u == url) {
-                                return Err(usage(format!(
-                                    "{}: {url} is built into fhir-pipes and cannot be redefined",
+                                eprintln!(
+                                    "{}: {url} is built into fhir-pipes; this copy is not used",
                                     path.display()
-                                )));
+                                );
+                                continue;
                             }
                             definitions
                                 .add(&resource)
@@ -326,4 +327,162 @@ fn first_source_url(map: &StructureMap) -> Option<String> {
                 || s.url.rsplit('/').next() == Some(type_name)
         })
         .map(|s| s.url.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dhis2::maps::{INDICATOR_MODEL, MODELS, ORG_UNIT_MODEL, VALUE_MODEL};
+    use serde_json::json;
+
+    const FACILITY: &str = r#"{"resourceType":"StructureDefinition","id":"Facility",
+        "url":"https://example.org/StructureDefinition/Facility","name":"Facility","status":"draft",
+        "fhirVersion":"4.0.1","kind":"logical","abstract":false,
+        "type":"https://example.org/StructureDefinition/Facility",
+        "baseDefinition":"http://hl7.org/fhir/StructureDefinition/Element","derivation":"specialization",
+        "snapshot":{"element":[
+          {"id":"Facility","path":"Facility","min":0,"max":"*"},
+          {"id":"Facility.code","path":"Facility.code","min":1,"max":"1","type":[{"code":"string"}]},
+          {"id":"Facility.name","path":"Facility.name","min":1,"max":"1","type":[{"code":"string"}]},
+          {"id":"Facility.kind","path":"Facility.kind","min":0,"max":"1","type":[{"code":"code"}]}]}}"#;
+
+    const KINDS: &str = r#"{"resourceType":"ConceptMap","url":"https://example.org/ConceptMap/kinds","status":"draft",
+        "group":[{"source":"https://example.org/kinds","target":"http://terminology.hl7.org/CodeSystem/location-physical-type",
+          "element":[{"code":"site","target":[{"code":"si","display":"Site","equivalence":"equivalent"}]}]}]}"#;
+
+    fn map(name: &str, body: &str) -> String {
+        format!(
+            "/// url = 'https://example.org/StructureMap/{name}'\n/// name = '{name}'\n\n\
+             uses \"https://example.org/StructureDefinition/Facility\" alias Facility as source\n\
+             uses \"http://hl7.org/fhir/StructureDefinition/Location\" alias Location as target\n\n\
+             group Facility(source src : Facility, target loc : Location) {{\n{body}}}\n"
+        )
+    }
+
+    fn folder(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    fn load(dir: &tempfile::TempDir) -> Result<MapPackage> {
+        MapPackage::load(&[dir.path().to_path_buf()], &[])
+    }
+
+    fn message<T>(result: Result<T>) -> String {
+        match result {
+            Err(PipesError::Usage(m)) => m,
+            Err(other) => panic!("expected a usage error, got {other}"),
+            Ok(_) => panic!("expected a usage error"),
+        }
+    }
+
+    #[test]
+    fn a_map_turns_a_logical_model_record_into_a_resource() {
+        let body = "  src.code as c -> loc.id = c \"id\";\n  src.name as n -> loc.name = n \"name\";\n  \
+                    src.kind as k -> loc.physicalType = translate(k, 'https://example.org/ConceptMap/kinds', 'CodeableConcept') \"kind\";\n";
+        // Definitions and ConceptMaps are found in subfolders too.
+        let dir = folder(&[
+            ("FacilityToLocation.map", &map("FacilityToLocation", body)),
+            ("models/Facility.json", FACILITY),
+            ("terminology/kinds.json", KINDS),
+            ("notes.txt", "not read"),
+        ]);
+        let package = load(&dir).unwrap();
+        assert_eq!(package.map_count(), 1);
+        let map = package.only_map().unwrap();
+        assert_eq!(
+            first_source_url(map).as_deref(),
+            Some("https://example.org/StructureDefinition/Facility")
+        );
+        let record =
+            json!({"resourceType": "Facility", "code": "f1", "name": "Bo clinic", "kind": "site"});
+        let out = package.transform(map, &record).unwrap();
+        assert_eq!(
+            out.resources,
+            vec![
+                json!({"resourceType": "Location", "id": "f1", "name": "Bo clinic",
+                "physicalType": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/location-physical-type",
+                                             "code": "si", "display": "Site"}]}})
+            ]
+        );
+        assert!(out.warnings.is_empty());
+        let (errors, warnings) = package.check();
+        assert!(
+            errors.is_empty() && warnings.is_empty(),
+            "{errors:?} {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn check_finds_a_misspelt_element_on_either_side() {
+        let body =
+            "  src.cod as c -> loc.id = c \"id\";\n  src.name as n -> loc.nmae = n \"name\";\n";
+        let dir = folder(&[("m.map", &map("M", body)), ("Facility.json", FACILITY)]);
+        let (errors, _) = load(&dir).unwrap().check();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        // file:line:column, then the message.
+        assert!(errors[0].contains("m.map:8:"), "{errors:?}");
+        assert!(errors[0].contains("has no element `cod`"), "{errors:?}");
+        assert!(errors[1].contains("m.map:9:"), "{errors:?}");
+        assert!(
+            errors[1].contains("`Location` has no element `nmae`"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_syntax_error_stops_the_load_and_names_the_line() {
+        let dir = folder(&[("bad.map", &map("Bad", "  src.code as c -> -> loc.id;\n"))]);
+        let m = message(load(&dir));
+        assert!(m.contains("bad.map:8:"), "{m}");
+    }
+
+    #[test]
+    fn the_map_for_a_record_type_must_be_the_only_one() {
+        let body = "  src.code as c -> loc.id = c \"id\";\n";
+        let dir = folder(&[
+            ("a.map", &map("A", body)),
+            ("b.map", &map("B", body)),
+            ("Facility.json", FACILITY),
+        ]);
+        let package = load(&dir).unwrap();
+        let m = message(package.map_for_source("https://example.org/StructureDefinition/Facility"));
+        assert!(
+            m.contains("more than one map reads") && m.contains("A (") && m.contains("B ("),
+            "{m}"
+        );
+        let m = message(package.map_for_source(ORG_UNIT_MODEL));
+        assert!(m.contains("no map reads"), "{m}");
+        let m = message(package.only_map());
+        assert!(m.contains("choose one with --map"), "{m}");
+        assert_eq!(package.map_named("B").unwrap().name.as_deref(), Some("B"));
+        assert!(
+            package
+                .map_named("https://example.org/StructureMap/A")
+                .is_ok()
+        );
+        let m = message(package.map_named("C"));
+        assert!(m.contains("no map is named C"), "{m}");
+        let m = message(MapPackage::load(&[dir.path().join("missing")], &[]));
+        assert!(m.contains("is not a folder of maps"), "{m}");
+    }
+
+    #[test]
+    fn the_example_icr_maps_check_clean_and_cover_every_dhis2_record() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let package = MapPackage::load(&[dir], &MODELS).unwrap();
+        let (errors, warnings) = package.check();
+        assert!(
+            errors.is_empty() && warnings.is_empty(),
+            "{errors:?} {warnings:?}"
+        );
+        for model in [ORG_UNIT_MODEL, INDICATOR_MODEL, VALUE_MODEL] {
+            assert!(package.map_for_source(model).is_ok(), "{model}");
+        }
+    }
 }

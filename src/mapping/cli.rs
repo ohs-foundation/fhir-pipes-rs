@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::MapPackage;
+use crate::dhis2::maps::MODELS as BUILT_IN;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{NdjsonReader, NdjsonWriter};
 use crate::fs::check_out;
@@ -49,7 +50,7 @@ pub fn run(command: &MapCommand) -> anyhow::Result<()> {
 
 fn run_map(args: &RunArgs) -> Result<()> {
     check_out(&args.out)?;
-    let package = MapPackage::load(&args.maps, &[])?;
+    let package = MapPackage::load(&args.maps, &BUILT_IN)?;
     let map = match &args.map {
         Some(name) => package.map_named(name)?,
         None => package.only_map()?,
@@ -102,7 +103,7 @@ fn run_map(args: &RunArgs) -> Result<()> {
 }
 
 fn check(args: &CheckArgs) -> anyhow::Result<()> {
-    let package = MapPackage::load(&args.maps, &[])?;
+    let package = MapPackage::load(&args.maps, &BUILT_IN)?;
     let (errors, warnings) = package.check();
     for line in &warnings {
         println!("warning: {line}");

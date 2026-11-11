@@ -24,7 +24,8 @@ and MeasureReports; see [Maps for the DHIS2 import](#maps-for-the-dhis2-import).
 | `StructureDefinition` JSON | A logical model the maps read, or a profile or extension they write |
 | `ConceptMap` JSON | A code translation, used by `translate()` in a map |
 
-Other files are ignored. The FHIR R4 core definitions are built in.
+Other files are ignored. The FHIR R4 core definitions are built in, and so
+are the logical models of the DHIS2 records (below).
 
 A map names the types it reads and writes with `uses`, and its first group is
 where it starts:
@@ -123,5 +124,9 @@ Notes:
 - A map sees one record. Anything that needs several records, such as
   grouping or a lookup in another file, has to be done before the map runs.
 - Maps are read as FHIR R4.
+- A map is much slower than the built-in mapping: about 1 millisecond per
+  record on one core (20,000 org units in 23 seconds, 20,000 values with a
+  breakdown in 15 seconds, release build). The built-in mapping stays the
+  better choice for `dhis2 reports` runs of millions of values.
 - The engine is [fml-rs](https://github.com/octofhir/fml-rs), first released
   in November 2026.
