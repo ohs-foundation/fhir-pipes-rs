@@ -354,6 +354,11 @@ fn check_in_reports_each_record_problem_with_its_file_and_line() {
 
 #[test]
 fn a_record_that_fails_names_its_file_and_line_and_the_work_folder_is_removed() {
+    // The package has a library step, so the run needs duckdb before it
+    // reads a record.
+    if !have_duckdb("a_record_that_fails_names_its_file_and_line_and_the_work_folder_is_removed") {
+        return;
+    }
     let (tmp, pkg) = package();
     let out = tmp.path().join("out");
     // A record that does not fit its model.
