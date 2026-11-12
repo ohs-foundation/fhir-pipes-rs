@@ -81,15 +81,21 @@ the `dhis2` commands map, for the package
 ```sh
 fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-code SLE --out raw
 fhir-pipes dhis2 extract measures --instance sl-demo --indicator-group srxUNt2w5jn --out raw
-fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 fhir-pipes dhis2 extract reports --instance sl-demo --indicator-group srxUNt2w5jn \
-  --locations fhir/Location.ndjson --period 2025 --level 2 --level 3 --out raw
-fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite
+  --period 2025 --level 2 --level 3 --out raw
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 ```
 
 Each run writes one file in `raw/`: `DHIS2OrgUnit.ndjson`,
 `DHIS2Indicator.ndjson` and `DHIS2Value.ndjson`. See
 [dhis2.md](dhis2.md#records-and-the-import-package) for the options.
+
+The records carry what DHIS2 returns and what is worked out from it, and
+none of the URLs the resources have: those are parameters of the import
+package. `extract reports` finds each org unit in the `DHIS2OrgUnit` records
+that `extract locations` wrote to the same folder, not in FHIR Locations.
+So `dhis2 extract` reads no profile, and one `import run` maps the whole
+folder.
 
 `dhis2 extract` is built into fhir-pipes for now. It will move to its own
 program, `fhir-pipes-dhis2`, once the built-in DHIS2 mapping is removed;

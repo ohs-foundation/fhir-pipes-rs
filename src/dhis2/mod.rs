@@ -35,9 +35,15 @@ use crate::profile::{Dhis2Profile, Profile};
 /// Instance names go into every id, so they are kept short.
 pub const MAX_INSTANCE_LEN: usize = 16;
 
-/// Every system, profile and extension URL comes from the profile's [dhis2]
-/// section (and the Location roles from [location] and [organization]).
+/// For `locations`, `measures` and `reports`, every system, profile and
+/// extension URL comes from the profile's [dhis2] section (and the Location
+/// roles from [location] and [organization]). `extract` writes records, which
+/// carry none of them, and reads nothing else from a profile, so it does not
+/// load one.
 pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
+    if let Dhis2Command::Extract(cmd) = cmd {
+        return Ok(extract(cmd)?);
+    }
     let profile = Profile::load(profile)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
     profile.dhis2()?;
@@ -45,7 +51,7 @@ pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
         Dhis2Command::Locations(args) => locations::run_locations(args, &profile)?,
         Dhis2Command::Measures(args) => measures::run_measures(args, &profile)?,
         Dhis2Command::Reports(args) => reports::run_reports(args, &profile)?,
-        Dhis2Command::Extract(cmd) => extract(cmd, &profile)?,
+        Dhis2Command::Extract(_) => unreachable!("handled above"),
     }
     Ok(())
 }
@@ -53,8 +59,11 @@ pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
 /// `dhis2 extract`: the matching command run with its records written to
 /// `--out/<RecordType>.ndjson` instead of resources. Its temporary and
 /// `--resume` files sit beside that file, as `<RecordType>.ndjson.tmp` and
-/// `.resume`, which `import run` does not read.
-fn extract(cmd: &Dhis2ExtractCommand, profile: &Profile) -> Result<()> {
+/// `.resume`, which `import run` does not read. It runs with the base
+/// profile, which has no [dhis2] section: nothing it writes comes from one.
+fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
+    let base = Profile::base();
+    let profile = &base;
     let file = |dir: &Path, model: &str| -> Result<PathBuf> {
         if dir.exists() && !dir.is_dir() {
             return Err(PipesError::Usage(format!(
@@ -76,9 +85,31 @@ fn extract(cmd: &Dhis2ExtractCommand, profile: &Profile) -> Result<()> {
         }
         Dhis2ExtractCommand::Reports(args) => {
             let out = file(&args.out, maps::VALUE_MODEL)?;
-            reports::run_reports(&(**args).clone().into_command(out), profile)
+            let org_units = match &args.org_units {
+                Some(p) => p.clone(),
+                None => org_units_in(&args.out).ok_or_else(|| {
+                    PipesError::Usage(format!(
+                        "dhis2 extract reports needs the org units: there is no {name}.ndjson in \
+                         {dir}. Run `fhir-pipes dhis2 extract locations --out {dir}` first, or give \
+                         --org-units FILE",
+                        name = maps::record_type(maps::ORG_UNIT_MODEL),
+                        dir = args.out.display()
+                    ))
+                })?,
+            };
+            reports::run_reports(&(**args).clone().into_command(out, org_units), profile)
         }
     }
+}
+
+/// The `DHIS2OrgUnit` records in `dir`, as `dhis2 extract locations` wrote
+/// them there: `DHIS2OrgUnit.ndjson`, else `DHIS2OrgUnit.ndjson.gz`.
+fn org_units_in(dir: &Path) -> Option<PathBuf> {
+    let name = maps::record_type(maps::ORG_UNIT_MODEL);
+    [format!("{name}.ndjson"), format!("{name}.ndjson.gz")]
+        .into_iter()
+        .map(|f| dir.join(f))
+        .find(|p| p.is_file())
 }
 
 /// True for a name made of ASCII letters, digits and hyphens, 1–`max` long.
@@ -94,7 +125,9 @@ pub fn valid_name(name: &str, max: usize) -> bool {
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub name: String,
-    pub urls: Dhis2Profile,
+    /// The profile's [dhis2] section: `None` for `dhis2 extract`, which
+    /// reads no profile and uses none of the URLs.
+    urls: Option<Dhis2Profile>,
     /// [location] admin_unit_type: the type code of an org unit above facility level.
     pub admin_unit_type: Option<String>,
     /// [organization] facility_type: the type code of a facility.
@@ -114,7 +147,7 @@ impl Instance {
         }
         Ok(Self {
             name: name.to_string(),
-            urls: profile.dhis2()?.clone(),
+            urls: profile.dhis2.clone(),
             admin_unit_type: profile.location.admin_unit_type.clone(),
             facility_type: profile.organization.facility_type.clone(),
             org_id_prefix: profile.organization.id_prefix.clone(),
@@ -122,8 +155,16 @@ impl Instance {
         })
     }
 
+    /// The profile's [dhis2] section. Only the built-in mapping and the
+    /// `--maps` route use it, and `run` refuses those without one.
+    pub fn urls(&self) -> &Dhis2Profile {
+        self.urls
+            .as_ref()
+            .expect("dhis2 run checked that the profile has a [dhis2] section")
+    }
+
     fn base(&self) -> &str {
-        self.urls.base.trim_end_matches('/')
+        self.urls().base.trim_end_matches('/')
     }
 
     pub fn orgunit_system(&self) -> String {
@@ -206,7 +247,7 @@ impl Instance {
     }
 
     pub fn tag(&self) -> Value {
-        json!({"system": self.urls.project_tag_system, "code": self.name})
+        json!({"system": self.urls().project_tag_system, "code": self.name})
     }
 }
 
@@ -218,7 +259,13 @@ mod tests {
     fn instance_names_are_short_and_plain() {
         assert!(Instance::new("sl-demo", &crate::profile::icr_example()).is_ok());
         assert!(Instance::new("", &crate::profile::icr_example()).is_err());
-        assert!(Instance::new("sl-demo", &crate::profile::Profile::base()).is_err());
+        // dhis2 extract runs with the base profile, which has no [dhis2] section.
+        assert!(
+            Instance::new("sl-demo", &crate::profile::Profile::base())
+                .unwrap()
+                .urls
+                .is_none()
+        );
         assert!(Instance::new("sl demo", &crate::profile::icr_example()).is_err());
         assert!(Instance::new("sl_demo", &crate::profile::icr_example()).is_err());
         assert!(

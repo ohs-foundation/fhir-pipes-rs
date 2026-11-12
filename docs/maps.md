@@ -133,11 +133,21 @@ writes the prepared records instead of resources, and
 
 Notes:
 
-- The profile is still needed. `dhis2 reports` finds each org unit's Location
-  by the identifier system the profile's `[dhis2] base` gives, so the maps
-  and the profile have to agree on it.
-- A map states its systems, profiles and codes itself. The profile's URL
-  settings for the built-in mapping are not passed to it.
+- The profile is still needed with `--maps`. `dhis2 reports` finds each org
+  unit's Location by the identifier system the profile's `[dhis2] base`
+  gives, so the maps and the profile have to agree on it. `dhis2 extract`
+  reads no profile, and `extract reports` finds org units in the
+  `DHIS2OrgUnit` records, not in Locations (see
+  [dhis2.md](dhis2.md#records-and-the-import-package)).
+- The profile's URL settings for the built-in mapping are not passed to the
+  maps. The example maps read their systems, profiles and extensions as
+  parameters of their package, declared in
+  [examples/import/icr-dhis2/import.toml](../examples/import/icr-dhis2/import.toml)
+  with the values `examples/profiles/icr.toml` gives. `--maps` gives the maps
+  the defaults in `import.toml` of the `--maps` folder or of the folder
+  above it, and prints which file it read (see
+  [import.md](import.md#in-maps)). To change a value, change the default,
+  or run the maps with `import run --param`.
 - A map writes a resource's elements in the order FHIR defines them. For a
   Measure that puts `subjectCodeableConcept` before `date`, where the
   built-in mapping puts it after `topic`. The content is the same.

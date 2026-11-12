@@ -13,16 +13,37 @@ was exported, a boundary merged from the children, counts as whole numbers,
 breakdowns attached to their totals. The maps only turn one record into its
 resources.
 
+`dhis2 extract reports` finds each org unit in the `DHIS2OrgUnit` records
+that `dhis2 extract locations` wrote, so the three extract runs can write to
+one folder and one `import run` maps it. A `DHIS2Value` record's
+`locationId` is `<idPrefix>-<uid>` of the org unit's record, the id
+`DHIS2OrgUnitToICR` gives its Location. A package that gives Locations
+other ids has to write the same ids in `DHIS2ValueToICR`'s `subject`.
+
+```sh
+fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --out raw
+fhir-pipes dhis2 extract measures  --instance sl-demo --indicator-group srxUNt2w5jn --out raw
+fhir-pipes dhis2 extract reports   --instance sl-demo --indicator-group srxUNt2w5jn \
+  --period 2025 --level 2 --out raw
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
+```
+
 - `models/`: the logical models of the three record types: `DHIS2OrgUnit`,
   `DHIS2Indicator` and `DHIS2Value`. fhir-pipes builds the same files in
   for `dhis2 --maps`.
 - `maps/`: `DHIS2OrgUnitToICR`, `DHIS2IndicatorToICR` and `DHIS2ValueToICR`,
   one per record type, and three ConceptMaps for the codes. This is the
   folder `dhis2 --maps examples/import/icr-dhis2/maps` runs.
-- `import.toml`: the name and a `[compare]` section, and no steps, so each
-  record file goes through the one map that reads its type. `[compare]`
-  leaves a MeasureReport's `date`, when DHIS2 last built its analytics
-  tables, out of `import run --previous`.
+- `import.toml`: the name, the parameters, a `[compare]` section, and no
+  steps, so each record file goes through the one map that reads its type.
+  The parameters are the systems, profiles and extensions the maps write
+  (`base`, `projectTagSystem`, `locationProfile`, `periodExtension` and the
+  rest), with the values the `[dhis2]` section of
+  `examples/profiles/icr.toml` gives the built-in mapping as defaults;
+  `import run --param base=https://example.org` changes one for a run (see
+  [Parameters](../../../docs/import.md#parameters)). The records carry none
+  of these values. `[compare]` leaves a MeasureReport's `date`, when DHIS2
+  last built its analytics tables, out of `import run --previous`.
 - `tests/sample/`: synthetic records and the resources expected from them.
   The org units are a country with no geometry of its own (its boundary is
   merged from its districts), two districts with boundaries, one of them

@@ -8,7 +8,7 @@
 //! the files it writes, never from its standard output, whose format the
 //! user's environment can change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -16,10 +16,11 @@ use fhir_pipes_sof::ViewResult;
 use fhir_pipes_sof::output::OutputWriter;
 use serde_json::Value;
 
-use super::plan::PlannedCheck;
+use super::parameters::{self, Values};
+use super::plan::{PlannedCheck, library_parameters};
 use crate::error::{PipesError, usage};
 use crate::library::Library;
-use crate::library::compose::{Bind, compose, strip_terminator};
+use crate::library::compose::{Bind, bind_placeholders, compose, strip_terminator};
 use crate::library::resolve::{Artifact, Catalog};
 use crate::views::run::View;
 use crate::warehouse::partition::{open_parquet, parquet_writer};
@@ -71,7 +72,48 @@ impl Tables {
 
     /// Runs a SQLQuery Library over the tables written so far and writes its
     /// result as its table. Returns the row count.
-    pub fn run_query(&mut self, lib: &Library, catalog: &Catalog) -> Result<u64> {
+    ///
+    /// Each parameter the Library declares gets the value of the package
+    /// parameter of its name. Its `:name` placeholders become
+    /// `getvariable('name')`, and the script sets each variable from an
+    /// environment variable of duckdb's, cast to the Library's type, so the
+    /// value never becomes SQL text.
+    pub fn run_query(&mut self, lib: &Library, catalog: &Catalog, values: &Values) -> Result<u64> {
+        let declared = library_parameters(lib);
+        let mut setup = String::new();
+        let mut env = Vec::new();
+        let names: BTreeSet<String> = declared.iter().map(|(n, _)| n.clone()).collect();
+        for (name, fhir_type) in &declared {
+            let value = values.get(name).ok_or_else(|| {
+                usage(anyhow!(
+                    "Library {} declares the parameter {name}, which has no value",
+                    lib.name
+                ))
+            })?;
+            let sql_type = parameters::sql_type(fhir_type, value.kind()).ok_or_else(|| {
+                usage(anyhow!(
+                    "Library {}: the parameter {name} is of type {fhir_type}, and its value of type {}",
+                    lib.name,
+                    value.kind().name()
+                ))
+            })?;
+            let var = format!("{}{name}", parameters::ENV_PREFIX);
+            setup.push_str(&format!(
+                "SET VARIABLE {name} = CAST(getenv('{var}') AS {sql_type});\n"
+            ));
+            env.push((var, value.text()));
+        }
+        let bound;
+        let lib = if names.is_empty() {
+            lib
+        } else {
+            let mut copy = lib.clone();
+            for (_, sql) in &mut copy.content {
+                *sql = bind_placeholders(sql, &names, |n| format!("getvariable('{n}')"));
+            }
+            bound = copy;
+            &bound
+        };
         let bind = |a: &Artifact| -> Result<Option<Bind>> {
             if let Artifact::Library(l) = a
                 && l.kind == crate::library::Kind::SqlView
@@ -91,10 +133,13 @@ impl Tables {
         let sql = compose(lib, "duckdb", catalog, &bind).map_err(usage)?;
         let table = lib.table(&[]);
         let path = self.path(&table);
-        self.script(&format!(
-            "COPY ({sql}\n) TO {} (FORMAT PARQUET);",
-            sql_path(&path)
-        ))
+        self.script_with(
+            &format!(
+                "{setup}COPY ({sql}\n) TO {} (FORMAT PARQUET);",
+                sql_path(&path)
+            ),
+            &env,
+        )
         .with_context(|| format!("running Library {}", lib.name))?;
         private(&path)?;
         let rows = open_parquet(&path)?.metadata().file_metadata().num_rows();
@@ -193,8 +238,18 @@ impl Tables {
     }
 
     fn script(&self, sql: &str) -> Result<()> {
+        self.script_with(sql, &[])
+    }
+
+    /// Runs `sql` in duckdb with the environment variables `env` set.
+    fn script_with(&self, sql: &str, env: &[(String, String)]) -> Result<()> {
         let script = format!("SET TimeZone = 'UTC';\n{sql}");
-        tools::output(tools::duckdb_command(&self.duckdb).args(["-c", &script])).map(|_| ())
+        let mut command = tools::duckdb_command(&self.duckdb);
+        command.args(["-c", &script]);
+        for (k, v) in env {
+            command.env(k, v);
+        }
+        tools::output(&mut command).map(|_| ())
     }
 }
 

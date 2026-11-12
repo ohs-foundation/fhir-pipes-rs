@@ -55,17 +55,53 @@ type Run<'a> = &'a dyn Fn(To, &[&str]) -> Assert;
 
 /// `fhir-pipes dhis2 <command>` (or `dhis2 extract <command>`) against
 /// `server`, signed in, with `--out`.
+///
+/// `dhis2 extract` reads no profile, so no `[dhis2]` section: the records
+/// carry none of its URLs, and the package's parameters give the maps the
+/// same values. It runs here with a profile that does not exist, which it
+/// would fail to load.
 fn dhis2(server: &Server, command: &str, to: To) -> Command {
     let mut c = fhir_pipes();
     c.arg("dhis2");
     if let To::Records(_) = to {
-        c.arg("extract");
+        c.arg("extract")
+            .env("FHIR_PIPES_PROFILE", "no-such-profile.toml");
     }
     c.args([command, "--dhis2", &base(server), "--instance", "sl-demo"])
         .arg("--out")
         .arg(to.path())
         .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
     c
+}
+
+/// Where a reports scenario reads its org units from.
+#[derive(Clone, Copy)]
+enum OrgUnits<'a> {
+    /// The scenario's own Locations file: `dhis2 reports --locations FILE`,
+    /// and `dhis2 extract reports --org-units` with the same org units as
+    /// `DHIS2OrgUnit` records.
+    Given(&'a Path),
+    /// `dhis2 reports --locations FILE`, and `dhis2 extract reports` with
+    /// no flag: it reads the `DHIS2OrgUnit.ndjson` that `extract locations`
+    /// wrote in its `--out`.
+    Extracted(&'a Path),
+}
+
+impl OrgUnits<'_> {
+    /// The flags that give a reports run its org units.
+    fn args(self, to: To) -> Vec<std::ffi::OsString> {
+        let flag = |f: &str, p: &Path| vec![f.into(), p.as_os_str().to_owned()];
+        match (self, to) {
+            (OrgUnits::Given(p) | OrgUnits::Extracted(p), To::Resources(_)) => {
+                flag("--locations", p)
+            }
+            (OrgUnits::Given(p), To::Records(_)) => {
+                let records = p.with_file_name("org-units.ndjson");
+                flag("--org-units", &org_units_from_locations(p, &records))
+            }
+            (OrgUnits::Extracted(_), To::Records(_)) => Vec::new(),
+        }
+    }
 }
 
 /// The folder Locations files of a scenario go in: beside its --out.
@@ -343,6 +379,13 @@ fn report_locations(dir: &Path) -> PathBuf {
 /// a campaign. One value has no breakdown, one count is not whole, one org
 /// unit has no Location, and one breakdown has no total.
 fn reports_by_period(to: To, extra: &[&str]) -> Assert {
+    let dir = beside(to);
+    let locations = report_locations(&dir);
+    reports_by_period_from(to, extra, OrgUnits::Given(&locations))
+}
+
+/// `reports_by_period`, reading the org units from `org_units`.
+fn reports_by_period_from(to: To, extra: &[&str], org_units: OrgUnits) -> Assert {
     let server = Server::run();
     expect_info(&server);
     expect_group(&server);
@@ -459,14 +502,12 @@ fn reports_by_period(to: To, extra: &[&str]) -> Assert {
         json!({"CXw2yu5fodb": {"name": "CHC"}}),
         group_set,
     );
-    let dir = beside(to);
     dhis2(&server, "reports", to)
         .args(["--indicator-group", "srxUNt2w5jn", "--level", "2"])
         .args(["--period", "202501", "--period", "202502"])
         .args(["--breakdown", "fMZEcRHuamy", "--breakdown", "J5jldMd8OHv"])
         .args(["--campaign", "CarePlan/sle-penta-2025"])
-        .arg("--locations")
-        .arg(report_locations(&dir))
+        .args(org_units.args(to))
         .args(extra)
         .assert()
 }
@@ -502,8 +543,7 @@ fn reports_by_range(to: To, extra: &[&str]) -> Assert {
     dhis2(&server, "reports", to)
         .args(["--data-element", "s46m5MS0hxu", "--data-set", "QX4ZTUbOt3a"])
         .args(["--level", "2", "--range", "2025-01-01:2025-03-31"])
-        .arg("--locations")
-        .arg(report_locations(&dir))
+        .args(OrgUnits::Given(&report_locations(&dir)).args(to))
         .args(extra)
         .assert()
 }
@@ -521,8 +561,7 @@ fn reports_from_data_values(to: To, extra: &[&str]) -> Assert {
         .args(["--level", "1", "--level", "2", "--level", "3"])
         .args(["--period", "202501", "--period", "202502"])
         .args(["--breakdown", "fMZEcRHuamy"])
-        .arg("--locations")
-        .arg(hierarchy(&dir))
+        .args(OrgUnits::Given(&hierarchy(&dir)).args(to))
         .args(extra)
         .assert()
 }
@@ -636,12 +675,19 @@ fn reports_from_data_values_agree_but_for_the_date() {
 
 /// Three `dhis2 extract` runs into one folder: one file per record type,
 /// which one `import run` maps to what the three built-in runs write.
+/// `extract reports` is given no org units: it reads the
+/// `DHIS2OrgUnit.ndjson` that `extract locations` wrote in the folder, as
+/// `dhis2 reports` reads the Locations that `dhis2 locations` wrote.
 #[test]
 fn three_extracts_into_one_folder_import_together() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in");
     let mut built_in = Vec::new();
-    for (i, run) in [&locations as Run, &measures, &reports_by_period]
+    let built_in_locations = dir.path().join("0.ndjson");
+    let reports = |to: To, extra: &[&str]| {
+        reports_by_period_from(to, extra, OrgUnits::Extracted(&built_in_locations))
+    };
+    for (i, run) in [&locations as Run, &measures, &reports]
         .into_iter()
         .enumerate()
     {
@@ -650,6 +696,14 @@ fn three_extracts_into_one_folder_import_together() {
         built_in.extend(read_ndjson(&a));
         run(To::Records(&input), &[]).success();
     }
+    // Bo and Bombali have Locations and records; the third org unit has
+    // neither.
+    let reports = read_ndjson(&dir.path().join("2.ndjson"));
+    assert_eq!(reports.len(), 5);
+    assert!(
+        reports.iter().any(|r| r["subject"]["display"] == "Bombali"),
+        "the Location's name, from the record"
+    );
     let mut names: Vec<String> = std::fs::read_dir(&input)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -730,32 +784,42 @@ fn the_package_sample_is_what_the_commands_write() {
 fn extract_refuses_the_options_of_the_fhir_commands() {
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[BO]);
+    let org_units = org_units_from_locations(&locations, &dir.path().join("org-units.ndjson"));
     let previous = dir.path().join("previous.ndjson");
     std::fs::write(&previous, "").unwrap();
     let p = previous.to_str().unwrap();
     let c = dir.path().join("c.ndjson");
     let r = dir.path().join("removed.txt");
     let reports = |command: &[&str], extra: &[&str]| {
+        let (flag, file) = if command[0] == "extract" {
+            ("--org-units", &org_units)
+        } else {
+            ("--locations", &locations)
+        };
         fhir_pipes()
             .arg("dhis2")
             .args(command)
             .args(["--dhis2", "https://dhis2.invalid"])
             .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
             .args(["--period", "2025", "--level", "2"])
-            .arg("--locations")
-            .arg(&locations)
+            .arg(flag)
+            .arg(file)
             .arg("--out")
             .arg(dir.path().join("out"))
             .args(extra)
             .assert()
             .code(2)
     };
-    let cases: [(&str, &[&str]); 5] = [
+    let l = locations.to_str().unwrap();
+    let cases: [(&str, &[&str]); 7] = [
         ("--previous", &["--previous", p]),
         ("--changed", &["--changed", c.to_str().unwrap()]),
         ("--removed", &["--removed", r.to_str().unwrap()]),
         ("--updated-since", &["--updated-since", "2026-10-01"]),
         ("--maps", &["--maps", MAPS]),
+        // extract reports reads the org unit records, not Locations.
+        ("--locations", &["--locations", l]),
+        ("--org-unit-system", &["--org-unit-system", ORGUNIT_SYSTEM]),
     ];
     for (flag, extra) in cases {
         let e = stderr(&reports(&["extract", "reports"], extra));
@@ -766,6 +830,8 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
     }
     let e = stderr(&reports(&["reports"], &["--records"]));
     assert!(e.contains("unexpected argument '--records'"), "{e}");
+    let e = stderr(&reports(&["reports"], &["--org-units", l]));
+    assert!(e.contains("unexpected argument '--org-units'"), "{e}");
     let a = fhir_pipes()
         .args([
             "dhis2",
@@ -804,6 +870,94 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
     assert!(stderr(&a).contains("is not a folder"), "{}", stderr(&a));
 }
 
+/// With no `[dhis2]` section in the profile, the FHIR commands still stop.
+/// `dhis2 extract` reads no profile, even one that does not exist; `extract
+/// reports` needs the org unit records, and says how to get them.
+#[test]
+fn without_a_dhis2_section_only_extract_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &[BO]);
+    let out = dir.path().join("out");
+    let run = |command: &[&str], profile: Option<&str>, extra: &[&std::ffi::OsStr]| {
+        let mut c = fhir_pipes();
+        match profile {
+            Some(p) => c.env("FHIR_PIPES_PROFILE", p),
+            None => c.env_remove("FHIR_PIPES_PROFILE"),
+        };
+        c.arg("dhis2")
+            .args(command)
+            .args(["--dhis2", "https://dhis2.invalid"])
+            .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
+            .args(["--period", "2025", "--level", "2"])
+            .args(extra)
+            .arg("--out")
+            .arg(&out)
+            .assert()
+            .code(2)
+    };
+    let e = stderr(&run(
+        &["reports"],
+        None,
+        &["--locations".as_ref(), locations.as_os_str()],
+    ));
+    assert!(
+        e.contains("dhis2 needs a profile with a [dhis2] section"),
+        "{e}"
+    );
+    // No --org-units and none in --out.
+    let e = stderr(&run(
+        &["extract", "reports"],
+        Some("no-such-profile.toml"),
+        &[],
+    ));
+    assert!(
+        e.contains("dhis2 extract reports needs the org units: there is no DHIS2OrgUnit.ndjson in")
+            && e.contains("fhir-pipes dhis2 extract locations --out")
+            && e.contains("--org-units FILE")
+            && !e.contains("profile"),
+        "{e}"
+    );
+    let missing = dir.path().join("missing.ndjson");
+    let e = stderr(&run(
+        &["extract", "reports"],
+        None,
+        &["--org-units".as_ref(), missing.as_os_str()],
+    ));
+    assert!(
+        e.contains("--org-units") && e.contains("no such file"),
+        "{e}"
+    );
+    // A Locations file is not org unit records.
+    let e = stderr(&run(
+        &["extract", "reports"],
+        None,
+        &["--org-units".as_ref(), locations.as_os_str()],
+    ));
+    assert!(
+        e.contains("no DHIS2OrgUnit record of instance sl-demo in"),
+        "{e}"
+    );
+    // Records of another instance are not read.
+    let other = dir.path().join("other.ndjson");
+    std::fs::write(
+        &other,
+        format!(
+            "{}\n",
+            json!({"resourceType": "DHIS2OrgUnit", "instance": "other", "idPrefix": "o", "uid": BO})
+        ),
+    )
+    .unwrap();
+    let e = stderr(&run(
+        &["extract", "reports"],
+        None,
+        &["--org-units".as_ref(), other.as_os_str()],
+    ));
+    assert!(
+        e.contains("no DHIS2OrgUnit record of instance sl-demo in"),
+        "{e}"
+    );
+}
+
 /// `dhis2 extract reports --resume`: an interrupted run (cut mid-line)
 /// leaves its temporary and resume files beside DHIS2Value.ndjson, which
 /// `import run` does not read, and resumes to the same bytes and the same
@@ -813,7 +967,13 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
 fn an_interrupted_extract_resumes_to_the_same_file() {
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[BO, BOMBALI, NJANDAMA, ORPHAN]);
+    // Written once: the file is part of the --resume plan.
+    let org_units = org_units_from_locations(&locations, &dir.path().join("org-units.ndjson"));
     let run = |server: &Server, to: To, extra: &[&str]| {
+        let (flag, file) = match to {
+            To::Resources(_) => ("--locations", &locations),
+            To::Records(_) => ("--org-units", &org_units),
+        };
         dhis2(server, "reports", to)
             .args(["--indicator-group", "srxUNt2w5jn"])
             .args(["--level", "2", "--level", "3", "--chunk", "1"])
@@ -821,8 +981,8 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
                 "--period", "202501", "--period", "202502", "--period", "202503",
             ])
             .args(["--max-rows", "1"])
-            .arg("--locations")
-            .arg(&locations)
+            .arg(flag)
+            .arg(file)
             .args(extra)
             .assert()
     };
@@ -860,8 +1020,35 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     expect_units(&server, 2, 2);
     expect_units(&server, 3, 2);
     let refused = run(&server, To::Resources(&out), &["--resume"]).code(2);
+    // The extract run read org unit records, dhis2 reports reads Locations.
     assert!(
-        stderr(&refused).contains("was planned differently (records changed)"),
+        stderr(&refused)
+            .contains("was planned differently (locations, org_units, records changed)"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(tmp.exists() && checkpoint.exists());
+
+    // Not resumed from other org unit records: a copy is another file.
+    server.verify_and_clear();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 2);
+    expect_units(&server, 3, 2);
+    let copy = dir.path().join("org-units-copy.ndjson");
+    std::fs::copy(&org_units, &copy).unwrap();
+    let refused = dhis2(&server, "reports", To::Records(&input))
+        .args(["--indicator-group", "srxUNt2w5jn"])
+        .args(["--level", "2", "--level", "3", "--chunk", "1"])
+        .args([
+            "--period", "202501", "--period", "202502", "--period", "202503",
+        ])
+        .args(["--max-rows", "1", "--resume", "--org-units"])
+        .arg(&copy)
+        .assert()
+        .code(2);
+    assert!(
+        stderr(&refused).contains("was planned differently (org_units changed)"),
         "{}",
         stderr(&refused)
     );
@@ -912,7 +1099,8 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     expect_units(&server, 3, 2);
     let refused = run(&server, To::Records(&plain_dir), &["--resume"]).code(2);
     assert!(
-        stderr(&refused).contains("was planned differently (records changed)"),
+        stderr(&refused)
+            .contains("was planned differently (locations, org_units, records changed)"),
         "{}",
         stderr(&refused)
     );
@@ -932,7 +1120,12 @@ fn a_rerun_compares_the_same_both_ways() {
     let (a, b) = (BO, BOMBALI);
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[a, b]);
+    let org_units = org_units_from_locations(&locations, &dir.path().join("org-units.ndjson"));
     let run = |built: &str, rows: Vec<Value>, to: To, extra: &[&str]| {
+        let (flag, file) = match to {
+            To::Resources(_) => ("--locations", &locations),
+            To::Records(_) => ("--org-units", &org_units),
+        };
         let server = Server::run();
         expect_info_built(&server, built);
         expect_group(&server);
@@ -951,8 +1144,8 @@ fn a_rerun_compares_the_same_both_ways() {
         let assert = dhis2(&server, "reports", to)
             .args(["--indicator-group", "srxUNt2w5jn"])
             .args(["--level", "2", "--period", "202501"])
-            .arg("--locations")
-            .arg(&locations)
+            .arg(flag)
+            .arg(file)
             .args(extra)
             .assert()
             .success();

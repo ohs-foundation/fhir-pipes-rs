@@ -4,6 +4,24 @@ title = "DHIS2 to the Integrated Campaign Registry"
 # No [[step]]: each record file goes through the one map in maps/ that
 # reads its type.
 
+# The systems, profiles and extensions the maps write. The defaults are the
+# Integrated Campaign Registry's, the values the [dhis2] section of
+# examples/profiles/icr.toml gives the built-in mapping. Change one for a run
+# with `import run --param NAME=VALUE`.
+[parameters]
+base = { default = "https://icr.healthcampaigns.org", description = "Identifier and code systems are named under it (<base>/identifiers/dhis2/<instance>/orgunit, <base>/CodeSystem/dhis2/<instance>/...), and Measures get the canonical URL <base>/Measure/<id>" }
+projectTagSystem = { default = "https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs", description = "The system of the meta.tag that carries the instance name" }
+locationProfile = { default = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation", description = "meta.profile of each Location" }
+facilityOrganizationProfile = { default = "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization", description = "meta.profile of a facility's Organization" }
+locationTypeSystem = { default = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs", description = "The system of the facility or admin unit code in Location.type" }
+countryCodeSystem = { default = "https://icr.healthcampaigns.org/identifiers/national-admin-code", description = "The identifier system of the country code on the top org unit" }
+boundaryExtension = { default = "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson", description = "The extension that holds a Location's boundary as GeoJSON" }
+organizationIdPrefix = { default = "org-", description = "Put before a facility Location's id to give its Organization's id" }
+indicatorExtension = { default = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-indicator", description = "The extension of a Measure that says how DHIS2 computes the value" }
+periodExtension = { default = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period", description = "The extension of a MeasureReport that holds the DHIS2 period" }
+campaignExtension = { default = "https://icr.healthcampaigns.org/StructureDefinition/campaign", description = "The extension of a MeasureReport that refers to its campaign" }
+sourceExtension = { default = "https://icr.healthcampaigns.org/StructureDefinition/report-source", description = "The extension of a MeasureReport that says where the value came from" }
+
 # `import run --previous`: a MeasureReport's `date` is when DHIS2 last built
 # its analytics tables. It changes after every build, whether or not the
 # value did, so it is not compared.

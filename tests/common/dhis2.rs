@@ -163,6 +163,51 @@ pub fn locations_for(dir: &Path, org_units: &[&str]) -> std::path::PathBuf {
     p
 }
 
+/// The org units of the Locations file `locations` as the `DHIS2OrgUnit`
+/// records `dhis2 extract locations` writes for them, at `out`: what
+/// `dhis2 extract reports --org-units` reads in place of `--locations`.
+/// Each Location `<prefix>-<uid>` carrying `<uid>` under `ORGUNIT_SYSTEM`
+/// gives a record with that `idPrefix` and `uid`, its `name` when it has
+/// one, and the `parentUid` its `partOf` names. Only the fields `extract
+/// reports` reads are written.
+pub fn org_units_from_locations(locations: &Path, out: &Path) -> std::path::PathBuf {
+    let list = read_ndjson(locations);
+    let uid_of = |l: &Value| -> String {
+        l["identifier"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["system"] == ORGUNIT_SYSTEM)
+            .unwrap()["value"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let by_id: std::collections::HashMap<String, String> = list
+        .iter()
+        .map(|l| (l["id"].as_str().unwrap().to_string(), uid_of(l)))
+        .collect();
+    let lines: String = list
+        .iter()
+        .map(|l| {
+            let uid = uid_of(l);
+            let id = l["id"].as_str().unwrap();
+            let prefix = id.strip_suffix(&format!("-{uid}")).unwrap();
+            let mut r = json!({"resourceType": "DHIS2OrgUnit", "instance": "sl-demo",
+                               "idPrefix": prefix, "uid": uid});
+            if let Some(name) = l.get("name") {
+                r["name"] = name.clone();
+            }
+            if let Some(parent) = l.pointer("/partOf/reference").and_then(Value::as_str) {
+                r["parentUid"] = json!(by_id[parent.strip_prefix("Location/").unwrap()]);
+            }
+            format!("{r}\n")
+        })
+        .collect();
+    std::fs::write(out, lines).unwrap();
+    out.to_path_buf()
+}
+
 /// An analytics response with dates for every period in `rows`.
 pub fn analytics_for(rows: Vec<Value>) -> Value {
     let mut items = serde_json::Map::new();

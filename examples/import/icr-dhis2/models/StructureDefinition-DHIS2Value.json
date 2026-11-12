@@ -64,8 +64,8 @@
       {
         "id": "DHIS2Value.locationId",
         "path": "DHIS2Value.locationId",
-        "short": "Id of the Location the org unit maps to (--locations)",
-        "definition": "Id of the Location the org unit maps to (--locations)",
+        "short": "Id of the Location the org unit maps to: <idPrefix>-<uid> of its DHIS2OrgUnit record (dhis2 extract reports), or the id of the Location that carries its UID (dhis2 reports --maps --locations)",
+        "definition": "Id of the Location the org unit maps to: <idPrefix>-<uid> of its DHIS2OrgUnit record (dhis2 extract reports), or the id of the Location that carries its UID (dhis2 reports --maps --locations)",
         "min": 1,
         "max": "1",
         "type": [
@@ -414,8 +414,8 @@
       {
         "id": "DHIS2Value.locationId",
         "path": "DHIS2Value.locationId",
-        "short": "Id of the Location the org unit maps to (--locations)",
-        "definition": "Id of the Location the org unit maps to (--locations)",
+        "short": "Id of the Location the org unit maps to: <idPrefix>-<uid> of its DHIS2OrgUnit record (dhis2 extract reports), or the id of the Location that carries its UID (dhis2 reports --maps --locations)",
+        "definition": "Id of the Location the org unit maps to: <idPrefix>-<uid> of its DHIS2OrgUnit record (dhis2 extract reports), or the id of the Location that carries its UID (dhis2 reports --maps --locations)",
         "min": 1,
         "max": "1",
         "type": [

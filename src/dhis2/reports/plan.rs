@@ -1,14 +1,14 @@
 //! The units of work of a run, in the order their reports are written, each
 //! sized from its org unit count to stay under `--max-rows`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::dhis2::api::{Dhis2, under};
 use crate::dhis2::measures::Indicator;
-use crate::dhis2::raw::{RawSource, Span, load_parents, prepare};
+use crate::dhis2::raw::{RawSource, Span, prepare};
 use crate::error::{PipesError, Result};
 
 use super::periods::{DateRange, period_groups, periods_label};
@@ -185,13 +185,14 @@ pub(super) struct Planned {
 /// Plans the batches. From data values each level's org units are read (and
 /// with `--updated-since` only the periods with updated values are kept);
 /// from analytics requests are sized from each level's org unit count, so
-/// several periods can share one.
+/// several periods can share one. `parents` is the org unit tree data
+/// values are added up (empty from analytics).
 pub(super) fn plan_run(
     args: &Dhis2ReportsArgs,
     api: &Dhis2,
     indicators: &BTreeMap<String, Indicator>,
     ids: &[String],
-    system: &str,
+    parents: HashMap<String, Option<String>>,
     ranges: Vec<DateRange>,
 ) -> Result<Planned> {
     let mut periods = unique(&args.opts.periods);
@@ -212,7 +213,6 @@ pub(super) fn plan_run(
             levels.push((level, ous.len() as u64));
             by_level.push((level, ous));
         }
-        let parents = load_parents(&args.opts.locations, system)?;
         src.place(&parents, &by_level, args.opts.root.as_deref());
         if let Some(since) = &args.updated_since {
             let spans: Vec<Span> = periods

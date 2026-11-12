@@ -43,7 +43,7 @@ macro_rules! other_json_types_are_default {
 
 pub mod location_boundaries;
 pub mod location_sites;
-mod package;
+pub(crate) mod package;
 
 use std::path::PathBuf;
 

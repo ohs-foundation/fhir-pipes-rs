@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 use crate::cli::ReportSource;
 use crate::dhis2::Instance;
 use crate::dhis2::api::ServerInfo;
-use crate::dhis2::maps::{VALUE_MODEL, record_type};
+use crate::dhis2::locations::location_id;
+use crate::dhis2::maps::{ORG_UNIT_MODEL, VALUE_MODEL, record_type};
 use crate::dhis2::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fhir_key};
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
@@ -64,6 +65,60 @@ pub fn load_mapping(path: &Path, system: &str) -> Result<HashMap<String, Target>
         }
     }
     Ok(out)
+}
+
+/// Org unit UID → its Location, and org unit UID → its parent's UID.
+pub type OrgUnits = (HashMap<String, Target>, HashMap<String, Option<String>>);
+
+/// The org units of `instance` in the `DHIS2OrgUnit` records at `path`, the
+/// file `dhis2 extract locations` writes: org unit UID → the Location its
+/// record becomes, and org unit UID → its parent's UID.
+///
+/// The Location is the one the record's map writes: id `<idPrefix>-<uid>`,
+/// named as the org unit. These are the same facts `load_mapping` and
+/// `load_parents` read from the Locations, so a `DHIS2Value` record comes
+/// out the same from either. As there:
+///
+/// - a record whose Location id would not be a valid FHIR id is left out
+///   (`dhis2 extract locations` writes none, nor a Location);
+/// - records of another instance are left out (their Locations carry the
+///   UID under another instance's system);
+/// - a parent is kept only when its own record is in the file (a Location's
+///   `partOf` is followed only to a Location in the file).
+pub fn load_org_unit_records(path: &Path, instance: &str) -> Result<OrgUnits> {
+    let record_type = record_type(ORG_UNIT_MODEL);
+    let mut targets = HashMap::new();
+    let mut parent_of: Vec<(String, Option<String>)> = Vec::new();
+    for line in NdjsonReader::open(path)? {
+        let line = line?;
+        let v: Value = serde_json::from_str(&line.text).map_err(|e| {
+            PipesError::Usage(format!("{}: line {}: {e}", path.display(), line.number))
+        })?;
+        let field = |k: &str| v.get(k).and_then(Value::as_str);
+        if field("resourceType") != Some(record_type) || field("instance") != Some(instance) {
+            continue;
+        }
+        let (Some(uid), Some(prefix)) = (field("uid"), field("idPrefix")) else {
+            continue;
+        };
+        let id = location_id(prefix, uid);
+        if !is_valid_id(&id) {
+            continue;
+        }
+        targets.insert(
+            uid.to_string(),
+            Target {
+                id,
+                name: field("name").map(str::to_string),
+            },
+        );
+        parent_of.push((uid.to_string(), field("parentUid").map(str::to_string)));
+    }
+    let parents = parent_of
+        .into_iter()
+        .map(|(uid, parent)| (uid, parent.filter(|p| targets.contains_key(p))))
+        .collect();
+    Ok((targets, parents))
 }
 
 /// A DHIS2 count as a FHIR integer. Counts that are not whole numbers
@@ -141,15 +196,15 @@ pub fn measure_report(
     }
     group["measureScore"] = json!({"value": figures.score});
     let pe = period_value(&row.pe);
-    let mut extension = vec![json!({"url": instance.urls.period_extension, "valueString": pe})];
+    let mut extension = vec![json!({"url": instance.urls().period_extension, "valueString": pe})];
     if let Some(c) = campaign {
         extension.push(
-            json!({"url": instance.urls.campaign_extension, "valueReference": {"reference": c}}),
+            json!({"url": instance.urls().campaign_extension, "valueReference": {"reference": c}}),
         );
     }
     let (code, display) = source.coding();
-    extension.push(json!({"url": instance.urls.source_extension,
-        "valueCodeableConcept": {"coding": [{"system": instance.urls.source_system,
+    extension.push(json!({"url": instance.urls().source_extension,
+        "valueCodeableConcept": {"coding": [{"system": instance.urls().source_system,
             "code": code, "display": display}]}}));
     let mut r = json!({
         "resourceType": "MeasureReport",
@@ -789,6 +844,53 @@ mod tests {
         let m = load_mapping(&p, "S").unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m["a"].id, "sle-a");
+    }
+
+    #[test]
+    fn org_unit_records_give_the_locations_and_parents_the_locations_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = concat!(
+            r#"{"resourceType":"DHIS2OrgUnit","instance":"sl-demo","idPrefix":"sle","uid":"a","name":"A"}"#,
+            "\n",
+            r#"{"resourceType":"DHIS2OrgUnit","instance":"sl-demo","idPrefix":"sle","uid":"b","parentUid":"a"}"#,
+            "\n",
+            // Its parent has no record: no parent, as no partOf is followed.
+            r#"{"resourceType":"DHIS2OrgUnit","instance":"sl-demo","idPrefix":"sle","uid":"c","parentUid":"gone"}"#,
+            "\n",
+            // Another instance, and an id that is not a valid FHIR id.
+            r#"{"resourceType":"DHIS2OrgUnit","instance":"other","idPrefix":"o","uid":"d"}"#,
+            "\n",
+            r#"{"resourceType":"DHIS2OrgUnit","instance":"sl-demo","idPrefix":"sle","uid":"e_f"}"#,
+            "\n",
+            r#"{"resourceType":"Location","id":"sle-g","identifier":[{"system":"S","value":"g"}]}"#,
+            "\n",
+        );
+        let plain = dir.path().join("DHIS2OrgUnit.ndjson");
+        std::fs::write(&plain, text).unwrap();
+        let gz = dir.path().join("DHIS2OrgUnit.ndjson.gz");
+        let mut e = flate2::write::GzEncoder::new(
+            std::fs::File::create(&gz).unwrap(),
+            flate2::Compression::default(),
+        );
+        std::io::Write::write_all(&mut e, text.as_bytes()).unwrap();
+        e.finish().unwrap();
+        for path in [&plain, &gz] {
+            let (targets, parents) = load_org_unit_records(path, "sl-demo").unwrap();
+            let mut uids: Vec<&str> = targets.keys().map(String::as_str).collect();
+            uids.sort();
+            assert_eq!(uids, ["a", "b", "c"]);
+            assert_eq!(
+                targets["a"],
+                Target {
+                    id: "sle-a".into(),
+                    name: Some("A".into())
+                }
+            );
+            assert_eq!(targets["b"].name, None);
+            assert_eq!(parents["a"], None);
+            assert_eq!(parents["b"].as_deref(), Some("a"));
+            assert_eq!(parents["c"], None);
+        }
     }
 
     #[test]

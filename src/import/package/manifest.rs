@@ -1,19 +1,20 @@
 //! `import.toml`: the package's name, its steps in order, its data tests,
 //! how records that do not fit their model exactly are read, the limit on a
-//! map's values, whether views may read record files and the elements
-//! `import run --previous` does not compare.
+//! map's values, whether views may read record files, the elements
+//! `import run --previous` does not compare, and the parameters a run takes.
 //! Parsing checks the manifest on its own: the keys, the shape of each step
 //! and test, and that every stage step comes before the first library step.
 //! What the names refer to is checked against the package (`plan`).
 
 use serde::Deserialize;
 
+use super::parameters::{self, Parameter};
 use crate::error::{PipesError, Result};
 
 /// The manifest file name in a package folder.
 pub const FILE: &str = "import.toml";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub name: String,
     pub title: Option<String>,
@@ -29,6 +30,8 @@ pub struct Manifest {
     /// `[views] records = "allow"`: a view may read a record type's file
     /// directly (a record view), which goes beyond SQL on FHIR.
     pub record_views: bool,
+    /// `[parameters]`: the settings a run can give, with their defaults.
+    pub parameters: Vec<Parameter>,
 }
 
 /// `[records]`: what a record of the input folder may hold beyond its
@@ -105,6 +108,7 @@ struct File {
     records: Option<RecordsFile>,
     maps: Option<MapsFile>,
     views: Option<ViewsFile>,
+    parameters: Option<toml::Table>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +210,10 @@ pub fn parse(text: &str, origin: &str) -> Result<Manifest> {
             )));
         }
     };
+    let parameters = match &file.parameters {
+        Some(t) => parameters::parse(t, origin)?,
+        None => Vec::new(),
+    };
     Ok(Manifest {
         name: file.name,
         title: file.title,
@@ -215,6 +223,7 @@ pub fn parse(text: &str, origin: &str) -> Result<Manifest> {
         records,
         max_values,
         record_views,
+        parameters,
     })
 }
 

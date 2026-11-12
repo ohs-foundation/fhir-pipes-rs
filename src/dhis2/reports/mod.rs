@@ -11,7 +11,9 @@
 //! `endDate` instead, and gives one value for the whole range.
 //!
 //! Org units are mapped to Locations through the identifier that
-//! `fhir-pipes dhis2 locations` writes. A row whose org unit has no Location is
+//! `fhir-pipes dhis2 locations` writes. `dhis2 extract reports` reads the
+//! `DHIS2OrgUnit` records of `dhis2 extract locations` instead, and no
+//! Locations. A row whose org unit has no Location (or no record) is
 //! reported and skipped.
 //!
 //! An export can run to millions of values, so the work is planned in
@@ -40,6 +42,7 @@ mod writer;
 pub use analytics::{Analytics, AnalyticsRow};
 pub use periods::DateRange;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,8 +50,9 @@ use serde_json::{Value, json};
 
 use super::Instance;
 use super::api::{Dhis2, ServerInfo, check_analytics_age};
-use super::maps::{RecordMap, VALUE_MODEL, Writes, record_type};
+use super::maps::{ORG_UNIT_MODEL, RecordMap, VALUE_MODEL, Writes, record_type};
 use super::measures::{fetch_indicators, fhir_key};
+use super::raw::load_parents;
 use super::rerun::{Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::error::{PipesError, Result};
@@ -59,7 +63,7 @@ use crate::report::write_report;
 use crate::snapshot::instant::format_utc;
 
 use analytics::Values;
-use build::load_mapping;
+use build::{OrgUnits, load_mapping, load_org_unit_records};
 use periods::period_kind;
 use plan::{Planned, plan_run};
 use writer::{Tally, Writer, fetch_and_write};
@@ -108,21 +112,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
     if let Some(c) = &args.opts.campaign {
         check_campaign(c)?;
     }
-    if !args.opts.locations.is_file() {
-        return Err(PipesError::Usage(format!(
-            "--locations {}: no such file",
-            args.opts.locations.display()
-        )));
-    }
-    let system = instance.orgunit_system();
-    let mapping = load_mapping(&args.opts.locations, &system)?;
-    if mapping.is_empty() {
-        return Err(PipesError::Usage(format!(
-            "no Location in {} carries an identifier under {system}; run `fhir-pipes dhis2 locations --instance {}` and load its output first",
-            args.opts.locations.display(),
-            instance.name
-        )));
-    }
+    let (mapping, parents) = load_org_units(args, &instance, from_values)?;
 
     let maps = RecordMap::load(&args.maps.dirs, VALUE_MODEL)?;
     let api = Dhis2::connect(&args.conn)?;
@@ -142,7 +132,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
     let ids: Vec<String> = indicators.keys().cloned().collect();
     check_report_ids(&instance, &ranges, &unique(&args.opts.periods), &ids)?;
 
-    let plan = plan_run(args, &api, &indicators, &ids, &system, ranges)?;
+    let plan = plan_run(args, &api, &indicators, &ids, parents, ranges)?;
     let total = plan.units.len();
     let fingerprint = fingerprint(args, &instance, &api, &ids, &plan);
     let checkpoint = Checkpoint::path(&args.out);
@@ -221,6 +211,62 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         removed.as_deref(),
         kept,
     )
+}
+
+/// Org unit UID → its Location, and, from data values, org unit UID → its
+/// parent's UID: from `--locations`, or for `dhis2 extract reports` from the
+/// `DHIS2OrgUnit` records (see `load_org_unit_records`).
+fn load_org_units(
+    args: &Dhis2ReportsArgs,
+    instance: &Instance,
+    from_values: bool,
+) -> Result<OrgUnits> {
+    if let Some(path) = &args.org_units {
+        if !path.is_file() {
+            return Err(PipesError::Usage(format!(
+                "--org-units {}: no such file",
+                path.display()
+            )));
+        }
+        let (mapping, parents) = load_org_unit_records(path, &instance.name)?;
+        if mapping.is_empty() {
+            return Err(PipesError::Usage(format!(
+                "no {} record of instance {} in {}; run `fhir-pipes dhis2 extract locations --instance {}` first",
+                record_type(ORG_UNIT_MODEL),
+                instance.name,
+                path.display(),
+                instance.name
+            )));
+        }
+        return Ok((mapping, parents));
+    }
+    let path = args
+        .locations
+        .as_deref()
+        .expect("clap requires --locations for dhis2 reports");
+    if !path.is_file() {
+        return Err(PipesError::Usage(format!(
+            "--locations {}: no such file",
+            path.display()
+        )));
+    }
+    // dhis2 run checked the profile has a [dhis2] section, which names the
+    // system the Locations carry the org unit UIDs under.
+    let system = instance.orgunit_system();
+    let mapping = load_mapping(path, &system)?;
+    if mapping.is_empty() {
+        return Err(PipesError::Usage(format!(
+            "no Location in {} carries an identifier under {system}; run `fhir-pipes dhis2 locations --instance {}` and load its output first",
+            path.display(),
+            instance.name
+        )));
+    }
+    let parents = if from_values {
+        load_parents(path, &system)?
+    } else {
+        HashMap::new()
+    };
+    Ok((mapping, parents))
 }
 
 /// The checks of the flags alone, before anything is read or requested.
@@ -384,10 +430,17 @@ fn fingerprint(
         "chunk": args.opts.chunk,
         "max_rows": args.opts.max_rows,
         "campaign": args.opts.campaign,
-        "locations": file_stamp(&args.opts.locations),
         "previous": args.previous.as_deref().map(file_stamp),
         "changed": args.changed.as_ref().map(|p| p.display().to_string()),
     });
+    // The file the org units were read from: `--locations`, or for `dhis2
+    // extract reports` its org unit records.
+    if let Some(p) = &args.locations {
+        plan["locations"] = file_stamp(p);
+    }
+    if let Some(p) = &args.org_units {
+        plan["org_units"] = file_stamp(p);
+    }
     // Only for `dhis2 extract reports`, so a run of `dhis2 reports` resumes
     // a checkpoint written before records existed, and neither resumes the
     // other's checkpoint.
@@ -530,7 +583,7 @@ fn compare_with_previous(
         .extend(plan.ranges.iter().map(DateRange::label));
     let out = &mut w.out;
     let removed = prev.removed(
-        |r| scope.contains(r, &instance.urls.period_extension),
+        |r| scope.contains(r, &instance.urls().period_extension),
         |r| {
             if keep_rest {
                 kept += 1;

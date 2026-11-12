@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use fml_model::StructureMap;
 
 use super::manifest::{self, Check, Manifest, RecordRules, Source, Step};
+use super::parameters::{self, Given, Parameter, Values};
 use super::records::{Model, Models};
 use crate::error::usage;
 use crate::library::resolve::{Artifact, Catalog, HIERARCHY_URL, LOCATION_URL};
@@ -30,6 +31,10 @@ pub struct Package {
     pub catalog: Catalog,
     /// The views in `views/`, in file-name order.
     pub views: Vec<View>,
+    /// `[parameters]` in the manifest.
+    pub parameters: Vec<Parameter>,
+    /// The values of this run: the defaults until `set_values`.
+    pub values: Values,
 }
 
 /// The variable a record view's paths read the record's line in its file
@@ -112,7 +117,11 @@ impl Package {
             Vec::new()
         };
         let catalog = Catalog::load_with(&sources, Some(("libraries/", built)), dir, &[])?;
-        Ok(Self {
+        let declared = manifest
+            .as_ref()
+            .map(|m| m.parameters.clone())
+            .unwrap_or_default();
+        let mut package = Self {
             dir: dir.to_path_buf(),
             name,
             manifest,
@@ -120,7 +129,195 @@ impl Package {
             models,
             catalog,
             views,
-        })
+            parameters: declared,
+            values: Values::new(),
+        };
+        package.check_parameter_names()?;
+        package.set_values(&[], false)?;
+        Ok(package)
+    }
+
+    /// Sets the values of the run: the defaults, then each of `given`. With
+    /// `require`, a parameter with no value is an error.
+    pub fn set_values(&mut self, given: &[Given], require: bool) -> Result<()> {
+        self.values = parameters::values(&self.parameters, given, require)?;
+        let for_maps: Vec<crate::mapping::MapParameter> = self
+            .values
+            .iter()
+            .map(|(n, v)| (n.clone(), v.json(), v.kind().name()))
+            .collect();
+        self.maps.set_parameters(&for_maps);
+        Ok(())
+    }
+
+    /// A view's constants and the package's parameters share one name
+    /// space, `%name`, so a view may not declare a constant of a
+    /// parameter's name. A Library's `[[parameter]]` gets its value from the
+    /// package parameter of its name, which must exist and have a type the
+    /// Library's can be cast from.
+    fn check_parameter_names(&self) -> Result<()> {
+        let find = |n: &str| self.parameters.iter().find(|p| p.name == n);
+        for v in &self.views {
+            if let Some(c) = v
+                .definition
+                .constant
+                .iter()
+                .find(|c| find(&c.name).is_some())
+            {
+                return Err(usage(anyhow!(
+                    "view {} declares the constant {}, which is also a parameter in {}; a \
+                     view reads a parameter as %{} without declaring it, so remove the \
+                     constant or rename one of them",
+                    v.name,
+                    c.name,
+                    manifest::FILE,
+                    c.name
+                )));
+            }
+        }
+        for lib in self.package_libraries() {
+            for (name, fhir_type) in library_parameters(lib) {
+                let Some(p) = find(&name) else {
+                    return Err(usage(anyhow!(
+                        "Library {} declares the parameter {name}, which {} does not \
+                         declare under [parameters]; the import gives a Library's parameters \
+                         their values from the package's",
+                        lib.name,
+                        manifest::FILE
+                    )));
+                };
+                if parameters::sql_type(&fhir_type, p.kind).is_none() {
+                    return Err(usage(anyhow!(
+                        "Library {} declares the parameter {name} of type {fhir_type}, and \
+                         the package's parameter {name} is of type {}; give the Library a type \
+                         that value can be cast to",
+                        lib.name,
+                        p.kind.name()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The SQLQuery and SQLView Libraries of `libraries/`.
+    fn package_libraries(&self) -> impl Iterator<Item = &Library> {
+        self.catalog
+            .libraries()
+            .into_iter()
+            .filter(|l| l.url != HIERARCHY_URL)
+    }
+
+    /// What `import check` reports about the parameters: the errors (a map
+    /// or view that reads a `%name` that is neither its own nor a parameter,
+    /// which fails when it runs) and the warnings (a parameter nothing
+    /// reads, a Library that declares a parameter its SQL does not use or
+    /// uses one it does not declare).
+    pub fn parameter_findings(&self) -> (Vec<String>, Vec<String>) {
+        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+        let declared: BTreeSet<&str> = self.parameters.iter().map(|p| p.name.as_str()).collect();
+        let mut read: BTreeSet<String> = BTreeSet::new();
+        for (path, names) in self.maps.external_variables() {
+            for n in names {
+                if declared.contains(n.as_str()) {
+                    read.insert(n);
+                } else {
+                    errors.push(format!(
+                        "{}: reads %{n}, which is not a parameter in {} and not a variable \
+                         of the map",
+                        path.display(),
+                        manifest::FILE
+                    ));
+                }
+            }
+        }
+        for v in &self.views {
+            let own: BTreeSet<&str> = v
+                .definition
+                .constant
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            let record_view = self.is_record_view(v);
+            let mut unknown = BTreeSet::new();
+            for p in view_paths(v) {
+                for n in fhir_pipes_sof::percent_variables(p) {
+                    if own.contains(n.as_str())
+                        || n == "rowIndex"
+                        || (record_view && n == RECORD_LINE)
+                        || crate::mapping::fhirpath_defines(&n)
+                    {
+                        continue;
+                    }
+                    if declared.contains(n.as_str()) {
+                        read.insert(n);
+                    } else {
+                        unknown.insert(n);
+                    }
+                }
+            }
+            for n in unknown {
+                errors.push(format!(
+                    "view {}: reads %{n}, which is neither a constant of the view nor a \
+                     parameter in {}",
+                    v.name,
+                    manifest::FILE
+                ));
+            }
+        }
+        for lib in self.package_libraries() {
+            let own: BTreeSet<String> = library_parameters(lib)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+            let used: BTreeSet<String> = lib
+                .content
+                .iter()
+                .flat_map(|(_, sql)| crate::library::compose::placeholders(sql))
+                .map(|(_, n)| n)
+                .collect();
+            for n in &own {
+                read.insert(n.clone());
+                if !used.contains(n) {
+                    warnings.push(format!(
+                        "Library {}: declares the parameter {n}, and its SQL has no :{n}",
+                        lib.name
+                    ));
+                }
+            }
+            for n in used.difference(&own) {
+                if declared.contains(n.as_str()) {
+                    warnings.push(format!(
+                        "Library {}: its SQL has :{n}, and it does not declare {n} under \
+                         [[parameter]], so the value of the package's parameter {n} is not \
+                         given to it",
+                        lib.name
+                    ));
+                }
+            }
+        }
+        for p in &self.parameters {
+            if !read.contains(&p.name) {
+                warnings.push(format!(
+                    "parameter {} in {}: nothing reads it; no map or view has %{} and no \
+                     Library declares it",
+                    p.name,
+                    manifest::FILE,
+                    p.name
+                ));
+            }
+        }
+        (errors, warnings)
+    }
+
+    /// `view` with the run's parameter values as constants, so its paths can
+    /// read them as `%name`.
+    pub fn with_parameters(&self, view: &View) -> View {
+        let mut v = view.clone();
+        for (name, value) in &self.values {
+            v.definition.constant.push(value.constant(name));
+        }
+        v
     }
 
     /// Whether `view` reads a record file rather than staged resources.
@@ -294,6 +491,22 @@ fn uses_record_line(path: &str) -> bool {
     path.match_indices(&name).any(|(i, _)| {
         !path[i + name.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
     })
+}
+
+/// The `in` parameters a Library declares, as (name, FHIR type).
+pub fn library_parameters(lib: &Library) -> Vec<(String, String)> {
+    lib.json["parameter"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["use"].as_str().is_none_or(|u| u == "in"))
+        .filter_map(|p| {
+            Some((
+                p["name"].as_str()?.to_string(),
+                p["type"].as_str().unwrap_or("string").to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Where a map step's records come from.

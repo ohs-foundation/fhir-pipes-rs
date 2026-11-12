@@ -19,6 +19,19 @@ uses "http://hl7.org/fhir/StructureDefinition/Bundle" alias Bundle as target
 uses "http://hl7.org/fhir/StructureDefinition/Location" alias Location as target
 uses "http://hl7.org/fhir/StructureDefinition/Organization" alias Organization as target
 
+
+// The systems, profiles and extensions it writes are parameters of the
+// package (import.toml). Each is a constant here, so `append` and plain
+// copies can use it; FHIRPath reads it as %name.
+let base = %base;
+let boundaryExtension = %boundaryExtension;
+let countryCodeSystem = %countryCodeSystem;
+let facilityOrganizationProfile = %facilityOrganizationProfile;
+let locationProfile = %locationProfile;
+let locationTypeSystem = %locationTypeSystem;
+let organizationIdPrefix = %organizationIdPrefix;
+let projectTagSystem = %projectTagSystem;
+
 group OrgUnit(source src : DHIS2OrgUnit, target bundle : Bundle) {
   src -> bundle.type = 'collection' "bundleType";
   // A facility also gets its Organization, written first.
@@ -29,29 +42,29 @@ group OrgUnit(source src : DHIS2OrgUnit, target bundle : Bundle) {
 group OrgUnitToLocation(source src : DHIS2OrgUnit, target loc : Location) {
   src.idPrefix as p, src.uid as u -> loc.id = append(p, '-', u) "locationId";
   src -> loc.meta as meta then {
-    src -> meta.profile = 'https://icr.healthcampaigns.org/StructureDefinition/ICRLocation' "locationProfile";
-    src.instance as i -> meta.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs', tag.code = i "locationTag";
+    src -> meta.profile = locationProfile "locationProfile";
+    src.instance as i -> meta.tag as tag, tag.system = projectTagSystem, tag.code = i "locationTag";
   } "locationMeta";
-  src.boundary as b -> loc.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson', ext.value = create('Attachment') as att, att.contentType = 'application/geo+json', att.data = evaluate(b, $this.encode('base64')) "boundary";
+  src.boundary as b -> loc.extension as ext, ext.url = boundaryExtension, ext.value = create('Attachment') as att, att.contentType = 'application/geo+json', att.data = evaluate(b, $this.encode('base64')) "boundary";
   src -> loc then Identifiers(src, loc) "locationIdentifiers";
-  src.countryCode as cc -> loc.identifier as ident, ident.system = 'https://icr.healthcampaigns.org/identifiers/national-admin-code', ident.value = cc "countryCode";
+  src.countryCode as cc -> loc.identifier as ident, ident.system = countryCodeSystem, ident.value = cc "countryCode";
   src.closedDate as closed -> loc.status = 'inactive' "closed";
   src where closedDate.empty() -> loc.status = 'active' "open";
   src.name as n -> loc.name = n "locationName";
   src.name as n, src.shortName as s where s != n -> loc.alias = s "alias";
-  src.kind as k -> loc.type as t, t.coding as c, c.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs', c.code = translate(k, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-location-type', 'code') "locationType";
+  src.kind as k -> loc.type as t, t.coding as c, c.system = locationTypeSystem, c.code = translate(k, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-location-type', 'code') "locationType";
   src.group as g -> loc.type as t then GroupType(src, g, t) "locationGroups";
   src.kind as k -> loc.physicalType = translate(k, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-physical-type', 'CodeableConcept') "physicalType";
   src.longitude as lon, src.latitude as lat -> loc.position as pos, pos.longitude = lon, pos.latitude = lat "position";
-  src.kind as k where k = 'facility', src.idPrefix as p, src.uid as u -> loc.managingOrganization as r, r.reference = append('Organization/org-', p, '-', u) "managingOrganization";
+  src.kind as k where k = 'facility', src.idPrefix as p, src.uid as u -> loc.managingOrganization as r, r.reference = append('Organization/', organizationIdPrefix, p, '-', u) "managingOrganization";
   src.parentUid as parent, src.idPrefix as p -> loc.partOf as r, r.reference = append('Location/', p, '-', parent) "partOf";
 }
 
 group OrgUnitToOrganization(source src : DHIS2OrgUnit, target org : Organization) {
-  src.idPrefix as p, src.uid as u -> org.id = append('org-', p, '-', u) "organizationId";
+  src.idPrefix as p, src.uid as u -> org.id = append(organizationIdPrefix, p, '-', u) "organizationId";
   src -> org.meta as meta then {
-    src -> meta.profile = 'https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization' "organizationProfile";
-    src.instance as i -> meta.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs', tag.code = i "organizationTag";
+    src -> meta.profile = facilityOrganizationProfile "organizationProfile";
+    src.instance as i -> meta.tag as tag, tag.system = projectTagSystem, tag.code = i "organizationTag";
   } "organizationMeta";
   src -> org then Identifiers(src, org) "organizationIdentifiers";
   src.closedDate as closed -> org.active = false "inactive";
@@ -63,14 +76,14 @@ group OrgUnitToOrganization(source src : DHIS2OrgUnit, target org : Organization
 
 // The org unit UID, and its code when it has one, under systems named after the instance.
 group Identifiers(source src : DHIS2OrgUnit, target tgt) {
-  src.uid as uid, src.instance as i -> tgt.identifier as ident, ident.use = 'official', ident.system = append('https://icr.healthcampaigns.org/identifiers/dhis2/', i, '/orgunit'), ident.value = uid "uid";
-  src.code as code, src.instance as i -> tgt.identifier as ident, ident.system = append('https://icr.healthcampaigns.org/identifiers/dhis2/', i, '/orgunit-code'), ident.value = code "code";
+  src.uid as uid, src.instance as i -> tgt.identifier as ident, ident.use = 'official', ident.system = append(base, '/identifiers/dhis2/', i, '/orgunit'), ident.value = uid "uid";
+  src.code as code, src.instance as i -> tgt.identifier as ident, ident.system = append(base, '/identifiers/dhis2/', i, '/orgunit-code'), ident.value = code "code";
 }
 
 // An org unit group as a type: coded once per group set it was asked for
 // under, or under org-unit-group when it is in no set.
 group GroupType(source src : DHIS2OrgUnit, source g, target t : CodeableConcept) {
-  g.set as s, g.uid as u, g.name as n, src.instance as i -> t.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/dimension/', s), c.code = u, c.display = n "inSet";
-  g where set.empty(), g.uid as u, g.name as n, src.instance as i -> t.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/org-unit-group'), c.code = u, c.display = n "inNoSet";
+  g.set as s, g.uid as u, g.name as n, src.instance as i -> t.coding as c, c.system = append(base, '/CodeSystem/dhis2/', i, '/dimension/', s), c.code = u, c.display = n "inSet";
+  g where set.empty(), g.uid as u, g.name as n, src.instance as i -> t.coding as c, c.system = append(base, '/CodeSystem/dhis2/', i, '/org-unit-group'), c.code = u, c.display = n "inNoSet";
   g.name as n -> t.text = n "groupName";
 }
