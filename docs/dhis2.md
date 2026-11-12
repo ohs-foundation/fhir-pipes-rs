@@ -239,10 +239,12 @@ writes the bare id in file order.
 
 ## Example
 
-The Sierra Leone demo instance is open:
+The Sierra Leone demo instance is open. Its address carries the DHIS2
+version and changes with each release; https://play.dhis2.org lists the
+current ones:
 
 ```sh
-export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-41-10
+export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-42-7-1
 export FHIR_PIPES_PROFILE=examples/profiles/icr.toml
 export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
 fhir-pipes dhis2 locations --instance sl-demo --id-prefix sle --country-code SLE --out sl-locations.ndjson

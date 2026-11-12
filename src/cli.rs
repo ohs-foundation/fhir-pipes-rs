@@ -193,7 +193,7 @@ impl ReportSource {
 /// files it under.
 #[derive(clap::Args, Debug, Clone)]
 pub struct Dhis2Conn {
-    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-41-10 (a trailing /api is accepted); falls back to $FHIR_PIPES_DHIS2_URL
+    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-42-7-1 (a trailing /api is accepted); falls back to $FHIR_PIPES_DHIS2_URL
     #[arg(long = "dhis2", env = "FHIR_PIPES_DHIS2_URL")]
     pub url: String,
     /// Short name for this instance (letters, digits, hyphens; up to 16), used in identifier systems, ids and the meta tag, e.g. sl-demo

@@ -56,25 +56,33 @@ pub struct Group {
     pub sets: Vec<String>,
 }
 
+/// The groups of an indicator or data element, sorted by id then name, and
+/// each group's sets sorted: DHIS2 returns both in an order that can change
+/// between requests, and the order here is the order of `Measure.topic`.
 fn groups(v: &Value, key: &str) -> Vec<Group> {
-    v.get(key)
+    let mut groups: Vec<Group> = v
+        .get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|g| {
+            let mut sets: Vec<String> = g
+                .get("groupSets")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.get("id")?.as_str().map(str::to_string))
+                .collect();
+            sets.sort();
             Some(Group {
                 id: g.get("id").and_then(Value::as_str).map(str::to_string),
                 name: g.get("name")?.as_str()?.to_string(),
-                sets: g
-                    .get("groupSets")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|s| s.get("id")?.as_str().map(str::to_string))
-                    .collect(),
+                sets,
             })
         })
-        .collect()
+        .collect();
+    groups.sort_by(|a, b| (&a.id, &a.name).cmp(&(&b.id, &b.name)));
+    groups
 }
 
 #[derive(Debug, Clone, Default)]
