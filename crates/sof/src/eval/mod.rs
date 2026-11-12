@@ -88,6 +88,27 @@ pub struct CompiledView {
 impl CompiledView {
     /// Compile and validate a ViewDefinition, building the FHIRPath engine.
     pub async fn compile(view: &ViewDefinition) -> Result<Self> {
+        Self::compile_inner(view, None).await
+    }
+
+    /// [`CompiledView::compile`], with `%name` a variable that holds a number
+    /// of each resource's own, given when it runs
+    /// ([`CompiledView::execute_resource_at`],
+    /// [`CompiledView::execute_parallel_at`]): such as the resource's line in
+    /// the file it was read from. This is not part of SQL on FHIR; a view
+    /// compiled with [`CompiledView::compile`] that uses `%name` is refused
+    /// as using an undefined constant. `name` must not be a constant of the
+    /// view.
+    pub async fn compile_with_position(view: &ViewDefinition, name: &str) -> Result<Self> {
+        if view.constant.iter().any(|c| c.name == name) {
+            return Err(Error::InvalidViewDefinition(format!(
+                "constant `{name}` is the name of the position variable"
+            )));
+        }
+        Self::compile_inner(view, Some(name.to_string())).await
+    }
+
+    async fn compile_inner(view: &ViewDefinition, position: Option<String>) -> Result<Self> {
         if view.resource.trim().is_empty() {
             return Err(Error::InvalidViewDefinition(
                 "ViewDefinition is missing the required `resource`".to_string(),
@@ -117,6 +138,7 @@ impl CompiledView {
             engine,
             model,
             uses_context: AtomicBool::new(false),
+            position,
         };
 
         let mut mismatched = false;
@@ -180,6 +202,17 @@ impl CompiledView {
     /// values in column order). Resources of a different type, or filtered out
     /// by `where`, yield no rows.
     pub async fn execute_resource(&self, resource: &Value) -> Result<Vec<Vec<Value>>> {
+        self.execute_resource_at(resource, 0).await
+    }
+
+    /// [`CompiledView::execute_resource`], with the position variable of a
+    /// view compiled by [`CompiledView::compile_with_position`] bound to
+    /// `position`. Without one, `position` is not used.
+    pub async fn execute_resource_at(
+        &self,
+        resource: &Value,
+        position: i64,
+    ) -> Result<Vec<Vec<Value>>> {
         if resource.get("resourceType").and_then(Value::as_str)
             != Some(self.ev.resource_type.as_str())
         {
@@ -188,7 +221,7 @@ impl CompiledView {
         // The resource's one conversion to the engine's tree; every focus
         // below shares it, and every context is a child of its context.
         let root = FhirPathValue::resource_from_node(FhirNode::from_json(resource));
-        let root_ctx = self.ev.root_context(&root);
+        let root_ctx = self.ev.root_context(&root, position);
         let focus = Focus::with_context(&root, root_ctx.clone());
         for plan in &self.wheres {
             if !self

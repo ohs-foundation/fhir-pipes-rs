@@ -1,6 +1,7 @@
 //! `import.toml`: the package's name, its steps in order, its data tests,
 //! how records that do not fit their model exactly are read, the limit on a
-//! map's values and the elements `import run --previous` does not compare.
+//! map's values, whether views may read record files and the elements
+//! `import run --previous` does not compare.
 //! Parsing checks the manifest on its own: the keys, the shape of each step
 //! and test, and that every stage step comes before the first library step.
 //! What the names refer to is checked against the package (`plan`).
@@ -25,6 +26,9 @@ pub struct Manifest {
     pub records: RecordRules,
     /// `[maps] max_values`: the values a map may create from one record.
     pub max_values: Option<usize>,
+    /// `[views] records = "allow"`: a view may read a record type's file
+    /// directly (a record view), which goes beyond SQL on FHIR.
+    pub record_views: bool,
 }
 
 /// `[records]`: what a record of the input folder may hold beyond its
@@ -100,6 +104,13 @@ struct File {
     compare: Option<CompareFile>,
     records: Option<RecordsFile>,
     maps: Option<MapsFile>,
+    views: Option<ViewsFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewsFile {
+    records: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +197,15 @@ pub fn parse(text: &str, origin: &str) -> Result<Manifest> {
             )));
         }
     };
+    let record_views = match file.views.and_then(|v| v.records).as_deref() {
+        None | Some("error") => false,
+        Some("allow") => true,
+        Some(v) => {
+            return Err(usage(format!(
+                "{origin}: views.records is {v:?}; give \"error\" or \"allow\""
+            )));
+        }
+    };
     Ok(Manifest {
         name: file.name,
         title: file.title,
@@ -194,6 +214,7 @@ pub fn parse(text: &str, origin: &str) -> Result<Manifest> {
         ignore,
         records,
         max_values,
+        record_views,
     })
 }
 
@@ -588,6 +609,37 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT id FROM t;"
         assert!(m.contains("maps.max_values is 0"), "{m}");
         let m = message("name = \"x\"\n[maps]\nmax_rules = 5\n");
         assert!(m.contains("unknown field `max_rules`"), "{m}");
+    }
+
+    #[test]
+    fn views_may_be_allowed_to_read_records() {
+        assert!(!parse("name = \"x\"\n", "import.toml").unwrap().record_views);
+        let m = parse(
+            "name = \"x\"\n[views]\nrecords = \"allow\"\n",
+            "import.toml",
+        )
+        .unwrap();
+        assert!(m.record_views);
+        let m = parse(
+            "name = \"x\"\n[views]\nrecords = \"error\"\n",
+            "import.toml",
+        )
+        .unwrap();
+        assert!(!m.record_views);
+        assert!(
+            !parse("name = \"x\"\n[views]\n", "import.toml")
+                .unwrap()
+                .record_views
+        );
+        let m = message("name = \"x\"\n[views]\nrecords = \"yes\"\n");
+        assert!(
+            m.contains("views.records is \"yes\"; give \"error\" or \"allow\""),
+            "{m}"
+        );
+        let m = message("name = \"x\"\n[views]\nrecord = \"allow\"\n");
+        assert!(m.contains("unknown field `record`"), "{m}");
+        let m = message("name = \"x\"\n[views]\nrecords = true\n");
+        assert!(m.contains("invalid type"), "{m}");
     }
 
     #[test]

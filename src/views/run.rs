@@ -161,6 +161,9 @@ pub struct ViewRows<'a> {
     views: Vec<(&'a str, &'a ViewDefinition)>,
     compiled: Vec<Option<CompiledView>>,
     results: Vec<Option<ViewResult>>,
+    /// The position variable the views are compiled with, if any
+    /// (`CompiledView::compile_with_position`).
+    position: Option<&'a str>,
 }
 
 impl<'a> ViewRows<'a> {
@@ -172,7 +175,32 @@ impl<'a> ViewRows<'a> {
             views,
             compiled,
             results,
+            position: None,
         }
+    }
+
+    /// As `new`, with `%name` a variable each resource binds to a number of
+    /// its own, given to `add_at`.
+    pub fn with_position(views: Vec<(&'a str, &'a ViewDefinition)>, name: &'a str) -> Self {
+        Self {
+            position: Some(name),
+            ..Self::new(views)
+        }
+    }
+
+    /// Run every view on `resources`, the position variable of
+    /// `resources[i]` bound to `positions[i]`.
+    pub fn add_at(&mut self, resources: &[Value], positions: &[i64], threads: usize) -> Result<()> {
+        for (i, (name, view)) in self.views.iter().enumerate() {
+            let r = compiled(&mut self.compiled[i], view, name, self.position)?
+                .execute_parallel_at(resources, positions, threads)
+                .with_context(|| format!("running view {name}"))?;
+            match &mut self.results[i] {
+                Some(all) => all.data.extend(r.data),
+                slot => *slot = Some(r),
+            }
+        }
+        Ok(())
     }
 
     /// Run every view on `resources` and keep the rows. A view skips the
@@ -191,7 +219,7 @@ impl<'a> ViewRows<'a> {
             if only.is_some_and(|t| t != view.resource) {
                 continue;
             }
-            let r = compiled(&mut self.compiled[i], view, name)?
+            let r = compiled(&mut self.compiled[i], view, name, self.position)?
                 .execute_parallel(resources, threads)
                 .with_context(|| format!("running view {name}"))?;
             match &mut self.results[i] {
@@ -207,13 +235,14 @@ impl<'a> ViewRows<'a> {
     /// Each view's rows, in the order of the views. A view that never ran
     /// (no resources) is run on none, which gives its columns, or its error.
     pub fn finish(self, threads: usize) -> Result<Vec<ViewResult>> {
+        let position = self.position;
         self.views
             .iter()
             .zip(self.compiled)
             .zip(self.results)
             .map(|(((name, view), mut c), r)| match r {
                 Some(r) => Ok(r),
-                None => compiled(&mut c, view, name)?
+                None => compiled(&mut c, view, name, position)?
                     .execute_parallel(&[], threads)
                     .with_context(|| format!("running view {name}")),
             })
@@ -228,11 +257,15 @@ fn compiled<'c>(
     slot: &'c mut Option<CompiledView>,
     view: &ViewDefinition,
     name: &str,
+    position: Option<&str>,
 ) -> Result<&'c CompiledView> {
     if slot.is_none() {
-        let c = CompiledView::compile_blocking(view)
-            .with_context(|| format!("compiling view {name}"))
-            .map_err(crate::error::usage)?;
+        let c = match position {
+            Some(p) => CompiledView::compile_with_position_blocking(view, p),
+            None => CompiledView::compile_blocking(view),
+        }
+        .with_context(|| format!("compiling view {name}"))
+        .map_err(crate::error::usage)?;
         *slot = Some(c);
     }
     Ok(slot.as_ref().expect("just compiled"))

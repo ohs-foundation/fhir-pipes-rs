@@ -5,7 +5,9 @@
 //! Mapping Language maps and ConceptMaps that turn them into resources
 //! (`maps/`), and, where records have to be joined or grouped first,
 //! ViewDefinitions (`views/`) and SQLQuery Libraries (`libraries/`) that run
-//! over resources staged by earlier maps. `import.toml` lists the steps.
+//! over resources staged by earlier maps, or, for a record view (a view
+//! whose `resource` is a record type), over the record files themselves.
+//! `import.toml` lists the steps.
 //! See docs/import.md.
 //!
 //! - `manifest`: `import.toml`;
@@ -135,12 +137,25 @@ fn check_files(plan: &Plan, files: &BTreeMap<String, PathBuf>) -> Result<()> {
 
 pub fn check(args: &CheckArgs) -> Result<()> {
     let package = Package::load(&args.package)?;
-    let (errors, warnings) = package.maps.check();
+    let (mut errors, mut warnings) = package.maps.check();
+    errors.extend(package.record_view_problems());
+    warnings.extend(package.record_view_warnings());
     for line in &warnings {
         println!("warning: {line}");
     }
     for line in &errors {
         println!("error: {line}");
+    }
+    let record_views: Vec<String> = package
+        .record_views()
+        .map(|v| format!("{} ({})", v.name, v.resource))
+        .collect();
+    if !record_views.is_empty() {
+        println!(
+            "record views, which read record files directly, beyond the SQL on FHIR \
+             specification: {}",
+            record_views.join(", ")
+        );
     }
     println!(
         "{}: {} maps, {} logical models: {} errors, {} warnings",
