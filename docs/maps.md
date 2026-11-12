@@ -133,9 +133,11 @@ writes the prepared records instead of resources, and
 
 Notes:
 
-- The profile is still needed. `dhis2 reports` finds each org unit's Location
-  by the identifier system the profile's `[dhis2] base` gives, so the maps
-  and the profile have to agree on it.
+- The profile is still needed with `--maps`. `dhis2 reports` finds each org
+  unit's Location by the identifier system the profile's `[dhis2] base`
+  gives, so the maps and the profile have to agree on it. `dhis2 extract`
+  needs no `[dhis2]` section (see
+  [dhis2.md](dhis2.md#records-and-the-import-package)).
 - The profile's URL settings for the built-in mapping are not passed to the
   maps. The example maps read their systems, profiles and extensions as
   parameters of their package, declared in

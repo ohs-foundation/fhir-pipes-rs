@@ -141,15 +141,15 @@ pub fn measure_report(
     }
     group["measureScore"] = json!({"value": figures.score});
     let pe = period_value(&row.pe);
-    let mut extension = vec![json!({"url": instance.urls.period_extension, "valueString": pe})];
+    let mut extension = vec![json!({"url": instance.urls().period_extension, "valueString": pe})];
     if let Some(c) = campaign {
         extension.push(
-            json!({"url": instance.urls.campaign_extension, "valueReference": {"reference": c}}),
+            json!({"url": instance.urls().campaign_extension, "valueReference": {"reference": c}}),
         );
     }
     let (code, display) = source.coding();
-    extension.push(json!({"url": instance.urls.source_extension,
-        "valueCodeableConcept": {"coding": [{"system": instance.urls.source_system,
+    extension.push(json!({"url": instance.urls().source_extension,
+        "valueCodeableConcept": {"coding": [{"system": instance.urls().source_system,
             "code": code, "display": display}]}}));
     let mut r = json!({
         "resourceType": "MeasureReport",

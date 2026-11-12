@@ -114,7 +114,22 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             args.opts.locations.display()
         )));
     }
-    let system = instance.orgunit_system();
+    // The system the Locations carry the org unit UIDs under: given, or the
+    // one the profile's [dhis2] base names.
+    let system = match (&args.org_unit_system, instance.has_urls()) {
+        (Some(s), _) => s.clone(),
+        (None, true) => instance.orgunit_system(),
+        (None, false) => {
+            return Err(PipesError::Usage(format!(
+                "dhis2 extract reports needs the identifier system of the org unit UIDs on the \
+                 --locations Locations: give --org-unit-system URL (for \
+                 examples/import/icr-dhis2, https://icr.healthcampaigns.org/identifiers/dhis2/{}/orgunit), \
+                 or a profile with a [dhis2] section; {}",
+                instance.name,
+                profile.lacks("[dhis2] section")
+            )));
+        }
+    };
     let mapping = load_mapping(&args.opts.locations, &system)?;
     if mapping.is_empty() {
         return Err(PipesError::Usage(format!(
@@ -394,6 +409,11 @@ fn fingerprint(
     if args.records {
         plan["records"] = json!(true);
     }
+    // Only when given, so a checkpoint written before the option existed
+    // is resumed.
+    if let Some(system) = &args.org_unit_system {
+        plan["org_unit_system"] = json!(system);
+    }
     // Only with --maps, so a run without it resumes a checkpoint written
     // before the option existed.
     if !args.maps.dirs.is_empty() {
@@ -530,7 +550,7 @@ fn compare_with_previous(
         .extend(plan.ranges.iter().map(DateRange::label));
     let out = &mut w.out;
     let removed = prev.removed(
-        |r| scope.contains(r, &instance.urls.period_extension),
+        |r| scope.contains(r, &instance.urls().period_extension),
         |r| {
             if keep_rest {
                 kept += 1;

@@ -281,7 +281,7 @@ pub fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value
         "resourceType": "Measure",
         "id": instance.measure_id(&ind.fhir_key()),
         "meta": {"tag": [instance.tag()]},
-        "extension": [{"url": instance.urls.indicator_extension, "extension": sub}],
+        "extension": [{"url": instance.urls().indicator_extension, "extension": sub}],
         "url": instance.measure_url(&ind.fhir_key()),
         "identifier": identifier,
         "title": ind.name,

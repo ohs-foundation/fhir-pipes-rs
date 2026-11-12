@@ -432,6 +432,10 @@ pub struct Dhis2ReportsArgs {
     /// Write DHIS2Value records instead of resources: set by `dhis2 extract reports`.
     #[arg(skip)]
     pub records: bool,
+    /// `dhis2 extract reports --org-unit-system`: the identifier system of
+    /// the org unit UIDs on the --locations Locations.
+    #[arg(skip)]
+    pub org_unit_system: Option<String>,
 }
 
 /// `dhis2 extract reports`. The comparison with a previous run
@@ -449,6 +453,9 @@ pub struct ExtractReportsArgs {
     /// Output folder; the records are written to DIR/DHIS2Value.ndjson. It is created if missing. An interrupted run leaves DHIS2Value.ndjson.tmp and DHIS2Value.ndjson.resume there for --resume; `import run` reads neither
     #[arg(long, value_name = "DIR")]
     pub out: PathBuf,
+    /// The identifier system that carries the org unit UIDs on the --locations Locations, as the import package's map writes it (for examples/import/icr-dhis2, https://icr.healthcampaigns.org/identifiers/dhis2/<instance>/orgunit). Default: the one the profile's [dhis2] base gives; needed when the profile has no [dhis2] section
+    #[arg(long, value_name = "URL")]
+    pub org_unit_system: Option<String>,
 }
 
 impl ExtractReportsArgs {
@@ -465,6 +472,7 @@ impl ExtractReportsArgs {
             changed: None,
             removed: None,
             records: true,
+            org_unit_system: self.org_unit_system,
         }
     }
 }

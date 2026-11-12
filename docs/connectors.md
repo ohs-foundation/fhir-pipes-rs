@@ -83,13 +83,22 @@ fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-
 fhir-pipes dhis2 extract measures --instance sl-demo --indicator-group srxUNt2w5jn --out raw
 fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 fhir-pipes dhis2 extract reports --instance sl-demo --indicator-group srxUNt2w5jn \
-  --locations fhir/Location.ndjson --period 2025 --level 2 --level 3 --out raw
+  --locations fhir/Location.ndjson \
+  --org-unit-system https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit \
+  --period 2025 --level 2 --level 3 --out raw
 fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite
 ```
 
 Each run writes one file in `raw/`: `DHIS2OrgUnit.ndjson`,
 `DHIS2Indicator.ndjson` and `DHIS2Value.ndjson`. See
 [dhis2.md](dhis2.md#records-and-the-import-package) for the options.
+
+The records carry what DHIS2 returns and what is worked out from it, and
+none of the URLs the resources have: those are parameters of the import
+package. So `dhis2 extract` needs no `[dhis2]` section in the profile.
+`extract reports` is given the identifier system the Locations of the
+first import carry the org unit UIDs under (`--org-unit-system`), since the
+package chose it.
 
 `dhis2 extract` is built into fhir-pipes for now. It will move to its own
 program, `fhir-pipes-dhis2`, once the built-in DHIS2 mapping is removed;

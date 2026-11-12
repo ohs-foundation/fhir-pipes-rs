@@ -25,7 +25,7 @@ the example connector of [connectors.md](connectors.md).
 | `--dhis2-token`, `$FHIR_PIPES_DHIS2_TOKEN` | Personal access token, sent as `Authorization: ApiToken …` |
 | `--dhis2-user` / `--dhis2-password`, `$FHIR_PIPES_DHIS2_USER` / `$FHIR_PIPES_DHIS2_PASSWORD` | Basic authentication |
 | `--instance` | A short name for the instance: letters, digits and hyphens, up to 16 characters, such as `sl-demo` |
-| `--profile`, `$FHIR_PIPES_PROFILE` | A profile with a `[dhis2]` section. Without one the command stops with exit 2. See [profiles.md](profiles.md) |
+| `--profile`, `$FHIR_PIPES_PROFILE` | A profile with a `[dhis2]` section. Without one the command stops with exit 2. See [profiles.md](profiles.md). `dhis2 extract` does not need one |
 | `--maps DIR`, `$FHIR_PIPES_DHIS2_MAPS` | Write the resources with FHIR Mapping Language maps in this folder instead of the built-in mapping. See [maps.md](maps.md#maps-for-the-dhis2-import). Not for `dhis2 extract` |
 
 Use a read-only DHIS2 user. Keep
@@ -147,7 +147,24 @@ requests, checks, run report and summary (which counts records), except:
 - `--maps`: no mapping runs, so it is not taken, and
   `$FHIR_PIPES_DHIS2_MAPS` is ignored;
 - `--previous`, `--changed`, `--removed` and `--updated-since`: they
-  compare MeasureReports. Compare after the import instead, as below.
+  compare MeasureReports. Compare after the import instead, as below;
+- `extract reports` takes `--org-unit-system URL`, below.
+
+`dhis2 extract` needs no `[dhis2]` section in the profile, nor `[location]
+admin_unit_type` or `[organization] facility_type`. The records carry none
+of the systems, profiles, extensions or type codes: the package's maps
+write them, from the package's parameters (see
+[examples/import/icr-dhis2/import.toml](../examples/import/icr-dhis2/import.toml)
+and [import.md](import.md#parameters)). To write other URLs, change the
+parameters, for example `import run --param base=https://example.org`.
+
+`extract reports` reads `--locations` to find the Location of each org unit,
+by the identifier the Location carries the org unit UID under. That system
+is one the package's map wrote, so it is given with `--org-unit-system URL`:
+for examples/import/icr-dhis2 with its default `base`,
+`https://icr.healthcampaigns.org/identifiers/dhis2/<instance>/orgunit`.
+Without it, the system the profile's `[dhis2] base` names is used, as
+`dhis2 reports` does; with neither, the command stops with exit 2.
 
 The file is written under a temporary name and renamed when the run ends.
 An interrupted `dhis2 extract reports` leaves `DHIS2Value.ndjson.tmp` and
@@ -172,8 +189,9 @@ fhir-pipes dhis2 extract measures --instance sl-demo --indicator-group srxUNt2w5
   --out raw
 fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 fhir-pipes dhis2 extract reports --instance sl-demo --indicator-group srxUNt2w5jn \
-  --locations fhir/Location.ndjson --period 2025 --level 2 --level 3 \
-  --out raw
+  --locations fhir/Location.ndjson \
+  --org-unit-system https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit \
+  --period 2025 --level 2 --level 3 --out raw
 fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite
 for t in Organization Location Measure MeasureReport; do
   fhir-pipes load --server URL --in fhir/$t.ndjson

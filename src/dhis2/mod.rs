@@ -35,12 +35,16 @@ use crate::profile::{Dhis2Profile, Profile};
 /// Instance names go into every id, so they are kept short.
 pub const MAX_INSTANCE_LEN: usize = 16;
 
-/// Every system, profile and extension URL comes from the profile's [dhis2]
-/// section (and the Location roles from [location] and [organization]).
+/// For `locations`, `measures` and `reports`, every system, profile and
+/// extension URL comes from the profile's [dhis2] section (and the Location
+/// roles from [location] and [organization]). `extract` writes records, which
+/// carry none of them, so it needs no [dhis2] section.
 pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
     let profile = Profile::load(profile)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
-    profile.dhis2()?;
+    if !matches!(cmd, Dhis2Command::Extract(_)) {
+        profile.dhis2()?;
+    }
     match cmd {
         Dhis2Command::Locations(args) => locations::run_locations(args, &profile)?,
         Dhis2Command::Measures(args) => measures::run_measures(args, &profile)?,
@@ -94,7 +98,9 @@ pub fn valid_name(name: &str, max: usize) -> bool {
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub name: String,
-    pub urls: Dhis2Profile,
+    /// The profile's [dhis2] section: `None` for `dhis2 extract` with a
+    /// profile that has none, which uses none of the URLs.
+    urls: Option<Dhis2Profile>,
     /// [location] admin_unit_type: the type code of an org unit above facility level.
     pub admin_unit_type: Option<String>,
     /// [organization] facility_type: the type code of a facility.
@@ -114,7 +120,7 @@ impl Instance {
         }
         Ok(Self {
             name: name.to_string(),
-            urls: profile.dhis2()?.clone(),
+            urls: profile.dhis2.clone(),
             admin_unit_type: profile.location.admin_unit_type.clone(),
             facility_type: profile.organization.facility_type.clone(),
             org_id_prefix: profile.organization.id_prefix.clone(),
@@ -122,8 +128,21 @@ impl Instance {
         })
     }
 
+    /// The profile's [dhis2] section. Only the built-in mapping and the
+    /// `--maps` route use it, and `run` refuses those without one.
+    pub fn urls(&self) -> &Dhis2Profile {
+        self.urls
+            .as_ref()
+            .expect("dhis2 run checked that the profile has a [dhis2] section")
+    }
+
+    /// Whether the profile has a [dhis2] section.
+    pub fn has_urls(&self) -> bool {
+        self.urls.is_some()
+    }
+
     fn base(&self) -> &str {
-        self.urls.base.trim_end_matches('/')
+        self.urls().base.trim_end_matches('/')
     }
 
     pub fn orgunit_system(&self) -> String {
@@ -206,7 +225,7 @@ impl Instance {
     }
 
     pub fn tag(&self) -> Value {
-        json!({"system": self.urls.project_tag_system, "code": self.name})
+        json!({"system": self.urls().project_tag_system, "code": self.name})
     }
 }
 
@@ -218,7 +237,12 @@ mod tests {
     fn instance_names_are_short_and_plain() {
         assert!(Instance::new("sl-demo", &crate::profile::icr_example()).is_ok());
         assert!(Instance::new("", &crate::profile::icr_example()).is_err());
-        assert!(Instance::new("sl-demo", &crate::profile::Profile::base()).is_err());
+        // dhis2 extract runs with a profile that has no [dhis2] section.
+        assert!(
+            !Instance::new("sl-demo", &crate::profile::Profile::base())
+                .unwrap()
+                .has_urls()
+        );
         assert!(Instance::new("sl demo", &crate::profile::icr_example()).is_err());
         assert!(Instance::new("sl_demo", &crate::profile::icr_example()).is_err());
         assert!(

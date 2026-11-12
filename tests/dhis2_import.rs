@@ -55,16 +55,24 @@ type Run<'a> = &'a dyn Fn(To, &[&str]) -> Assert;
 
 /// `fhir-pipes dhis2 <command>` (or `dhis2 extract <command>`) against
 /// `server`, signed in, with `--out`.
+///
+/// `dhis2 extract` runs with no profile, so with no `[dhis2]` section: the
+/// records carry none of its URLs, and the package's parameters give the
+/// maps the same values. `extract reports` is told the system the
+/// Locations carry the org unit UIDs under instead.
 fn dhis2(server: &Server, command: &str, to: To) -> Command {
     let mut c = fhir_pipes();
     c.arg("dhis2");
     if let To::Records(_) = to {
-        c.arg("extract");
+        c.arg("extract").env_remove("FHIR_PIPES_PROFILE");
     }
     c.args([command, "--dhis2", &base(server), "--instance", "sl-demo"])
         .arg("--out")
         .arg(to.path())
         .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
+    if let (To::Records(_), "reports") = (to, command) {
+        c.args(["--org-unit-system", ORGUNIT_SYSTEM]);
+    }
     c
 }
 
@@ -804,6 +812,40 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
     assert!(stderr(&a).contains("is not a folder"), "{}", stderr(&a));
 }
 
+/// With no `[dhis2]` section in the profile, the FHIR commands still stop,
+/// and `extract reports` needs `--org-unit-system` to read the Locations.
+#[test]
+fn without_a_dhis2_section_only_extract_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &[BO]);
+    let reports = |command: &[&str]| {
+        fhir_pipes()
+            .env_remove("FHIR_PIPES_PROFILE")
+            .arg("dhis2")
+            .args(command)
+            .args(["--dhis2", "https://dhis2.invalid"])
+            .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
+            .args(["--period", "2025", "--level", "2"])
+            .arg("--locations")
+            .arg(&locations)
+            .arg("--out")
+            .arg(dir.path().join("out"))
+            .assert()
+            .code(2)
+    };
+    let e = stderr(&reports(&["reports"]));
+    assert!(
+        e.contains("dhis2 needs a profile with a [dhis2] section"),
+        "{e}"
+    );
+    let e = stderr(&reports(&["extract", "reports"]));
+    assert!(
+        e.contains("dhis2 extract reports needs the identifier system of the org unit UIDs")
+            && e.contains("--org-unit-system URL"),
+        "{e}"
+    );
+}
+
 /// `dhis2 extract reports --resume`: an interrupted run (cut mid-line)
 /// leaves its temporary and resume files beside DHIS2Value.ndjson, which
 /// `import run` does not read, and resumes to the same bytes and the same
@@ -860,8 +902,11 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     expect_units(&server, 2, 2);
     expect_units(&server, 3, 2);
     let refused = run(&server, To::Resources(&out), &["--resume"]).code(2);
+    // The extract run also gave --org-unit-system, which dhis2 reports has not.
     assert!(
-        stderr(&refused).contains("was planned differently (records changed)"),
+        stderr(&refused).contains("was planned differently (")
+            && stderr(&refused).contains("records")
+            && stderr(&refused).contains("org_unit_system"),
         "{}",
         stderr(&refused)
     );
@@ -911,8 +956,11 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     expect_units(&server, 2, 2);
     expect_units(&server, 3, 2);
     let refused = run(&server, To::Records(&plain_dir), &["--resume"]).code(2);
+    // The extract run also gave --org-unit-system, which dhis2 reports has not.
     assert!(
-        stderr(&refused).contains("was planned differently (records changed)"),
+        stderr(&refused).contains("was planned differently (")
+            && stderr(&refused).contains("records")
+            && stderr(&refused).contains("org_unit_system"),
         "{}",
         stderr(&refused)
     );

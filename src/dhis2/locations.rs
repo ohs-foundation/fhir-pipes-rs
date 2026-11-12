@@ -265,7 +265,7 @@ fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
         .collect();
     let mut ids = identifiers(unit, opts);
     if let Some(cc) = p.country_code {
-        ids.push(identifier(&opts.instance.urls.country_code_system, cc));
+        ids.push(identifier(&opts.instance.urls().country_code_system, cc));
     }
     // run_locations checked both are in the profile.
     let (type_code, physical) = if facility {
@@ -285,7 +285,7 @@ fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
     let meta = |profile: &str| json!({"profile": [profile], "tag": [opts.instance.tag()]});
     let loc = NewLocation {
         id,
-        meta: Some(meta(&opts.instance.urls.location_profile)),
+        meta: Some(meta(&opts.instance.urls().location_profile)),
         extension,
         identifier: ids,
         status: if unit.closed_date.is_some() {
@@ -300,7 +300,7 @@ fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
             .filter(|s| **s != unit.name)
             .map(std::slice::from_ref)
             .unwrap_or_default(),
-        type_system: &opts.instance.urls.location_type_system,
+        type_system: &opts.instance.urls().location_type_system,
         type_code,
         extra_types: group_types.clone(),
         physical_type: Some(physical),
@@ -314,7 +314,7 @@ fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
         out.push(
             NewOrganization {
                 id: &org_id,
-                meta: Some(meta(&opts.instance.urls.facility_organization_profile)),
+                meta: Some(meta(&opts.instance.urls().facility_organization_profile)),
                 identifier: identifiers(unit, opts),
                 active: unit.closed_date.is_none(),
                 extra_types: group_types,
@@ -590,7 +590,9 @@ fn add_org_unit_groups(
 pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_out(&args.out)?;
     let instance = Instance::new(&args.conn.instance, profile)?;
-    if instance.admin_unit_type.is_none() || instance.facility_type.is_none() {
+    // The type codes are for the resources; dhis2 extract writes the kind
+    // (facility or admin-unit) and the package's maps choose the codes.
+    if !args.records && (instance.admin_unit_type.is_none() || instance.facility_type.is_none()) {
         return Err(PipesError::Usage(format!(
             "dhis2 locations needs [location] admin_unit_type and [organization] facility_type \
              in the profile, the type codes of admin units and facilities; {}",
@@ -751,7 +753,11 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         };
         println!("  level {level} {name}: {count} ({role})");
     }
-    println!("Org unit identifier system: {}", instance.orgunit_system());
+    // dhis2 extract may run with no [dhis2] section; the package's maps
+    // then name the system.
+    if instance.has_urls() {
+        println!("Org unit identifier system: {}", instance.orgunit_system());
+    }
     println!("{}", report.summary());
     if let Some(path) = &args.report {
         write_report(path, &report)?;
