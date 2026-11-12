@@ -329,7 +329,7 @@ pub fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value
 }
 
 /// The item as a `DHIS2Indicator` record (examples/import/icr-dhis2/models):
-/// the input of a `--maps` map, or the line `--records` writes.
+/// the input of a `--maps` map, or the line `dhis2 extract` writes.
 pub fn record(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
     let mut r = json!({
         "resourceType": record_type(INDICATOR_MODEL),
@@ -659,8 +659,8 @@ pub fn fetch_indicators(
 pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_out(&args.out)?;
     let instance = Instance::new(&args.conn.instance, profile)?;
-    let maps = RecordMap::load(&args.conn.maps, INDICATOR_MODEL)?;
-    let writes = Writes::new(maps.as_ref(), args.conn.records);
+    let maps = RecordMap::load(&args.maps.dirs, INDICATOR_MODEL)?;
+    let writes = Writes::new(maps.as_ref(), args.records);
     let api = Dhis2::connect(&args.conn)?;
     let indicators = fetch_indicators(&api, &args.select)?;
     let mut report = Report::default();
@@ -698,7 +698,7 @@ pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile)
         *by_scoring.entry(key).or_default() += 1;
     }
     let scoring: Vec<String> = by_scoring.iter().map(|(k, v)| format!("{v} {k}")).collect();
-    let what = if args.conn.records {
+    let what = if args.records {
         format!("{} records", record_type(INDICATOR_MODEL))
     } else {
         "Measures".to_string()

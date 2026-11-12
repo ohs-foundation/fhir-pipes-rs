@@ -447,8 +447,6 @@ mod tests {
             token: token.map(str::to_string),
             user: user.map(str::to_string),
             password: password.map(str::to_string),
-            maps: Vec::new(),
-            records: false,
             retries: 1,
             timeout: 1,
         };

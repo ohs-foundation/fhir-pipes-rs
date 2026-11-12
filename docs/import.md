@@ -18,8 +18,11 @@ feature described here, on synthetic data.
 [examples/import/icr-dhis2](../examples/import/icr-dhis2) is the DHIS2
 import as a package: three record types, each through its own map, with a
 manifest that has no steps and no views or Libraries. Its records are what `fhir-pipes dhis2
-locations|measures|reports --records` writes (see
+extract locations|measures|reports` writes (see
 [dhis2.md](dhis2.md#records-and-the-import-package)).
+
+A program that writes such a folder from a source system is a connector.
+Any program in any language can be one; see [connectors.md](connectors.md).
 
 The same `import` command also has `location-boundaries` and
 `location-sites`, which are unrelated to packages; see

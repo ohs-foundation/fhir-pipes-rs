@@ -2,8 +2,9 @@
 //!
 //! (a) `fhir-pipes dhis2 locations|measures|reports --out a.ndjson`, the
 //!     built-in mapping, and
-//! (b) the same command with `--records`, writing `<in>/<RecordType>.ndjson`,
-//!     then `fhir-pipes import run --package examples/import/icr-dhis2`,
+//! (b) `fhir-pipes dhis2 extract locations|measures|reports --out IN` with
+//!     the same options, writing `IN/<RecordType>.ndjson`, then
+//!     `fhir-pipes import run --package examples/import/icr-dhis2 --in IN`,
 //!
 //! must give the same resources. The import writes one file per resource
 //! type, so the two are compared by `resourceType/id`, as JSON values (key
@@ -31,23 +32,51 @@ const MAPS: &str = concat!(
     "/examples/import/icr-dhis2/maps"
 );
 
-/// One run of a dhis2 command: it starts its own stub server, runs the
-/// command with `--out OUT` and `extra`, and returns what it printed.
-type Run<'a> = &'a dyn Fn(&Path, &[&str]) -> Assert;
+/// What a scenario writes: resources with `dhis2 <command> --out FILE`, or
+/// records with `dhis2 extract <command> --out DIR`.
+#[derive(Clone, Copy)]
+enum To<'a> {
+    Resources(&'a Path),
+    Records(&'a Path),
+}
 
-/// `fhir-pipes dhis2 <command>` against `server`, signed in.
-fn dhis2(server: &Server, command: &str) -> Command {
+impl To<'_> {
+    /// The --out path.
+    fn path(&self) -> &Path {
+        match self {
+            To::Resources(p) | To::Records(p) => p,
+        }
+    }
+}
+
+/// One run of a dhis2 command: it starts its own stub server, runs the
+/// command with `--out` and `extra`, and returns what it printed.
+type Run<'a> = &'a dyn Fn(To, &[&str]) -> Assert;
+
+/// `fhir-pipes dhis2 <command>` (or `dhis2 extract <command>`) against
+/// `server`, signed in, with `--out`.
+fn dhis2(server: &Server, command: &str, to: To) -> Command {
     let mut c = fhir_pipes();
-    c.args([
-        "dhis2",
-        command,
-        "--dhis2",
-        &base(server),
-        "--instance",
-        "sl-demo",
-    ])
-    .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
+    c.arg("dhis2");
+    if let To::Records(_) = to {
+        c.arg("extract");
+    }
+    c.args([command, "--dhis2", &base(server), "--instance", "sl-demo"])
+        .arg("--out")
+        .arg(to.path())
+        .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
     c
+}
+
+/// The folder Locations files of a scenario go in: beside its --out.
+fn beside(to: To) -> PathBuf {
+    let out = to.path();
+    let dir = out.parent().unwrap().join(format!(
+        "loc-{}",
+        out.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 fn import_run(input: &Path, out: &Path) -> Assert {
@@ -121,22 +150,27 @@ fn assert_same(built_in: &[Value], imported: &[Value]) {
 struct BothWays {
     built_in: Vec<Value>,
     imported: Vec<Value>,
-    /// The `--records` output.
+    /// What `dhis2 extract` wrote.
     records: Vec<Value>,
-    /// What `--records` printed.
+    /// What `dhis2 extract` printed.
     records_run: Assert,
 }
 
-/// Runs a scenario with the built-in mapping and with `--records` then
+/// Runs a scenario with the built-in mapping and with `dhis2 extract` then
 /// `import run`, and checks the two agree.
 fn both_ways(record_type: &str, run: Run) -> BothWays {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.ndjson");
-    run(&a, &[]).success();
+    run(To::Resources(&a), &[]).success();
+    // dhis2 extract makes the folder.
     let input = dir.path().join("in");
-    std::fs::create_dir(&input).unwrap();
+    let records_run = run(To::Records(&input), &[]).success();
     let records_file = input.join(format!("{record_type}.ndjson"));
-    let records_run = run(&records_file, &["--records"]).success();
+    let names: Vec<String> = std::fs::read_dir(&input)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, [format!("{record_type}.ndjson")], "only the records");
     let out = dir.path().join("out");
     let imported = import_run(&input, &out);
     let e = stderr(&imported);
@@ -169,7 +203,7 @@ const WARD: &str = "Rp268JB6Ne4";
 /// closed, a facility with a point, a closed facility with a point, a
 /// facility whose parent is not exported, and a level-4 unit below the
 /// facility level. Groups from a group set and a group in no set.
-fn locations(out: &Path, extra: &[&str]) -> Assert {
+fn locations(to: To, extra: &[&str]) -> Assert {
     let server = Server::run();
     expect_info(&server);
     server.expect(
@@ -224,18 +258,17 @@ fn locations(out: &Path, extra: &[&str]) -> Assert {
             "organisationUnits": [{"id": BO}, {"id": BOMBALI}]}),
         )),
     );
-    dhis2(&server, "locations")
+    dhis2(&server, "locations", to)
         .args(["--id-prefix", "sle", "--country-code", "SLE"])
         .args(["--facility-level", "3", "--group-set", "J5jldMd8OHv"])
-        .args(["--org-unit-group", "hSgatV6qHFI", "--out"])
-        .arg(out)
+        .args(["--org-unit-group", "hSgatV6qHFI"])
         .args(extra)
         .assert()
 }
 
 /// An indicator group with a percent and a plain-number indicator, a data
 /// element in a group of a group set, and a data set's reporting rate.
-fn measures(out: &Path, extra: &[&str]) -> Assert {
+fn measures(to: To, extra: &[&str]) -> Assert {
     let server = Server::run();
     expect_info(&server);
     server.expect(
@@ -279,15 +312,14 @@ fn measures(out: &Path, extra: &[&str]) -> Assert {
                 "name": "Reproductive Health", "periodType": "Monthly"}]})),
         ),
     );
-    dhis2(&server, "measures")
+    dhis2(&server, "measures", to)
         .args([
             "--indicator-group",
             "srxUNt2w5jn",
             "--data-element",
             "s46m5MS0hxu",
         ])
-        .args(["--data-set", "QX4ZTUbOt3a", "--out"])
-        .arg(out)
+        .args(["--data-set", "QX4ZTUbOt3a"])
         .args(extra)
         .assert()
 }
@@ -310,7 +342,7 @@ fn report_locations(dir: &Path) -> PathBuf {
 /// a category (both options) and an org unit group set (one option), with
 /// a campaign. One value has no breakdown, one count is not whole, one org
 /// unit has no Location, and one breakdown has no total.
-fn reports_by_period(out: &Path, extra: &[&str]) -> Assert {
+fn reports_by_period(to: To, extra: &[&str]) -> Assert {
     let server = Server::run();
     expect_info(&server);
     expect_group(&server);
@@ -427,27 +459,21 @@ fn reports_by_period(out: &Path, extra: &[&str]) -> Assert {
         json!({"CXw2yu5fodb": {"name": "CHC"}}),
         group_set,
     );
-    let dir = out.parent().unwrap().join(format!(
-        "loc-{}",
-        out.file_name().unwrap().to_string_lossy()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dhis2(&server, "reports")
+    let dir = beside(to);
+    dhis2(&server, "reports", to)
         .args(["--indicator-group", "srxUNt2w5jn", "--level", "2"])
         .args(["--period", "202501", "--period", "202502"])
         .args(["--breakdown", "fMZEcRHuamy", "--breakdown", "J5jldMd8OHv"])
         .args(["--campaign", "CarePlan/sle-penta-2025"])
         .arg("--locations")
         .arg(report_locations(&dir))
-        .arg("--out")
-        .arg(out)
         .args(extra)
         .assert()
 }
 
 /// A data element's count and a data set's reporting rate over a date
 /// range, with no breakdown and no campaign.
-fn reports_by_range(out: &Path, extra: &[&str]) -> Assert {
+fn reports_by_range(to: To, extra: &[&str]) -> Assert {
     let server = Server::run();
     expect_info(&server);
     server.expect(
@@ -472,18 +498,12 @@ fn reports_by_range(out: &Path, extra: &[&str]) -> Assert {
                          ["QX4ZTUbOt3a.REPORTING_RATE", BO, "93.33", "28.0", "30.0"]]
             }))),
     );
-    let dir = out.parent().unwrap().join(format!(
-        "loc-{}",
-        out.file_name().unwrap().to_string_lossy()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dhis2(&server, "reports")
+    let dir = beside(to);
+    dhis2(&server, "reports", to)
         .args(["--data-element", "s46m5MS0hxu", "--data-set", "QX4ZTUbOt3a"])
         .args(["--level", "2", "--range", "2025-01-01:2025-03-31"])
         .arg("--locations")
         .arg(report_locations(&dir))
-        .arg("--out")
-        .arg(out)
         .args(extra)
         .assert()
 }
@@ -491,15 +511,11 @@ fn reports_by_range(out: &Path, extra: &[&str]) -> Assert {
 /// `--source data-values`: the fixture of tests/dhis2.rs (a country, two
 /// districts, four facilities; doses by Fixed/Outreach, population and
 /// coverage), computed by fhir-pipes from raw data values.
-fn reports_from_data_values(out: &Path, extra: &[&str]) -> Assert {
+fn reports_from_data_values(to: To, extra: &[&str]) -> Assert {
     let server = values_server("SUM", None);
     expect_values(&server, "2025-01-01", "2025-02-28", fixture_values());
-    let dir = out.parent().unwrap().join(format!(
-        "loc-{}",
-        out.file_name().unwrap().to_string_lossy()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dhis2(&server, "reports")
+    let dir = beside(to);
+    dhis2(&server, "reports", to)
         .args(["--indicator", COVERAGE, "--data-element", DOSES])
         .args(["--data-element", POP, "--source", "data-values"])
         .args(["--level", "1", "--level", "2", "--level", "3"])
@@ -507,8 +523,6 @@ fn reports_from_data_values(out: &Path, extra: &[&str]) -> Assert {
         .args(["--breakdown", "fMZEcRHuamy"])
         .arg("--locations")
         .arg(hierarchy(&dir))
-        .arg("--out")
-        .arg(out)
         .args(extra)
         .assert()
 }
@@ -525,7 +539,7 @@ fn locations_agree() {
     let s = stdout(&r.records_run);
     assert!(s.contains("Wrote 6 DHIS2OrgUnit records to"), "{s}");
     assert!(s.contains("level 4 Ward: 1 (skipped)"), "{s}");
-    // What is reported about the source is the same with --records.
+    // What is reported about the source is the same with dhis2 extract.
     for kind in [
         "boundary_from_children",
         "parent_not_exported",
@@ -593,11 +607,10 @@ fn reports_from_data_values_agree_but_for_the_date() {
     // runs differ there; the import keeps the date the record carries.
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.ndjson");
-    reports_from_data_values(&a, &[]).success();
+    reports_from_data_values(To::Resources(&a), &[]).success();
     let input = dir.path().join("in");
-    std::fs::create_dir(&input).unwrap();
+    reports_from_data_values(To::Records(&input), &[]).success();
     let records = input.join("DHIS2Value.ndjson");
-    reports_from_data_values(&records, &["--records"]).success();
     let out = dir.path().join("out");
     import_run(&input, &out);
     let undated = |list: Vec<Value>| -> Vec<Value> {
@@ -621,11 +634,45 @@ fn reports_from_data_values_agree_but_for_the_date() {
     assert_eq!(dates, imported);
 }
 
+/// Three `dhis2 extract` runs into one folder: one file per record type,
+/// which one `import run` maps to what the three built-in runs write.
+#[test]
+fn three_extracts_into_one_folder_import_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in");
+    let mut built_in = Vec::new();
+    for (i, run) in [&locations as Run, &measures, &reports_by_period]
+        .into_iter()
+        .enumerate()
+    {
+        let a = dir.path().join(format!("{i}.ndjson"));
+        run(To::Resources(&a), &[]).success();
+        built_in.extend(read_ndjson(&a));
+        run(To::Records(&input), &[]).success();
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&input)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "DHIS2Indicator.ndjson",
+            "DHIS2OrgUnit.ndjson",
+            "DHIS2Value.ndjson"
+        ]
+    );
+    let out = dir.path().join("out");
+    import_run(&input, &out);
+    assert_same(&built_in, &read_out(&out));
+}
+
 // ---------------------------------------------------------------------------
 // The package's test case
 
 /// The sample case of examples/import/icr-dhis2: its `in/` is what the
-/// scenarios above write with `--records` (both reports scenarios in one
+/// scenarios above write with `dhis2 extract` (both reports scenarios in one
 /// DHIS2Value file), and its `expected/` is what the built-in mapping
 /// writes for them. `import test` passes on it.
 ///
@@ -674,34 +721,13 @@ fn the_package_sample_is_what_the_commands_write() {
 }
 
 // ---------------------------------------------------------------------------
-// The --records rules
+// What dhis2 extract takes
 
+/// `dhis2 extract` has no `--maps`, `--records` is gone from the FHIR
+/// commands, and `extract reports` has none of the options that compare
+/// MeasureReports with a previous run. clap refuses each with exit 2.
 #[test]
-fn records_and_maps_together_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let a = fhir_pipes()
-        .args(["dhis2", "measures", "--dhis2", "https://dhis2.invalid"])
-        .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
-        .args(["--records", "--maps", MAPS, "--out"])
-        .arg(dir.path().join("m.ndjson"))
-        .assert()
-        .code(2);
-    let e = stderr(&a);
-    assert!(e.contains("--records") && e.contains("--maps"), "{e}");
-    // The same with the maps from the environment.
-    let a = fhir_pipes()
-        .args(["dhis2", "locations", "--dhis2", "https://dhis2.invalid"])
-        .args(["--instance", "sl-demo", "--records", "--out"])
-        .arg(dir.path().join("l.ndjson"))
-        .env("FHIR_PIPES_DHIS2_MAPS", MAPS)
-        .assert()
-        .code(2);
-    let e = stderr(&a);
-    assert!(e.contains("--records") && e.contains("--maps"), "{e}");
-}
-
-#[test]
-fn records_are_refused_with_the_comparison_with_a_previous_run() {
+fn extract_refuses_the_options_of_the_fhir_commands() {
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[BO]);
     let previous = dir.path().join("previous.ndjson");
@@ -709,50 +735,86 @@ fn records_are_refused_with_the_comparison_with_a_previous_run() {
     let p = previous.to_str().unwrap();
     let c = dir.path().join("c.ndjson");
     let r = dir.path().join("removed.txt");
-    let cases: [&[&str]; 4] = [
-        &["--previous", p],
-        &["--previous", p, "--changed", c.to_str().unwrap()],
-        &["--previous", p, "--removed", r.to_str().unwrap()],
-        &[
-            "--previous",
-            p,
-            "--source",
-            "data-values",
-            "--updated-since",
-            "2026-10-01",
-        ],
-    ];
-    for extra in cases {
-        let a = fhir_pipes()
-            .args(["dhis2", "reports", "--dhis2", "https://dhis2.invalid"])
+    let reports = |command: &[&str], extra: &[&str]| {
+        fhir_pipes()
+            .arg("dhis2")
+            .args(command)
+            .args(["--dhis2", "https://dhis2.invalid"])
             .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
-            .args(["--period", "2025", "--level", "2", "--records"])
+            .args(["--period", "2025", "--level", "2"])
             .arg("--locations")
             .arg(&locations)
             .arg("--out")
-            .arg(dir.path().join("r.ndjson"))
+            .arg(dir.path().join("out"))
             .args(extra)
             .assert()
-            .code(2);
-        let e = stderr(&a);
+            .code(2)
+    };
+    let cases: [(&str, &[&str]); 5] = [
+        ("--previous", &["--previous", p]),
+        ("--changed", &["--changed", c.to_str().unwrap()]),
+        ("--removed", &["--removed", r.to_str().unwrap()]),
+        ("--updated-since", &["--updated-since", "2026-10-01"]),
+        ("--maps", &["--maps", MAPS]),
+    ];
+    for (flag, extra) in cases {
+        let e = stderr(&reports(&["extract", "reports"], extra));
         assert!(
-            e.contains("--records cannot be used with --previous")
-                && e.contains("needs the MeasureReports"),
-            "{extra:?}: {e}"
+            e.contains(&format!("unexpected argument '{flag}'")),
+            "{flag}: {e}"
         );
     }
+    let e = stderr(&reports(&["reports"], &["--records"]));
+    assert!(e.contains("unexpected argument '--records'"), "{e}");
+    let a = fhir_pipes()
+        .args([
+            "dhis2",
+            "extract",
+            "measures",
+            "--dhis2",
+            "https://dhis2.invalid",
+        ])
+        .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
+        .args(["--maps", MAPS, "--out"])
+        .arg(dir.path().join("m"))
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("unexpected argument '--maps'"));
+    // --out is a folder.
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, "").unwrap();
+    let a = fhir_pipes()
+        .args([
+            "dhis2",
+            "extract",
+            "measures",
+            "--dhis2",
+            "https://dhis2.invalid",
+        ])
+        .args([
+            "--instance",
+            "sl-demo",
+            "--indicator",
+            "tUIlpyeeX9N",
+            "--out",
+        ])
+        .arg(&file)
+        .assert()
+        .code(2);
+    assert!(stderr(&a).contains("is not a folder"), "{}", stderr(&a));
 }
 
-/// `--records` with `--resume`: an interrupted run (cut mid-line) resumes
-/// to the same bytes and the same summary as an uninterrupted one, and a
-/// checkpoint written with `--records` is not resumed without it, nor one
-/// written without it resumed with it.
+/// `dhis2 extract reports --resume`: an interrupted run (cut mid-line)
+/// leaves its temporary and resume files beside DHIS2Value.ndjson, which
+/// `import run` does not read, and resumes to the same bytes and the same
+/// summary as an uninterrupted one. Its checkpoint is not resumed by
+/// `dhis2 reports` writing to the same file, nor the other way round.
 #[test]
-fn an_interrupted_records_run_resumes_to_the_same_file() {
+fn an_interrupted_extract_resumes_to_the_same_file() {
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[BO, BOMBALI, NJANDAMA, ORPHAN]);
-    let run = |server: &Server, out: &Path, extra: &[&str]| {
-        dhis2(server, "reports")
+    let run = |server: &Server, to: To, extra: &[&str]| {
+        dhis2(server, "reports", to)
             .args(["--indicator-group", "srxUNt2w5jn"])
             .args(["--level", "2", "--level", "3", "--chunk", "1"])
             .args([
@@ -761,20 +823,20 @@ fn an_interrupted_records_run_resumes_to_the_same_file() {
             .args(["--max-rows", "1"])
             .arg("--locations")
             .arg(&locations)
-            .arg("--out")
-            .arg(out)
             .args(extra)
             .assert()
     };
-    let full = dir.path().join("full.ndjson");
-    let whole = run(&stub_units(false, 0, None), &full, &["--records"]).success();
+    let full_dir = dir.path().join("full");
+    let full = full_dir.join("DHIS2Value.ndjson");
+    let whole = run(&stub_units(false, 0, None), To::Records(&full_dir), &[]).success();
 
-    let out = dir.path().join("DHIS2Value.ndjson");
-    let tmp = dir.path().join("DHIS2Value.ndjson.tmp");
-    let checkpoint = dir.path().join("DHIS2Value.ndjson.resume");
+    let input = dir.path().join("in");
+    let out = input.join("DHIS2Value.ndjson");
+    let tmp = input.join("DHIS2Value.ndjson.tmp");
+    let checkpoint = input.join("DHIS2Value.ndjson.resume");
     let mut server = Server::run();
     expect_units_batches(&server, false, 0, Some(6));
-    let failed = run(&server, &out, &["--records", "--concurrency", "1"]).code(2);
+    let failed = run(&server, To::Records(&input), &["--concurrency", "1"]).code(2);
     assert!(
         stderr(&failed).contains("6 of 12 batches written"),
         "{}",
@@ -783,14 +845,21 @@ fn an_interrupted_records_run_resumes_to_the_same_file() {
     let mut partial = std::fs::read(&tmp).unwrap();
     partial.extend_from_slice(br#"{"resourceType":"DHIS2Va"#);
     std::fs::write(&tmp, partial).unwrap();
+    // import run reads no records from the folder of an interrupted run.
+    let partial = import_run(&input, &dir.path().join("fhir-partial"));
+    assert!(
+        stdout(&partial).contains("Wrote 0 resources"),
+        "{}",
+        stdout(&partial)
+    );
 
-    // Not resumed without --records.
+    // Not resumed by dhis2 reports writing MeasureReports to the same file.
     server.verify_and_clear();
     expect_info(&server);
     expect_group(&server);
     expect_units(&server, 2, 2);
     expect_units(&server, 3, 2);
-    let refused = run(&server, &out, &["--resume"]).code(2);
+    let refused = run(&server, To::Resources(&out), &["--resume"]).code(2);
     assert!(
         stderr(&refused).contains("was planned differently (records changed)"),
         "{}",
@@ -800,7 +869,7 @@ fn an_interrupted_records_run_resumes_to_the_same_file() {
 
     server.verify_and_clear();
     expect_units_batches(&server, false, 6, None);
-    let resumed = run(&server, &out, &["--records", "--resume"]).success();
+    let resumed = run(&server, To::Records(&input), &["--resume"]).success();
     assert!(
         stderr(&resumed).contains("resuming after batch 6 of 12"),
         "{}",
@@ -824,25 +893,24 @@ fn an_interrupted_records_run_resumes_to_the_same_file() {
 
     // The records import to what the built-in mapping writes.
     let built_in = dir.path().join("built-in.ndjson");
-    run(&stub_units(false, 0, None), &built_in, &[]).success();
-    let input = dir.path().join("in");
-    std::fs::create_dir(&input).unwrap();
-    std::fs::copy(&out, input.join("DHIS2Value.ndjson")).unwrap();
+    run(&stub_units(false, 0, None), To::Resources(&built_in), &[]).success();
     let imported = dir.path().join("fhir");
     import_run(&input, &imported);
     assert_same(&read_ndjson(&built_in), &read_out(&imported));
 
-    // A checkpoint written without --records is not resumed with it.
-    let plain = dir.path().join("plain.ndjson");
+    // A checkpoint written by dhis2 reports is not resumed by dhis2 extract.
+    let plain_dir = dir.path().join("plain");
+    std::fs::create_dir(&plain_dir).unwrap();
+    let plain = plain_dir.join("DHIS2Value.ndjson");
     let mut server = Server::run();
     expect_units_batches(&server, false, 0, Some(6));
-    run(&server, &plain, &["--concurrency", "1"]).code(2);
+    run(&server, To::Resources(&plain), &["--concurrency", "1"]).code(2);
     server.verify_and_clear();
     expect_info(&server);
     expect_group(&server);
     expect_units(&server, 2, 2);
     expect_units(&server, 3, 2);
-    let refused = run(&server, &plain, &["--records", "--resume"]).code(2);
+    let refused = run(&server, To::Records(&plain_dir), &["--resume"]).code(2);
     assert!(
         stderr(&refused).contains("was planned differently (records changed)"),
         "{}",
@@ -856,7 +924,7 @@ fn an_interrupted_records_run_resumes_to_the_same_file() {
 /// Two runs of `dhis2 reports`, a day and an analytics build apart, over
 /// the same org units and period: one value the same, one changed, one new
 /// and one gone. `dhis2 reports --previous --changed --removed` and the
-/// general route (`--records`, then `import run --previous --changed
+/// general route (`dhis2 extract`, then `import run --previous --changed
 /// --removed` with the package, whose `[compare]` leaves out a report's
 /// `date`) find the same new, changed and removed reports.
 #[test]
@@ -864,7 +932,7 @@ fn a_rerun_compares_the_same_both_ways() {
     let (a, b) = (BO, BOMBALI);
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[a, b]);
-    let run = |built: &str, rows: Vec<Value>, out: &Path, extra: &[&str]| {
+    let run = |built: &str, rows: Vec<Value>, to: To, extra: &[&str]| {
         let server = Server::run();
         expect_info_built(&server, built);
         expect_group(&server);
@@ -880,13 +948,11 @@ fn a_rerun_compares_the_same_both_ways() {
             .times(1)
             .respond_with(ok(response)),
         );
-        let assert = dhis2(&server, "reports")
+        let assert = dhis2(&server, "reports", to)
             .args(["--indicator-group", "srxUNt2w5jn"])
             .args(["--level", "2", "--period", "202501"])
             .arg("--locations")
             .arg(&locations)
-            .arg("--out")
-            .arg(out)
             .args(extra)
             .assert()
             .success();
@@ -916,13 +982,13 @@ fn a_rerun_compares_the_same_both_ways() {
 
     // dhis2 reports --previous, the baseline rolled in place.
     let reports = dir.path().join("reports.ndjson");
-    run(day1, first.clone(), &reports, &[]);
+    run(day1, first.clone(), To::Resources(&reports), &[]);
     let changed = dir.path().join("changed.ndjson");
     let removed = dir.path().join("removed.txt");
     let printed = run(
         day2,
         second.clone(),
-        &reports,
+        To::Resources(&reports),
         &[
             "--previous",
             reports.to_str().unwrap(),
@@ -941,13 +1007,7 @@ fn a_rerun_compares_the_same_both_ways() {
     let fhir = dir.path().join("fhir");
     let records = |name: &str, built: &str, rows: Vec<Value>| {
         let input = dir.path().join(name);
-        std::fs::create_dir(&input).unwrap();
-        run(
-            built,
-            rows,
-            &input.join("DHIS2Value.ndjson"),
-            &["--records"],
-        );
+        run(built, rows, To::Records(&input), &[]);
         input
     };
     let in1 = records("in1", day1, first);

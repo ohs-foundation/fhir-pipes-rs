@@ -328,7 +328,7 @@ fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
 }
 
 /// The org unit as a `DHIS2OrgUnit` record (examples/import/icr-dhis2/models):
-/// the input of a `--maps` map, or the line `--records` writes.
+/// the input of a `--maps` map, or the line `dhis2 extract` writes.
 fn record(p: &Prepared, opts: &Options) -> Value {
     let unit = p.unit;
     let mut r = json!({
@@ -448,7 +448,7 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
     }
 }
 
-/// Every Location and Organization for `units` (or, with `--records`, every
+/// Every Location and Organization for `units` (or, with `dhis2 extract`, every
 /// `DHIS2OrgUnit` record), top level first, then by id, handed to `emit` as
 /// each unit is built.
 pub fn build(
@@ -533,7 +533,7 @@ fn add_org_unit_groups(
     args: &Dhis2LocationsArgs,
     groups: &mut HashMap<String, Vec<GroupType>>,
 ) -> Result<usize> {
-    let list = if args.all_org_unit_groups {
+    let list = if args.opts.all_org_unit_groups {
         let mut all = api.paged(
             "organisationUnitGroups.json",
             "organisationUnitGroups",
@@ -543,7 +543,7 @@ fn add_org_unit_groups(
         all
     } else {
         let mut list = Vec::new();
-        for uid in &args.org_unit_groups {
+        for uid in &args.opts.org_unit_groups {
             let Some(v) = api.get_one("organisationUnitGroups", uid, GROUP_FIELDS)? else {
                 return Err(PipesError::Usage(format!(
                     "DHIS2 has no org unit group {uid}"
@@ -598,6 +598,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         )));
     }
     let prefix = args
+        .opts
         .id_prefix
         .clone()
         .unwrap_or_else(|| instance.name.clone());
@@ -606,8 +607,8 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
             "--id-prefix must be letters, digits and hyphens, at most {MAX_PREFIX_LEN} characters, got {prefix:?}"
         )));
     }
-    let maps = RecordMap::load(&args.conn.maps, ORG_UNIT_MODEL)?;
-    let writes = Writes::new(maps.as_ref(), args.conn.records);
+    let maps = RecordMap::load(&args.maps.dirs, ORG_UNIT_MODEL)?;
+    let writes = Writes::new(maps.as_ref(), args.records);
     let api = Dhis2::connect(&args.conn)?;
     eprintln!(
         "DHIS2 {} ({})",
@@ -633,7 +634,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         .collect();
 
     let mut query = vec![("fields", ORG_UNIT_FIELDS.to_string())];
-    if let Some(root) = &args.root {
+    if let Some(root) = &args.opts.root {
         query.push(("filter", under(root)));
     }
     let raw = api.paged("organisationUnits.json", "organisationUnits", &query)?;
@@ -644,16 +645,16 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         .filter_map(|v| OrgUnit::parse(&v, &mut report))
         .collect();
     if units.is_empty() {
-        return Err(PipesError::Usage(match &args.root {
+        return Err(PipesError::Usage(match &args.opts.root {
             Some(r) => format!("DHIS2 returned no org units at or below {r}"),
             None => "DHIS2 returned no org units; does this user have any assigned?".into(),
         }));
     }
     let deepest = units.iter().map(|u| u.level).max().unwrap_or(1);
-    let facility_level = args.facility_level.unwrap_or(deepest);
+    let facility_level = args.opts.facility_level.unwrap_or(deepest);
     fill_missing_boundaries(&mut units, facility_level, &mut report);
     let mut groups: HashMap<String, Vec<GroupType>> = HashMap::new();
-    for set in &args.group_sets {
+    for set in &args.opts.group_sets {
         let Some(v) = api.get_one(
             "organisationUnitGroupSets",
             set,
@@ -706,7 +707,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     let opts = Options {
         instance: &instance,
         prefix: &prefix,
-        country_code: args.country_code.as_deref(),
+        country_code: args.opts.country_code.as_deref(),
         facility_level,
         groups,
     };
@@ -725,7 +726,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     for u in &units {
         *per_level.entry(u.level).or_default() += 1;
     }
-    if args.conn.records {
+    if args.records {
         println!(
             "Wrote {n} {} records to {}",
             record_type(ORG_UNIT_MODEL),

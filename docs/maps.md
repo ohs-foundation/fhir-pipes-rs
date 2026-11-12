@@ -126,8 +126,8 @@ tests run the DHIS2 import both ways and compare. Copy them to start a
 mapping for another implementation guide.
 
 The folder is part of an import package,
-[examples/import/icr-dhis2](../examples/import/icr-dhis2). With `--records`
-the `dhis2` commands write the prepared records instead of resources, and
+[examples/import/icr-dhis2](../examples/import/icr-dhis2). `dhis2 extract`
+writes the prepared records instead of resources, and
 `fhir-pipes import run` turns them into the same resources with these maps
 (see [dhis2.md](dhis2.md#records-and-the-import-package)).
 

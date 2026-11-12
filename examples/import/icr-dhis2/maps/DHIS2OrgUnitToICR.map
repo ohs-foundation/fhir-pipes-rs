@@ -4,7 +4,7 @@
 /// status = 'draft'
 
 // Run by `fhir-pipes dhis2 locations --maps`, and by `fhir-pipes import run`
-// over the records `dhis2 locations --records` writes.
+// over the records `dhis2 extract locations` writes.
 //
 // Each org unit becomes an ICRLocation; a facility also gets its
 // ICRFacilityOrganization, written first.

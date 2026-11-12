@@ -6,8 +6,8 @@
 //! exported, a merged boundary, parsed numbers). The record is an instance
 //! of one of the logical models in examples/import/icr-dhis2/models, which
 //! are built in. A map in the `--maps` folders whose first group reads that
-//! model turns the record into resources. With `--records` the records
-//! themselves are written, for `fhir-pipes import run` to map later.
+//! model turns the record into resources. `dhis2 extract` writes the records
+//! themselves, for `fhir-pipes import run` to map later.
 
 use std::path::PathBuf;
 
@@ -40,17 +40,18 @@ pub enum Writes<'a> {
     BuiltIn,
     /// `--maps`: the resources the map writes from the record.
     Maps(&'a RecordMap),
-    /// `--records`: the record itself.
+    /// `dhis2 extract`: the record itself.
     Records,
 }
 
 impl<'a> Writes<'a> {
-    /// `--records`, `--maps` (a loaded map) or neither. clap refuses both.
+    /// Records for `dhis2 extract` (which has no `--maps`), else the map
+    /// loaded from `--maps`, else the built-in mapping.
     pub fn new(map: Option<&'a RecordMap>, records: bool) -> Self {
-        match (map, records) {
-            (_, true) => Writes::Records,
-            (Some(m), false) => Writes::Maps(m),
-            (None, false) => Writes::BuiltIn,
+        match (records, map) {
+            (true, _) => Writes::Records,
+            (false, Some(m)) => Writes::Maps(m),
+            (false, None) => Writes::BuiltIn,
         }
     }
 
