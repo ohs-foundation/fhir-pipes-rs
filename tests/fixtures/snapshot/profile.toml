@@ -115,7 +115,12 @@ name = "ownership_text"
 kind = "type_text"
 system = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs"
 
-# fhir-pipes dhis2: DHIS2 org units, indicators and values as FHIR.
+# [dhis2]: the URLs fhir-pipes dhis2 wrote before its built-in mapping was
+# removed. The dhis2 commands no longer read this section; the parameters of
+# the import package examples/import/icr-dhis2 give these values. It stays
+# because `import location-boundaries` and `location-sites` read
+# location_profile, facility_organization_profile, location_type_system and
+# country_code_system as fallbacks (see above). The other keys are ignored.
 [dhis2]
 # Identifier and code systems are minted under this base:
 # <base>/identifiers/dhis2/<instance>/orgunit, <base>/CodeSystem/dhis2/<instance>/…,

@@ -12,6 +12,12 @@ all and one `import run` maps the three record files. Related notes:
 [staged import pipeline](2026-11-11-staged-import-pipeline-and-features-to-add.md),
 [ViewDefinitions over logical models](2026-11-11-viewdefinition-over-logical-models.md).
 
+12 November 2026: the built-in DHIS2 mapping was removed, after a run
+against the Sierra Leone demo server gave the same resources through the
+maps of `examples/import/icr-dhis2`. `dhis2 locations`, `measures` and
+`reports` stay, and now need a package (`--package`), whose maps they run
+one record at a time.
+
 ## Summary
 
 Today `fhir-pipes dhis2` reads DHIS2 and turns what it reads into FHIR in one

@@ -2,8 +2,10 @@
 
 A profile is a TOML file that tells fhir-pipes about an implementation guide
 (IG): the extra Location and Organization columns to write, the type codes
-and extensions that have a special role, and the URLs that the `dhis2`,
-`population` and `import` commands put on the resources they create.
+and extensions that have a special role, and the URLs that the `population`
+and `import location-*` commands put on the resources they create. The
+`dhis2` commands do not read a profile: the URLs they write are parameters
+of an import package (see [dhis2.md](dhis2.md)).
 
 Without a profile, fhir-pipes reads base FHIR R4 only. The Location commands
 work, but the output has only the built-in columns, with no admin hierarchy
@@ -34,19 +36,19 @@ command uses `--profile` and warns.
 
 ## The file
 
-Unknown keys are refused, so a typo is an error. Sections:
+Unknown keys are refused, so a typo is an error, except in `[dhis2]`.
+Sections:
 
 | Section | Used for |
 |---|---|
 | `[location]` | Boundary, spatial index and overlay extensions; `admin_unit_type` (the type code of an administrative unit); `type_systems`; `admin_code_column`; `admin_layers`; `[[location.column]]` |
 | `[organization]` | `facility_type`, `id_prefix` (default `org-`), `[[organization.column]]` |
-| `[dhis2]` | URLs, systems and extensions that the `dhis2` commands write. Required for `fhir-pipes dhis2` |
+| `[dhis2]` | No longer read by the `dhis2` commands, which warn when a profile has it. Four keys are read as fallbacks: `location_profile` for `[location] profile`, `facility_organization_profile` for `[organization] profile`, `location_type_system` for `[location] type_systems`, and `country_code_system` for `[location] admin_code_system` (see [locations.md](locations.md)). Other keys are accepted and ignored, so a profile written for an earlier fhir-pipes loads |
 | `[population]` | Group profile, characteristic and source systems, extensions. Required for `fhir-pipes population` |
 
 `admin_unit_type` and `admin_code_column` give admin levels, `adminN_*`
-columns and `country`. `dhis2 locations` also needs `[location]
-admin_unit_type` and `[organization] facility_type`. The ICR profile shows
-every key; each key's comment says what uses it.
+columns and `country`. The ICR profile shows every key; each key's comment
+says what uses it.
 
 Commands without the section they need refuse to run, for example
 `index needs a profile that names … spatial_index_extension`.
@@ -88,7 +90,7 @@ the columns. Use the profile the dataset was made with, or remove the column.
    partitions and the report.
 5. Edit one value per column, run `diff`, and check the changes file. Then
    `load --dry-run`.
-6. Add `[dhis2]` or `[population]` only if you use those commands.
+6. Add `[population]` only if you use `fhir-pipes population`.
 7. Run `profile check`, and again whenever the IG changes.
 
 ## Checking a profile against its IG

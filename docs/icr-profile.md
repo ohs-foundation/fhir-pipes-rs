@@ -48,7 +48,8 @@ empty. With it, rows sit under `country=NGA` and these columns are added:
 | `catchment_extension` | `catchment_of` in the catchment tiles `refresh` builds (not a column) | Extension `catchment-of` |
 | `[organization]` `facility_type = "facility"`, `id_prefix = "org-"` | `diff` gives a new facility Location an Organization with id `org-<location id>` | |
 | `type_systems` | `population --type facility-catchment` matches the code under the current or the older location-type URI | |
-| `[population]`, `[dhis2]` | URLs and extensions on the Groups, Locations, Organizations and MeasureReports those commands write | The ICR profiles, e.g. `ICRTargetPopulation`, `ICRLocation`, `ICRFacilityOrganization` |
+| `[population]` | URLs and extensions on the Groups `population` writes | The ICR profile `ICRTargetPopulation` |
+| `[dhis2]` | Not read by the `dhis2` commands, whose URLs are parameters of [examples/import/icr-dhis2](../examples/import/icr-dhis2). Its `location_profile`, `facility_organization_profile`, `location_type_system` and `country_code_system` give `import location-*` the Location and Organization profiles and systems | The ICR profiles `ICRLocation`, `ICRFacilityOrganization` |
 
 Toro's admin code comes from `…/national-admin-code`, since it has no
 `…/pcode` identifier. Rows below an admin unit take the names and codes of the

@@ -19,7 +19,7 @@ feature described here, on synthetic data.
 import as a package: three record types, each through its own map, with a
 manifest that has no steps and no views or Libraries. Its records are what `fhir-pipes dhis2
 extract locations|measures|reports` writes (see
-[dhis2.md](dhis2.md#records-and-the-import-package)).
+[dhis2.md](dhis2.md#the-records)).
 
 A program that writes such a folder from a source system is a connector.
 Any program in any language can be one; see [connectors.md](connectors.md).
@@ -62,8 +62,8 @@ A package is a folder:
 
 `models/` and `maps/` are read together as one folder of maps (see
 [maps.md](maps.md#a-folder-of-maps)), with the FHIR R4 core definitions built
-in. The DHIS2 models built into `dhis2 --maps` are not: the import reads
-the models in the package's `models/`, so
+in. The DHIS2 models built into `map run` are not: the import reads the
+models in the package's `models/`, so
 [examples/import/icr-dhis2](../examples/import/icr-dhis2) uses its own copies.
 
 ### Without a manifest, or without steps
@@ -346,10 +346,14 @@ except in its own `let` (`let idPrefix = %idPrefix;` reads the parameter).
 A `%NAME` that is neither stops the transform with `Unknown variable`.
 ConceptMaps cannot read parameters.
 
-`map run` and `dhis2 --maps` run a package's maps outside `import run`:
-they give the maps the defaults in `import.toml` of the folder given with
-`--maps`, or of the folder above it (the package of a `maps/` folder), and
-have no `--param`. A parameter with no default is an error there.
+`map run` runs a package's maps outside `import run`: it gives the maps the
+defaults in `import.toml` of the folder given with `--maps`, or of the
+folder above it (the package of a `maps/` folder), and has no `--param`. A
+parameter with no default is an error there.
+
+`dhis2 locations|measures|reports --package DIR` load the package as
+`import run` does, and take `--param NAME=VALUE` as it does (see
+[dhis2.md](dhis2.md#the-commands-that-write-resources)).
 
 ### In views
 
