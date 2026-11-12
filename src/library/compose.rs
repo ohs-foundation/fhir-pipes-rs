@@ -78,7 +78,7 @@ pub fn compose(
 /// whitespace. A `;` followed only by comments is a terminator too, and is
 /// cut with the comments after it. A `;` inside a string, quoted identifier
 /// or comment is left alone.
-fn strip_terminator(sql: &str) -> &str {
+pub(crate) fn strip_terminator(sql: &str) -> &str {
     let mut text = sql;
     while let Some(i) = last_code_byte(text).filter(|&i| text.as_bytes()[i] == b';') {
         text = &text[..i];

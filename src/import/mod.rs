@@ -6,6 +6,8 @@
 //! - `location-sites`: rows of points (CSV: facilities, schools,
 //!   settlements) as site Locations hung under that hierarchy by name, with
 //!   facility Organizations if asked.
+//! - `check`, `run`, `test`: an import package of logical models, maps,
+//!   views and Libraries over a folder of record files (`package`).
 //!
 //! They replace kiln's Python `bake` and `bake-points`, with the same options
 //! and output. The resource shape (profiles, type system, boundary and
@@ -41,6 +43,7 @@ macro_rules! other_json_types_are_default {
 
 pub mod location_boundaries;
 pub mod location_sites;
+mod package;
 
 use std::path::PathBuf;
 
@@ -87,6 +90,15 @@ pub enum ImportCommand {
     /// Rows of points (CSV: facilities, schools, settlements) as site Locations under the
     /// admin units location-boundaries wrote, optionally each with a facility Organization
     LocationSites(Box<LocationSitesArgs>),
+    /// Check an import package: its maps, its manifest, and with --in the records against
+    /// their logical models. Exits 1 on findings
+    Check(package::CheckArgs),
+    /// Run an import package over a folder of record files (one NDJSON file per record type)
+    /// and write one FHIR NDJSON file per resource type for `fhir-pipes load`
+    Run(package::RunArgs),
+    /// Run an import package's test cases (tests/<case>/in/) and compare the output with
+    /// tests/<case>/expected/. Exits 1 when a case fails
+    Test(package::TestArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -173,11 +185,21 @@ pub struct LocationSitesArgs {
 }
 
 pub fn run(cmd: &ImportCommand, profile: Option<&str>) -> anyhow::Result<()> {
+    // An import package needs no profile: its maps state their own systems.
+    match cmd {
+        ImportCommand::Check(args) => return package::check(args),
+        ImportCommand::Run(args) => return package::run_command(args),
+        ImportCommand::Test(args) => return package::test_command(args),
+        _ => {}
+    }
     let profile = Profile::load(profile)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
     match cmd {
         ImportCommand::LocationBoundaries(args) => location_boundaries::run(args, &profile)?,
         ImportCommand::LocationSites(args) => location_sites::run(args, &profile)?,
+        ImportCommand::Check(_) | ImportCommand::Run(_) | ImportCommand::Test(_) => {
+            unreachable!("run above")
+        }
     }
     Ok(())
 }

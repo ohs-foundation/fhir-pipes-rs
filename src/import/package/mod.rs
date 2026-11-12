@@ -1,0 +1,496 @@
+//! `fhir-pipes import check|run|test`: run an import package over a folder
+//! of record files and write FHIR NDJSON for `fhir-pipes load`.
+//!
+//! A package holds the logical models of the records (`models/`), the FHIR
+//! Mapping Language maps and ConceptMaps that turn them into resources
+//! (`maps/`), and, where records have to be joined or grouped first,
+//! ViewDefinitions (`views/`) and SQLQuery Libraries (`libraries/`) that run
+//! over resources staged by earlier maps. `import.toml` lists the steps.
+//! See docs/import.md.
+//!
+//! - `manifest`: `import.toml`;
+//! - `records`: the record files and the check of a record against its model;
+//! - `plan`: the package loaded, and its steps resolved;
+//! - `run`: the steps run in a work folder;
+//! - `tables`: views and Libraries over Parquet in duckdb, and the data tests;
+//! - `compare`: a run's output against a test case's expected files.
+
+mod compare;
+mod manifest;
+mod plan;
+mod records;
+mod run;
+mod tables;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow};
+use serde_json::json;
+
+use crate::error::{Findings, usage};
+use plan::{Package, Plan};
+use run::{Options, Report};
+
+/// The record problems printed per file by `import check --in`.
+const PROBLEMS_PER_FILE: usize = 20;
+
+/// The file in `--out` that lists what the last run wrote there, so a run
+/// with `--overwrite` removes only its own files.
+const WRITTEN: &str = ".fhir-pipes-import.json";
+
+#[derive(clap::Args, Debug)]
+pub struct CheckArgs {
+    /// The package folder: import.toml, models/, maps/, views/, libraries/
+    #[arg(long, value_name = "DIR")]
+    pub package: PathBuf,
+    /// Also check every record of every file in this folder against its logical model
+    #[arg(long = "in", value_name = "DIR")]
+    pub input: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct RunArgs {
+    /// The package folder: import.toml, models/, maps/, views/, libraries/
+    #[arg(long, value_name = "DIR")]
+    pub package: PathBuf,
+    /// The record files: one <Type>.ndjson (or .ndjson.gz) per record type
+    #[arg(long = "in", value_name = "DIR")]
+    pub input: PathBuf,
+    /// Folder for the output, one <ResourceType>.ndjson per type. Must be empty or not exist, unless --overwrite
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// Replace the files an earlier run wrote in --out, and remove those this run does not write
+    #[arg(long)]
+    pub overwrite: bool,
+    /// Threads that run the maps and views (default: the number of CPUs). The output is the same at any count
+    #[arg(long)]
+    pub threads: Option<usize>,
+    /// Write the run report, JSON, to this file
+    #[arg(long, value_name = "FILE")]
+    pub report: Option<PathBuf>,
+    /// Keep the staged resources, view tables and Library results in this folder (empty or new) instead of removing them
+    #[arg(long, value_name = "DIR")]
+    pub keep_work: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TestArgs {
+    /// The package folder; its test cases are tests/<case>/in/ and tests/<case>/expected/
+    #[arg(long, value_name = "DIR")]
+    pub package: PathBuf,
+    /// Run only this test case
+    #[arg(long, value_name = "NAME")]
+    pub case: Option<String>,
+    /// Write each case's output to its expected/ folder instead of comparing
+    #[arg(long)]
+    pub update: bool,
+    /// Threads that run the maps and views (default: the number of CPUs)
+    #[arg(long)]
+    pub threads: Option<usize>,
+}
+
+fn threads(n: Option<usize>) -> usize {
+    n.unwrap_or_else(crate::work::default_threads).max(1)
+}
+
+/// duckdb runs the views' Libraries and the data tests.
+const DUCKDB: &str = "duckdb";
+
+fn require_duckdb(plan: &Plan) -> Result<()> {
+    if plan.runs_libraries() {
+        crate::warehouse::tools::require(&[(DUCKDB, "the library steps")])?;
+    }
+    Ok(())
+}
+
+/// Every record file is read by a step.
+fn check_files(plan: &Plan, files: &BTreeMap<String, PathBuf>) -> Result<()> {
+    let read = plan.record_types();
+    for (t, path) in files {
+        if !read.contains(t.as_str()) {
+            return Err(usage(anyhow!(
+                "{}: no step reads record type {t}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub fn check(args: &CheckArgs) -> Result<()> {
+    let package = Package::load(&args.package)?;
+    let (errors, warnings) = package.maps.check();
+    for line in &warnings {
+        println!("warning: {line}");
+    }
+    for line in &errors {
+        println!("error: {line}");
+    }
+    println!(
+        "{}: {} maps, {} logical models: {} errors, {} warnings",
+        package.name,
+        package.maps.map_count(),
+        package.models.types().count(),
+        errors.len(),
+        warnings.len()
+    );
+    let files = args.input.as_deref().map(records::scan).transpose()?;
+    let plan = Plan::new(&package, files.as_ref())?;
+    let mut problems = 0usize;
+    if let Some(files) = &files {
+        let read = plan.record_types();
+        let mut records_read = 0usize;
+        for (t, path) in files {
+            if !read.contains(t.as_str()) {
+                println!("{}: no step reads record type {t}", path.display());
+                problems += 1;
+                continue;
+            }
+            let (n, found) = check_file(&package, t, path);
+            records_read += n;
+            for line in found.iter().take(PROBLEMS_PER_FILE) {
+                println!("{line}");
+            }
+            if found.len() > PROBLEMS_PER_FILE {
+                println!(
+                    "{}: {} more problems",
+                    path.display(),
+                    found.len() - PROBLEMS_PER_FILE
+                );
+            }
+            problems += found.len();
+        }
+        println!(
+            "{records_read} records in {} files: {problems} problems",
+            files.len()
+        );
+    }
+    if errors.is_empty() && problems == 0 {
+        Ok(())
+    } else {
+        Err(Findings.into())
+    }
+}
+
+/// The records read, and the problems as `file:line: message`.
+fn check_file(package: &Package, t: &str, path: &Path) -> (usize, Vec<String>) {
+    let mut found = Vec::new();
+    let mut n = 0;
+    let records = match records::Records::open(path, t) {
+        Ok(r) => r,
+        Err(e) => return (0, vec![e.to_string()]),
+    };
+    for record in records {
+        match record {
+            Ok((line, r)) => {
+                n += 1;
+                for p in package.models.check(t, &r) {
+                    found.push(format!("{}:{line}: {p}", path.display()));
+                }
+            }
+            Err(e) => found.push(e.to_string()),
+        }
+    }
+    (n, found)
+}
+
+/// Where a run writes its intermediate files: a temporary folder removed
+/// when dropped, or the folder `--keep-work` names.
+enum Work {
+    Temp(tempfile::TempDir),
+    Kept(PathBuf),
+}
+
+impl Work {
+    /// A new temporary folder in `near`, or `keep`, which must be empty or
+    /// not exist. Either is readable by its owner only.
+    fn new(keep: Option<&Path>, near: &Path) -> Result<Self> {
+        match keep {
+            None => Ok(Work::Temp(
+                tempfile::Builder::new()
+                    .prefix(".fhir-pipes-import-")
+                    .tempdir_in(near)
+                    .with_context(|| format!("creating a work folder in {}", near.display()))?,
+            )),
+            Some(dir) => {
+                if dir.exists() && !is_empty(dir)? {
+                    return Err(usage(anyhow!(
+                        "--keep-work {}: not empty; give an empty or new folder",
+                        dir.display()
+                    )));
+                }
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                        .with_context(|| format!("setting the mode of {}", dir.display()))?;
+                }
+                Ok(Work::Kept(dir.to_path_buf()))
+            }
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            Work::Temp(t) => t.path(),
+            Work::Kept(p) => p,
+        }
+    }
+}
+
+fn is_empty(dir: &Path) -> Result<bool> {
+    if !dir.is_dir() {
+        return Err(usage(anyhow!("{} is not a folder", dir.display())));
+    }
+    Ok(std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .next()
+        .is_none())
+}
+
+/// The folder `path` is in: `.` for a bare name.
+fn parent(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+pub fn run_command(args: &RunArgs) -> Result<()> {
+    let package = Package::load(&args.package)?;
+    let files = records::scan(&args.input)?;
+    let plan = Plan::new(&package, Some(&files))?;
+    check_files(&plan, &files)?;
+    if args.out.exists() && !args.overwrite && !is_empty(&args.out)? {
+        return Err(usage(anyhow!(
+            "--out {}: not empty; give an empty or new folder, or --overwrite to replace \
+             the files an earlier run wrote there",
+            args.out.display()
+        )));
+    }
+    if args.out.exists() && !args.out.is_dir() {
+        return Err(usage(anyhow!("--out {}: not a folder", args.out.display())));
+    }
+    require_duckdb(&plan)?;
+    crate::stop::install();
+    let near = parent(&args.out);
+    std::fs::create_dir_all(&near).with_context(|| format!("creating {}", near.display()))?;
+    let work = Work::new(args.keep_work.as_deref(), &near)?;
+    let options = Options {
+        files: &files,
+        work: work.path(),
+        threads: threads(args.threads),
+        duckdb: DUCKDB,
+        echo: true,
+    };
+    let mut report = Report::default();
+    let result = run::run(&package, &plan, &options, &mut report);
+    if let Err(e) = &result {
+        report.status = "error".into();
+        report.error = Some(crate::error::message(e));
+    }
+    let failed = report.tests.iter().filter(|t| !t.passed).count();
+    let published = match (&result, report.status.as_str()) {
+        (Ok(()), "ok") => Some(publish(&work.path().join("out"), &args.out, &report)),
+        _ => None,
+    };
+    if let Some(Err(e)) = &published {
+        report.status = "error".into();
+        report.error = Some(crate::error::message(e));
+    }
+    if let Some(path) = &args.report {
+        crate::report::write_json(path, &serde_json::to_value(&report)?)?;
+    }
+    if let Work::Kept(dir) = &work {
+        println!("work files kept in {}", dir.display());
+    }
+    result?;
+    if failed > 0 {
+        eprintln!(
+            "fhir-pipes: {failed} of {} data tests failed; nothing was written to {}",
+            report.tests.len(),
+            args.out.display()
+        );
+        return Err(Findings.into());
+    }
+    published.expect("published when the run passed")?;
+    let total: usize = report.output.values().sum();
+    let warnings: usize = report.steps.iter().filter_map(|s| s.warnings).sum();
+    println!(
+        "Wrote {total} resources ({}) to {}",
+        run::describe(&report.output),
+        args.out.display()
+    );
+    if warnings > 0 {
+        println!("{warnings} engine warnings");
+    }
+    Ok(())
+}
+
+/// Moves the output files into `out`, replacing files of the same name, and
+/// removes the files the last run listed in `out/.fhir-pipes-import.json`
+/// that this run did not write. Nothing else in `out` is touched.
+fn publish(from: &Path, out: &Path, report: &Report) -> Result<()> {
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    let list = out.join(WRITTEN);
+    let before: BTreeSet<String> = match std::fs::read_to_string(&list) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v["files"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .unwrap_or_default(),
+        Err(_) => BTreeSet::new(),
+    };
+    let mut written = BTreeSet::new();
+    for t in report.output.keys() {
+        let name = format!("{t}.ndjson");
+        let (src, dest) = (from.join(&name), out.join(&name));
+        if std::fs::rename(&src, &dest).is_err() {
+            // Another file system: copy (mode and all), then remove.
+            std::fs::copy(&src, &dest).with_context(|| format!("writing {}", dest.display()))?;
+            let _ = std::fs::remove_file(&src);
+        }
+        written.insert(name);
+    }
+    for stale in before.difference(&written) {
+        let is_ours = stale.ends_with(".ndjson") && !stale.contains(['/', '\\']);
+        if is_ours {
+            let _ = std::fs::remove_file(out.join(stale));
+        }
+    }
+    let record = json!({"package": report.package, "files": written});
+    crate::fs::atomic_write(&list, serde_json::to_string_pretty(&record)? + "\n")?;
+    Ok(())
+}
+
+pub fn test_command(args: &TestArgs) -> Result<()> {
+    let package = Package::load(&args.package)?;
+    let tests = package.dir.join("tests");
+    let mut cases: Vec<(String, PathBuf)> = if tests.is_dir() {
+        crate::fs::sorted_entries(&tests)
+            .with_context(|| format!("reading {}", tests.display()))?
+            .into_iter()
+            .filter(|p| p.join("in").is_dir())
+            .filter_map(|p| Some((p.file_name()?.to_str()?.to_string(), p)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if cases.is_empty() {
+        return Err(usage(anyhow!(
+            "{}: no test cases; a case is a folder tests/<case>/ with in/ and expected/",
+            package.dir.display()
+        )));
+    }
+    if let Some(name) = &args.case {
+        let names: Vec<String> = cases.iter().map(|(n, _)| n.clone()).collect();
+        cases.retain(|(n, _)| n == name);
+        if cases.is_empty() {
+            return Err(usage(anyhow!(
+                "no test case {name}; the cases are: {}",
+                names.join(", ")
+            )));
+        }
+    }
+    let mut failed = 0;
+    for (name, dir) in &cases {
+        let files = records::scan(&dir.join("in"))?;
+        let plan = Plan::new(&package, Some(&files))?;
+        check_files(&plan, &files)?;
+        require_duckdb(&plan)?;
+        let work = tempfile::tempdir().context("creating a work folder")?;
+        let options = Options {
+            files: &files,
+            work: work.path(),
+            threads: threads(args.threads),
+            duckdb: DUCKDB,
+            echo: false,
+        };
+        let mut report = Report::default();
+        let result = run::run(&package, &plan, &options, &mut report);
+        let out = work.path().join("out");
+        let expected = dir.join("expected");
+        let problems: Vec<String> = match result {
+            Err(e) => vec![format!("the run failed: {}", crate::error::message(&e))],
+            Ok(()) if report.status == "failed" => report
+                .tests
+                .iter()
+                .filter(|t| !t.passed)
+                .map(|t| {
+                    format!(
+                        "data test {} ({}) failed: {} rows",
+                        t.name, t.check, t.failures
+                    )
+                })
+                .collect(),
+            Ok(()) if args.update => {
+                update(&out, &expected)?;
+                println!(
+                    "case {name}: wrote {} ({})",
+                    expected.display(),
+                    run::describe(&report.output)
+                );
+                continue;
+            }
+            Ok(()) => compare::compare(&out, &expected)?,
+        };
+        if problems.is_empty() {
+            let total: usize = report.output.values().sum();
+            println!(
+                "case {name}: passed ({total} resources: {})",
+                run::describe(&report.output)
+            );
+        } else {
+            failed += 1;
+            println!("case {name}: FAILED");
+            for p in problems {
+                println!("  {p}");
+            }
+        }
+    }
+    if args.update {
+        println!(
+            "{} cases: {} updated, {failed} failed",
+            cases.len(),
+            cases.len() - failed
+        );
+    } else {
+        println!(
+            "{} cases: {} passed, {failed} failed",
+            cases.len(),
+            cases.len() - failed
+        );
+    }
+    if failed > 0 {
+        Err(Findings.into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Replaces the `*.ndjson` files in `expected` with those in `out`.
+fn update(out: &Path, expected: &Path) -> Result<()> {
+    std::fs::create_dir_all(expected)
+        .with_context(|| format!("creating {}", expected.display()))?;
+    for old in compare::ndjson_files(expected)? {
+        std::fs::remove_file(expected.join(&old))
+            .with_context(|| format!("removing {}", expected.join(&old).display()))?;
+    }
+    // Written as new files, not copied, so they get the usual mode for files
+    // kept in a repository rather than the work files' owner-only one.
+    for name in compare::ndjson_files(out)? {
+        let bytes = std::fs::read(out.join(&name))
+            .with_context(|| format!("reading {}", out.join(&name).display()))?;
+        std::fs::write(expected.join(&name), bytes)
+            .with_context(|| format!("writing {}", expected.join(&name).display()))?;
+    }
+    Ok(())
+}

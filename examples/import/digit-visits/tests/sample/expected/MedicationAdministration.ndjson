@@ -1,0 +1,4 @@
+{"resourceType":"MedicationAdministration","id":"dgt-t-001","status":"completed","subject":{"reference":"Patient/dgt-p1"},"effectiveDateTime":"2026-07-01T09:00:00Z"}
+{"resourceType":"MedicationAdministration","id":"dgt-t-002","status":"not-done","subject":{"reference":"Patient/dgt-p2"},"effectiveDateTime":"2026-07-01T09:05:00Z"}
+{"resourceType":"MedicationAdministration","id":"dgt-t-003","status":"completed","subject":{"reference":"Patient/dgt-p2"},"effectiveDateTime":"2026-07-01T15:00:00Z"}
+{"resourceType":"MedicationAdministration","id":"dgt-t-004","status":"not-done","subject":{"reference":"Patient/dgt-p3"},"effectiveDateTime":"2026-07-01T09:40:00Z"}

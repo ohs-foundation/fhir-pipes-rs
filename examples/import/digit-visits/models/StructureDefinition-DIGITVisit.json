@@ -1,0 +1,231 @@
+{
+ "resourceType": "StructureDefinition",
+ "id": "DIGITVisit",
+ "url": "https://icr.healthcampaigns.org/StructureDefinition/DIGITVisit",
+ "name": "DIGITVisit",
+ "status": "draft",
+ "fhirVersion": "4.0.1",
+ "kind": "logical",
+ "abstract": false,
+ "type": "https://icr.healthcampaigns.org/StructureDefinition/DIGITVisit",
+ "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Element",
+ "derivation": "specialization",
+ "snapshot": {
+  "element": [
+   {
+    "id": "DIGITVisit",
+    "path": "DIGITVisit",
+    "min": 0,
+    "max": "*"
+   },
+   {
+    "id": "DIGITVisit.visitKey",
+    "path": "DIGITVisit.visitKey",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.roundId",
+    "path": "DIGITVisit.roundId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.householdId",
+    "path": "DIGITVisit.householdId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.workerId",
+    "path": "DIGITVisit.workerId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task",
+    "path": "DIGITVisit.task",
+    "min": 1,
+    "max": "*",
+    "type": [
+     {
+      "code": "BackboneElement"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.crid",
+    "path": "DIGITVisit.task.crid",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.personId",
+    "path": "DIGITVisit.task.personId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.status",
+    "path": "DIGITVisit.task.status",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "code"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.time",
+    "path": "DIGITVisit.task.time",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "dateTime"
+     }
+    ]
+   }
+  ]
+ },
+ "differential": {
+  "element": [
+   {
+    "id": "DIGITVisit",
+    "path": "DIGITVisit",
+    "min": 0,
+    "max": "*"
+   },
+   {
+    "id": "DIGITVisit.visitKey",
+    "path": "DIGITVisit.visitKey",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.roundId",
+    "path": "DIGITVisit.roundId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.householdId",
+    "path": "DIGITVisit.householdId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.workerId",
+    "path": "DIGITVisit.workerId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task",
+    "path": "DIGITVisit.task",
+    "min": 1,
+    "max": "*",
+    "type": [
+     {
+      "code": "BackboneElement"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.crid",
+    "path": "DIGITVisit.task.crid",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.personId",
+    "path": "DIGITVisit.task.personId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.status",
+    "path": "DIGITVisit.task.status",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "code"
+     }
+    ]
+   },
+   {
+    "id": "DIGITVisit.task.time",
+    "path": "DIGITVisit.task.time",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "dateTime"
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -334,7 +334,7 @@ impl MapPackage {
 }
 
 /// The URL of the type the map's first group reads.
-fn first_source_url(map: &StructureMap) -> Option<String> {
+pub(crate) fn first_source_url(map: &StructureMap) -> Option<String> {
     let group = map.group.first()?;
     let input = group.input.iter().find(|i| i.mode == "source")?;
     let type_name = input.type_name.as_deref()?;

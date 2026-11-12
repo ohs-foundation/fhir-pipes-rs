@@ -1,0 +1,16 @@
+/// url = 'https://icr.healthcampaigns.org/StructureMap/StageDIGITHouseholdMember'
+/// name = 'StageDIGITHouseholdMember'
+/// status = 'draft'
+
+// A person's membership of a household as a staged Basic, read by the
+// StgHouseholdMember view.
+uses "https://icr.healthcampaigns.org/StructureDefinition/DIGITHouseholdMember" alias DIGITHouseholdMember as source
+uses "http://hl7.org/fhir/StructureDefinition/Basic" alias Basic as target
+
+group StageMember(source src : DIGITHouseholdMember, target b : Basic) {
+  src.clientReferenceId as c -> b.id = append('stg-', c) "id";
+  src -> b.meta as m, m.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/staging', tag.code = 'digit-staging' "tag";
+  src -> b.code as c, c.text = 'household-member' "code";
+  src.individualClientReferenceId as p -> b.subject as r, r.reference = append('Patient/dgt-', p) "person";
+  src.householdClientReferenceId as h -> b.extension as e, e.url = 'https://icr.healthcampaigns.org/StructureDefinition/staging-household', e.value = create('Reference') as r, r.reference = append('Group/dgt-', h) "household";
+}

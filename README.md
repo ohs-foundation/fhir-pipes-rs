@@ -81,6 +81,7 @@ Run `fhir-pipes <command> --help` for every option.
 | `profile check` | Compare a profile with its IG | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
 | `terminology valueset`, `conceptmap` | A value set or concept map from FHIR packages as a table | [terminology.md](docs/terminology.md) |
 | `map run`, `map check` | Run and type-check FHIR Mapping Language maps over NDJSON records | [maps.md](docs/maps.md) |
+| `import check`, `import run`, `import test` | Run an import package (logical models, maps, views, Libraries) over a folder of records, to FHIR NDJSON | [import.md](docs/import.md) |
 
 An implementation guide's extra Location and Organization columns come from a
 profile (`--profile`, `FHIR_PIPES_PROFILE` or `profile =` in

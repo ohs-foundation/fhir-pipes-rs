@@ -177,6 +177,23 @@ fn content_entry(content_type: &str, sql: &str) -> Value {
 /// Build every `*.sql` in `src` that has a sibling `.toml`, writing
 /// `out/Library-<name>.json`. Returns how many were written.
 pub fn build_dir(src: &Path, out: &Path) -> Result<usize> {
+    let built = build_all(src)?;
+    fs::create_dir_all(out)
+        .with_context(|| format!("creating {}", out.display()))
+        .map_err(usage)?;
+    for (_, lib) in &built {
+        let name = lib["name"].as_str().unwrap_or_default();
+        let dest = out.join(format!("Library-{name}.json"));
+        let text = serde_json::to_string_pretty(&lib)? + "\n";
+        fs::write(&dest, text).with_context(|| format!("writing {}", dest.display()))?;
+    }
+    Ok(built.len())
+}
+
+/// The Library JSON of every `*.sql` in `src` that has a sibling `.toml`,
+/// each with the path of its `.sql` file, in file-name order. A `.sql` file
+/// with no `.toml` (other than a dialect file) is named in a warning.
+pub fn build_all(src: &Path) -> Result<Vec<(String, Value)>> {
     let entries = fs::read_dir(src)
         .with_context(|| format!("reading {}", src.display()))
         .map_err(usage)?;
@@ -195,21 +212,10 @@ pub fn build_dir(src: &Path, out: &Path) -> Result<usize> {
                 .to_string_lossy()
         );
     }
-    let paths: Vec<_> = sql
-        .into_iter()
+    sql.into_iter()
         .filter(|p| p.with_extension("toml").exists())
-        .collect();
-    fs::create_dir_all(out)
-        .with_context(|| format!("creating {}", out.display()))
-        .map_err(usage)?;
-    for path in &paths {
-        let lib = build_source(path)?;
-        let name = lib["name"].as_str().unwrap_or_default();
-        let dest = out.join(format!("Library-{name}.json"));
-        let text = serde_json::to_string_pretty(&lib)? + "\n";
-        fs::write(&dest, text).with_context(|| format!("writing {}", dest.display()))?;
-    }
-    Ok(paths.len())
+        .map(|p| Ok((p.display().to_string(), build_source(&p)?)))
+        .collect()
 }
 
 /// The `.sql` files of `sql` with no `.toml` beside them, other than the

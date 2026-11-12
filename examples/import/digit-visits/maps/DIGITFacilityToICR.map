@@ -1,0 +1,15 @@
+/// url = 'https://icr.healthcampaigns.org/StructureMap/DIGITFacilityToICR'
+/// name = 'DIGITFacilityToICR'
+/// status = 'draft'
+
+// One DIGIT facility as one Location.
+uses "https://icr.healthcampaigns.org/StructureDefinition/DIGITFacility" alias DIGITFacility as source
+uses "http://hl7.org/fhir/StructureDefinition/Location" alias Location as target
+
+group Facility(source src : DIGITFacility, target loc : Location) {
+  src.facilityId as f -> loc.id = append('dgt-', f) "id";
+  src.facilityId as f -> loc.identifier as i, i.system = 'https://icr.healthcampaigns.org/sid/digit-facility', i.value = f "identifier";
+  src -> loc.status = 'active' "status";
+  src.name as n -> loc.name = n "name";
+  src.usage as u -> loc.physicalType = translate(u, 'https://icr.healthcampaigns.org/ConceptMap/digit-facility-usage-to-physical-type', 'CodeableConcept') "physicalType";
+}

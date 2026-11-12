@@ -1,0 +1,39 @@
+/// url = 'https://icr.healthcampaigns.org/StructureMap/DIGITVisitToICR'
+/// name = 'DIGITVisitToICR'
+/// status = 'draft'
+
+// One household visit (a row of the DigitVisit Library) as a Task for the
+// visit and a MedicationAdministration for each person's task in it.
+uses "https://icr.healthcampaigns.org/StructureDefinition/DIGITVisit" alias DIGITVisit as source
+uses "http://hl7.org/fhir/StructureDefinition/Bundle" alias Bundle as target
+uses "http://hl7.org/fhir/StructureDefinition/Task" alias Task as target
+uses "http://hl7.org/fhir/StructureDefinition/MedicationAdministration" alias MedicationAdministration as target
+
+group Visit(source src : DIGITVisit, target bundle : Bundle) {
+  src -> bundle.type = 'collection' "bundleType";
+  src -> bundle.entry as e, e.resource = create('Task') as tk then VisitToTask(src, tk) "visit";
+  src.task as t -> bundle.entry as e, e.resource = create('MedicationAdministration') as ma then TaskToEvent(src, t, ma) "events";
+}
+
+group VisitToTask(source src : DIGITVisit, target tk : Task) {
+  // The visit key is the staged id of its first task: stg-t-001 gives dgt-visit-t-001.
+  src -> tk.id = evaluate(src, visitKey.replace('stg-', 'dgt-visit-')) "id";
+  src.roundId as r -> tk.basedOn as ref, ref.reference = append('CarePlan/', r) "round";
+  // Reached when any person's outcome was recorded; an absent household was not reached.
+  src where task.where(status = 'ADMINISTRATION_SUCCESS' or status = 'BENEFICIARY_REFUSED').exists() -> tk.status = 'completed' "reached";
+  src where task.where(status = 'ADMINISTRATION_SUCCESS' or status = 'BENEFICIARY_REFUSED').empty() -> tk.status = 'failed' "notReached";
+  src -> tk.intent = 'order' "intent";
+  src.householdId as h -> tk.for as ref, ref.reference = append('Group/', h) "household";
+  src.workerId as w -> tk.requester as ref, ref.reference = append('Practitioner/', w) "worker";
+  src -> tk.executionPeriod as p, p.start = evaluate(src, task.first().time), p.end = evaluate(src, task.last().time) "period";
+  src -> tk.output as o, o.type as ty, ty.text = 'treated-count', o.value = evaluate(src, task.where(status = 'ADMINISTRATION_SUCCESS').personId.distinct().count()) "treated";
+  src.task as t -> tk.output as o, o.type as ty, ty.text = 'delivery-event', o.value = create('Reference') as r, r.reference = evaluate(t, 'MedicationAdministration/' + crid.replace('stg-', 'dgt-')) "outputs";
+}
+
+group TaskToEvent(source src : DIGITVisit, source t, target ma : MedicationAdministration) {
+  t -> ma.id = evaluate(t, crid.replace('stg-', 'dgt-')) "eventId";
+  t where status = 'ADMINISTRATION_SUCCESS' -> ma.status = 'completed' "given";
+  t where status != 'ADMINISTRATION_SUCCESS' -> ma.status = 'not-done' "notGiven";
+  t.personId as p -> ma.subject as ref, ref.reference = append('Patient/', p) "subject";
+  t.time as tm -> ma.effective = tm "when";
+}

@@ -99,7 +99,9 @@ pub enum Command {
     /// Work with the profile given by --profile
     #[command(subcommand)]
     Profile(ProfileCommand),
-    /// Admin boundaries (GeoJSON) and sites (CSV) as Location NDJSON for `fhir-pipes load` (offline)
+    /// Admin boundaries (GeoJSON) and sites (CSV) as Location NDJSON, and import packages
+    /// (logical models, maps, views, Libraries) run over record files, as FHIR NDJSON for
+    /// `fhir-pipes load` (offline)
     #[command(subcommand)]
     Import(crate::import::ImportCommand),
     /// A value set or concept map from FHIR packages as a table SQL can join

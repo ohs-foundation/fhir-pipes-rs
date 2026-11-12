@@ -202,6 +202,14 @@ pub fn rule_for<'a>(result: &ViewResult, lookups: &'a [Lookup]) -> Option<(&'a L
 /// are held beside the rows.
 const ROW_GROUP_ROWS: usize = 64 * 1024;
 
+/// The writer of a view table's files: temporal values as Parquet's own
+/// types, a row group at a time.
+pub fn parquet_writer() -> ParquetWriter {
+    ParquetWriter::new()
+        .with_temporal(TemporalEncoding::Native)
+        .with_row_group_size(ROW_GROUP_ROWS)
+}
+
 /// Split `result` by partition value and write it to `table_dir`, replacing
 /// what was there only once every file is written. Returns the row count and
 /// the values that did not match their column's type.
@@ -231,9 +239,7 @@ pub fn write(
         .to_string_lossy();
     let staging = parent.join(format!(".{name}.new"));
     let _ = fs::remove_dir_all(&staging);
-    let writer = ParquetWriter::new()
-        .with_temporal(TemporalEncoding::Native)
-        .with_row_group_size(ROW_GROUP_ROWS);
+    let writer = parquet_writer();
     let mut columns = result.columns;
     columns.push(ColumnInfo::new(column, ColumnType::String));
     let mut summary = WriteSummary::default();

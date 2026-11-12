@@ -1,0 +1,17 @@
+url = "https://icr.healthcampaigns.org/Library/DigitVisit"
+name = "DigitVisit"
+status = "draft"
+kind = "SQLQuery"
+description = "DIGIT per-person tasks grouped into household visits: same round, household and worker, split where more than 2 hours pass between tasks."
+
+[[depends_on]]
+label = "task"
+resource = "https://icr.healthcampaigns.org/ViewDefinition/StgTask"
+
+[[depends_on]]
+label = "beneficiary"
+resource = "https://icr.healthcampaigns.org/ViewDefinition/StgBeneficiary"
+
+[[depends_on]]
+label = "member"
+resource = "https://icr.healthcampaigns.org/ViewDefinition/StgHouseholdMember"

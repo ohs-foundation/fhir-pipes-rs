@@ -1,0 +1,35 @@
+{
+ "resourceType": "ConceptMap",
+ "id": "digit-facility-usage",
+ "url": "https://icr.healthcampaigns.org/ConceptMap/digit-facility-usage-to-physical-type",
+ "name": "DIGITFacilityUsageToPhysicalType",
+ "status": "draft",
+ "group": [
+  {
+   "source": "https://icr.healthcampaigns.org/CodeSystem/digit-facility-usage",
+   "target": "http://terminology.hl7.org/CodeSystem/location-physical-type",
+   "element": [
+    {
+     "code": "Warehouse",
+     "target": [
+      {
+       "code": "bu",
+       "display": "Building",
+       "equivalence": "wider"
+      }
+     ]
+    },
+    {
+     "code": "Health Facility",
+     "target": [
+      {
+       "code": "si",
+       "display": "Site",
+       "equivalence": "wider"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

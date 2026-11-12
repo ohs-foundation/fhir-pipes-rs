@@ -1,0 +1,9 @@
+{"resourceType":"ViewDefinition","url":"https://icr.healthcampaigns.org/ViewDefinition/StgTask","name":"StgTask","status":"draft","resource":"Task",
+ "where":[{"path":"meta.tag.where(code = 'digit-staging').exists()"}],
+ "select":[{"column":[
+  {"name":"id","path":"getResourceKey()","type":"string"},
+  {"name":"beneficiary_id","path":"for.getReferenceKey(Basic)","type":"string"},
+  {"name":"round_id","path":"basedOn.first().getReferenceKey(CarePlan)","type":"string"},
+  {"name":"worker_id","path":"owner.getReferenceKey(Practitioner)","type":"string"},
+  {"name":"digit_status","path":"businessStatus.coding.first().code","type":"code"},
+  {"name":"t","path":"executionPeriod.start","type":"dateTime"}]}]}

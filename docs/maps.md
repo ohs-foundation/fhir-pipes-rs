@@ -12,6 +12,8 @@ fhir-pipes map run   --maps maps/ --in records.ndjson --out resources.ndjson
 
 `fhir-pipes dhis2 --maps` uses the same engine to write Locations, Measures
 and MeasureReports; see [Maps for the DHIS2 import](#maps-for-the-dhis2-import).
+To run several maps over a folder of records as one pipeline, with views and
+SQL where records have to be joined, see [import.md](import.md).
 
 ## A folder of maps
 

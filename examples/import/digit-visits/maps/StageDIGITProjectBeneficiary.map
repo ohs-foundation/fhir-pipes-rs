@@ -1,0 +1,15 @@
+/// url = 'https://icr.healthcampaigns.org/StructureMap/StageDIGITProjectBeneficiary'
+/// name = 'StageDIGITProjectBeneficiary'
+/// status = 'draft'
+
+// A person's registration in the campaign as a staged Basic, read by the
+// StgBeneficiary view.
+uses "https://icr.healthcampaigns.org/StructureDefinition/DIGITProjectBeneficiary" alias DIGITProjectBeneficiary as source
+uses "http://hl7.org/fhir/StructureDefinition/Basic" alias Basic as target
+
+group StageBeneficiary(source src : DIGITProjectBeneficiary, target b : Basic) {
+  src.clientReferenceId as c -> b.id = append('stg-', c) "id";
+  src -> b.meta as m, m.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/staging', tag.code = 'digit-staging' "tag";
+  src -> b.code as c, c.text = 'project-beneficiary' "code";
+  src.beneficiaryClientReferenceId as p -> b.subject as r, r.reference = append('Patient/dgt-', p) "person";
+}
