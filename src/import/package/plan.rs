@@ -189,12 +189,12 @@ pub struct Plan<'p> {
 }
 
 impl<'p> Plan<'p> {
-    /// The plan of the package's manifest, or with none, one step per
-    /// record file in `files`.
+    /// The plan of the package's manifest steps, or with no manifest or a
+    /// manifest with no steps, one step per record file in `files`.
     pub fn new(package: &'p Package, files: Option<&BTreeMap<String, PathBuf>>) -> Result<Self> {
         match &package.manifest {
-            Some(m) => Self::from_manifest(package, m),
-            None => match files {
+            Some(m) if !m.steps.is_empty() => Self::from_manifest(package, m),
+            _ => match files {
                 Some(files) => Self::by_record_type(package, files),
                 None => Ok(Plan {
                     steps: Vec::new(),

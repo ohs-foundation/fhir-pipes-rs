@@ -21,6 +21,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::plan::{Input, Package, Plan, PlanStep};
+use super::previous::Comparison;
 use super::records::{Records, with_type};
 use super::tables::Tables;
 use crate::error::{PipesError, usage};
@@ -41,6 +42,9 @@ pub struct Options<'a> {
     pub duckdb: &'a str,
     /// Print each step and its warnings.
     pub echo: bool,
+    /// Every resource written to the output must have an id, as `--previous`
+    /// compares resources by `resourceType` and `id`.
+    pub require_ids: bool,
 }
 
 /// What a run did, for the report.
@@ -55,6 +59,9 @@ pub struct Report {
     pub tests: Vec<TestReport>,
     /// The resources written to the output, by type.
     pub output: BTreeMap<String, usize>,
+    /// With `--previous`: how the output compares with the previous run's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<Comparison>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -353,6 +360,7 @@ fn map_step(
 ) -> Result<()> {
     let mut count = 0usize;
     let mut warnings = 0usize;
+    let need_ids = o.require_ids && !r.stage;
     loop {
         crate::stop::check()?;
         let mut batch: Vec<(String, Value)> = Vec::with_capacity(BATCH);
@@ -391,6 +399,14 @@ fn map_step(
                 }
             }
             for resource in &output.resources {
+                if need_ids && !has_id(resource) {
+                    let t = resource["resourceType"].as_str().unwrap_or("resource");
+                    return Err(usage(anyhow!(
+                        "{at}: map {} wrote a {t} with no id; --previous compares resources \
+                         by resourceType and id",
+                        r.map.as_deref().unwrap_or_default()
+                    )));
+                }
                 let t = sink.write(resource).with_context(|| at.clone())?;
                 *r.resources.entry(t).or_default() += 1;
             }
@@ -411,6 +427,14 @@ fn map_step(
     r.records = Some(count);
     r.warnings = Some(warnings);
     Ok(())
+}
+
+/// Whether a resource has an `id`: a non-empty string.
+fn has_id(resource: &Value) -> bool {
+    resource
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
 }
 
 /// The rows of a Library's result as records of `type_name`, numbered from

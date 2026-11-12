@@ -849,3 +849,158 @@ fn an_interrupted_records_run_resumes_to_the_same_file() {
         stderr(&refused)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Comparing with a previous run, both ways
+
+/// Two runs of `dhis2 reports`, a day and an analytics build apart, over
+/// the same org units and period: one value the same, one changed, one new
+/// and one gone. `dhis2 reports --previous --changed --removed` and the
+/// general route (`--records`, then `import run --previous --changed
+/// --removed` with the package, whose `[compare]` leaves out a report's
+/// `date`) find the same new, changed and removed reports.
+#[test]
+fn a_rerun_compares_the_same_both_ways() {
+    let (a, b) = (BO, BOMBALI);
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &[a, b]);
+    let run = |built: &str, rows: Vec<Value>, out: &Path, extra: &[&str]| {
+        let server = Server::run();
+        expect_info_built(&server, built);
+        expect_group(&server);
+        expect_units(&server, 2, 2);
+        let mut response = analytics_for(rows);
+        response["metaData"]["dimensions"] =
+            json!({"ou": [a, b], "pe": ["202501"], "dx": [], "co": []});
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(("dimension", "pe:202501")))),
+            ])
+            .times(1)
+            .respond_with(ok(response)),
+        );
+        let assert = dhis2(&server, "reports")
+            .args(["--indicator-group", "srxUNt2w5jn"])
+            .args(["--level", "2", "--period", "202501"])
+            .arg("--locations")
+            .arg(&locations)
+            .arg("--out")
+            .arg(out)
+            .args(extra)
+            .assert()
+            .success();
+        stdout(&assert)
+    };
+    let row = |dx: &str, ou: &str, num: f64| {
+        json!([
+            dx,
+            "202501",
+            ou,
+            format!("{}", num * 10.0),
+            format!("{num}"),
+            "10.0"
+        ])
+    };
+    let first = vec![
+        row("tUIlpyeeX9N", a, 5.0),
+        row("tUIlpyeeX9N", b, 3.0),
+        row("FbKK4ofIv5R", a, 1.0),
+    ];
+    let second = vec![
+        row("tUIlpyeeX9N", a, 5.0),
+        row("tUIlpyeeX9N", b, 4.0),
+        row("FbKK4ofIv5R", b, 2.0),
+    ];
+    let (day1, day2) = ("2026-10-12T02:07:00.052", "2026-10-13T02:07:00.052");
+
+    // dhis2 reports --previous, the baseline rolled in place.
+    let reports = dir.path().join("reports.ndjson");
+    run(day1, first.clone(), &reports, &[]);
+    let changed = dir.path().join("changed.ndjson");
+    let removed = dir.path().join("removed.txt");
+    let printed = run(
+        day2,
+        second.clone(),
+        &reports,
+        &[
+            "--previous",
+            reports.to_str().unwrap(),
+            "--changed",
+            changed.to_str().unwrap(),
+            "--removed",
+            removed.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        printed.contains("1 new, 1 changed, 1 unchanged, 1 removed"),
+        "{printed}"
+    );
+
+    // The general route, with one baseline folder.
+    let fhir = dir.path().join("fhir");
+    let records = |name: &str, built: &str, rows: Vec<Value>| {
+        let input = dir.path().join(name);
+        std::fs::create_dir(&input).unwrap();
+        run(
+            built,
+            rows,
+            &input.join("DHIS2Value.ndjson"),
+            &["--records"],
+        );
+        input
+    };
+    let in1 = records("in1", day1, first);
+    import_run(&in1, &fhir);
+    let in2 = records("in2", day2, second);
+    let import_changed = dir.path().join("import-changed");
+    let import_removed = dir.path().join("import-removed.txt");
+    let a2 = fhir_pipes()
+        .args(["import", "run", "--package", PACKAGE, "--in"])
+        .arg(&in2)
+        .arg("--out")
+        .arg(&fhir)
+        .arg("--overwrite")
+        .arg("--previous")
+        .arg(&fhir)
+        .arg("--changed")
+        .arg(&import_changed)
+        .arg("--removed")
+        .arg(&import_removed)
+        .assert()
+        .success();
+    let printed = stdout(&a2);
+    assert!(
+        printed.contains("1 new, 1 changed, 1 unchanged, 1 removed"),
+        "{printed}"
+    );
+
+    // The same reports, in the same order.
+    let ids = |list: Vec<Value>| -> Vec<String> {
+        list.iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let built_in_changed = ids(read_ndjson(&changed));
+    assert_eq!(built_in_changed.len(), 2);
+    assert_eq!(
+        ids(read_ndjson(&import_changed.join("MeasureReport.ndjson"))),
+        built_in_changed
+    );
+    let lines = |p: &Path| -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let built_in_removed = lines(&removed);
+    assert_eq!(built_in_removed.len(), 1);
+    let import_removed: Vec<String> = lines(&import_removed)
+        .iter()
+        .map(|l| l.strip_prefix("MeasureReport/").unwrap().to_string())
+        .collect();
+    assert_eq!(import_removed, built_in_removed);
+    // And the same baseline.
+    assert_same(&read_ndjson(&reports), &read_out(&fhir));
+}

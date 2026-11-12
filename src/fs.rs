@@ -185,7 +185,6 @@ impl AtomicFile {
 
     /// `create_at`, readable only by its owner on Unix: for exported FHIR
     /// resources, which can be patient data.
-    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     pub fn create_private_at(path: &Path, tmp: PathBuf) -> Result<Self> {
         Self::create_with(path, tmp, private())
     }

@@ -13,11 +13,13 @@
 //! - `plan`: the package loaded, and its steps resolved;
 //! - `run`: the steps run in a work folder;
 //! - `tables`: views and Libraries over Parquet in duckdb, and the data tests;
-//! - `compare`: a run's output against a test case's expected files.
+//! - `compare`: a run's output against a test case's expected files;
+//! - `previous`: a run's output against an earlier run's (`--previous`).
 
 mod compare;
 mod manifest;
 mod plan;
+mod previous;
 mod records;
 mod run;
 mod tables;
@@ -30,6 +32,7 @@ use serde_json::json;
 
 use crate::error::{Findings, usage};
 use plan::{Package, Plan};
+use previous::{Ignores, Previous};
 use run::{Options, Report};
 
 /// The record problems printed per file by `import check --in`.
@@ -72,6 +75,15 @@ pub struct RunArgs {
     /// Keep the staged resources, view tables and Library results in this folder (empty or new) instead of removing them
     #[arg(long, value_name = "DIR")]
     pub keep_work: Option<PathBuf>,
+    /// The --out folder of an earlier run of the same package: compare this run's resources with it, by resourceType and id. May be --out itself with --overwrite
+    #[arg(long, value_name = "DIR")]
+    pub previous: Option<PathBuf>,
+    /// With --previous: write the new and changed resources here, one <ResourceType>.ndjson per type. Must be empty or not exist, unless --overwrite
+    #[arg(long, value_name = "DIR", requires = "previous")]
+    pub changed: Option<PathBuf>,
+    /// With --previous: write here, sorted, one ResourceType/id per line for every resource of the previous run that this run did not write
+    #[arg(long, value_name = "FILE", requires = "previous")]
+    pub removed: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -264,17 +276,20 @@ pub fn run_command(args: &RunArgs) -> Result<()> {
     let files = records::scan(&args.input)?;
     let plan = Plan::new(&package, Some(&files))?;
     check_files(&plan, &files)?;
-    if args.out.exists() && !args.overwrite && !is_empty(&args.out)? {
-        return Err(usage(anyhow!(
-            "--out {}: not empty; give an empty or new folder, or --overwrite to replace \
-             the files an earlier run wrote there",
-            args.out.display()
-        )));
-    }
-    if args.out.exists() && !args.out.is_dir() {
-        return Err(usage(anyhow!("--out {}: not a folder", args.out.display())));
-    }
+    // First, so --previous given as --out without --overwrite is named as such.
+    check_comparison(args)?;
+    check_folder("--out", &args.out, args.overwrite)?;
     require_duckdb(&plan)?;
+    // Read before anything is written: --previous may be --out.
+    let mut previous = match &args.previous {
+        Some(dir) => {
+            let ignore = package.manifest.as_ref().map_or(&[][..], |m| &m.ignore);
+            let p = Previous::load(dir, Ignores::new(ignore))?;
+            eprintln!("{}: {} previous resources", dir.display(), p.len());
+            Some(p)
+        }
+        None => None,
+    };
     crate::stop::install();
     let near = parent(&args.out);
     std::fs::create_dir_all(&near).with_context(|| format!("creating {}", near.display()))?;
@@ -285,16 +300,32 @@ pub fn run_command(args: &RunArgs) -> Result<()> {
         threads: threads(args.threads),
         duckdb: DUCKDB,
         echo: true,
+        require_ids: previous.is_some(),
     };
     let mut report = Report::default();
-    let result = run::run(&package, &plan, &options, &mut report);
+    let mut result = run::run(&package, &plan, &options, &mut report);
+    let mut compared = None;
+    if result.is_ok()
+        && report.status == "ok"
+        && let Some(prev) = previous.as_mut()
+    {
+        let types: Vec<&String> = report.output.keys().collect();
+        let changed = args.changed.as_ref().map(|_| work.path().join("changed"));
+        match previous::compare(prev, &work.path().join("out"), &types, changed.as_deref()) {
+            Ok(c) => {
+                report.comparison = Some(c.comparison);
+                compared = Some((c.changed, c.removed));
+            }
+            Err(e) => result = Err(e),
+        }
+    }
     if let Err(e) = &result {
         report.status = "error".into();
         report.error = Some(crate::error::message(e));
     }
     let failed = report.tests.iter().filter(|t| !t.passed).count();
     let published = match (&result, report.status.as_str()) {
-        (Ok(()), "ok") => Some(publish(&work.path().join("out"), &args.out, &report)),
+        (Ok(()), "ok") => Some(publish_all(work.path(), args, &report, compared.as_ref())),
         _ => None,
     };
     if let Some(Err(e)) = &published {
@@ -324,16 +355,139 @@ pub fn run_command(args: &RunArgs) -> Result<()> {
         run::describe(&report.output),
         args.out.display()
     );
+    if let (Some(c), Some((changed, removed))) = (&report.comparison, &compared) {
+        println!("Compared with {}: {}", c.previous, c.total.describe());
+        for (t, counts) in &c.types {
+            println!("  {t}: {}", counts.describe());
+        }
+        if let Some(dir) = &args.changed {
+            println!(
+                "Wrote {} new or changed resources ({}) to {}",
+                changed.values().sum::<usize>(),
+                run::describe(changed),
+                dir.display()
+            );
+        }
+        if let Some(path) = &args.removed {
+            println!("Wrote {} removed ids to {}", removed.len(), path.display());
+        }
+    }
     if warnings > 0 {
         println!("{warnings} engine warnings");
     }
     Ok(())
 }
 
-/// Moves the output files into `out`, replacing files of the same name, and
-/// removes the files the last run listed in `out/.fhir-pipes-import.json`
-/// that this run did not write. Nothing else in `out` is touched.
-fn publish(from: &Path, out: &Path, report: &Report) -> Result<()> {
+/// An output folder (`--out`, `--changed`) must be a folder, and empty or
+/// new unless `--overwrite`.
+fn check_folder(flag: &str, dir: &Path, overwrite: bool) -> Result<()> {
+    if dir.exists() && !dir.is_dir() {
+        return Err(usage(anyhow!("{flag} {}: not a folder", dir.display())));
+    }
+    if dir.exists() && !overwrite && !is_empty(dir)? {
+        return Err(usage(anyhow!(
+            "{flag} {}: not empty; give an empty or new folder, or --overwrite to replace \
+             the files an earlier run wrote there",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The checks of `--previous`, `--changed` and `--removed`.
+fn check_comparison(args: &RunArgs) -> Result<()> {
+    let Some(prev) = &args.previous else {
+        return Ok(());
+    };
+    if !prev.exists() {
+        return Err(usage(anyhow!(
+            "--previous {}: no such folder; give the --out folder of an earlier run",
+            prev.display()
+        )));
+    }
+    if !prev.is_dir() {
+        return Err(usage(anyhow!(
+            "--previous {}: not a folder",
+            prev.display()
+        )));
+    }
+    if same_place(prev, &args.out) && !args.overwrite {
+        return Err(usage(anyhow!(
+            "--previous {}: is the --out folder; give --overwrite to replace the previous \
+             run's files there with this run's (the previous ones are read first)",
+            prev.display()
+        )));
+    }
+    if let Some(changed) = &args.changed {
+        for (flag, other) in [("--out", &args.out), ("--previous", prev)] {
+            if same_place(changed, other) {
+                return Err(usage(anyhow!(
+                    "--changed {}: is the {flag} folder; give --changed a folder of its own",
+                    changed.display()
+                )));
+            }
+        }
+        check_folder("--changed", changed, args.overwrite)?;
+    }
+    if let Some(removed) = &args.removed
+        && removed.is_dir()
+    {
+        return Err(usage(anyhow!(
+            "--removed {}: is a folder; give a file",
+            removed.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` name one place: the same path once resolved, or for
+/// a path that does not exist yet, the same name in the same resolved
+/// folder.
+fn same_place(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| {
+        p.canonicalize()
+            .ok()
+            .or_else(|| Some(parent(p).canonicalize().ok()?.join(p.file_name()?)))
+            .unwrap_or_else(|| p.to_path_buf())
+    };
+    key(a) == key(b)
+}
+
+/// Puts the run's files in place: `--changed` and `--removed` first, then
+/// `--out`. Should a later one fail, `--out` still holds the previous run,
+/// so the next run finds the same changes again rather than miss them.
+fn publish_all(
+    work: &Path,
+    args: &RunArgs,
+    report: &Report,
+    compared: Option<&(BTreeMap<String, usize>, Vec<String>)>,
+) -> Result<()> {
+    if let Some((changed, removed)) = compared {
+        if let Some(dir) = &args.changed {
+            publish(&work.join("changed"), dir, changed.keys(), &report.package)?;
+        }
+        if let Some(path) = &args.removed {
+            previous::write_lines(path, removed)?;
+        }
+    }
+    publish(
+        &work.join("out"),
+        &args.out,
+        report.output.keys(),
+        &report.package,
+    )
+}
+
+/// Moves the `<type>.ndjson` files of `types` from `from` into `out`,
+/// replacing files of the same name, and removes the files the last run
+/// listed in `out/.fhir-pipes-import.json` that this run did not write.
+/// Nothing else in `out` is touched.
+fn publish<'a>(
+    from: &Path,
+    out: &Path,
+    types: impl Iterator<Item = &'a String>,
+    package: &str,
+) -> Result<()> {
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let list = out.join(WRITTEN);
     let before: BTreeSet<String> = match std::fs::read_to_string(&list) {
@@ -350,7 +504,7 @@ fn publish(from: &Path, out: &Path, report: &Report) -> Result<()> {
         Err(_) => BTreeSet::new(),
     };
     let mut written = BTreeSet::new();
-    for t in report.output.keys() {
+    for t in types {
         let name = format!("{t}.ndjson");
         let (src, dest) = (from.join(&name), out.join(&name));
         if std::fs::rename(&src, &dest).is_err() {
@@ -366,7 +520,7 @@ fn publish(from: &Path, out: &Path, report: &Report) -> Result<()> {
             let _ = std::fs::remove_file(out.join(stale));
         }
     }
-    let record = json!({"package": report.package, "files": written});
+    let record = json!({"package": package, "files": written});
     crate::fs::atomic_write(&list, serde_json::to_string_pretty(&record)? + "\n")?;
     Ok(())
 }
@@ -413,6 +567,7 @@ pub fn test_command(args: &TestArgs) -> Result<()> {
             threads: threads(args.threads),
             duckdb: DUCKDB,
             echo: false,
+            require_ids: false,
         };
         let mut report = Report::default();
         let result = run::run(&package, &plan, &options, &mut report);

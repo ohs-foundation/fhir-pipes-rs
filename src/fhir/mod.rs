@@ -1,4 +1,5 @@
 pub mod chunks;
+pub mod content;
 pub mod edit;
 pub mod group;
 pub mod head;

@@ -1,4 +1,5 @@
-//! `import.toml`: the package's name, its steps in order and its data tests.
+//! `import.toml`: the package's name, its steps in order, its data tests and
+//! the elements `import run --previous` does not compare.
 //! Parsing checks the manifest on its own: the keys, the shape of each step
 //! and test, and that every stage step comes before the first library step.
 //! What the names refer to is checked against the package (`plan`).
@@ -16,6 +17,17 @@ pub struct Manifest {
     pub title: Option<String>,
     pub steps: Vec<Step>,
     pub tests: Vec<DataTest>,
+    /// `[compare] ignore`: elements left out when `import run --previous`
+    /// compares a resource with the previous run's.
+    pub ignore: Vec<IgnorePath>,
+}
+
+/// `ResourceType.path`: an element of a resource type, by the object keys
+/// that lead to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnorePath {
+    pub resource_type: String,
+    pub path: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +79,14 @@ struct File {
     step: Vec<StepFile>,
     #[serde(default)]
     test: Vec<TestFile>,
+    compare: Option<CompareFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompareFile {
+    #[serde(default)]
+    ignore: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,11 +134,58 @@ pub fn parse(text: &str, origin: &str) -> Result<Manifest> {
             "{origin}: data tests read Library results, and no step runs a Library"
         )));
     }
+    let mut ignore = Vec::new();
+    for p in file.compare.map(|c| c.ignore).unwrap_or_default() {
+        ignore.push(ignore_path(&p).map_err(|m| {
+            usage(format!(
+                "{origin}: compare.ignore {p:?}: {m}; give ResourceType.path, such as \
+                 MeasureReport.date or Observation.meta.tag"
+            ))
+        })?);
+    }
     Ok(Manifest {
         name: file.name,
         title: file.title,
         steps,
         tests,
+        ignore,
+    })
+}
+
+/// `ResourceType.path`: a resource type, then one or more element names
+/// separated by dots. The path names object keys; an array on the way is
+/// gone through, never indexed.
+fn ignore_path(p: &str) -> std::result::Result<IgnorePath, String> {
+    if p.contains(['[', ']']) {
+        return Err("arrays are not indexed: a path applies to every item of an array".into());
+    }
+    let mut parts = p.split('.');
+    let t = parts.next().unwrap_or_default();
+    if !crate::fhir::valid_type(t) {
+        return Err(format!("`{t}` is not a resource type"));
+    }
+    let path: Vec<String> = parts.map(str::to_string).collect();
+    if path.is_empty() {
+        return Err("names no element".into());
+    }
+    for name in &path {
+        let mut chars = name.chars();
+        let first_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!("`{name}` is not an element name"));
+        }
+    }
+    if path.len() == 1 && (path[0] == "id" || path[0] == "resourceType") {
+        return Err(format!(
+            "`{}` identifies the resource, so it is always compared",
+            path[0]
+        ));
+    }
+    Ok(IgnorePath {
+        resource_type: t.to_string(),
+        path,
     })
 }
 
@@ -354,6 +421,58 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT id FROM t;"
             "name = \"x\"\n[[step]]\nlibrary = \"L\"\n[[test]]\nlibrary = \"L\"\nuniq = [\"a\"]\n",
         );
         assert!(m.contains("unknown field `uniq`"), "{m}");
+    }
+
+    #[test]
+    fn compare_ignore_paths_are_checked() {
+        let m = parse(
+            "name = \"x\"\n[compare]\nignore = [\"MeasureReport.date\", \"Observation.meta.tag\", \"Patient._birthDate\"]\n",
+            "import.toml",
+        )
+        .unwrap();
+        assert!(m.steps.is_empty());
+        assert_eq!(
+            m.ignore,
+            vec![
+                IgnorePath {
+                    resource_type: "MeasureReport".into(),
+                    path: vec!["date".into()]
+                },
+                IgnorePath {
+                    resource_type: "Observation".into(),
+                    path: vec!["meta".into(), "tag".into()]
+                },
+                IgnorePath {
+                    resource_type: "Patient".into(),
+                    path: vec!["_birthDate".into()]
+                },
+            ]
+        );
+        assert!(
+            parse("name = \"x\"\n[compare]\n", "import.toml")
+                .unwrap()
+                .ignore
+                .is_empty()
+        );
+        let ignore = |p: &str| message(&format!("name = \"x\"\n[compare]\nignore = [{p:?}]\n"));
+        let m = ignore("MeasureReport.group[0].measureScore");
+        assert!(
+            m.contains("compare.ignore") && m.contains("arrays are not indexed"),
+            "{m}"
+        );
+        assert!(ignore("measureReport.date").contains("`measureReport` is not a resource type"));
+        assert!(ignore("MeasureReport").contains("names no element"));
+        assert!(ignore("MeasureReport.").contains("`` is not an element name"));
+        assert!(ignore("MeasureReport..date").contains("`` is not an element name"));
+        assert!(ignore("MeasureReport.da te").contains("`da te` is not an element name"));
+        assert!(ignore("MeasureReport.*").contains("is not an element name"));
+        assert!(ignore("MeasureReport.id").contains("identifies the resource"));
+        assert!(ignore("Patient.resourceType").contains("identifies the resource"));
+        // Unknown keys are refused, as elsewhere.
+        let m = message("name = \"x\"\n[compare]\nignored = [\"MeasureReport.date\"]\n");
+        assert!(m.contains("unknown field `ignored`"), "{m}");
+        let m = message("name = \"x\"\n[compare]\nignore = \"MeasureReport.date\"\n");
+        assert!(m.contains("invalid type"), "{m}");
     }
 
     #[test]

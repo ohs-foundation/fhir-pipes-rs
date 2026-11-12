@@ -97,7 +97,9 @@ days old. `--max-analytics-age 7d` refuses the run instead.
   reports DHIS2 no longer returns, to delete from the FHIR server. Reports
   for indicators, levels or periods not in this run are left alone.
   `--previous`, `--changed`, `--removed` and `--updated-since` compare
-  MeasureReports, so they cannot be used with `--records`.
+  MeasureReports, so they cannot be used with `--records`. With
+  `--records`, compare after the import instead (see
+  [Records and the import package](#records-and-the-import-package)).
 
 ```sh
 fhir-pipes dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndjson \
@@ -156,6 +158,26 @@ done
 
 Load Organizations before Locations: a facility Location refers to its
 Organization.
+
+`dhis2 reports --previous` cannot be combined with `--records`. To load
+only what changed on this route, compare after the import, with
+`import run --previous`, `--changed` and `--removed` (see
+[import.md](import.md#running-an-import-repeatedly)). The package's
+`import.toml` leaves a MeasureReport's `date`, the analytics build time,
+out of the comparison:
+
+```sh
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite \
+  --previous fhir --changed fhir-changed --removed fhir-removed.txt
+```
+
+`--removed` then lists every resource of the previous run that this run did
+not write, of every type in the folder. Unlike `dhis2 reports --removed`, it
+has no scope of indicators, org units and periods: give each run the same
+`--level`, `--period` and indicator options, and the same `locations` and
+`measures` selection, or the resources the run did not ask for are listed
+as removed. The lines are `MeasureReport/<id>`, sorted, where `dhis2 reports`
+writes the bare id in file order.
 
 ## Example
 

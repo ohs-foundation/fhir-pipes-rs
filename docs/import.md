@@ -16,8 +16,8 @@ fhir-pipes import test  --package examples/import/digit-visits
 [examples/import/digit-visits](../examples/import/digit-visits) uses every
 feature described here, on synthetic data.
 [examples/import/icr-dhis2](../examples/import/icr-dhis2) is the DHIS2
-import as a package: three record types, each through its own map, with no
-manifest, views or Libraries. Its records are what `fhir-pipes dhis2
+import as a package: three record types, each through its own map, with a
+manifest that has no steps and no views or Libraries. Its records are what `fhir-pipes dhis2
 locations|measures|reports --records` writes (see
 [dhis2.md](dhis2.md#records-and-the-import-package)).
 
@@ -50,7 +50,7 @@ A package is a folder:
 
 | Path | What it holds |
 |---|---|
-| `import.toml` | The manifest: the steps and the data tests. Optional |
+| `import.toml` | The manifest: the steps, the data tests and what `--previous` does not compare. Optional |
 | `models/` | StructureDefinition JSON with a snapshot: the logical models of the record types |
 | `maps/` | `*.map` (FML), StructureMap JSON and ConceptMap JSON |
 | `views/` | ViewDefinition JSON. Optional |
@@ -63,12 +63,22 @@ in. The DHIS2 models built into `dhis2 --maps` are not: the import reads
 the models in the package's `models/`, so
 [examples/import/icr-dhis2](../examples/import/icr-dhis2) uses its own copies.
 
-### Without a manifest
+### Without a manifest, or without steps
 
-With no `import.toml`, each record file is run through the one map in
-`maps/` whose first group reads its type, and the resources go to the
-output. A file whose type has no model, no such map or more than one is an
-error. The package is named after its folder.
+With no `import.toml`, or one with no `[[step]]`, each record file is run
+through the one map in `maps/` whose first group reads its type, and the
+resources go to the output. A file whose type has no model, no such map or
+more than one is an error. With no `import.toml`, the package is named after
+its folder; a manifest with no steps still gives the name and can have a
+`[compare]` section. [examples/import/icr-dhis2](../examples/import/icr-dhis2)
+has such a manifest:
+
+```toml
+name = "icr-dhis2"
+
+[compare]
+ignore = ["MeasureReport.date"]
+```
 
 ## import.toml
 
@@ -109,8 +119,9 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT u.t.crid FROM digit_visit, unnest(t
 | `title` | A title. Optional |
 | `[[step]]` | The steps, run in the order given |
 | `[[test]]` | Data tests on the Library results |
+| `[compare]` | What `import run --previous` does not compare. Optional |
 
-Any other key, here or in a step or test, is an error.
+Any other key, here or in a step, test or `[compare]`, is an error.
 
 ### Steps
 
@@ -184,6 +195,30 @@ after it. Every test runs, and every failure is reported with its count and
 first rows. If any fails, the run stops with exit 1 and writes nothing to
 `--out`: not even the output of steps that ran before the tests.
 
+### Compare
+
+```toml
+[compare]
+ignore = ["MeasureReport.date", "Observation.meta.tag"]
+```
+
+| Key | Meaning |
+|---|---|
+| `ignore` | Elements that [`import run --previous`](#running-an-import-repeatedly) does not compare, as `ResourceType.path` |
+
+A path is a resource type, then one or more element names separated by
+dots: a top-level element (`MeasureReport.date`) or an element inside
+objects (`Observation.meta.tag`). Arrays are not indexed: a path that goes
+through an array applies to every item of it (`MeasureReport.group.code`
+is the `code` of every group). The element is left out with everything
+under it, for that resource type only. `id` and `resourceType` cannot be
+left out. A path that does not fit this syntax is an error when the
+manifest is read.
+
+Use it for an element that changes on every run without the content
+changing. In the DHIS2 package, a MeasureReport's `date` is when DHIS2 last
+built its analytics tables, which changes every day.
+
 ## import check
 
 ```
@@ -225,6 +260,7 @@ package or the options.
 
 ```
 fhir-pipes import run --package DIR --in RAW --out OUT [--threads N] [--report FILE] [--overwrite] [--keep-work DIR]
+                      [--previous DIR [--changed DIR] [--removed FILE]]
 ```
 
 | Option | Meaning |
@@ -236,6 +272,9 @@ fhir-pipes import run --package DIR --in RAW --out OUT [--threads N] [--report F
 | `--threads N` | Threads that run the maps and views. Default: one per core. The output files are the same, byte for byte, at any count |
 | `--report FILE` | Write the run report, JSON, to this file |
 | `--keep-work DIR` | Keep the intermediate files in `DIR`, which must be empty or not exist |
+| `--previous DIR` | The `--out` folder of an earlier run of the same package. This run's resources are compared with it. See [Running an import repeatedly](#running-an-import-repeatedly) |
+| `--changed DIR` | Requires `--previous`. Gets the resources that are new or differ from the previous run, one `<ResourceType>.ndjson` per type, in the same order as in `--out`. A type with nothing changed gets no file. Must be empty or not exist, unless `--overwrite` |
+| `--removed FILE` | Requires `--previous`. Gets one `ResourceType/id` per line, sorted, for every resource of the previous run that this run did not write. Replaced if it exists |
 
 Each record is checked against its model (as `import check --in` does)
 before its map runs. The first record that does not fit, or that its map
@@ -248,7 +287,8 @@ The output holds every resource the non-staged steps wrote, one file per
 resource type, in step order and then record order. A map with a `Bundle`
 target writes the resources of its entries. Nothing is written to `--out`
 until every step and test has passed; the files are then moved in. A run
-that fails in a step or a test leaves `--out` as it was.
+that fails in a step or a test leaves `--out` as it was, and `--changed`
+and `--removed` too.
 
 `--out` gets a file `.fhir-pipes-import.json` listing the files the run
 wrote. With `--overwrite`, the next run removes only the files in that list
@@ -298,11 +338,76 @@ or read when a map does something unexpected.
 }
 ```
 
+With `--previous`, the report also has the comparison: the counts for every
+resource type together, and by type, including the types only the previous
+run had:
+
+```json
+"comparison": {
+  "previous": "fhir",
+  "new": 1, "changed": 1, "unchanged": 19, "removed": 1,
+  "types": {
+    "Location": {"new": 0, "changed": 0, "unchanged": 6, "removed": 0},
+    "MeasureReport": {"new": 1, "changed": 1, "unchanged": 6, "removed": 1}
+  }
+}
+```
+
 `status` is `ok`, `failed` (a data test failed; `examples` holds the first
 5 failing rows of each failed test) or `error` (with `error`, the message).
 `file` is `null` for a step whose record file is missing. The report is
 written whatever the outcome once the steps have started; a problem found
 before then (a bad package, a non-empty `--out`) is only printed.
+
+### Running an import repeatedly
+
+An import that runs every week mostly writes resources that have not
+changed. With `--previous`, the run compares its resources with an earlier
+run's, so only what changed needs loading, and what disappeared can be
+deleted from the FHIR server:
+
+```sh
+# The first run.
+fhir-pipes import run --package PKG --in raw --out fhir
+# Every run after it: fhir/ is the baseline, read and then replaced.
+fhir-pipes import run --package PKG --in raw --out fhir --overwrite \
+  --previous fhir --changed fhir-changed --removed fhir-removed.txt
+for f in fhir-changed/*.ndjson; do fhir-pipes load --server URL --in "$f"; done
+```
+
+- `--out` still gets every resource, so it is the baseline for the next run.
+- `--previous` can be the `--out` folder when `--overwrite` is given: the
+  previous resources are read before anything is replaced. Without
+  `--overwrite` that is refused.
+- A resource is identified by `resourceType` and `id`. With `--previous`,
+  a resource with no `id`, in this run or the previous one, is an error that
+  names the file and line (for this run, the record the map read).
+- A resource differs when its JSON content differs. Key order does not
+  matter. `meta.versionId`, `meta.lastUpdated` and `meta.source` are never
+  compared, as a FHIR server sets them: `--previous` can be a folder of
+  resources exported from the server. Nor are the elements in the
+  package's [`[compare] ignore`](#compare). Numbers are compared as written,
+  so `1` and `1.0` differ.
+- The files read in `--previous` are those its `.fhir-pipes-import.json`
+  lists, or with no such file, every `*.ndjson` and `*.ndjson.gz` file in
+  it.
+- `--changed` and `--removed` are written only when the run passes, and
+  before `--out` is replaced. A resource written twice in a run is compared
+  twice, and goes to `--changed` twice when it is new or changed.
+- `--changed` keeps a `.fhir-pipes-import.json` as `--out` does, so with
+  `--overwrite` the files of types that changed last time and not this
+  time are removed from it.
+- The files in `--changed` and the `--removed` file are readable by their
+  owner only on Unix (mode 0600), as the files in `--out` are.
+- Only the previous run's hashes are kept in memory: 16 bytes of key and 8
+  of content hash per resource. The previous files are read twice.
+
+`--removed` lists every resource of the previous run that this run did not
+write, so it is only meaningful when both runs cover the same scope: the
+same record files, from the same source selection. A run over a subset (one
+district, the last month) lists the rest as removed. `dhis2 reports
+--previous` handles this with a scope of indicators, org units and periods;
+`import run` has no such scope.
 
 ## import test
 
