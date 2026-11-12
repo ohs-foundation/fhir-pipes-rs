@@ -42,7 +42,6 @@ pub struct Profile {
     pub location: LocationProfile,
     #[serde(default)]
     pub organization: OrganizationProfile,
-    pub dhis2: Option<Dhis2Profile>,
     pub population: Option<PopulationProfile>,
     /// Where it came from: a path, a URL, or [`NO_PROFILE`].
     #[serde(skip)]
@@ -82,11 +81,9 @@ pub struct LocationProfile {
     /// `states`, `lgas`). A level not named here is `admin<level>`.
     #[serde(default)]
     pub admin_layers: Vec<String>,
-    /// `meta.profile` of the Locations `import` writes; else `[dhis2]
-    /// location_profile`.
+    /// `meta.profile` of the Locations `import` writes.
     pub profile: Option<String>,
-    /// The identifier system of the admin codes `import admin` writes; else
-    /// `[dhis2] country_code_system`.
+    /// The identifier system of the admin codes `import` writes.
     pub admin_code_system: Option<String>,
     #[serde(default, rename = "column")]
     pub columns: Vec<Column>,
@@ -100,8 +97,8 @@ pub struct OrganizationProfile {
     /// Prefix of the id of an Organization diff creates (`org-`).
     #[serde(default = "default_org_prefix")]
     pub id_prefix: String,
-    /// `meta.profile` of the facility Organizations `import sites` writes;
-    /// else `[dhis2] facility_organization_profile`.
+    /// `meta.profile` of the facility Organizations `import location-sites`
+    /// writes.
     pub profile: Option<String>,
     #[serde(default, rename = "column")]
     pub columns: Vec<Column>,
@@ -111,20 +108,12 @@ fn default_org_prefix() -> String {
     "org-".into()
 }
 
-/// `[dhis2]`: the URLs the `dhis2` commands wrote before the built-in
-/// mapping was removed. The `dhis2` commands no longer read it: the import
-/// package's parameters give those values. Four of its keys are still read
-/// as the fallbacks of `[location]` and `[organization]` keys (see
-/// `location_profile` and the methods after it); the other keys are
-/// accepted and ignored, so a profile written for an earlier fhir-pipes
-/// still loads.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Dhis2Profile {
-    pub location_profile: String,
-    pub facility_organization_profile: String,
-    pub location_type_system: String,
-    pub country_code_system: String,
-}
+/// The error for a profile with a `[dhis2]` section, which was removed.
+const DHIS2_SECTION_REMOVED: &str = "the [dhis2] section was removed. Remove it, and put its \
+     values under these keys: location_profile as [location] profile, \
+     facility_organization_profile as [organization] profile, location_type_system as the first \
+     of [location] type_systems, and country_code_system as [location] admin_code_system. The \
+     dhis2 commands take their URLs from the import package's parameters; see docs/profiles.md";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -230,7 +219,7 @@ impl Profile {
     }
 
     /// The end of a message saying the profile lacks `what` (such as
-    /// "[dhis2] section"): that no profile was given, or which profile
+    /// "[population] section"): that no profile was given, or which profile
     /// lacks it, and what to do.
     pub fn lacks(&self, what: &str) -> String {
         if self.is_base() {
@@ -245,8 +234,16 @@ impl Profile {
 
     /// Parse and check a profile's text; `source` is for messages.
     pub fn parse(text: &str, source: &str) -> Result<Self> {
-        let mut p: Profile = toml::from_str(text)
-            .map_err(|e| PipesError::Usage(format!("profile {source}: {e}")))?;
+        let mut p: Profile = toml::from_str(text).map_err(|e| {
+            // Said plainly, not as the parser's "unknown field".
+            let dhis2 = toml::from_str::<toml::Table>(text).is_ok_and(|t| t.contains_key("dhis2"));
+            let e = if dhis2 {
+                DHIS2_SECTION_REMOVED.to_string()
+            } else {
+                e.to_string()
+            };
+            PipesError::Usage(format!("profile {source}: {e}"))
+        })?;
         p.source = source.to_string();
         p.text = text.to_string();
         p.check()
@@ -373,41 +370,27 @@ impl Profile {
         )
     }
 
-    /// `meta.profile` of written Locations: `[location] profile`, else
-    /// `[dhis2] location_profile`.
+    /// `meta.profile` of written Locations: `[location] profile`.
     pub fn location_profile(&self) -> Option<&str> {
-        self.location
-            .profile
-            .as_deref()
-            .or(self.dhis2.as_ref().map(|d| d.location_profile.as_str()))
+        self.location.profile.as_deref()
     }
 
     /// `meta.profile` of written facility Organizations: `[organization]
-    /// profile`, else `[dhis2] facility_organization_profile`.
+    /// profile`.
     pub fn organization_profile(&self) -> Option<&str> {
-        self.organization.profile.as_deref().or(self
-            .dhis2
-            .as_ref()
-            .map(|d| d.facility_organization_profile.as_str()))
+        self.organization.profile.as_deref()
     }
 
     /// The system of written Location type codes: the first of `[location]
-    /// type_systems`, else `[dhis2] location_type_system`.
+    /// type_systems`.
     pub fn location_type_system(&self) -> Option<&str> {
-        self.location
-            .type_systems
-            .first()
-            .map(String::as_str)
-            .or(self.dhis2.as_ref().map(|d| d.location_type_system.as_str()))
+        self.location.type_systems.first().map(String::as_str)
     }
 
     /// The identifier system of written admin codes: `[location]
-    /// admin_code_system`, else `[dhis2] country_code_system`.
+    /// admin_code_system`.
     pub fn admin_code_system(&self) -> Option<&str> {
-        self.location
-            .admin_code_system
-            .as_deref()
-            .or(self.dhis2.as_ref().map(|d| d.country_code_system.as_str()))
+        self.location.admin_code_system.as_deref()
     }
 
     fn check(&self) -> std::result::Result<(), String> {
@@ -579,14 +562,29 @@ mod tests {
             ]
         );
         assert_eq!(p.admin_code_index(), Some(0));
-        assert!(p.dhis2.is_some() && p.population.is_some());
+        assert!(p.population.is_some());
+        assert_eq!(
+            p.location_profile(),
+            Some("https://icr.healthcampaigns.org/StructureDefinition/ICRLocation")
+        );
+        assert_eq!(
+            p.organization_profile(),
+            Some("https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization")
+        );
+        assert_eq!(
+            p.location_type_system(),
+            Some("https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs")
+        );
+        assert_eq!(
+            p.admin_code_system(),
+            Some("https://icr.healthcampaigns.org/identifiers/national-admin-code")
+        );
     }
 
     #[test]
     fn base_has_nothing_extra() {
         let p = Profile::base();
         assert_eq!(p.column_names().count(), 0);
-        assert!(p.dhis2.is_none());
         assert!(p.population().is_err());
         assert!(p.spatial_index_extension().is_err());
     }
@@ -722,6 +720,45 @@ mod tests {
         );
         icr_example().save_copy(dir.path());
         assert_eq!(Profile::for_snapshot(None, dir.path()).unwrap().name, "icr");
+    }
+
+    /// The `[dhis2]` section was removed: a profile with one does not load,
+    /// and the error says where its values go.
+    #[test]
+    fn a_dhis2_section_is_refused_with_where_its_values_go() {
+        let text = "name = \"old\"\n[dhis2]\nbase = \"https://example.org\"\n\
+                    location_profile = \"https://example.org/StructureDefinition/L\"\n";
+        let err = Profile::parse(text, "old.toml").unwrap_err().to_string();
+        assert!(
+            err.starts_with("profile old.toml: the [dhis2] section was removed"),
+            "{err}"
+        );
+        for key in [
+            "[location] profile",
+            "[organization] profile",
+            "[location] type_systems",
+            "[location] admin_code_system",
+            "import package's parameters",
+        ] {
+            assert!(err.contains(key), "{key}: {err}");
+        }
+        assert!(!err.contains("unknown field"), "{err}");
+        // Other unknown keys keep the parser's message.
+        let err = Profile::parse("[dhis]\n", "t.toml")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    /// Without the proper keys nothing is written: the `[dhis2]` fallback is
+    /// gone.
+    #[test]
+    fn the_urls_come_only_from_the_location_and_organization_keys() {
+        let p = Profile::parse("name = \"x\"\n", "t.toml").unwrap();
+        assert_eq!(p.location_profile(), None);
+        assert_eq!(p.organization_profile(), None);
+        assert_eq!(p.location_type_system(), None);
+        assert_eq!(p.admin_code_system(), None);
     }
 
     #[test]

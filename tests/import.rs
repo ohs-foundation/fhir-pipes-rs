@@ -13,6 +13,7 @@ const ICR_PROFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profile
 const NATIONAL_ADMIN_CODE: &str = "https://icr.healthcampaigns.org/identifiers/national-admin-code";
 const GRID3: &str = "https://icr.healthcampaigns.org/identifiers/grid3-globalid";
 const NHFR: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code";
+const ICR_LOCATION: &str = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation";
 const FACILITY_TYPE_CS: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs";
 
 fn square(x: f64) -> Value {
@@ -108,6 +109,12 @@ fn boundaries_then_sites() {
     assert_eq!(
         units[1]["identifier"],
         json!([{"system": NATIONAL_ADMIN_CODE, "value": "BA"}])
+    );
+    // The URLs from [location] profile, type_systems and admin_code_system.
+    assert_eq!(units[0]["meta"]["profile"], json!([ICR_LOCATION]));
+    assert_eq!(
+        units[0]["type"][0]["coding"][0]["system"],
+        "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs"
     );
     let report: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     assert_eq!(report["counts"], json!({}));
@@ -206,6 +213,12 @@ fn boundaries_then_sites() {
         json!([{"system": NHFR, "value": "08/1"}])
     );
     assert_eq!(sites[0]["type"][1]["coding"][0]["code"], "primary");
+    // From [organization] profile and [location] profile.
+    assert_eq!(
+        sites[0]["meta"]["profile"],
+        json!(["https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"])
+    );
+    assert_eq!(sites[1]["meta"]["profile"], json!([ICR_LOCATION]));
     // Fell back to the LGA.
     assert_eq!(sites[3]["partOf"]["reference"], "Location/nga-ba-toro");
     assert!(sites[5].get("position").is_none());
@@ -304,6 +317,52 @@ fn without_a_profile_the_shape_is_refused() {
         .stderr(contains("type_systems"))
         .stderr(contains("no profile was given. Pass one with --profile"))
         .stderr(contains("has none").not());
+    assert!(!out.exists());
+}
+
+/// Without `[location] profile` the Locations get no meta.profile. A
+/// `[dhis2]` section no longer stands in for the key: such a profile does not
+/// load.
+#[test]
+fn without_location_profile_the_locations_have_no_meta_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("p.toml");
+    std::fs::write(
+        &profile,
+        r#"name = "other"
+[location]
+admin_unit_type = "jurisdiction"
+type_systems = ["https://example.org/CodeSystem/location-type"]
+admin_code_system = "https://example.org/identifiers/admin-code"
+"#,
+    )
+    .unwrap();
+    let (out, a) = boundaries(dir.path(), profile.to_str(), &[]);
+    a.success();
+    let units = read_ndjson(&out);
+    assert!(
+        units.iter().all(|u| u.get("meta").is_none()),
+        "{:?}",
+        units[0]
+    );
+    // A profile that still has [dhis2] does not load: nothing is written.
+    std::fs::write(
+        &profile,
+        r#"name = "other"
+[location]
+admin_unit_type = "jurisdiction"
+type_systems = ["https://example.org/CodeSystem/location-type"]
+
+[dhis2]
+location_profile = "https://example.org/StructureDefinition/OtherLocation"
+"#,
+    )
+    .unwrap();
+    std::fs::remove_file(&out).unwrap();
+    let (out, a) = boundaries(dir.path(), profile.to_str(), &[]);
+    a.code(2)
+        .stderr(contains("the [dhis2] section was removed"))
+        .stderr(contains("location_profile as [location] profile"));
     assert!(!out.exists());
 }
 

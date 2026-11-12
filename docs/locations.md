@@ -167,7 +167,7 @@ fhir-pipes import location-boundaries --profile examples/profiles/icr.toml \
 - `--country NAME=CODE` writes the root (level 0); its id is the code as a slug (`nga`).
 - `--level LEVEL=NAME_PROP[:CODE_PROP]`, top down. The last level carries the boundaries. A unit above it is written once.
 - Unit ids are the parent's id, a hyphen, and the slug of the code (or name): `nga-ba-alkaleri-alkaleri-east`. They are the same on every run.
-- `--code-system URI` sets the identifier system for each unit's code (default: the profile's `[location] admin_code_system`, else `[dhis2] country_code_system`).
+- `--code-system URI` sets the identifier system for each unit's code (default: the profile's `[location] admin_code_system`).
 - `--alias LEVEL=PROPERTY` reads `;`-separated alternative names into `alias`; `import location-sites` matches them too.
 - `--dissolve-parents` gives every level above the last a boundary that is the union of the boundaries below it. It is derived, not authoritative.
 - The input must be WGS84 (reproject with `ogr2ogr -t_srs EPSG:4326`). Boundaries are checked and rewound to RFC 7946.
@@ -196,11 +196,11 @@ fhir-pipes import location-sites --profile examples/profiles/icr.toml \
 
 | In the output | Profile key |
 |---|---|
-| Location type codes' system | `[location] type_systems` (the first), else `[dhis2] location_type_system` |
+| Location type codes' system | `[location] type_systems` (the first) |
 | Admin unit type code | `[location] admin_unit_type` |
-| Location `meta.profile` | `[location] profile`, else `[dhis2] location_profile`; none: no `meta` |
-| Organization `meta.profile` | `[organization] profile`, else `[dhis2] facility_organization_profile` |
-| Admin code identifier system | `--code-system`, else `[location] admin_code_system`, else `[dhis2] country_code_system` |
+| Location `meta.profile` | `[location] profile`; none: no `meta` |
+| Organization `meta.profile` | `[organization] profile`; none: no `meta` |
+| Admin code identifier system | `--code-system`, else `[location] admin_code_system` |
 | Boundary extension | `[location] boundary_extensions` (the first), else the HL7 one |
 | Spatial index extension | `[location] spatial_index_extension` (needed for `--spatial-index`) |
 | Organization id prefix | `[organization] id_prefix` |

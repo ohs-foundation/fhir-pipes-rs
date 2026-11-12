@@ -27,9 +27,8 @@ Each command that uses a profile prints it on its first line, for example
 | `diff` | writes back built-in columns; refuses edits to other columns |
 | `index` | refuses (needs `spatial_index_extension`) |
 | `population` | refuses (needs `[population]`) |
-| `dhis2 …` | refuses (needs `[dhis2]`) |
 | `import location-boundaries`, `import location-sites` | refuses (needs the Location type system) |
-| `extract`, `export`, `load`, `sync`, `views` | not used |
+| `extract`, `export`, `load`, `sync`, `views`, `dhis2` | not used |
 
 A refusal exits 2. Its message ends "no profile was given. Pass one with
 --profile; see docs/profiles.md", or names the profile and the section it
@@ -53,7 +52,8 @@ warnings. It exits 1 on any error, so it can run in the IG's CI.
 | Message | Meaning |
 |---|---|
 | `profile …: unknown field …` | a key that does not exist, often a typo |
-| `… needs a profile with a [dhis2] / [population] section` | pass a profile that has it |
+| `… needs a profile with a [population] section` | pass a profile that has it |
+| `profile …: the [dhis2] section was removed …` | move its values to `[location] profile`, `[location] admin_code_system`, `[organization] profile` and `[location] type_systems`, then delete the section |
 | `index needs a profile that names … spatial_index_extension` | pass a profile that names it |
 | `profiles are fetched over https only` | use an https URL or a local file |
 | `warning: --profile … differs from …/profile.toml` | the snapshot was transformed with another profile |

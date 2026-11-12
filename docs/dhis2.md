@@ -226,9 +226,9 @@ The package must have no `[[step]]`: each record goes through the one map
 that reads its type. A package with steps is refused; run `dhis2 extract`
 and `import run` with it instead.
 
-A profile given with `--profile` is not read. If it has a `[dhis2]` section,
-which these commands read before fhir-pipes removed its built-in mapping,
-they print a warning that it is not read.
+A profile given with `--profile` is not read. The `[dhis2]` profile section
+these commands read before is removed; a profile that still has it does not
+load (see [profiles.md](profiles.md)).
 
 The options of `dhis2 locations` and `dhis2 measures` are those of the
 matching `dhis2 extract` command. `dhis2 reports` has the options of

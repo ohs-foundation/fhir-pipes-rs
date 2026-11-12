@@ -26,20 +26,17 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{Dhis2Command, Dhis2ExtractCommand, Dhis2Package};
 use crate::error::{PipesError, Result};
-use crate::profile::Profile;
 use maps::RecordMap;
 
 /// Instance names go into every id, so they are kept short.
 pub const MAX_INSTANCE_LEN: usize = 16;
 
 /// No `dhis2` command reads the profile. The URLs the resources carry are
-/// the package's parameters. A profile given with a `[dhis2]` section, which
-/// these commands read before, gets a warning that it is not read.
-pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
+/// the package's parameters.
+pub fn run(cmd: &Dhis2Command) -> anyhow::Result<()> {
     if let Dhis2Command::Extract(cmd) = cmd {
         return Ok(extract(cmd)?);
     }
-    warn_of_dhis2_section(profile);
     match cmd {
         Dhis2Command::Locations(args) => locations::run_locations(args)?,
         Dhis2Command::Measures(args) => measures::run_measures(args)?,
@@ -47,24 +44,6 @@ pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
         Dhis2Command::Extract(_) => unreachable!("handled above"),
     }
     Ok(())
-}
-
-/// One line on stderr when `profile`, a local file, has a `[dhis2]`
-/// section. A profile that cannot be read is left to the commands that
-/// read it.
-fn warn_of_dhis2_section(profile: Option<&str>) {
-    let Some(spec) = profile.filter(|s| !s.is_empty() && !s.starts_with("https://")) else {
-        return;
-    };
-    let Ok(text) = std::fs::read_to_string(spec) else {
-        return;
-    };
-    if Profile::parse(&text, spec).is_ok_and(|p| p.dhis2.is_some()) {
-        eprintln!(
-            "warning: profile {spec}: dhis2 no longer reads the [dhis2] section; the package's \
-             parameters give those values (change one with --param NAME=VALUE)"
-        );
-    }
 }
 
 /// The package of `dhis2 locations|measures|reports`, and the map in it

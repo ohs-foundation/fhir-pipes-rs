@@ -115,7 +115,7 @@ pub struct LocationBoundariesArgs {
     /// LEVEL=PROPERTY holding ';'-separated alternate names, written as alias; repeatable
     #[arg(long = "alias")]
     pub aliases: Vec<String>,
-    /// Identifier system of the admin codes; defaults to the profile's [location] admin_code_system (or [dhis2] country_code_system)
+    /// Identifier system of the admin codes; defaults to the profile's [location] admin_code_system
     #[arg(long)]
     pub code_system: Option<String>,
     /// Also give the country and every level above the last a boundary: the union of its children's (consistent with them, not authoritative)

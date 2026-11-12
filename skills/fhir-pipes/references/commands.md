@@ -142,7 +142,10 @@ package commands do not.
 
 ## dhis2
 
-All need a profile with a `[dhis2]` section. Nothing is written to DHIS2.
+None reads the profile. `locations`, `measures` and `reports` need an import
+package, `--package DIR` (such as `examples/import/icr-dhis2`), whose
+parameters give the URLs; `dhis2 extract …` writes the records without one.
+Nothing is written to DHIS2.
 Auth: `--dhis2-token` (`FHIR_PIPES_DHIS2_TOKEN`) or `--dhis2-user` and
 `--dhis2-password` (`FHIR_PIPES_DHIS2_USER`, `FHIR_PIPES_DHIS2_PASSWORD`);
 `--dhis2 URL` (`FHIR_PIPES_DHIS2_URL`).

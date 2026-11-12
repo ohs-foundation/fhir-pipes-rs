@@ -36,14 +36,20 @@ command uses `--profile` and warns.
 
 ## The file
 
-Unknown keys are refused, so a typo is an error, except in `[dhis2]`.
+Unknown keys are refused, so a typo is an error. A profile with a `[dhis2]`
+section, which older profiles have, does not load: the section was removed.
+Move its `location_profile` to `[location] profile`,
+`facility_organization_profile` to `[organization] profile`,
+`location_type_system` to the first of `[location] type_systems` and
+`country_code_system` to `[location] admin_code_system`, then delete the
+section. The `dhis2` commands take their URLs from the import package's
+parameters ([dhis2.md](dhis2.md)).
 Sections:
 
 | Section | Used for |
 |---|---|
-| `[location]` | Boundary, spatial index and overlay extensions; `admin_unit_type` (the type code of an administrative unit); `type_systems`; `admin_code_column`; `admin_layers`; `[[location.column]]` |
-| `[organization]` | `facility_type`, `id_prefix` (default `org-`), `[[organization.column]]` |
-| `[dhis2]` | No longer read by the `dhis2` commands, which warn when a profile has it. Four keys are read as fallbacks: `location_profile` for `[location] profile`, `facility_organization_profile` for `[organization] profile`, `location_type_system` for `[location] type_systems`, and `country_code_system` for `[location] admin_code_system` (see [locations.md](locations.md)). Other keys are accepted and ignored, so a profile written for an earlier fhir-pipes loads |
+| `[location]` | Boundary, spatial index and overlay extensions; `admin_unit_type` (the type code of an administrative unit); `type_systems`; `admin_code_column`; `admin_layers`; `profile` and `admin_code_system`, the `meta.profile` and admin code system `import location-*` write; `[[location.column]]` |
+| `[organization]` | `facility_type`, `id_prefix` (default `org-`), `profile` (the `meta.profile` of the facility Organizations `import location-sites` writes), `[[organization.column]]` |
 | `[population]` | Group profile, characteristic and source systems, extensions. Required for `fhir-pipes population` |
 
 `admin_unit_type` and `admin_code_column` give admin levels, `adminN_*`

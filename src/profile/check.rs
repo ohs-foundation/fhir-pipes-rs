@@ -684,25 +684,6 @@ pub fn check(profile: &Profile, ig: &Ig) -> CheckResult {
     for col in &profile.organization.columns {
         c.column("organization", "Organization", col);
     }
-    if let Some(d) = &profile.dhis2 {
-        c.structure("[dhis2] location_profile", &d.location_profile, "Location");
-        c.structure(
-            "[dhis2] facility_organization_profile",
-            &d.facility_organization_profile,
-            "Organization",
-        );
-        c.code_system(
-            "[dhis2] location_type_system",
-            &d.location_type_system,
-            &type_codes,
-            Severity::Error,
-        );
-        c.identifier_system(
-            "[dhis2] country_code_system",
-            &d.country_code_system,
-            "Location",
-        );
-    }
     if let Some(p) = &profile.population {
         c.structure("[population] group_profile", &p.group_profile, "Group");
         c.code_system(
@@ -772,9 +753,6 @@ fn not_read(profile: &Profile, ig: &Ig) -> Vec<(String, Vec<String>)> {
         read.extend(col.systems.iter().map(String::as_str));
     }
     read.extend(loc.admin_code_system.as_deref());
-    if let Some(d) = &profile.dhis2 {
-        read.insert(&d.country_code_system);
-    }
     let mut out = Vec::new();
     for ty in ["Location", "Organization"] {
         let missing: Vec<String> = ig
