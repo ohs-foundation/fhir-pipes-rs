@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
 use crate::dhis2::Instance;
 use crate::dhis2::api::{Dhis2, ServerInfo};
-use crate::dhis2::maps::RecordMap;
+use crate::dhis2::maps::{RecordMap, Writes};
 use crate::dhis2::measures::Indicator;
 use crate::dhis2::rerun::{Change, Checkpoint, Previous};
 use crate::error::{PipesError, Result};
@@ -26,8 +26,9 @@ use super::build::{Target, measure_report, report_id, stratum, stratum_record, v
 use super::periods::period_value;
 use super::plan::Unit;
 
-/// Totals that can be counted from the reports themselves, so a resumed run
-/// recounts them from what the interrupted run wrote.
+/// Totals that can be counted from the reports (or, with `--records`, the
+/// `DHIS2Value` records) themselves, so a resumed run recounts them from what
+/// the interrupted run wrote.
 #[derive(Debug, Default)]
 pub(super) struct Tally {
     pub(super) written: usize,
@@ -73,6 +74,48 @@ impl Tally {
         }
         change
     }
+
+    /// Counts one written `DHIS2Value` record (`--records`), from the
+    /// fields that hold what `add` reads from a MeasureReport: the subject
+    /// is `Location/` and `locationId`, the period extension is `period`,
+    /// and the breakdowns are `stratifier`. `--previous` is refused with
+    /// `--records`, so there is nothing to compare.
+    fn add_record(&mut self, r: &Value) {
+        self.ids
+            .insert(r["id"].as_str().unwrap_or_default().to_string());
+        self.written += 1;
+        if let Some(l) = r.get("locationId").and_then(Value::as_str) {
+            let s = format!("Location/{l}");
+            if !self.locations.contains(&s) {
+                self.locations.insert(s);
+            }
+        }
+        if let Some(pe) = r.get("period").and_then(Value::as_str)
+            && !self.periods.contains(pe)
+        {
+            self.periods.insert(pe.to_string());
+        }
+        self.stratified += r
+            .get("stratifier")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+    }
+
+    /// Counts one written line: a MeasureReport, or a record with `--records`.
+    fn count(
+        &mut self,
+        r: &Value,
+        writes: Writes,
+        previous: Option<&mut Previous>,
+    ) -> Option<Change> {
+        match writes {
+            Writes::Records => {
+                self.add_record(r);
+                None
+            }
+            _ => self.add(r, previous),
+        }
+    }
 }
 
 /// Turns fetched units into written reports. It runs on one thread and
@@ -93,9 +136,10 @@ pub(super) struct Writer<'a> {
     pub(super) campaign: Option<&'a str>,
     /// Analytics or data values, written in the source extension.
     pub(super) source: ReportSource,
-    /// `--maps`: the map that writes each MeasureReport from a `DHIS2Value`
-    /// record, instead of the built-in mapping.
-    pub(super) maps: Option<&'a RecordMap>,
+    /// The built-in mapping; `--maps`, the map that writes each
+    /// MeasureReport from a `DHIS2Value` record; or `--records`, the record
+    /// itself.
+    pub(super) writes: Writes<'a>,
     pub(super) state: Checkpoint,
     pub(super) checkpoint: PathBuf,
     pub(super) tally: Tally,
@@ -177,8 +221,9 @@ impl<'a> Writer<'a> {
                     );
                     continue;
                 };
-                // With --maps, `out` holds DHIS2Value records until they are written.
-                let make = if self.maps.is_some() {
+                // With --maps or --records, `out` holds DHIS2Value records
+                // until they are written.
+                let make = if self.writes.prepares_records() {
                     value_record
                 } else {
                     measure_report
@@ -208,7 +253,7 @@ impl<'a> Writer<'a> {
                     let Some((ind, _)) = self.target(row) else {
                         continue;
                     };
-                    let make = if self.maps.is_some() {
+                    let make = if self.writes.prepares_records() {
                         stratum_record
                     } else {
                         stratum
@@ -240,7 +285,7 @@ impl<'a> Writer<'a> {
                 );
                 continue;
             };
-            if self.maps.is_some() {
+            if self.writes.prepares_records() {
                 list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
                 let stratifier = json!({"dimension": b, "name": name, "stratum": list});
                 match r.get_mut("stratifier").and_then(Value::as_array_mut) {
@@ -280,15 +325,15 @@ impl<'a> Writer<'a> {
             .collect();
         // With --maps, the unit's records are transformed on several
         // threads, then written in order.
-        let mut outputs = self
-            .maps
-            .map(|map| map.transform_all(&pending))
-            .unwrap_or_default()
-            .into_iter();
+        let mut outputs = match self.writes {
+            Writes::Maps(map) => map.transform_all(&pending),
+            _ => Vec::new(),
+        }
+        .into_iter();
         for r in pending {
             let mapped;
-            let r = match self.maps {
-                Some(_) => {
+            let r = match self.writes {
+                Writes::Maps(_) => {
                     let id = r["id"].as_str().unwrap_or_default();
                     let output = outputs.next().expect("an output for each record");
                     let mut written = RecordMap::take(output, id, &mut self.state.report)?;
@@ -301,9 +346,9 @@ impl<'a> Writer<'a> {
                     mapped = written.remove(0);
                     &mapped
                 }
-                None => r,
+                Writes::BuiltIn | Writes::Records => r,
             };
-            let change = self.tally.add(r, self.previous.as_mut());
+            let change = self.tally.count(r, self.writes, self.previous.as_mut());
             self.out.write(r)?;
             if let (Some(w), Some(Change::New | Change::Changed)) = (self.changed.as_mut(), change)
             {
@@ -327,8 +372,8 @@ impl<'a> Writer<'a> {
         self.state.write(&self.checkpoint)
     }
 
-    /// After a resume: counts the reports the interrupted run wrote, and
-    /// marks their ids as written again for `--removed`.
+    /// After a resume: counts the reports (or records) the interrupted run
+    /// wrote, and marks their ids as written again for `--removed`.
     pub(super) fn recount(&mut self) -> Result<()> {
         let path = self.out.tmp().to_path_buf();
         let mut reader = self.out.read_back()?;
@@ -343,7 +388,7 @@ impl<'a> Writer<'a> {
                 return Ok(());
             }
             let r: Value = serde_json::from_str(&line)?;
-            self.tally.add(&r, self.previous.as_mut());
+            self.tally.count(&r, self.writes, self.previous.as_mut());
         }
     }
 }
@@ -530,5 +575,84 @@ mod tests {
         );
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    /// A resumed `--records` run recounts the summary from the records it
+    /// wrote: they must count as their MeasureReports do.
+    #[test]
+    fn a_record_counts_as_its_measure_report() {
+        use crate::dhis2::reports::build::{Target, measure_report, value_record};
+        use crate::report::Report;
+        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let ind = Indicator::parse(
+            &json!({"id": "tUIlpyeeX9N", "indicatorType": {"factor": 100},
+            "numerator": "#{a}", "denominator": "#{b}"}),
+        )
+        .unwrap();
+        let location = Target {
+            id: "sle-O6uvpzGd5pu".into(),
+            name: None,
+        };
+        let mut report_tally = Tally::default();
+        let mut record_tally = Tally::default();
+        let period = ("2025-01-01".to_string(), "2025-03-31".to_string());
+        let info = ServerInfo::default();
+        for (pe, ou) in [("202501", "a"), ("202502", "a"), ("20250101-20250331", "b")] {
+            let row = AnalyticsRow {
+                dx: ind.id.clone(),
+                pe: pe.into(),
+                ou: ou.into(),
+                value: "50.0".into(),
+                numerator: "5".into(),
+                denominator: "10".into(),
+                option: None,
+            };
+            let source = ReportSource::Analytics;
+            let mut issues = Report::default();
+            let mut r = measure_report(
+                &row,
+                &ind,
+                &location,
+                &period,
+                &instance,
+                &info,
+                None,
+                source,
+                &mut issues,
+            )
+            .unwrap();
+            let mut v = value_record(
+                &row,
+                &ind,
+                &location,
+                &period,
+                &instance,
+                &info,
+                None,
+                source,
+                &mut issues,
+            )
+            .unwrap();
+            // Two breakdowns on the monthly values.
+            if ou == "a" {
+                r["group"][0]["stratifier"] = json!([{}, {}]);
+                v["stratifier"] = json!([{}, {}]);
+            }
+            report_tally.count(&r, Writes::BuiltIn, None);
+            record_tally.count(&v, Writes::Records, None);
+        }
+        let seen = |t: &Tally| {
+            let mut l: Vec<String> = t.locations.iter().cloned().collect();
+            let mut p: Vec<String> = t.periods.iter().cloned().collect();
+            let mut i: Vec<String> = t.ids.iter().cloned().collect();
+            l.sort();
+            p.sort();
+            i.sort();
+            (t.written, t.stratified, l, p, i)
+        };
+        assert_eq!(seen(&record_tally), seen(&report_tally));
+        assert_eq!(report_tally.written, 3);
+        assert_eq!(report_tally.stratified, 4);
+        assert_eq!(report_tally.periods.len(), 3);
     }
 }

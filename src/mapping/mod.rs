@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn the_example_icr_maps_check_clean_and_cover_every_dhis2_record() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
         let package = MapPackage::load(&[dir], &MODELS).unwrap();
         let (errors, warnings) = package.check();
         assert!(

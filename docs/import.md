@@ -15,6 +15,11 @@ fhir-pipes import test  --package examples/import/digit-visits
 
 [examples/import/digit-visits](../examples/import/digit-visits) uses every
 feature described here, on synthetic data.
+[examples/import/icr-dhis2](../examples/import/icr-dhis2) is the DHIS2
+import as a package: three record types, each through its own map, with no
+manifest, views or Libraries. Its records are what `fhir-pipes dhis2
+locations|measures|reports --records` writes (see
+[dhis2.md](dhis2.md#records-and-the-import-package)).
 
 The same `import` command also has `location-boundaries` and
 `location-sites`, which are unrelated to packages; see
@@ -54,7 +59,9 @@ A package is a folder:
 
 `models/` and `maps/` are read together as one folder of maps (see
 [maps.md](maps.md#a-folder-of-maps)), with the FHIR R4 core definitions built
-in. The DHIS2 models built into `dhis2 --maps` are not.
+in. The DHIS2 models built into `dhis2 --maps` are not: the import reads
+the models in the package's `models/`, so
+[examples/import/icr-dhis2](../examples/import/icr-dhis2) uses its own copies.
 
 ### Without a manifest
 

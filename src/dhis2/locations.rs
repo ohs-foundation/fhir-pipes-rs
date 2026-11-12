@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::api::{Dhis2, under};
-use super::maps::{ORG_UNIT_MODEL, RecordMap, record_type};
+use super::maps::{ORG_UNIT_MODEL, RecordMap, Writes, record_type};
 use super::{Instance, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
@@ -327,8 +327,8 @@ fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
     out
 }
 
-/// The org unit as a `DHIS2OrgUnit` record (models/), the input of a
-/// `--maps` map.
+/// The org unit as a `DHIS2OrgUnit` record (examples/import/icr-dhis2/models):
+/// the input of a `--maps` map, or the line `--records` writes.
 fn record(p: &Prepared, opts: &Options) -> Value {
     let unit = p.unit;
     let mut r = json!({
@@ -448,13 +448,13 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
     }
 }
 
-/// Every Location and Organization for `units`, top level first, then by id.
-/// The resources for `units`, parents first, handed to `emit` as each unit
-/// is built.
+/// Every Location and Organization for `units` (or, with `--records`, every
+/// `DHIS2OrgUnit` record), top level first, then by id, handed to `emit` as
+/// each unit is built.
 pub fn build(
     units: &[OrgUnit],
     opts: &Options,
-    maps: Option<&RecordMap>,
+    writes: Writes,
     report: &mut Report,
     mut emit: impl FnMut(Value) -> Result<()>,
 ) -> Result<()> {
@@ -486,31 +486,34 @@ pub fn build(
             })
             .collect();
         // With --maps, the batch's records are transformed on several threads.
-        let records: Vec<Value> = match maps {
-            Some(_) => prepared
+        let records: Vec<Value> = if writes.prepares_records() {
+            prepared
                 .iter()
                 .filter_map(|(_, p)| p.as_ref())
                 .map(|p| record(p, opts))
-                .collect(),
-            None => Vec::new(),
+                .collect()
+        } else {
+            Vec::new()
         };
-        let records: Vec<&Value> = records.iter().collect();
-        let mut outputs = maps
-            .map(|map| map.transform_all(&records))
-            .unwrap_or_default()
-            .into_iter();
+        let mut outputs = match writes {
+            Writes::Maps(map) => map.transform_all(&records.iter().collect::<Vec<_>>()),
+            _ => Vec::new(),
+        }
+        .into_iter();
+        let mut records = records.into_iter();
         for (issues, p) in prepared {
             report.append(issues);
             let Some(p) = p else {
                 continue;
             };
-            let written = match maps {
-                Some(_) => RecordMap::take(
+            let written = match writes {
+                Writes::Maps(_) => RecordMap::take(
                     outputs.next().expect("an output for each record"),
                     &p.unit.id,
                     report,
                 )?,
-                None => built_in(&p, opts),
+                Writes::Records => vec![records.next().expect("a record for each unit")],
+                Writes::BuiltIn => built_in(&p, opts),
             };
             for resource in written {
                 emit(resource)?;
@@ -604,6 +607,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         )));
     }
     let maps = RecordMap::load(&args.conn.maps, ORG_UNIT_MODEL)?;
+    let writes = Writes::new(maps.as_ref(), args.conn.records);
     let api = Dhis2::connect(&args.conn)?;
     eprintln!(
         "DHIS2 {} ({})",
@@ -709,7 +713,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     // Written as built; the file is renamed into place at the end.
     let mut out = NdjsonWriter::create(&args.out)?;
     let mut organizations = 0usize;
-    build(&units, &opts, maps.as_ref(), &mut report, |resource| {
+    build(&units, &opts, writes, &mut report, |resource| {
         if resource["resourceType"] == "Organization" {
             organizations += 1;
         }
@@ -721,11 +725,19 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
     for u in &units {
         *per_level.entry(u.level).or_default() += 1;
     }
-    println!(
-        "Wrote {n} resources to {} ({} Locations, {organizations} Organizations)",
-        args.out.display(),
-        n - organizations
-    );
+    if args.conn.records {
+        println!(
+            "Wrote {n} {} records to {}",
+            record_type(ORG_UNIT_MODEL),
+            args.out.display()
+        );
+    } else {
+        println!(
+            "Wrote {n} resources to {} ({} Locations, {organizations} Organizations)",
+            args.out.display(),
+            n - organizations
+        );
+    }
     for (level, count) in &per_level {
         let name = level_names
             .get(&u64::from(*level))
@@ -753,7 +765,7 @@ mod tests {
 
     fn build_all(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Value> {
         let mut out = Vec::new();
-        build(units, opts, None, report, |r| {
+        build(units, opts, Writes::BuiltIn, report, |r| {
             out.push(r);
             Ok(())
         })
@@ -801,9 +813,10 @@ mod tests {
         }
     }
 
-    /// The example ICR maps (examples/maps/icr-dhis2).
+    /// The example ICR maps (examples/import/icr-dhis2/maps).
     fn icr_maps() -> RecordMap {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
         RecordMap::load(&[dir], ORG_UNIT_MODEL).unwrap().unwrap()
     }
 
@@ -873,7 +886,7 @@ mod tests {
         let maps = icr_maps();
         let mut mapped_report = Report::default();
         let mut mapped = Vec::new();
-        build(&units, &o, Some(&maps), &mut mapped_report, |r| {
+        build(&units, &o, Writes::Maps(&maps), &mut mapped_report, |r| {
             mapped.push(r);
             Ok(())
         })

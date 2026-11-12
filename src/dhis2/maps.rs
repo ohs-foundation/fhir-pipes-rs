@@ -4,9 +4,10 @@
 //! fhir-pipes still reads DHIS2 and prepares each record: the values that
 //! need other records or the run's options (ids, the parent that was
 //! exported, a merged boundary, parsed numbers). The record is an instance
-//! of one of the logical models in `models/`, which are built in. A map in
-//! the `--maps` folders whose first group reads that model turns the record
-//! into resources.
+//! of one of the logical models in examples/import/icr-dhis2/models, which
+//! are built in. A map in the `--maps` folders whose first group reads that
+//! model turns the record into resources. With `--records` the records
+//! themselves are written, for `fhir-pipes import run` to map later.
 
 use std::path::PathBuf;
 
@@ -27,10 +28,38 @@ pub const VALUE_MODEL: &str =
 
 /// The logical models of the records fhir-pipes prepares.
 pub const MODELS: [&str; 3] = [
-    include_str!("models/StructureDefinition-DHIS2OrgUnit.json"),
-    include_str!("models/StructureDefinition-DHIS2Indicator.json"),
-    include_str!("models/StructureDefinition-DHIS2Value.json"),
+    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2OrgUnit.json"),
+    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Indicator.json"),
+    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Value.json"),
 ];
+
+/// What a DHIS2 command writes for each record it prepares.
+#[derive(Clone, Copy)]
+pub enum Writes<'a> {
+    /// The resources of the built-in mapping.
+    BuiltIn,
+    /// `--maps`: the resources the map writes from the record.
+    Maps(&'a RecordMap),
+    /// `--records`: the record itself.
+    Records,
+}
+
+impl<'a> Writes<'a> {
+    /// `--records`, `--maps` (a loaded map) or neither. clap refuses both.
+    pub fn new(map: Option<&'a RecordMap>, records: bool) -> Self {
+        match (map, records) {
+            (_, true) => Writes::Records,
+            (Some(m), false) => Writes::Maps(m),
+            (None, false) => Writes::BuiltIn,
+        }
+    }
+
+    /// Whether the command prepares records rather than the built-in
+    /// resources.
+    pub fn prepares_records(self) -> bool {
+        !matches!(self, Writes::BuiltIn)
+    }
+}
 
 /// The map for one kind of record.
 pub struct RecordMap {

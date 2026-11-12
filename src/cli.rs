@@ -216,6 +216,9 @@ pub struct Dhis2Conn {
         value_delimiter = ','
     )]
     pub maps: Vec<PathBuf>,
+    /// Write the prepared records to --out instead of FHIR resources, one per line, for `fhir-pipes import run`: DHIS2OrgUnit (locations), DHIS2Indicator (measures), DHIS2Value (reports). Name the file after the record type (DHIS2OrgUnit.ndjson) in the folder given to import run --in
+    #[arg(long, conflicts_with = "maps")]
+    pub records: bool,
     /// Attempts per request
     #[arg(long, default_value_t = DEFAULT_RETRIES)]
     pub retries: usize,
@@ -264,7 +267,7 @@ pub struct Dhis2LocationsArgs {
     /// Every org unit group, as --org-unit-group
     #[arg(long, conflicts_with = "org_unit_groups")]
     pub all_org_unit_groups: bool,
-    /// Output NDJSON file of Location and Organization resources
+    /// Output NDJSON file of Location and Organization resources (with --records, DHIS2OrgUnit records)
     #[arg(long)]
     pub out: PathBuf,
     /// Also write the report as JSON to this file
@@ -302,7 +305,7 @@ pub struct Dhis2MeasuresArgs {
     pub conn: Dhis2Conn,
     #[command(flatten)]
     pub select: IndicatorSelection,
-    /// Output NDJSON file of Measure resources
+    /// Output NDJSON file of Measure resources (with --records, DHIS2Indicator records)
     #[arg(long)]
     pub out: PathBuf,
     /// Also write the report as JSON to this file
@@ -356,7 +359,7 @@ pub struct Dhis2ReportsArgs {
     /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
     pub concurrency: usize,
-    /// Output NDJSON file of MeasureReport resources: every report this run returns, with or without --previous, so it is the baseline for the next run
+    /// Output NDJSON file of MeasureReport resources (with --records, DHIS2Value records): every report this run returns, with or without --previous, so it is the baseline for the next run
     #[arg(long)]
     pub out: PathBuf,
     /// A previous run's --out (it may be the same file as --out): reports with the same content there count as unchanged. `date`, when DHIS2 last built its analytics tables, is not compared

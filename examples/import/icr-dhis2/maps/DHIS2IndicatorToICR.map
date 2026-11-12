@@ -3,8 +3,11 @@
 /// title = 'DHIS2 indicator, data element or reporting rate to Measure'
 /// status = 'draft'
 
-// Run by `fhir-pipes dhis2 measures --maps`. A percent (factor 100) is scored
-// proportion, another factor ratio, and a plain number (denominator 1) cohort.
+// Run by `fhir-pipes dhis2 measures --maps`, and by `fhir-pipes import run`
+// over the records `dhis2 measures --records` writes.
+//
+// A percent (factor 100) is scored proportion, another factor ratio, and a
+// plain number (denominator 1) cohort.
 //
 // Ids and urls are joined with `append` from source variables. FHIRPath is
 // kept where it reads more clearly than the alternative: there are few
