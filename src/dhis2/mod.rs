@@ -8,6 +8,9 @@
 //!   MeasureReport per indicator, org unit and period. The org unit is mapped
 //!   to its Location through that identifier.
 //!
+//! - `extract locations|measures|reports`: the records each of the above
+//!   maps, written to a folder for `fhir-pipes import run` instead.
+//!
 //! Every id is deterministic (`INSTANCE-<uid>…`), so re-running replaces the
 //! same resources. Nothing is written to DHIS2.
 
@@ -21,9 +24,11 @@ pub mod raw;
 pub mod reports;
 pub mod rerun;
 
+use std::path::{Path, PathBuf};
+
 use serde_json::{Value, json};
 
-use crate::cli::Dhis2Command;
+use crate::cli::{Dhis2Command, Dhis2ExtractCommand};
 use crate::error::{PipesError, Result};
 use crate::profile::{Dhis2Profile, Profile};
 
@@ -40,8 +45,40 @@ pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
         Dhis2Command::Locations(args) => locations::run_locations(args, &profile)?,
         Dhis2Command::Measures(args) => measures::run_measures(args, &profile)?,
         Dhis2Command::Reports(args) => reports::run_reports(args, &profile)?,
+        Dhis2Command::Extract(cmd) => extract(cmd, &profile)?,
     }
     Ok(())
+}
+
+/// `dhis2 extract`: the matching command run with its records written to
+/// `--out/<RecordType>.ndjson` instead of resources. Its temporary and
+/// `--resume` files sit beside that file, as `<RecordType>.ndjson.tmp` and
+/// `.resume`, which `import run` does not read.
+fn extract(cmd: &Dhis2ExtractCommand, profile: &Profile) -> Result<()> {
+    let file = |dir: &Path, model: &str| -> Result<PathBuf> {
+        if dir.exists() && !dir.is_dir() {
+            return Err(PipesError::Usage(format!(
+                "--out {}: is not a folder; dhis2 extract writes one file per record type in it",
+                dir.display()
+            )));
+        }
+        std::fs::create_dir_all(dir).map_err(|e| PipesError::io(dir, e))?;
+        Ok(dir.join(format!("{}.ndjson", maps::record_type(model))))
+    };
+    match cmd {
+        Dhis2ExtractCommand::Locations(args) => {
+            let out = file(&args.out, maps::ORG_UNIT_MODEL)?;
+            locations::run_locations(&args.clone().into_command(out), profile)
+        }
+        Dhis2ExtractCommand::Measures(args) => {
+            let out = file(&args.out, maps::INDICATOR_MODEL)?;
+            measures::run_measures(&args.clone().into_command(out), profile)
+        }
+        Dhis2ExtractCommand::Reports(args) => {
+            let out = file(&args.out, maps::VALUE_MODEL)?;
+            reports::run_reports(&(**args).clone().into_command(out), profile)
+        }
+    }
 }
 
 /// True for a name made of ASCII letters, digits and hyphens, 1–`max` long.

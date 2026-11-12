@@ -1,7 +1,10 @@
 # Design: a general import, with connectors that only extract
 
-Status: proposal, 12 November 2026. Nothing here is built yet except where
-it says so. Related notes:
+Status: proposal of 12 November 2026, with the decisions taken the same day
+(see [Decisions](#decisions-12-november-2026)). Built so far: `import
+check`, `run` and `test` with the manifest, Library results as the input of
+a map, record checks and package tests; `dhis2 extract`; and external
+commands (`fhir-pipes NAME` runs `fhir-pipes-NAME`). Related notes:
 [staged import pipeline](2026-11-11-staged-import-pipeline-and-features-to-add.md),
 [ViewDefinitions over logical models](2026-11-11-viewdefinition-over-logical-models.md).
 
@@ -11,8 +14,8 @@ Today `fhir-pipes dhis2` reads DHIS2 and turns what it reads into FHIR in one
 command. The second half is not specific to DHIS2. This proposal splits it:
 
 - A **connector** reads one source system and writes its records as NDJSON.
-  It can be Rust code in fhir-pipes, an OpenFn workflow, a script or a
-  database export.
+  It is a separate program: an OpenFn workflow, a script, a database export,
+  or a Rust program such as `fhir-pipes-dhis2`.
 - An **import package** states how those records become FHIR resources:
   logical models, maps, ConceptMaps, and views and SQL where records have to
   be joined or grouped. It is published with an implementation guide.
@@ -111,11 +114,23 @@ folder beside `OUT`, mode 0600, and removed when the run ends.
 
 ## Connectors
 
-A connector in fhir-pipes does only what needs the source's API:
+A connector does only what needs the source's API. It is a separate
+program, not part of the core binary; see [connectors.md](../connectors.md).
 
 - `dhis2 extract`: org units, indicators and values. It keeps the request
-  planning, resume and `--previous` comparison that `dhis2 reports` has now.
-- `digit extract`: paged `_search` calls per entity, with `lastChangedSince`.
+  planning and resume that `dhis2 reports` has. The `--previous` comparison
+  stays with `dhis2 reports`, since it compares MeasureReports; after the
+  import, `import run --previous` compares the resources. For now it is a
+  command of fhir-pipes; it moves to `fhir-pipes-dhis2` later (see the
+  decisions).
+- DIGIT: paged `_search` calls per entity, with `lastChangedSince`. This
+  stays in Python in the implementation guide's repository. There will be
+  no `digit extract` in Rust.
+
+`fhir-pipes NAME ARGS…`, for a NAME that is not a built-in command, runs
+the program `fhir-pipes-NAME` from the folder of fhir-pipes or the `PATH`,
+as git and cargo do, so a connector installed that way runs as a fhir-pipes
+command.
 
 Anything else can stand in for a connector. OpenFn is the obvious one where
 scheduling, credentials and retries are wanted, or where it already has an
@@ -126,37 +141,57 @@ runs `load`. The mapping still lives in the package, not in job code.
 
 | Today | Proposed |
 |---|---|
-| `dhis2 locations`, `measures`, `reports` read and write FHIR | `dhis2 extract` writes records; `import run` writes FHIR. The three commands can stay as shorthands for the two steps |
+| `dhis2 locations`, `measures`, `reports` read and write FHIR | `dhis2 extract` writes records (built); `import run` writes FHIR. The three commands go when the built-in mapping is removed, and `dhis2 extract` moves to `fhir-pipes-dhis2` |
 | Logical models compiled into the binary (`src/dhis2/models`) | In the package |
 | Built-in Rust mapping and the `[dhis2]` URL settings in the profile | Removed, once a real DHIS2 run has gone through the maps |
 | Preparation in Rust: merged boundaries, the parent check, counts, breakdowns attached to totals | Stays in the connector at first, which emits prepared records as now. Pieces move to SQL in the package only where there is a reason |
 
 The built-in mapping is faster (the maps take about 0.25 ms of CPU per
-record). Keeping it as a fast path for very large `reports` runs is the
-alternative to removing it.
+record). Keeping it as a fast path for very large `reports` runs was the
+alternative to removing it; it is to be removed (decision 3 below).
 
 ## What has to be built
 
-1. `import run`, `check` and `test`, and the manifest.
-2. A SQLQuery result as the input of a map. Views and Libraries already run
-   over local files through `refresh --input`; the import needs the same
-   without the warehouse layout.
-3. Checking records against a logical model.
-4. Package tests and data checks.
-5. `digit extract`, and the DIGIT package in the IG, compared with what
-   `icr/tools/digit/transform/transform.py` writes for the demo tenant.
-6. `dhis2 extract`, and the DHIS2 commands rewritten on top of the import.
+1. `import run`, `check` and `test`, and the manifest (built).
+2. A SQLQuery result as the input of a map (built). Views and Libraries
+   already ran over local files through `refresh --input`; the import needed
+   the same without the warehouse layout.
+3. Checking records against a logical model (built).
+4. Package tests and data checks (built).
+5. The DIGIT package in the IG, compared with what
+   `icr/tools/digit/transform/transform.py` writes for the demo tenant. The
+   extraction stays in Python there.
+6. `dhis2 extract` (built).
+7. The removal of the built-in DHIS2 mapping, then the move of the DHIS2
+   connector to its own crate and binary, `fhir-pipes-dhis2`.
 
 Order: 1 to 4 together with the DIGIT package, since DIGIT uses every stage;
-then DHIS2; then the removal of the built-in mapping.
+then DHIS2; then the removal of the built-in mapping; then the DHIS2 crate.
+
+## Decisions (12 November 2026)
+
+1. **Connectors are separate programs**, not part of the core binary. The
+   contract is the folder of NDJSON files above. Any program in any
+   language can be a connector.
+2. **External commands.** `fhir-pipes NAME` runs `fhir-pipes-NAME` when NAME
+   is not a built-in command, looked for in the folder of fhir-pipes, then
+   on the `PATH`. `--profile` given before NAME reaches the program as
+   `FHIR_PIPES_PROFILE`.
+3. **DHIS2** moves to its own crate and binary, `fhir-pipes-dhis2`, after
+   the built-in mapping is removed. Until then `dhis2 extract` is a command
+   of fhir-pipes, and `--records` on the three `dhis2` commands is gone.
+4. **DIGIT** extraction stays in Python, in the implementation guide's
+   repository. `digit extract` will not be built in Rust.
+5. **No plugin system** that loads libraries or WebAssembly modules. A
+   separate program and a folder of files are enough.
 
 ## Open decisions
 
 1. **Where packages live.** Proposed: in the implementation guide's
    repository, next to the profiles they target. fhir-pipes keeps small
    examples for its own tests.
-2. **The built-in DHIS2 mapping.** Remove it, or keep it as a fast path.
-   Proposed: remove, after a real run through the maps.
+2. **The built-in DHIS2 mapping.** Decided: remove it, after a real run
+   through the maps, then move DHIS2 to `fhir-pipes-dhis2` (decision 3).
 3. **The manifest format.** TOML, as above and as the Library sources use,
    or a FHIR resource so that the pipeline itself is published in the IG.
    Proposed: TOML to start.

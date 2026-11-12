@@ -180,7 +180,7 @@ pub fn measure_report(
 }
 
 /// The row as a `DHIS2Value` record (examples/import/icr-dhis2/models), the
-/// input of a `--maps` map or the line `--records` writes, or `None` after
+/// input of a `--maps` map or the line `dhis2 extract` writes, or `None` after
 /// reporting why there is none. Breakdowns are added to its `stratifier`
 /// afterwards.
 #[allow(clippy::too_many_arguments)]

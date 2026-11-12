@@ -26,7 +26,7 @@ use super::build::{Target, measure_report, report_id, stratum, stratum_record, v
 use super::periods::period_value;
 use super::plan::Unit;
 
-/// Totals that can be counted from the reports (or, with `--records`, the
+/// Totals that can be counted from the reports (or, with `dhis2 extract`, the
 /// `DHIS2Value` records) themselves, so a resumed run recounts them from what
 /// the interrupted run wrote.
 #[derive(Debug, Default)]
@@ -75,11 +75,11 @@ impl Tally {
         change
     }
 
-    /// Counts one written `DHIS2Value` record (`--records`), from the
+    /// Counts one written `DHIS2Value` record (`dhis2 extract`), from the
     /// fields that hold what `add` reads from a MeasureReport: the subject
     /// is `Location/` and `locationId`, the period extension is `period`,
     /// and the breakdowns are `stratifier`. `--previous` is refused with
-    /// `--records`, so there is nothing to compare.
+    /// `dhis2 extract`, so there is nothing to compare.
     fn add_record(&mut self, r: &Value) {
         self.ids
             .insert(r["id"].as_str().unwrap_or_default().to_string());
@@ -101,7 +101,7 @@ impl Tally {
             .map_or(0, Vec::len);
     }
 
-    /// Counts one written line: a MeasureReport, or a record with `--records`.
+    /// Counts one written line: a MeasureReport, or a record with `dhis2 extract`.
     fn count(
         &mut self,
         r: &Value,
@@ -137,7 +137,7 @@ pub(super) struct Writer<'a> {
     /// Analytics or data values, written in the source extension.
     pub(super) source: ReportSource,
     /// The built-in mapping; `--maps`, the map that writes each
-    /// MeasureReport from a `DHIS2Value` record; or `--records`, the record
+    /// MeasureReport from a `DHIS2Value` record; or `dhis2 extract`, the record
     /// itself.
     pub(super) writes: Writes<'a>,
     pub(super) state: Checkpoint,
@@ -221,7 +221,7 @@ impl<'a> Writer<'a> {
                     );
                     continue;
                 };
-                // With --maps or --records, `out` holds DHIS2Value records
+                // With --maps or dhis2 extract, `out` holds DHIS2Value records
                 // until they are written.
                 let make = if self.writes.prepares_records() {
                     value_record
@@ -459,7 +459,7 @@ pub(super) fn fetch_and_write(
     start: usize,
 ) -> Result<()> {
     let total = units.len();
-    let workers = args.concurrency.min(total - start).max(1);
+    let workers = args.opts.concurrency.min(total - start).max(1);
     let window = workers * 2;
     let stop = AtomicBool::new(false);
     let written = (Mutex::new(start), Condvar::new());
@@ -489,7 +489,7 @@ pub(super) fn fetch_and_write(
             if stop.load(Ordering::Relaxed) {
                 return None;
             }
-            Some((i, fetch_unit(api, values, &args.breakdowns, &units[i])))
+            Some((i, fetch_unit(api, values, &args.opts.breakdowns, &units[i])))
         },
         |fetched| {
             // After a failure, what workers still mid-request send is dropped.
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(thousands(1_234_567), "1,234,567");
     }
 
-    /// A resumed `--records` run recounts the summary from the records it
+    /// A resumed `dhis2 extract` run recounts the summary from the records it
     /// wrote: they must count as their MeasureReports do.
     #[test]
     fn a_record_counts_as_its_measure_report() {

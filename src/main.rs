@@ -4,6 +4,7 @@ mod dhis2;
 mod diff;
 mod error;
 mod export;
+mod external;
 mod extract;
 mod fhir;
 mod fs;
@@ -43,7 +44,10 @@ use clap::Parser;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
-    let cli = cli::Cli::parse();
+    let cli = match cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => std::process::exit(external_or_error(err)),
+    };
     if let Err(err) = run(cli) {
         // A check that failed has already printed its findings.
         if !err.is::<error::Findings>() {
@@ -51,6 +55,36 @@ fn main() {
         }
         std::process::exit(error::exit_code(&err));
     }
+}
+
+/// When clap does not know the first command, runs the external command
+/// `fhir-pipes-NAME` if there is one (see `external`), and returns its exit
+/// code. Otherwise prints clap's error, and for an unknown command a line
+/// saying where `fhir-pipes-NAME` was looked for, and returns clap's code.
+fn external_or_error(err: clap::Error) -> i32 {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let name = match (err.kind(), err.get(ContextKind::InvalidSubcommand)) {
+        (ErrorKind::InvalidSubcommand, Some(ContextValue::String(name))) => Some(name.clone()),
+        _ => None,
+    };
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let call = name.as_deref().and_then(|n| external::call(&argv, n));
+    if let Some(call) = &call {
+        let exe = std::env::current_exe().ok();
+        let exe_dir = exe.as_deref().and_then(std::path::Path::parent);
+        let path = std::env::var_os("PATH");
+        if let Some(program) = external::find(&call.name, exe_dir, path.as_deref()) {
+            return external::run(&program, call);
+        }
+    }
+    let _ = err.print();
+    if let Some(call) = call {
+        eprintln!(
+            "fhir-pipes-{} was not found next to fhir-pipes or on the PATH",
+            call.name
+        );
+    }
+    err.exit_code()
 }
 
 fn run(cli: cli::Cli) -> anyhow::Result<()> {

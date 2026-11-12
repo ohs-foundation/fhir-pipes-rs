@@ -149,7 +149,7 @@ Auth: `--dhis2-token` (`FHIR_PIPES_DHIS2_TOKEN`) or `--dhis2-user` and
 
 - `dhis2 locations --dhis2 URL --instance NAME --out FILE [--country-code CC] [--facility-level N] [--root UID] [--id-prefix P]`
 - `dhis2 measures --dhis2 URL --instance NAME --out FILE (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) …`
-- `dhis2 reports --dhis2 URL --instance NAME --locations LOCATIONS.ndjson --level N … (--period P … | --range START:END …) (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) … --out FILE [--source analytics|data-values] [--previous FILE --changed FILE --removed FILE] [--resume] [--concurrency 4] [--records]`: needs at least one of the same selection flags as `measures`.
+- `dhis2 reports --dhis2 URL --instance NAME --locations LOCATIONS.ndjson --level N … (--period P … | --range START:END …) (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) … --out FILE [--source analytics|data-values] [--previous FILE --changed FILE --removed FILE] [--resume] [--concurrency 4]`: needs at least one of the same selection flags as `measures`.
 
 ## profile check
 
@@ -183,9 +183,14 @@ resources. ConceptMap JSON in the folders serves `translate()`.
 instead of the built-in mapping; examples/import/icr-dhis2/maps holds the ICR
 maps. See docs/maps.md.
 
-`dhis2 locations|measures|reports --records` writes the prepared records
-(`DHIS2OrgUnit`, `DHIS2Indicator`, `DHIS2Value`) instead of resources, for
-`import run --package examples/import/icr-dhis2`; name each file after its
-record type in the `--in` folder. Not with `--maps`; `dhis2 reports` refuses
-it with `--previous`, `--changed`, `--removed` and `--updated-since`.
-`--resume` works. See docs/dhis2.md.
+`dhis2 extract locations|measures|reports --out DIR` writes the prepared
+records (`DHIS2OrgUnit`, `DHIS2Indicator`, `DHIS2Value`) instead of
+resources, to `DIR/<RecordType>.ndjson`, for
+`import run --package examples/import/icr-dhis2 --in DIR`. It takes the
+options of the matching command except `--maps`; `extract reports` has no
+`--previous`, `--changed`, `--removed` or `--updated-since`. `--resume`
+works. See docs/dhis2.md.
+
+`fhir-pipes NAME ARGS…`, where NAME is not a built-in command, runs the
+program `fhir-pipes-NAME` from the folder of fhir-pipes or the PATH. See
+docs/connectors.md.

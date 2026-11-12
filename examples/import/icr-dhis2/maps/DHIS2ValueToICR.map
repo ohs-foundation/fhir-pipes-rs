@@ -4,7 +4,7 @@
 /// status = 'draft'
 
 // Run by `fhir-pipes dhis2 reports --maps`, and by `fhir-pipes import run`
-// over the records `dhis2 reports --records` writes.
+// over the records `dhis2 extract reports` writes.
 //
 // One summary MeasureReport per value, with a stratifier for each breakdown.
 //

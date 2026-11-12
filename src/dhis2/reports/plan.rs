@@ -194,26 +194,26 @@ pub(super) fn plan_run(
     system: &str,
     ranges: Vec<DateRange>,
 ) -> Result<Planned> {
-    let mut periods = unique(&args.periods);
+    let mut periods = unique(&args.opts.periods);
     let mut ranges = ranges;
     let mut raw: Option<RawSource> = None;
     let mut levels: Vec<(u32, u64)> = Vec::new();
-    let units = if args.source == ReportSource::DataValues {
+    let units = if args.opts.source == ReportSource::DataValues {
         if let Some(p) = periods.iter().find(|p| Span::of_period(p).is_none()) {
             return Err(PipesError::Usage(format!(
                 "--period {p}: --source data-values knows the dates of days, ISO weeks, months, bi-months, quarters, six-months and years only (no relative periods); use --range for other spans"
             )));
         }
-        let mut src = prepare(api, indicators, &args.breakdowns)?;
+        let mut src = prepare(api, indicators, &args.opts.breakdowns)?;
         let mut by_level = Vec::new();
-        for level in unique(&args.levels) {
-            let ous = org_unit_ids(api, level, args.root.as_deref())?;
+        for level in unique(&args.opts.levels) {
+            let ous = org_unit_ids(api, level, args.opts.root.as_deref())?;
             eprintln!("level {level}: {} org units", ous.len());
             levels.push((level, ous.len() as u64));
             by_level.push((level, ous));
         }
-        let parents = load_parents(&args.locations, system)?;
-        src.place(&parents, &by_level, args.root.as_deref());
+        let parents = load_parents(&args.opts.locations, system)?;
+        src.place(&parents, &by_level, args.opts.root.as_deref());
         if let Some(since) = &args.updated_since {
             let spans: Vec<Span> = periods
                 .iter()
@@ -230,29 +230,36 @@ pub(super) fn plan_run(
             );
         }
         let units = plan_all_levels(
-            &unique(&args.levels),
+            &unique(&args.opts.levels),
             parents.len() as u64,
             &periods,
             &ranges,
             ids,
-            args.chunk,
-            args.max_rows,
+            args.opts.chunk,
+            args.opts.max_rows,
             &|chunk| src.elements_of(chunk).len(),
         );
         eprintln!("{} batches, one dataValueSets request each", units.len());
         raw = Some(src);
         units
     } else {
-        for level in unique(&args.levels) {
-            let n = org_unit_count(api, level, args.root.as_deref())?;
+        for level in unique(&args.opts.levels) {
+            let n = org_unit_count(api, level, args.opts.root.as_deref())?;
             eprintln!("level {level}: {n} org units");
             levels.push((level, n));
         }
-        let units = plan(&levels, &periods, &ranges, ids, args.chunk, args.max_rows);
+        let units = plan(
+            &levels,
+            &periods,
+            &ranges,
+            ids,
+            args.opts.chunk,
+            args.opts.max_rows,
+        );
         eprintln!(
             "{} batches, {} analytics requests unless DHIS2 calls some too large",
             units.len(),
-            units.len() * (1 + args.breakdowns.len())
+            units.len() * (1 + args.opts.breakdowns.len())
         );
         units
     };

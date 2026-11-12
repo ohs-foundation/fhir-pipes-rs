@@ -99,32 +99,32 @@ fn unique<T: Clone + PartialEq>(list: &[T]) -> Vec<T> {
 
 pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -> Result<()> {
     check_args(args)?;
-    let from_values = args.source == ReportSource::DataValues;
+    let from_values = args.opts.source == ReportSource::DataValues;
     let instance = Instance::new(&args.conn.instance, profile)?;
-    let ranges = unique(&args.ranges)
+    let ranges = unique(&args.opts.ranges)
         .iter()
         .map(|r| DateRange::parse(r))
         .collect::<Result<Vec<_>>>()?;
-    if let Some(c) = &args.campaign {
+    if let Some(c) = &args.opts.campaign {
         check_campaign(c)?;
     }
-    if !args.locations.is_file() {
+    if !args.opts.locations.is_file() {
         return Err(PipesError::Usage(format!(
             "--locations {}: no such file",
-            args.locations.display()
+            args.opts.locations.display()
         )));
     }
     let system = instance.orgunit_system();
-    let mapping = load_mapping(&args.locations, &system)?;
+    let mapping = load_mapping(&args.opts.locations, &system)?;
     if mapping.is_empty() {
         return Err(PipesError::Usage(format!(
             "no Location in {} carries an identifier under {system}; run `fhir-pipes dhis2 locations --instance {}` and load its output first",
-            args.locations.display(),
+            args.opts.locations.display(),
             instance.name
         )));
     }
 
-    let maps = RecordMap::load(&args.conn.maps, VALUE_MODEL)?;
+    let maps = RecordMap::load(&args.maps.dirs, VALUE_MODEL)?;
     let api = Dhis2::connect(&args.conn)?;
     if !from_values {
         match &api.info.last_analytics {
@@ -134,13 +134,13 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        if let Some(warning) = check_analytics_age(&api.info, args.max_analytics_age, now)? {
+        if let Some(warning) = check_analytics_age(&api.info, args.opts.max_analytics_age, now)? {
             eprintln!("{warning}");
         }
     }
     let indicators = fetch_indicators(&api, &args.select)?;
     let ids: Vec<String> = indicators.keys().cloned().collect();
-    check_report_ids(&instance, &ranges, &unique(&args.periods), &ids)?;
+    check_report_ids(&instance, &ranges, &unique(&args.opts.periods), &ids)?;
 
     let plan = plan_run(args, &api, &indicators, &ids, &system, ranges)?;
     let total = plan.units.len();
@@ -173,7 +173,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
             indicators: &indicators,
         },
         None => Values::Analytics {
-            root: args.root.as_deref(),
+            root: args.opts.root.as_deref(),
         },
     };
     let mut w = Writer {
@@ -184,9 +184,9 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         info: &info,
         indicators: &indicators,
         mapping: &mapping,
-        campaign: args.campaign.as_deref(),
-        source: args.source,
-        writes: Writes::new(maps.as_ref(), args.conn.records),
+        campaign: args.opts.campaign.as_deref(),
+        source: args.opts.source,
+        writes: Writes::new(maps.as_ref(), args.records),
         state,
         checkpoint: checkpoint.clone(),
         tally: Tally::default(),
@@ -228,7 +228,7 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
     check_out(&args.out)?;
     // A dimension with items (`UID:a;b`) names its analytics column by the
     // UID alone, and goes into report ids and codes: only a bare UID.
-    for b in &args.breakdowns {
+    for b in &args.opts.breakdowns {
         if b.len() != UID_LEN || !b.bytes().all(|c| c.is_ascii_alphanumeric()) {
             return Err(PipesError::Usage(format!(
                 "--breakdown {b:?}: expected the UID of a category or group set (11 letters \
@@ -236,16 +236,16 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
             )));
         }
     }
-    if args.chunk == 0 {
+    if args.opts.chunk == 0 {
         return Err(PipesError::Usage("--chunk must be at least 1".into()));
     }
-    if args.max_rows == 0 {
+    if args.opts.max_rows == 0 {
         return Err(PipesError::Usage("--max-rows must be at least 1".into()));
     }
-    if args.concurrency == 0 {
+    if args.opts.concurrency == 0 {
         return Err(PipesError::Usage("--concurrency must be at least 1".into()));
     }
-    if args.levels.contains(&0) {
+    if args.opts.levels.contains(&0) {
         return Err(PipesError::Usage(
             "--level counts from 1, the top of the DHIS2 tree".into(),
         ));
@@ -260,7 +260,7 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
         ("--out", Some(&args.out)),
         ("--changed", args.changed.as_ref()),
         ("--removed", args.removed.as_ref()),
-        ("--report", args.report.as_ref()),
+        ("--report", args.opts.report.as_ref()),
         ("--previous", args.previous.as_ref()),
     ]
     .into_iter()
@@ -277,7 +277,7 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
             }
         }
     }
-    let from_values = args.source == ReportSource::DataValues;
+    let from_values = args.opts.source == ReportSource::DataValues;
     if let Some(since) = &args.updated_since {
         if !from_values {
             return Err(PipesError::Usage(
@@ -291,16 +291,6 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
                 "--updated-since {since:?}: expected YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
             )));
         }
-    }
-    // --changed, --removed and --updated-since need --previous, so this
-    // refuses them too.
-    if args.conn.records && args.previous.is_some() {
-        return Err(PipesError::Usage(
-            "--records cannot be used with --previous: the comparison with a previous run \
-             (--previous, --changed, --removed, --updated-since) needs the MeasureReports, \
-             and --records writes DHIS2Value records instead"
-                .into(),
-        ));
     }
     if let Some(p) = &args.previous
         && !p.is_file()
@@ -377,11 +367,11 @@ fn fingerprint(
     ids: &[String],
     plan: &Planned,
 ) -> Value {
-    let from_values = args.source == ReportSource::DataValues;
+    let from_values = args.opts.source == ReportSource::DataValues;
     let mut plan = json!({
         "dhis2": crate::redact::url(&args.conn.url),
         "instance": instance.name,
-        "source": args.source.code(),
+        "source": args.opts.source.code(),
         "updated_since": args.updated_since,
         // Data values do not depend on the analytics build.
         "last_analytics": if from_values { None } else { api.info.last_analytics.clone() },
@@ -389,26 +379,27 @@ fn fingerprint(
         "levels": plan.levels,
         "periods": plan.periods,
         "ranges": plan.ranges.iter().map(DateRange::label).collect::<Vec<_>>(),
-        "root": args.root,
-        "breakdowns": args.breakdowns,
-        "chunk": args.chunk,
-        "max_rows": args.max_rows,
-        "campaign": args.campaign,
-        "locations": file_stamp(&args.locations),
+        "root": args.opts.root,
+        "breakdowns": args.opts.breakdowns,
+        "chunk": args.opts.chunk,
+        "max_rows": args.opts.max_rows,
+        "campaign": args.opts.campaign,
+        "locations": file_stamp(&args.opts.locations),
         "previous": args.previous.as_deref().map(file_stamp),
         "changed": args.changed.as_ref().map(|p| p.display().to_string()),
     });
-    // Only with --records, so a run without it resumes a checkpoint written
-    // before the option existed, and a run is not resumed in the other mode.
-    if args.conn.records {
+    // Only for `dhis2 extract reports`, so a run of `dhis2 reports` resumes
+    // a checkpoint written before records existed, and neither resumes the
+    // other's checkpoint.
+    if args.records {
         plan["records"] = json!(true);
     }
     // Only with --maps, so a run without it resumes a checkpoint written
     // before the option existed.
-    if !args.conn.maps.is_empty() {
+    if !args.maps.dirs.is_empty() {
         plan["maps"] = json!(
-            args.conn
-                .maps
+            args.maps
+                .dirs
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -425,7 +416,7 @@ fn resume_point(
     checkpoint: &Path,
     fingerprint: &Value,
 ) -> Result<Option<Checkpoint>> {
-    let saved = if args.resume {
+    let saved = if args.opts.resume {
         let saved =
             Checkpoint::read(checkpoint)?.filter(|_| NdjsonWriter::tmp_path(&args.out).is_file());
         if saved.is_none() {
@@ -488,7 +479,7 @@ fn open_outputs(
                 .transpose()?,
             Checkpoint {
                 plan: fingerprint,
-                as_of: (args.source == ReportSource::DataValues)
+                as_of: (args.opts.source == ReportSource::DataValues)
                     .then(|| format_utc(std::time::SystemTime::now())),
                 ..Checkpoint::default()
             },
@@ -560,7 +551,7 @@ fn print_summary(
     removed: Option<&[String]>,
     kept: usize,
 ) -> Result<()> {
-    let what = if args.conn.records {
+    let what = if args.records {
         format!("{} records", record_type(VALUE_MODEL))
     } else {
         "MeasureReports".to_string()
@@ -574,17 +565,17 @@ fn print_summary(
         tally.periods.len(),
         state.values,
         state.requests,
-        if args.source == ReportSource::DataValues {
+        if args.opts.source == ReportSource::DataValues {
             "dataValueSets"
         } else {
             "analytics"
         }
     );
-    if !args.breakdowns.is_empty() {
+    if !args.opts.breakdowns.is_empty() {
         println!(
             "{} breakdowns attached ({} dimensions)",
             tally.stratified,
-            args.breakdowns.len()
+            args.opts.breakdowns.len()
         );
     }
     if let (Some(prev), Some(removed)) = (&args.previous, removed) {
@@ -614,7 +605,7 @@ fn print_summary(
         }
     }
     println!("{}", state.report.summary());
-    if let Some(path) = &args.report {
+    if let Some(path) = &args.opts.report {
         write_report(path, &state.report)?;
     }
     Ok(())

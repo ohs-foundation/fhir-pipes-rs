@@ -40,7 +40,8 @@ pub const DEFAULT_MAX_DELETE_SHARE: f64 = 0.2;
 #[command(
     name = "fhir-pipes",
     version,
-    about = "Move data into and out of FHIR servers: SQL-on-FHIR warehouses, GeoParquet, DHIS2"
+    about = "Move data into and out of FHIR servers: SQL-on-FHIR warehouses, GeoParquet, DHIS2",
+    after_help = "Other commands: `fhir-pipes NAME ARGS…` runs the program fhir-pipes-NAME, found next to fhir-pipes or on the PATH, when NAME is not one of the commands above (see docs/connectors.md)"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -145,6 +146,19 @@ pub enum Dhis2Command {
     Measures(Dhis2MeasuresArgs),
     /// Indicator values from DHIS2 analytics as MeasureReports, one per indicator, org unit and period
     Reports(Box<Dhis2ReportsArgs>),
+    /// Write the records the other commands map, without mapping them: one NDJSON file per record type in a folder, for `fhir-pipes import run`
+    #[command(subcommand)]
+    Extract(Dhis2ExtractCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Dhis2ExtractCommand {
+    /// Org units as DHIS2OrgUnit records, to DIR/DHIS2OrgUnit.ndjson
+    Locations(ExtractLocationsArgs),
+    /// Indicators, data elements and reporting rates as DHIS2Indicator records, to DIR/DHIS2Indicator.ndjson
+    Measures(ExtractMeasuresArgs),
+    /// Indicator values as DHIS2Value records, to DIR/DHIS2Value.ndjson
+    Reports(Box<ExtractReportsArgs>),
 }
 
 /// Where `fhir-pipes dhis2 reports` takes its values from.
@@ -208,6 +222,17 @@ pub struct Dhis2Conn {
         requires = "user"
     )]
     pub password: Option<String>,
+    /// Attempts per request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
+}
+
+/// `--maps`: the folders of maps the FHIR commands write with.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct Dhis2Maps {
     /// Write the resources with FHIR Mapping Language maps instead of the built-in mapping: a folder of maps (*.map), ConceptMaps and StructureDefinitions (JSON); repeatable, or comma-separated in $FHIR_PIPES_DHIS2_MAPS. The map whose first group reads the command's record type is run: DHIS2OrgUnit (locations), DHIS2Indicator (measures), DHIS2Value (reports)
     #[arg(
         long = "maps",
@@ -215,16 +240,7 @@ pub struct Dhis2Conn {
         env = "FHIR_PIPES_DHIS2_MAPS",
         value_delimiter = ','
     )]
-    pub maps: Vec<PathBuf>,
-    /// Write the prepared records to --out instead of FHIR resources, one per line, for `fhir-pipes import run`: DHIS2OrgUnit (locations), DHIS2Indicator (measures), DHIS2Value (reports). Name the file after the record type (DHIS2OrgUnit.ndjson) in the folder given to import run --in
-    #[arg(long, conflicts_with = "maps")]
-    pub records: bool,
-    /// Attempts per request
-    #[arg(long, default_value_t = DEFAULT_RETRIES)]
-    pub retries: usize,
-    /// Total timeout per HTTP request, in seconds
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
-    pub timeout: u64,
+    pub dirs: Vec<PathBuf>,
 }
 
 /// A DHIS2 UID (11 letters and digits, the first a letter), for the flags
@@ -246,6 +262,53 @@ fn parse_uid(s: &str) -> std::result::Result<String, String> {
 pub struct Dhis2LocationsArgs {
     #[command(flatten)]
     pub conn: Dhis2Conn,
+    #[command(flatten)]
+    pub opts: LocationsOptions,
+    #[command(flatten)]
+    pub maps: Dhis2Maps,
+    /// Output NDJSON file of Location and Organization resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+    /// Write DHIS2OrgUnit records instead of resources: set by `dhis2 extract locations`.
+    #[arg(skip)]
+    pub records: bool,
+}
+
+/// `dhis2 extract locations`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExtractLocationsArgs {
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    #[command(flatten)]
+    pub opts: LocationsOptions,
+    /// Output folder; the records are written to DIR/DHIS2OrgUnit.ndjson. It is created if missing
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+}
+
+impl ExtractLocationsArgs {
+    /// The `dhis2 locations` run that writes these records.
+    pub fn into_command(self, out: PathBuf) -> Dhis2LocationsArgs {
+        Dhis2LocationsArgs {
+            conn: self.conn,
+            opts: self.opts,
+            maps: Dhis2Maps::default(),
+            out,
+            report: self.report,
+            records: true,
+        }
+    }
+}
+
+/// Which org units `dhis2 locations` and `dhis2 extract locations` read, and how.
+#[derive(clap::Args, Debug, Clone)]
+pub struct LocationsOptions {
     /// Prefix of the Location ids (PREFIX-<uid>); defaults to the instance name
     #[arg(long)]
     pub id_prefix: Option<String>,
@@ -267,12 +330,6 @@ pub struct Dhis2LocationsArgs {
     /// Every org unit group, as --org-unit-group
     #[arg(long, conflicts_with = "org_unit_groups")]
     pub all_org_unit_groups: bool,
-    /// Output NDJSON file of Location and Organization resources (with --records, DHIS2OrgUnit records)
-    #[arg(long)]
-    pub out: PathBuf,
-    /// Also write the report as JSON to this file
-    #[arg(long)]
-    pub report: Option<PathBuf>,
 }
 
 /// Which indicators and data elements: by group, one by one, or any mix.
@@ -305,12 +362,46 @@ pub struct Dhis2MeasuresArgs {
     pub conn: Dhis2Conn,
     #[command(flatten)]
     pub select: IndicatorSelection,
-    /// Output NDJSON file of Measure resources (with --records, DHIS2Indicator records)
+    #[command(flatten)]
+    pub maps: Dhis2Maps,
+    /// Output NDJSON file of Measure resources
     #[arg(long)]
     pub out: PathBuf,
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// Write DHIS2Indicator records instead of resources: set by `dhis2 extract measures`.
+    #[arg(skip)]
+    pub records: bool,
+}
+
+/// `dhis2 extract measures`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExtractMeasuresArgs {
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    #[command(flatten)]
+    pub select: IndicatorSelection,
+    /// Output folder; the records are written to DIR/DHIS2Indicator.ndjson. It is created if missing
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+}
+
+impl ExtractMeasuresArgs {
+    /// The `dhis2 measures` run that writes these records.
+    pub fn into_command(self, out: PathBuf) -> Dhis2MeasuresArgs {
+        Dhis2MeasuresArgs {
+            conn: self.conn,
+            select: self.select,
+            maps: Dhis2Maps::default(),
+            out,
+            report: self.report,
+            records: true,
+        }
+    }
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -319,7 +410,69 @@ pub struct Dhis2ReportsArgs {
     pub conn: Dhis2Conn,
     #[command(flatten)]
     pub select: IndicatorSelection,
-    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `fhir-pipes dhis2 locations`, or a snapshot's locations.ndjson
+    #[command(flatten)]
+    pub opts: ReportsOptions,
+    #[command(flatten)]
+    pub maps: Dhis2Maps,
+    /// With --source data-values and --previous: recompute only the periods and ranges with data values updated or deleted since this date or time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS); --out keeps the previous reports for the rest
+    #[arg(long, requires = "previous")]
+    pub updated_since: Option<String>,
+    /// Output NDJSON file of MeasureReport resources: every report this run returns, with or without --previous, so it is the baseline for the next run
+    #[arg(long)]
+    pub out: PathBuf,
+    /// A previous run's --out (it may be the same file as --out): reports with the same content there count as unchanged. `date`, when DHIS2 last built its analytics tables, is not compared
+    #[arg(long)]
+    pub previous: Option<PathBuf>,
+    /// With --previous: also write the new and changed reports here, the ones to load
+    #[arg(long, requires = "previous")]
+    pub changed: Option<PathBuf>,
+    /// With --previous: write here, one per line, the ids of previous reports this run asked for again (same indicators, levels' org units and periods) that DHIS2 no longer returns, to delete from the FHIR server
+    #[arg(long, requires = "previous")]
+    pub removed: Option<PathBuf>,
+    /// Write DHIS2Value records instead of resources: set by `dhis2 extract reports`.
+    #[arg(skip)]
+    pub records: bool,
+}
+
+/// `dhis2 extract reports`. The comparison with a previous run
+/// (`--previous`, `--changed`, `--removed`, `--updated-since`) compares
+/// MeasureReports, so it is not here: `import run --previous` does it after
+/// the import.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExtractReportsArgs {
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    #[command(flatten)]
+    pub select: IndicatorSelection,
+    #[command(flatten)]
+    pub opts: ReportsOptions,
+    /// Output folder; the records are written to DIR/DHIS2Value.ndjson. It is created if missing. An interrupted run leaves DHIS2Value.ndjson.tmp and DHIS2Value.ndjson.resume there for --resume; `import run` reads neither
+    #[arg(long, value_name = "DIR")]
+    pub out: PathBuf,
+}
+
+impl ExtractReportsArgs {
+    /// The `dhis2 reports` run that writes these records.
+    pub fn into_command(self, out: PathBuf) -> Dhis2ReportsArgs {
+        Dhis2ReportsArgs {
+            conn: self.conn,
+            select: self.select,
+            opts: self.opts,
+            maps: Dhis2Maps::default(),
+            updated_since: None,
+            out,
+            previous: None,
+            changed: None,
+            removed: None,
+            records: true,
+        }
+    }
+}
+
+/// What `dhis2 reports` and `dhis2 extract reports` ask DHIS2 for, and how.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ReportsOptions {
+    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `fhir-pipes dhis2 locations`, a snapshot's locations.ndjson, or the Location.ndjson that `import run` writes from `dhis2 extract locations`
     #[arg(long)]
     pub locations: PathBuf,
     /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …). Needed unless --range is given
@@ -350,27 +503,12 @@ pub struct Dhis2ReportsArgs {
     /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the --locations hierarchy and computed by fhir-pipes: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
     #[arg(long, value_enum, default_value_t = ReportSource::Analytics)]
     pub source: ReportSource,
-    /// With --source data-values and --previous: recompute only the periods and ranges with data values updated or deleted since this date or time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS); --out keeps the previous reports for the rest
-    #[arg(long, requires = "previous")]
-    pub updated_since: Option<String>,
     /// Refuse to run when DHIS2's analytics tables were last built longer ago than this (e.g. 36h, 7d, 2w): values are only as fresh as that build. Without it, a build over 7 days old is warned about
     #[arg(long, value_parser = crate::dhis2::api::parse_age)]
     pub max_analytics_age: Option<std::time::Duration>,
     /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
     pub concurrency: usize,
-    /// Output NDJSON file of MeasureReport resources (with --records, DHIS2Value records): every report this run returns, with or without --previous, so it is the baseline for the next run
-    #[arg(long)]
-    pub out: PathBuf,
-    /// A previous run's --out (it may be the same file as --out): reports with the same content there count as unchanged. `date`, when DHIS2 last built its analytics tables, is not compared
-    #[arg(long)]
-    pub previous: Option<PathBuf>,
-    /// With --previous: also write the new and changed reports here, the ones to load
-    #[arg(long, requires = "previous")]
-    pub changed: Option<PathBuf>,
-    /// With --previous: write here, one per line, the ids of previous reports this run asked for again (same indicators, levels' org units and periods) that DHIS2 no longer returns, to delete from the FHIR server
-    #[arg(long, requires = "previous")]
-    pub removed: Option<PathBuf>,
     /// Continue an interrupted run after its last fully written batch instead of starting over. Refused if anything that shapes the batches has changed since (arguments, org unit counts, the analytics build, the --locations or --previous file)
     #[arg(long)]
     pub resume: bool,

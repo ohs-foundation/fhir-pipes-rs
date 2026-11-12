@@ -76,12 +76,13 @@ Run `fhir-pipes <command> --help` for every option.
 | `extract`, `transform locations`, `run`, `inspect` | Snapshot Locations and Organizations; turn them into GeoParquet | [locations.md](docs/locations.md) |
 | `diff`, `load` | Edited GeoJSON or GeoParquet to changed resources; send NDJSON to a server with version checks | [locations.md](docs/locations.md), [qgis.md](docs/qgis.md) |
 | `import location-boundaries`, `import location-sites`, `index`, `population` | Build Locations, spatial indexes and population Groups offline | [locations.md](docs/locations.md) |
-| `dhis2 locations`, `measures`, `reports` | DHIS2 org units, indicators and data to FHIR NDJSON, or to records for `import run` with [examples/import/icr-dhis2](examples/import/icr-dhis2) | [dhis2.md](docs/dhis2.md) |
+| `dhis2 locations`, `measures`, `reports`, `extract` | DHIS2 org units, indicators and data to FHIR NDJSON, or to records for `import run` with [examples/import/icr-dhis2](examples/import/icr-dhis2) | [dhis2.md](docs/dhis2.md) |
 | `libraries build`, `libraries sql` | SQL on FHIR Libraries: build Library JSON from SQL files, print the SQL to run one | [libraries.md](docs/libraries.md) |
 | `profile check` | Compare a profile with its IG | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
 | `terminology valueset`, `conceptmap` | A value set or concept map from FHIR packages as a table | [terminology.md](docs/terminology.md) |
 | `map run`, `map check` | Run and type-check FHIR Mapping Language maps over NDJSON records | [maps.md](docs/maps.md) |
 | `import check`, `import run`, `import test` | Run an import package (logical models, maps, views, Libraries) over a folder of records, to FHIR NDJSON | [import.md](docs/import.md) |
+| `fhir-pipes NAME` | Run a separate program `fhir-pipes-NAME`, such as a connector that writes records for `import run` | [connectors.md](docs/connectors.md) |
 
 An implementation guide's extra Location and Organization columns come from a
 profile (`--profile`, `FHIR_PIPES_PROFILE` or `profile =` in

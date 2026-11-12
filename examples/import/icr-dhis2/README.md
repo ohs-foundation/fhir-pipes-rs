@@ -6,7 +6,7 @@ resources of the Integrated Campaign Registry: Locations and facility
 Organizations, Measures, and MeasureReports. It writes the same resources as
 the built-in mapping of `fhir-pipes dhis2` with `examples/profiles/icr.toml`.
 
-The records are what `fhir-pipes dhis2 locations|measures|reports --records`
+The records are what `fhir-pipes dhis2 extract locations|measures|reports`
 writes (see [docs/dhis2.md](../../../docs/dhis2.md#records-and-the-import-package)).
 fhir-pipes prepares them from the DHIS2 API: the ids, the parent only when it
 was exported, a boundary merged from the children, counts as whole numbers,
@@ -40,8 +40,8 @@ fhir-pipes import run   --package examples/import/icr-dhis2 \
   --in examples/import/icr-dhis2/tests/sample/in --out /tmp/icr-dhis2-fhir
 ```
 
-`tests/dhis2_import.rs` checks that `tests/sample/in/` is what the `dhis2`
-commands write with `--records` for its fake DHIS2 server, and that
+`tests/dhis2_import.rs` checks that `tests/sample/in/` is what
+`dhis2 extract` writes for its fake DHIS2 server, and that
 `tests/sample/expected/` is what the built-in mapping writes for the same
 responses. To change the sample, change the scenarios there, then:
 
