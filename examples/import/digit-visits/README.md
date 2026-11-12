@@ -15,7 +15,11 @@ It shows every part of a package:
   into Task and Basic resources for the views. `DIGITVisitToICR` maps each
   visit to a Task and one MedicationAdministration per person. Two
   ConceptMaps translate the DIGIT codes.
-- `views/`: three ViewDefinitions that flatten the staged resources.
+- `views/`: three ViewDefinitions that flatten the staged resources. This
+  is the standard SQL on FHIR form: each view's `resource` is a FHIR
+  resource type. A package can instead let views read the record files
+  directly, with no staging map; see
+  [Record views](../../../docs/import.md#record-views).
 - `libraries/`: `DigitVisit`, a SQLQuery that joins the views and groups the
   tasks of one round, household and worker into visits, split where more
   than 2 hours pass between tasks. Its columns are named as the elements of

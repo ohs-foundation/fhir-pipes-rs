@@ -15,7 +15,7 @@ mod fhirpath;
 use std::path::{Path, PathBuf};
 
 use fml_check::{CoreDefinitions, PackageDefinitions, Release};
-use fml_engine::{ConceptMapSet, Engine, MapSet};
+use fml_engine::{ConceptMapSet, Engine, ErrorKind, Limits, MapSet};
 use fml_model::StructureMap;
 use fml_syntax::{Diagnostic, Severity};
 use serde_json::Value;
@@ -56,6 +56,11 @@ pub struct MapPackage {
     expressions: FhirPath,
     /// FML sources, kept for `check`.
     sources: Vec<(PathBuf, String)>,
+    /// What one transform may do: the engine's defaults unless an import
+    /// package sets `max_values`.
+    limits: Limits,
+    /// Added to the message of a transform that created too many values.
+    values_hint: Option<String>,
 }
 
 fn usage(message: String) -> PipesError {
@@ -185,7 +190,22 @@ impl MapPackage {
             concept_maps,
             expressions: FhirPath::new()?,
             sources,
+            limits: Limits::default(),
+            values_hint: None,
         })
+    }
+
+    /// The values one transform may create, instead of the engine's
+    /// default (2,000,000). A large record, such as a tree of tens of
+    /// thousands of boundaries, can need more.
+    pub fn set_max_values(&mut self, n: usize) {
+        self.limits.max_values = n;
+    }
+
+    /// A hint added to the message of a transform that ran past the limit
+    /// on values: where that limit is set.
+    pub fn set_values_hint(&mut self, hint: &str) {
+        self.values_hint = Some(hint.to_string());
     }
 
     fn describe(&self, loaded: &Loaded) -> String {
@@ -261,12 +281,19 @@ impl MapPackage {
     pub fn transform(&self, map: &StructureMap, source: &Value) -> Result<Output> {
         let engine = Engine::new(&self.definitions, &self.expressions)
             .with_maps(&self.imports)
-            .with_concept_maps(&self.concept_maps);
+            .with_concept_maps(&self.concept_maps)
+            .with_limits(self.limits);
         let transformed = crate::runtime::block_on(engine.transform(map, source))
             .map_err(|e| PipesError::Environment(format!("starting the map runtime: {e}")))?
             .map_err(|e| {
+                let hint = match &self.values_hint {
+                    Some(h) if e.kind == ErrorKind::Limit && e.message.ends_with(" values") => {
+                        format!("; {h}")
+                    }
+                    _ => String::new(),
+                };
                 PipesError::Environment(format!(
-                    "map {}: {e}",
+                    "map {}: {e}{hint}",
                     map.name.as_deref().unwrap_or("unnamed")
                 ))
             })?;

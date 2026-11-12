@@ -149,6 +149,10 @@ Notes:
 - A map sees one record. Anything that needs several records, such as
   grouping or a lookup in another file, has to be done before the map runs.
 - Maps are read as FHIR R4.
+- One transform may create at most 2,000,000 values (the elements it
+  writes and the values it works with), and run at most 20,000,000 rules.
+  An import package can raise the first with
+  [`[maps] max_values`](import.md#maps), for a record that is a large tree.
 - A map is slower than the built-in mapping: about 0.25 milliseconds of CPU
   per record with the example maps. `map run` and the `dhis2` commands run
   the map on every core, and the output is the same at any thread count:

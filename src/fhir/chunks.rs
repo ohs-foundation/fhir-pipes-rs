@@ -158,12 +158,22 @@ impl Chunk {
         threads: usize,
         read: impl Fn(&str) -> Result<T> + Sync,
     ) -> Result<Vec<T>> {
+        self.parse_numbered(threads, |number, text| {
+            read(text).with_context(|| format!("parsing {} line {number}", self.name))
+        })
+    }
+
+    /// Each line read by `read`, given the line's number in the file and
+    /// its text, on up to `threads` threads, in line order. The error is the
+    /// first bad line's, as `read` gives it.
+    pub fn parse_numbered<T: Send>(
+        &self,
+        threads: usize,
+        read: impl Fn(usize, &str) -> Result<T> + Sync,
+    ) -> Result<Vec<T>> {
         let one = |part: &[Line]| -> Result<Vec<T>> {
             part.iter()
-                .map(|l| {
-                    read(&self.text[l.start..l.end])
-                        .with_context(|| format!("parsing {} line {}", self.name, l.number))
-                })
+                .map(|l| read(l.number, &self.text[l.start..l.end]))
                 .collect()
         };
         let threads = threads.clamp(1, self.lines.len().max(1));

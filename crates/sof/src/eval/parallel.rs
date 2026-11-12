@@ -111,6 +111,19 @@ impl CompiledView {
         })
     }
 
+    /// [`CompiledView::compile_with_position`] for non-async callers.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`CompiledView::compile_with_position`].
+    pub fn compile_with_position_blocking(view: &ViewDefinition, name: &str) -> Result<Self> {
+        std::thread::scope(|s| {
+            s.spawn(|| block_on(Self::compile_with_position(view, name))?)
+                .join()
+                .map_err(|_| thread_panicked())?
+        })
+    }
+
     /// Execute the view against in-memory FHIR resources on up to `threads`
     /// OS threads, for non-async callers.
     ///
@@ -128,12 +141,55 @@ impl CompiledView {
     /// them in input order is returned; the other threads stop at their next
     /// block.
     pub fn execute_parallel(&self, resources: &[Value], threads: usize) -> Result<ViewResult> {
+        self.run_parallel(resources, None, threads)
+    }
+
+    /// [`CompiledView::execute_parallel`], with the position variable of a
+    /// view compiled by [`CompiledView::compile_with_position`] bound to
+    /// `positions[i]` for `resources[i]`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`CompiledView::execute_parallel`], and an error when
+    /// `positions` and `resources` differ in length.
+    pub fn execute_parallel_at(
+        &self,
+        resources: &[Value],
+        positions: &[i64],
+        threads: usize,
+    ) -> Result<ViewResult> {
+        if positions.len() != resources.len() {
+            return Err(Error::InvalidViewDefinition(format!(
+                "{} positions for {} resources",
+                positions.len(),
+                resources.len()
+            )));
+        }
+        self.run_parallel(resources, Some(positions), threads)
+    }
+
+    fn run_parallel(
+        &self,
+        resources: &[Value],
+        positions: Option<&[i64]>,
+        threads: usize,
+    ) -> Result<ViewResult> {
         let threads = threads.clamp(1, resources.len().max(1));
         let block = resources
             .len()
             .div_ceil(threads * BLOCKS_PER_THREAD)
             .clamp(1, MAX_BLOCK);
-        let blocks: Vec<&[Value]> = resources.chunks(block).collect();
+        // Each block with its positions, or none.
+        let blocks: Vec<(&[Value], Option<&[i64]>)> = resources
+            .chunks(block)
+            .enumerate()
+            .map(|(i, part)| {
+                (
+                    part,
+                    positions.map(|p| &p[i * block..i * block + part.len()]),
+                )
+            })
+            .collect();
         let blocks = &blocks;
         let next = &AtomicUsize::new(0);
         let failed = &AtomicBool::new(false);
@@ -145,8 +201,10 @@ impl CompiledView {
                             let mut done = Vec::new();
                             while !failed.load(Ordering::Relaxed) {
                                 let i = next.fetch_add(1, Ordering::Relaxed);
-                                let Some(part) = blocks.get(i) else { break };
-                                let rows = self.execute_block(part).await;
+                                let Some((part, at)) = blocks.get(i) else {
+                                    break;
+                                };
+                                let rows = self.execute_block(part, *at).await;
                                 if rows.is_err() {
                                     failed.store(true, Ordering::Relaxed);
                                 }
@@ -177,11 +235,17 @@ impl CompiledView {
         })
     }
 
-    /// The rows of a run of resources, in order.
-    async fn execute_block(&self, resources: &[Value]) -> Result<Vec<Vec<Value>>> {
+    /// The rows of a run of resources, in order, each at its position if
+    /// `positions` are given.
+    async fn execute_block(
+        &self,
+        resources: &[Value],
+        positions: Option<&[i64]>,
+    ) -> Result<Vec<Vec<Value>>> {
         let mut rows = Vec::new();
-        for resource in resources {
-            rows.extend(self.execute_resource(resource).await?);
+        for (i, resource) in resources.iter().enumerate() {
+            let at = positions.map_or(0, |p| p[i]);
+            rows.extend(self.execute_resource_at(resource, at).await?);
         }
         Ok(rows)
     }
@@ -235,6 +299,45 @@ mod tests {
             batched.extend(compiled.execute_parallel(batch, 4).unwrap().data);
         }
         assert_eq!(batched, sequential.data);
+    }
+
+    #[test]
+    fn a_position_variable_holds_each_resources_own_number() {
+        let resources: Vec<Value> = (0..300).map(|i| patient(i, i % 3)).collect();
+        let positions: Vec<i64> = (0..300).map(|i| 1000 + i).collect();
+        let v = view(json!({
+            "resource": "Patient",
+            "select": [
+                { "column": [{ "name": "line", "path": "%line" }] },
+                { "forEach": "name", "column": [
+                    { "name": "inner", "path": "%line + %rowIndex" }
+                ] }
+            ]
+        }));
+        let compiled = CompiledView::compile_with_position_blocking(&v, "line").unwrap();
+        let want: Vec<Vec<Value>> = (0..300i64)
+            .flat_map(|i| (0..i % 3).map(move |n| vec![json!(1000 + i), json!(1000 + i + n)]))
+            .collect();
+        for threads in [1, 4, 16] {
+            let got = compiled
+                .execute_parallel_at(&resources, &positions, threads)
+                .unwrap();
+            assert_eq!(got.data, want, "{threads} threads");
+        }
+        assert!(
+            compiled
+                .execute_parallel_at(&resources, &positions[1..], 2)
+                .is_err()
+        );
+        // Without the position, the variable is an undefined constant.
+        let err = CompiledView::compile_blocking(&v).err().unwrap();
+        assert!(err.to_string().contains("line"), "{err}");
+        // It may not shadow a constant of the view.
+        let mut with_constant = v.clone();
+        with_constant
+            .constant
+            .push(serde_json::from_value(json!({ "name": "line", "valueInteger": 1 })).unwrap());
+        assert!(CompiledView::compile_with_position_blocking(&with_constant, "line").is_err());
     }
 
     #[test]

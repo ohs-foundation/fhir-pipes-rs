@@ -1,7 +1,9 @@
 //! Running a plan over a folder of record files. Everything the run writes
 //! goes in its work folder:
 //!
-//! - `staged/<ResourceType>.ndjson`: the resources of the stage steps;
+//! - `staged/<ResourceType>.ndjson`: the resources of the stage steps, which
+//!   the views over resource types read (a record view reads its record
+//!   file from `--in` instead);
 //! - `tables/<table>.parquet`: the views' rows and the Libraries' results;
 //! - `rows/<table>.ndjson`: a Library's result as records, for a map;
 //! - `out/<ResourceType>.ndjson`: the output, which the caller moves into
@@ -20,7 +22,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::plan::{Input, Package, Plan, PlanStep};
+use super::manifest::RecordRules;
+use super::plan::{Input, Package, Plan, PlanStep, RECORD_LINE};
 use super::previous::Comparison;
 use super::records::{Records, with_type};
 use super::tables::Tables;
@@ -105,6 +108,10 @@ pub struct TableReport {
     pub table: String,
     /// `view <name>` or `Library <name>`.
     pub from: String,
+    /// For a record view, the record file it read; `null` when the folder
+    /// has none for its type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<Option<String>>,
     pub rows: u64,
 }
 
@@ -201,6 +208,12 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                 r.map = Some(name.clone());
                 r.stage = *stage;
                 let sink = if *stage { &mut staged } else { &mut output };
+                // `[records]` loosens the check of the record files only; a
+                // Library's rows are the package's own and are checked as they are.
+                let rules = match input {
+                    Input::File(_) => package.record_rules(),
+                    Input::Rows(_) => RecordRules::default(),
+                };
                 let records: Box<dyn Iterator<Item = Result<(String, Value)>>> = match input {
                     Input::File(t) => {
                         r.from = Some(t.clone());
@@ -231,7 +244,16 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                         Box::new(rows(&path, &lib.name, &model.type_name)?)
                     }
                 };
-                map_step(package, map, &model.type_name, records, sink, o, &mut r)?;
+                map_step(
+                    package,
+                    map,
+                    &model.type_name,
+                    rules,
+                    records,
+                    sink,
+                    o,
+                    &mut r,
+                )?;
                 if o.echo {
                     let to = if *stage { "staged" } else { "output" };
                     println!(
@@ -251,6 +273,7 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                 library,
                 views,
                 queries,
+                ..
             } => {
                 r.library = Some(library.name.clone());
                 staged.flush()?;
@@ -258,11 +281,15 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                     tables = Some(Tables::new(o.work, o.duckdb)?);
                 }
                 let t = tables.as_mut().expect("just made");
-                for (view, rows) in run_views(views, &staged, o.threads)? {
+                for (view, rows) in run_views(package, views, &staged, o)? {
                     let n = t.write_view(view, rows)?;
+                    let file = package
+                        .is_record_view(view)
+                        .then(|| o.files.get(&view.resource).map(|p| p.display().to_string()));
                     r.tables.push(TableReport {
                         table: view.table.clone(),
                         from: format!("view {}", view.name),
+                        file,
                         rows: n as u64,
                     });
                 }
@@ -272,6 +299,7 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                     r.tables.push(TableReport {
                         table: q.table(&[]),
                         from: format!("Library {}", q.name),
+                        file: None,
                         rows: n,
                     });
                 }
@@ -291,6 +319,14 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                             tables.join(", ")
                         }
                     );
+                    let missing: std::collections::BTreeSet<&str> = views
+                        .iter()
+                        .filter(|v| package.is_record_view(v) && !o.files.contains_key(&v.resource))
+                        .map(|v| v.resource.as_str())
+                        .collect();
+                    for t in missing {
+                        println!("   no {t}.ndjson in the input folder");
+                    }
                 }
             }
         }
@@ -347,12 +383,15 @@ pub fn describe(counts: &BTreeMap<String, usize>) -> String {
 }
 
 /// Runs `map` over `records` a batch at a time and writes the resources to
-/// `sink` in record order. Each record is checked against its model first;
-/// a record that does not fit, or that the map fails on, stops the run.
+/// `sink` in record order. Each record is prepared by `rules` and checked
+/// against its model first; a record that does not fit, or that the map
+/// fails on, stops the run.
+#[allow(clippy::too_many_arguments)]
 fn map_step(
     package: &Package,
     map: &fml_model::StructureMap,
     type_name: &str,
+    rules: RecordRules,
     mut records: Box<dyn Iterator<Item = Result<(String, Value)>> + '_>,
     sink: &mut TypeFiles,
     o: &Options,
@@ -365,7 +404,8 @@ fn map_step(
         crate::stop::check()?;
         let mut batch: Vec<(String, Value)> = Vec::with_capacity(BATCH);
         for record in records.by_ref() {
-            let (at, record) = record?;
+            let (at, mut record) = record?;
+            package.models.prepare(type_name, &mut record, rules);
             let problems = package.models.check(type_name, &record);
             if let Some(first) = problems.first() {
                 let more = match problems.len() - 1 {
@@ -470,23 +510,36 @@ fn drop_nulls(v: &mut Value) {
     }
 }
 
-/// Runs `views` over the staged resources, each staged file read once for
-/// the views of its type. A type nothing staged gives empty tables. The
-/// results come in the order of `views`.
+/// Runs `views`, each file read once for the views of its type: a view
+/// over a resource type reads the staged resources, and a record view the
+/// record file of its type in `--in`. A type nothing staged, or with no
+/// record file, gives empty tables. The results come in the order of
+/// `views`.
 fn run_views<'v>(
+    package: &Package,
     views: &[&'v View],
     staged: &TypeFiles,
-    threads: usize,
+    o: &Options,
 ) -> Result<Vec<(&'v View, fhir_pipes_sof::ViewResult)>> {
+    let threads = o.threads;
     let mut by_type: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, v) in views.iter().enumerate() {
         by_type.entry(v.resource.as_str()).or_default().push(i);
     }
     let mut results: Vec<Option<fhir_pipes_sof::ViewResult>> = views.iter().map(|_| None).collect();
     for (t, idx) in by_type {
+        crate::stop::check()?;
         let vs: Vec<&View> = idx.iter().map(|&i| views[i]).collect();
         let path = staged.path(t);
-        let out = if path.exists() {
+        let out = if package.models.get(t).is_some() {
+            record_view_rows(
+                package,
+                t,
+                o.files.get(t).map(PathBuf::as_path),
+                &vs,
+                threads,
+            )?
+        } else if path.exists() {
             crate::views::run::run_file(&vs, &path, threads)?.1
         } else {
             ViewRows::new(
@@ -505,6 +558,59 @@ fn run_views<'v>(
         .copied()
         .zip(results.into_iter().map(|r| r.expect("every view ran")))
         .collect())
+}
+
+/// Runs the record views `views`, all over record type `t`, on the records
+/// of `path` (none when the folder has no file of the type). The records are
+/// read as a map step reads them: `[records]` applied, then checked against
+/// the model, the first that does not fit stopping the run. `%recordLine`
+/// is each record's line in the file. The file is read a chunk of lines at
+/// a time, parsed on `threads` threads.
+fn record_view_rows(
+    package: &Package,
+    t: &str,
+    path: Option<&Path>,
+    views: &[&View],
+    threads: usize,
+) -> Result<Vec<fhir_pipes_sof::ViewResult>> {
+    let mut rows = ViewRows::with_position(
+        views
+            .iter()
+            .map(|v| (v.name.as_str(), &v.definition))
+            .collect(),
+        RECORD_LINE,
+    );
+    if let Some(path) = path {
+        // Refuses a JSON document, as the map steps do.
+        crate::fhir::ndjson::NdjsonReader::open(path)?;
+        let rules = package.record_rules();
+        let shown = path.display().to_string();
+        let read = |number: usize, text: &str| -> Result<(i64, Value)> {
+            let at = format!("{shown}:{number}");
+            let record: Value =
+                serde_json::from_str(text).map_err(|e| usage(anyhow!("{at}: {e}")))?;
+            let mut record = with_type(record, t).map_err(|m| usage(anyhow!("{at}: {m}")))?;
+            package.models.prepare(t, &mut record, rules);
+            let problems = package.models.check(t, &record);
+            if let Some(first) = problems.first() {
+                let more = match problems.len() - 1 {
+                    0 => String::new(),
+                    n => format!(" (and {n} more problems in this record)"),
+                };
+                return Err(usage(anyhow!(
+                    "{at}: {first}{more}; `fhir-pipes import check --in` lists every problem"
+                )));
+            }
+            Ok((i64::try_from(number).unwrap_or(i64::MAX), record))
+        };
+        for chunk in crate::fhir::chunks::open(path)? {
+            crate::stop::check()?;
+            let (positions, records): (Vec<i64>, Vec<Value>) =
+                chunk?.parse_numbered(threads, read)?.into_iter().unzip();
+            rows.add_at(&records, &positions, threads)?;
+        }
+    }
+    rows.finish(threads)
 }
 
 #[cfg(test)]
