@@ -905,6 +905,15 @@ mod tests {
             assert_eq!(m.to_string(), e.to_string());
         }
         assert_eq!(mapped_report.summary(), built_in_report.summary());
+
+        let mut records = Vec::new();
+        build(&units, &o, Writes::Records, &mut Report::default(), |r| {
+            records.push(r);
+            Ok(())
+        })
+        .unwrap();
+        crate::dhis2::maps::case::records("org-units", &records);
+        crate::dhis2::maps::case::expected("org-units", &expected);
     }
 
     #[test]

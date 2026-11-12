@@ -223,6 +223,59 @@ fn both_ways(record_type: &str, run: Run) -> BothWays {
     }
 }
 
+/// A test case of the package: `records` are its `in/` file of their type
+/// and `resources` its `expected/` files, one per resourceType. With
+/// `FHIR_PIPES_UPDATE_SAMPLE=1` they are written instead of compared. With
+/// `undated`, `date` is left out of the comparison: a run from data values
+/// dates its records when it started.
+fn package_case(case: &str, records: &[Value], resources: &[Value], undated: bool) {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if undated {
+            v.as_object_mut().unwrap().remove("date");
+        }
+        v
+    };
+    let dir = Path::new(PACKAGE).join("tests").join(case);
+    let update = std::env::var_os("FHIR_PIPES_UPDATE_SAMPLE").is_some();
+    let write = |path: &Path, list: &[&Value]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = list.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(path, text).unwrap();
+    };
+    let kind = records[0]["resourceType"].as_str().unwrap();
+    let file = dir.join("in").join(format!("{kind}.ndjson"));
+    if update {
+        write(&file, &records.iter().collect::<Vec<_>>());
+    }
+    assert_eq!(
+        read_ndjson(&file).iter().map(strip).collect::<Vec<_>>(),
+        records.iter().map(strip).collect::<Vec<_>>(),
+        "{}",
+        file.display()
+    );
+    let mut by_type: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    for r in resources {
+        by_type
+            .entry(r["resourceType"].as_str().unwrap())
+            .or_default()
+            .push(r);
+    }
+    for (kind, list) in by_type {
+        let file = dir.join("expected").join(format!("{kind}.ndjson"));
+        if update {
+            write(&file, &list);
+        }
+        let want = read_ndjson(&file);
+        assert_eq!(
+            want.iter().map(strip).collect::<Vec<_>>(),
+            list.iter().map(|r| strip(r)).collect::<Vec<_>>(),
+            "{}",
+            file.display()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The scenarios
 
@@ -671,6 +724,17 @@ fn reports_from_data_values_agree_but_for_the_date() {
         .collect();
     let imported: Vec<Value> = read_out(&out).iter().map(|r| r["date"].clone()).collect();
     assert_eq!(dates, imported);
+    // The package's case: the records, and the built-in reports with the
+    // date of their records.
+    let dated: Vec<Value> = built_in
+        .into_iter()
+        .zip(&dates)
+        .map(|(mut r, d)| {
+            r["date"] = d.clone();
+            r
+        })
+        .collect();
+    package_case("data-values", &read_ndjson(&records), &dated, true);
 }
 
 /// Three `dhis2 extract` runs into one folder: one file per record type,
@@ -1084,6 +1148,12 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     let imported = dir.path().join("fhir");
     import_run(&input, &imported);
     assert_same(&read_ndjson(&built_in), &read_out(&imported));
+    package_case(
+        "batches",
+        &read_ndjson(&full),
+        &read_ndjson(&built_in),
+        false,
+    );
 
     // A checkpoint written by dhis2 reports is not resumed by dhis2 extract.
     let plain_dir = dir.path().join("plain");

@@ -722,6 +722,8 @@ mod tests {
                 analytics,
             ),
         ];
+        let mut all_records = Vec::new();
+        let mut all_expected = Vec::new();
         for (row, ind, location, info, campaign, source) in &cases {
             let mut row = row.clone();
             row.dx = ind.id.clone();
@@ -824,7 +826,11 @@ mod tests {
             // The same MeasureReport, key for key and in the same order.
             assert_eq!(mapped[0].to_string(), expected.to_string(), "{id}");
             assert_eq!(mapped_report.summary(), built_in_report.summary(), "{id}");
+            all_records.push(record);
+            all_expected.push(expected);
         }
+        crate::dhis2::maps::case::records("values", &all_records);
+        crate::dhis2::maps::case::expected("values", &all_expected);
     }
 
     #[test]

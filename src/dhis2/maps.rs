@@ -127,3 +127,74 @@ impl RecordMap {
 pub fn record_type(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
+
+/// The test cases of the example package examples/import/icr-dhis2: the
+/// unit tests check that the records fhir-pipes prepares are a case's
+/// `in/` file. `import test` checks that the package maps them to its
+/// `expected/` files. With `FHIR_PIPES_UPDATE_SAMPLE` set, the files are
+/// written instead of compared.
+#[cfg(test)]
+pub mod case {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use serde_json::Value;
+
+    fn dir(case: &str) -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/import/icr-dhis2/tests")
+            .join(case)
+    }
+
+    fn update() -> bool {
+        std::env::var_os("FHIR_PIPES_UPDATE_SAMPLE").is_some()
+    }
+
+    fn read(path: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn write(path: &std::path::Path, values: &[&Value]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = values.iter().map(|v| format!("{v}\n")).collect();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// `records` are the case's `in/<their resourceType>.ndjson`.
+    pub fn records(case: &str, records: &[Value]) {
+        let kind = records[0]["resourceType"].as_str().unwrap();
+        let path = dir(case).join("in").join(format!("{kind}.ndjson"));
+        if update() {
+            write(&path, &records.iter().collect::<Vec<_>>());
+        }
+        assert_eq!(read(&path), records, "{}", path.display());
+    }
+
+    /// `resources` are the case's `expected/` files, one per resourceType,
+    /// in the order given within each.
+    pub fn expected(case: &str, resources: &[Value]) {
+        let mut by_type: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+        for r in resources {
+            by_type
+                .entry(r["resourceType"].as_str().unwrap())
+                .or_default()
+                .push(r);
+        }
+        for (kind, list) in by_type {
+            let path = dir(case).join("expected").join(format!("{kind}.ndjson"));
+            if update() {
+                write(&path, &list);
+            }
+            let want = read(&path);
+            assert_eq!(want.len(), list.len(), "{}", path.display());
+            for (w, g) in want.iter().zip(&list) {
+                assert_eq!(w, *g, "{}", path.display());
+            }
+        }
+    }
+}

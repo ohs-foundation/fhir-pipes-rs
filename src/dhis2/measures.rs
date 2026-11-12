@@ -780,7 +780,21 @@ mod tests {
             )
             .unwrap(),
         ];
+        // Each item its own id, so the case's Measures differ by id.
+        let mut items = items;
+        items[1].id = "Uvn6LCg7dV1".into();
+        items[2].id = "Uvn6LCg7dV2".into();
         let maps = icr_maps();
+        let records: Vec<Value> = items
+            .iter()
+            .map(|ind| record(ind, &instance, &info))
+            .collect();
+        let expected: Vec<Value> = items
+            .iter()
+            .map(|ind| measure(ind, &instance, &info))
+            .collect();
+        crate::dhis2::maps::case::records("indicators", &records);
+        crate::dhis2::maps::case::expected("indicators", &expected);
         for ind in &items {
             let mut report = Report::default();
             let mapped = maps
