@@ -1,5 +1,10 @@
 //! A package loaded from its folder, and the plan of a run: each step with
 //! the map, model, Library and views it names, resolved and checked.
+//!
+//! A view whose `resource` is one of the package's record types is a
+//! record view: it reads the record file of that type, as the maps read it,
+//! not staged resources. That goes beyond SQL on FHIR, so the manifest has
+//! to allow it (`[views] records = "allow"`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -7,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use fml_model::StructureMap;
 
-use super::manifest::{self, Check, Manifest, Source, Step};
+use super::manifest::{self, Check, Manifest, RecordRules, Source, Step};
 use super::records::{Model, Models};
 use crate::error::usage;
 use crate::library::resolve::{Artifact, Catalog, HIERARCHY_URL, LOCATION_URL};
@@ -23,7 +28,13 @@ pub struct Package {
     pub maps: MapPackage,
     pub models: Models,
     pub catalog: Catalog,
+    /// The views in `views/`, in file-name order.
+    pub views: Vec<View>,
 }
+
+/// The variable a record view's paths read the record's line in its file
+/// from, counted from 1: `%recordLine`.
+pub const RECORD_LINE: &str = "recordLine";
 
 impl Package {
     /// Reads `import.toml` (if there is one), `models/`, `maps/`, `views/`
@@ -64,14 +75,35 @@ impl Package {
             }
         }
         let models = Models::load(&models_dir)?;
-        let maps = MapPackage::load(&[models_dir, maps_dir], &[])?;
+        let mut maps = MapPackage::load(&[models_dir, maps_dir], &[])?;
+        if let Some(n) = manifest.as_ref().and_then(|m| m.max_values) {
+            maps.set_max_values(n);
+        }
+        maps.set_values_hint(&format!(
+            "a record this large needs a higher limit: set max_values under [maps] in {}",
+            manifest::FILE
+        ));
         let views_dir = dir.join("views");
         let mut sources = Vec::new();
+        let mut views = Vec::new();
         if views_dir.is_dir() {
             // Checks each view's structure, as the refresh does.
-            crate::views::run::discover(&views_dir, &[]).map_err(usage)?;
+            views = crate::views::run::discover(&views_dir, &[]).map_err(usage)?;
             // Relative to the package folder, `base` below.
             sources.push("views".to_string());
+        }
+        let allowed = manifest.as_ref().is_some_and(|m| m.record_views);
+        for v in &views {
+            if models.get(&v.resource).is_some() {
+                check_record_view(v, allowed)?;
+            } else if let Some(p) = view_paths(v).into_iter().find(|p| uses_record_line(p)) {
+                return Err(usage(anyhow!(
+                    "view {} reads {}, and its path `{p}` uses %{RECORD_LINE}, which only a \
+                     view over a record type has",
+                    v.name,
+                    v.resource
+                )));
+            }
         }
         let libraries_dir = dir.join("libraries");
         let built = if libraries_dir.is_dir() {
@@ -87,7 +119,89 @@ impl Package {
             maps,
             models,
             catalog,
+            views,
         })
+    }
+
+    /// Whether `view` reads a record file rather than staged resources.
+    pub fn is_record_view(&self, view: &View) -> bool {
+        self.models.get(&view.resource).is_some()
+    }
+
+    /// The record views, in file-name order.
+    pub fn record_views(&self) -> impl Iterator<Item = &View> {
+        self.views.iter().filter(|v| self.is_record_view(v))
+    }
+
+    /// For each record view's model, the pairs of elements the view engine
+    /// can read one for the other (`Models::misread_pairs`), as messages.
+    pub fn record_view_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for v in self.record_views() {
+            for (parent, a, b) in self.models.misread_pairs(&v.resource) {
+                out.push(format!(
+                    "view {} ({}): {parent} has elements `{a}` and `{b}`: in a record with no \
+                     `{a}`, the view engine reads `{b}` for a path that reads `{a}`, as if `{a}` \
+                     were a choice element",
+                    v.name, v.resource
+                ));
+            }
+        }
+        out
+    }
+
+    /// The paths of the record views that name an element their model does
+    /// not have, each as one message naming the view, the path and the
+    /// model. Only plain chains of element names are followed (see
+    /// `fhir_pipes_sof_lint::lint_selectors`); a path it cannot follow is
+    /// not reported.
+    pub fn record_view_problems(&self) -> Vec<String> {
+        let elements = self.models.elements();
+        let mut out = Vec::new();
+        for v in self.record_views() {
+            let model = self.models.get(&v.resource).expect("a record view's model");
+            let columns: Vec<(&str, &str)> = v
+                .definition
+                .selects()
+                .into_iter()
+                .flat_map(|s| s.column.iter().flatten())
+                .map(|c| (c.name.as_str(), c.path.as_str()))
+                .collect();
+            for f in fhir_pipes_sof_lint::lint_selectors(&v.definition, &elements) {
+                if f.code != "FH01" {
+                    continue;
+                }
+                let location = f.location.as_deref().unwrap_or_default();
+                // A column by its name; `unionAll` branches repeat the names,
+                // so the one whose path has the unknown name.
+                let unknown = f.message.split('`').nth(1).unwrap_or_default();
+                let named: Vec<&str> = columns
+                    .iter()
+                    .filter(|(n, _)| *n == location)
+                    .map(|(_, p)| *p)
+                    .collect();
+                let path = named.iter().find(|p| p.contains(unknown)).or(named.first());
+                let at = match path {
+                    Some(path) => format!("column `{location}`, path `{path}`"),
+                    None => format!("path `{location}`"),
+                };
+                let message = f
+                    .message
+                    .replacen("unknown FHIR element", "unknown element", 1);
+                out.push(format!(
+                    "view {} ({}, {}): {at}: {message}",
+                    v.name, v.resource, model.url
+                ));
+            }
+        }
+        out
+    }
+
+    /// How the record files are read: the manifest's `[records]`.
+    pub fn record_rules(&self) -> RecordRules {
+        self.manifest
+            .as_ref()
+            .map_or(RecordRules::default(), |m| m.records)
     }
 
     /// The SQLQuery Library with this name, URL or `url|version`.
@@ -131,6 +245,57 @@ impl Package {
     }
 }
 
+/// A view over a record type is refused unless the manifest allows record
+/// views, and when it does, may not call `getResourceKey()`: a record is
+/// not a resource and has no key of its own.
+fn check_record_view(v: &View, allowed: bool) -> Result<()> {
+    if !allowed {
+        return Err(usage(anyhow!(
+            "view {} reads record type {}: a view over a record type reads the record \
+             file directly, which goes beyond the SQL on FHIR specification. Set \
+             `records = \"allow\"` under [views] in {} to allow it",
+            v.name,
+            v.resource,
+            manifest::FILE
+        )));
+    }
+    for p in view_paths(v) {
+        if fhir_pipes_sof::calls_any(p, &["getResourceKey"]) == Some(true) {
+            return Err(usage(anyhow!(
+                "view {} reads record type {}, and its path `{p}` calls getResourceKey(): \
+                 a record is not a resource and has no key of its own. Select the field \
+                 that identifies the record by its path (such as `id`)",
+                v.name,
+                v.resource
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Every FHIRPath path of a view: `where`, columns, `forEach`,
+/// `forEachOrNull` and `repeat`, nested selects and `unionAll` too.
+fn view_paths(v: &View) -> Vec<&str> {
+    let d = &v.definition;
+    let mut paths: Vec<&str> = d.where_.iter().map(|w| w.path.as_str()).collect();
+    for s in d.selects() {
+        paths.extend(s.column.iter().flatten().map(|c| c.path.as_str()));
+        paths.extend(s.for_each.as_deref());
+        paths.extend(s.for_each_or_null.as_deref());
+        paths.extend(s.repeat.iter().map(String::as_str));
+    }
+    paths
+}
+
+/// Whether `path` names `%recordLine` (and not a longer name that starts
+/// with it).
+fn uses_record_line(path: &str) -> bool {
+    let name = format!("%{RECORD_LINE}");
+    path.match_indices(&name).any(|(i, _)| {
+        !path[i + name.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 /// Where a map step's records come from.
 pub enum Input<'p> {
     /// The record file of this type in `--in`.
@@ -151,8 +316,11 @@ pub enum PlanStep<'p> {
     },
     Library {
         library: &'p Library,
-        /// The views to run first, which no earlier step ran.
+        /// The views to run first, which no earlier step ran: views over
+        /// staged resources and record views.
         views: Vec<&'p View>,
+        /// The record types the record views among `views` read.
+        record_types: BTreeSet<String>,
         /// The SQLQuery Libraries to run, each after those it reads, ending
         /// with `library` unless an earlier step ran it.
         queries: Vec<&'p Library>,
@@ -276,9 +444,15 @@ impl<'p> Plan<'p> {
                         queries.push(lib);
                     }
                     tests_after = Some(i);
+                    let record_types = views
+                        .iter()
+                        .filter(|v| package.is_record_view(v))
+                        .map(|v| v.resource.clone())
+                        .collect();
                     PlanStep::Library {
                         library: lib,
                         views,
+                        record_types,
                         queries,
                     }
                 }
@@ -366,18 +540,25 @@ impl<'p> Plan<'p> {
         })
     }
 
-    /// The record types the steps read from files.
+    /// The record types the steps read from files: in map steps, and in the
+    /// record views of library steps.
     pub fn record_types(&self) -> BTreeSet<&str> {
-        self.steps
-            .iter()
-            .filter_map(|s| match s {
+        let mut types = BTreeSet::new();
+        for s in &self.steps {
+            match s {
                 PlanStep::Map {
                     input: Input::File(t),
                     ..
-                } => Some(t.as_str()),
-                _ => None,
-            })
-            .collect()
+                } => {
+                    types.insert(t.as_str());
+                }
+                PlanStep::Library { record_types, .. } => {
+                    types.extend(record_types.iter().map(String::as_str));
+                }
+                PlanStep::Map { .. } => {}
+            }
+        }
+        types
     }
 
     /// Whether any step runs a Library, which needs duckdb.

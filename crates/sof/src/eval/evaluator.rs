@@ -34,6 +34,10 @@ pub(super) struct Evaluator {
     /// Whether any path uses `%context`, so contexts bind [`CONTEXT_VAR`].
     /// Set while the view compiles.
     pub(super) uses_context: AtomicBool,
+    /// The position variable's name, when the view was compiled with one
+    /// (`CompiledView::compile_with_position`): each resource binds it to a
+    /// number of its own.
+    pub(super) position: Option<String>,
 }
 
 /// The variable `%context` is renamed to ([`rename_context`]). Each context
@@ -125,6 +129,7 @@ impl Evaluator {
         let defined = defined_variables(path);
         let substituted = substitute_constants_keeping(path, &self.constants, |name| {
             is_environment_variable(name)
+                || self.position.as_deref() == Some(name)
                 || defined
                     .as_ref()
                     .is_none_or(|defined| defined.iter().any(|d| d == name))
@@ -244,8 +249,9 @@ impl Evaluator {
     /// its root, so `%resource`, `%rootResource` and `%context` are the
     /// resource, and `%rowIndex` is 0. Building one sets up the engine's
     /// shared state (caches, providers); every other context for the resource
-    /// is a child of this one ([`Evaluator::context`]) and shares it.
-    pub(super) fn root_context(&self, root: &FhirPathValue) -> EvaluationContext {
+    /// is a child of this one ([`Evaluator::context`]) and shares it. The
+    /// position variable, if the view has one, is `position` throughout.
+    pub(super) fn root_context(&self, root: &FhirPathValue, position: i64) -> EvaluationContext {
         let ctx = EvaluationContext::new(
             Collection::single(root.clone()),
             self.model.clone(),
@@ -262,6 +268,9 @@ impl Evaluator {
         // %rowIndex: the engine resolves `%rowIndex` by stripping `%` and
         // looking up `rowIndex`.
         ctx.set_variable("rowIndex".to_string(), FhirPathValue::integer(0));
+        if let Some(name) = &self.position {
+            ctx.set_variable(name.clone(), FhirPathValue::integer(position));
+        }
         ctx
     }
 

@@ -521,6 +521,143 @@ fn without_a_manifest_each_file_runs_through_the_map_that_reads_it() {
     );
 }
 
+/// A package of the example's facility map and model alone, with
+/// `manifest` as its import.toml, and an input folder with its records.
+fn facility_package(manifest: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg = tmp.path().join("facilities");
+    let p = example();
+    for f in [
+        "models/StructureDefinition-DIGITFacility.json",
+        "maps/DIGITFacilityToICR.map",
+        "maps/ConceptMap-digit-facility-usage.json",
+    ] {
+        fs::create_dir_all(pkg.join(f).parent().unwrap()).unwrap();
+        copy_file(p.join(f), pkg.join(f)).unwrap();
+    }
+    fs::write(pkg.join("import.toml"), manifest).unwrap();
+    let input = tmp.path().join("in");
+    fs::create_dir(&input).unwrap();
+    (tmp, pkg, input)
+}
+
+#[test]
+fn records_can_have_nulls_and_members_the_model_does_not_describe() {
+    // The example's two facilities as a raw API returns them: nulls, and
+    // members the model does not describe, at the top and nested.
+    let raw = [
+        r#"{"facilityId":"f-1","name":"Bo district store","usage":"Warehouse","isPermanent":true,"storageCapacity":500,"source":null,"rowVersion":1,"auditDetails":{"createdBy":"u1","createdTime":1789492036910}}"#,
+        r#"{"facilityId":"f-2","name":"Tikonko health post","usage":"Health Facility","isPermanent":true,"storageCapacity":null,"additionalFields":null,"rowVersion":3}"#,
+    ];
+    let strict = "name = \"facilities\"\n";
+    let (tmp, pkg, input) = facility_package(strict);
+    let file = input.join("DIGITFacility.ndjson");
+    fs::write(&file, raw.join("\n") + "\n").unwrap();
+    let f = file.display().to_string();
+
+    // By default each is refused.
+    let o = run(&pkg, &input, &tmp.path().join("out1"), &[]);
+    let (_, err) = text(&o);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains(&format!("{f}:1: unknown element `source` (and 2 more")),
+        "{err}"
+    );
+    let o = import(&["check", "--package", s(&pkg), "--in", s(&input)]);
+    let (out, err) = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}\n{err}");
+    for want in [
+        format!("{f}:1: unknown element `source`"),
+        format!("{f}:1: unknown element `rowVersion`"),
+        format!("{f}:1: unknown element `auditDetails`"),
+        format!("{f}:2: `storageCapacity` is null"),
+        format!("{f}:2: unknown element `additionalFields`"),
+        "2 records in 1 files: 6 problems".to_string(),
+    ] {
+        assert!(out.contains(&want), "{want}\n{out}");
+    }
+
+    // Nulls as absent only: the members the model does not describe are still refused.
+    fs::write(
+        pkg.join("import.toml"),
+        "name = \"facilities\"\n[records]\nnull = \"absent\"\n",
+    )
+    .unwrap();
+    let o = import(&["check", "--package", s(&pkg), "--in", s(&input)]);
+    let (out, _) = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(!out.contains("is null"), "{out}");
+    assert!(out.contains("2 records in 1 files: 3 problems"), "{out}");
+
+    // Both: the records are read as the model describes them, and the
+    // resources are those of the clean records.
+    fs::write(
+        pkg.join("import.toml"),
+        "name = \"facilities\"\n[records]\nnull = \"absent\"\nunknown = \"ignore\"\n",
+    )
+    .unwrap();
+    let o = import(&["check", "--package", s(&pkg), "--in", s(&input)]);
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "{out}\n{err}");
+    assert!(
+        out.contains(&format!(
+            "{f}: ignored 2 members the model does not describe (records with each): \
+             auditDetails (1), rowVersion (2)"
+        )),
+        "{out}"
+    );
+    assert!(out.contains("2 records in 1 files: 0 problems"), "{out}");
+    let out = tmp.path().join("out2");
+    let o = run(&pkg, &input, &out, &[]);
+    let (stdout, err) = text(&o);
+    assert!(o.status.success(), "{stdout}\n{err}");
+    assert_eq!(
+        fs::read(out.join("Location.ndjson")).unwrap(),
+        read_lf(&example().join("tests/sample/expected/Location.ndjson"))
+    );
+
+    // An unknown value for either is refused.
+    fs::write(
+        pkg.join("import.toml"),
+        "name = \"facilities\"\n[records]\nunknown = \"drop\"\n",
+    )
+    .unwrap();
+    let o = import(&["check", "--package", s(&pkg)]);
+    let (_, err) = text(&o);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("records.unknown is \"drop\"; give \"error\" or \"ignore\""),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_values_a_map_may_create_from_one_record_can_be_raised() {
+    let (tmp, pkg, input) = facility_package("name = \"facilities\"\n[maps]\nmax_values = 5\n");
+    copy_file(
+        sample_in(&example()).join("DIGITFacility.ndjson"),
+        input.join("DIGITFacility.ndjson"),
+    )
+    .unwrap();
+    let o = run(&pkg, &input, &tmp.path().join("out1"), &[]);
+    let (_, err) = text(&o);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains(
+            "map DIGITFacilityToICR: the transform created more than 5 values; a record \
+             this large needs a higher limit: set max_values under [maps] in import.toml"
+        ),
+        "{err}"
+    );
+    fs::write(
+        pkg.join("import.toml"),
+        "name = \"facilities\"\n[maps]\nmax_values = 5_000\n",
+    )
+    .unwrap();
+    let o = run(&pkg, &input, &tmp.path().join("out2"), &[]);
+    assert!(o.status.success(), "{:?}", text(&o));
+}
+
 #[test]
 fn a_record_file_that_no_step_reads_is_refused() {
     let (tmp, pkg) = package();

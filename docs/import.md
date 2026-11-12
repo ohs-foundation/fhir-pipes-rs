@@ -122,9 +122,12 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT u.t.crid FROM digit_visit, unnest(t
 | `title` | A title. Optional |
 | `[[step]]` | The steps, run in the order given |
 | `[[test]]` | Data tests on the Library results |
+| `[records]` | How records with nulls or members their model does not describe are read. Optional |
+| `[maps]` | The limit on the values a map may create from one record. Optional |
+| `[views]` | Whether a view may read a record file directly. Optional |
 | `[compare]` | What `import run --previous` does not compare. Optional |
 
-Any other key, here or in a step, test or `[compare]`, is an error.
+Any other key, here or in a step, test, `[records]`, `[maps]`, `[views]` or `[compare]`, is an error.
 
 ### Steps
 
@@ -147,8 +150,9 @@ come anywhere.
 A library step runs the views and SQLQuery Libraries that `L` depends on,
 through any SQLView it reads, and then `L`. A view or Library that an
 earlier step ran is not run again, and one that no step needs is not run.
-The views read only the staged resources. A view of a type nothing staged
-gives an empty table. A Library cannot depend on the built-in Location view
+A view over a FHIR resource type reads only the staged resources. A view
+of a type nothing staged gives an empty table. A view over a record type
+reads the record file instead (see [Record views](#record-views)). A Library cannot depend on the built-in Location view
 or LocationHierarchy: the import has no Location tables.
 
 ### A Library result as records
@@ -198,6 +202,185 @@ after it. Every test runs, and every failure is reported with its count and
 first rows. If any fails, the run stops with exit 1 and writes nothing to
 `--out`: not even the output of steps that ran before the tests.
 
+### Records
+
+```toml
+[records]
+null = "absent"
+unknown = "ignore"
+```
+
+| Key | Meaning |
+|---|---|
+| `null` | `error` (the default): a null value is a problem. `absent`: a member whose value is null is read as if it were not there, at any depth. A null item of an array is still a problem |
+| `unknown` | `error` (the default): a member the model does not describe is a problem. `ignore`: it is left out of the record before the record is checked and mapped, at any depth the model describes |
+
+Records that a system's API returns as they are, such as DIGIT search
+results, set most members to null when they have no value, and carry
+members a mapping has no use for: audit details, row versions, free-form
+`additionalDetails` objects whose keys no model can list. With both set,
+the model describes only what the package reads, and a record is read as
+an instance of it.
+
+The cost is that a member renamed at the source is no longer reported, but
+left out: make the elements the maps need `min` 1 where the source always
+has them, so a rename is still found. `import check --in` names the members
+it left out, with the number of records that had each, so what is ignored
+can be read.
+
+`[records]` applies to the record files of `--in`. The rows of a Library
+result are always read with SQL NULLs left out and every column checked
+against the model.
+
+### Maps
+
+```toml
+[maps]
+max_values = 20_000_000
+```
+
+| Key | Meaning |
+|---|---|
+| `max_values` | The values one transform may create: the elements it writes and the values it works with. Default 2,000,000 |
+
+The limit stops a map that runs away, such as a group that calls itself
+without end. A record that is a large tree, such as a DIGIT boundary
+hierarchy with 80,000 boundaries in one record, needs more: its map writes
+every Location in one transform. A run past the limit stops with
+`the transform created more than 2000000 values`, and says where to raise it.
+Memory grows with the values: the 83,194 Locations of one DIGIT hierarchy
+took about 2.5 GB.
+
+### Views
+
+```toml
+[views]
+records = "allow"
+```
+
+| Key | Meaning |
+|---|---|
+| `records` | `error` (the default): a view whose `resource` is a record type is refused, naming the view and this setting. `allow`: such a view reads the record file of its type (see [Record views](#record-views)) |
+
+## Record views
+
+A *record view* is a ViewDefinition in `views/` whose `resource` is one of
+the package's record types, the name of a logical model in `models/`
+(`DIGITFacility`), not a FHIR resource type. It reads the record file of
+that type from `--in`, not staged resources.
+
+The SQL on FHIR specification binds `ViewDefinition.resource` to the FHIR
+resource types, so a record view goes beyond it, and a package has to allow
+record views with `[views] records = "allow"`. The standard form remains
+available: stage the records with a map (`stage = true`) and write the view
+over the staged resources. [examples/import/digit-visits](../examples/import/digit-visits)
+uses that form.
+
+```json
+{"resourceType": "ViewDefinition", "name": "Facility", "status": "draft",
+ "resource": "DIGITFacility",
+ "select": [{"column": [
+   {"name": "line", "path": "%recordLine", "type": "integer"},
+   {"name": "id", "path": "id", "type": "string"},
+   {"name": "locality", "path": "address.locality.code", "type": "string"}]}]}
+```
+
+### What a record view reads
+
+- The records of its type as a map step reads them: with the
+  [`[records]`](#records) rules applied, then checked against the model. A
+  record that does not fit stops the run with exit 2, naming the file and
+  line, as in a map step.
+- A missing record file gives an empty table, as a type nothing staged
+  does.
+- The view runs when a Library that depends on it runs, as any view does.
+  Record views of one type that one library step runs share one read of the
+  file, a chunk of lines at a time; the records are not held in memory, only
+  the view's rows, as for any view.
+- Its table is named as any view's (`Facility` is `facility`), so Libraries
+  and `sql` data tests read it the same way.
+- A view over a FHIR resource type still reads the staged resources. Both
+  kinds can be in one package, and one Library can read both.
+
+### Keys
+
+A record is not a resource and has no key of its own.
+
+| Function | In a record view |
+|---|---|
+| `getResourceKey()` | Refused when the package is loaded (exit 2), naming the view and the path. Select the field that identifies the record by its path (`id`) |
+| `getReferenceKey()` | Allowed. It reads a `Reference` value and works as in any view |
+
+Without the refusal, the view engine would return the record's `id` member
+where it has one, and on an element inside the record, that element's `id`.
+
+### The record's line
+
+`%recordLine` is the record's line in its file, counted from 1: the line
+number that `import check` and the run's messages give (`file:line`). Blank
+lines are counted. It is the same throughout the view, inside `forEach` and
+`repeat` too. Only a record view has it: a view over a resource type that
+uses it is refused when the package is loaded.
+
+The rows of a view, and so of the tables, come in the order of the records.
+SQL keeps no order, so a Library that wants the records' order selects the
+line and sorts by it (`ORDER BY line`).
+
+### What import check verifies
+
+`import check` lists the record views on one line:
+
+```
+record views, which read record files directly, beyond the SQL on FHIR specification: Boundary (DIGITBoundaryTree), Facility (DIGITFacility)
+```
+
+It checks the paths of each record view against the model of its type, and
+reports an element the model does not have as an error, with the view, the
+path and the model:
+
+```
+error: view Facility (DIGITFacility, https://icr.healthcampaigns.org/StructureDefinition/DIGITFacility): column `name`, path `nmae`: unknown element `nmae` — did you mean `name`?
+```
+
+| Checked | Not checked |
+|---|---|
+| Each `column.path`, `forEach`, `forEachOrNull` and `where` path that is a chain of element names, from the record or from the `forEach` items above it | Anything else: operators (`a = 'x'`, `a and b`), unions, literals, variables (`%recordLine`) |
+| Through `first()`, `last()`, `single()`, `tail()`, an index (`[0]`) and `where(...)` | The arguments of a function, such as the condition inside `where(...)`. The walk stops at any other function: what follows `exists()`, `empty()` or `ofType()` is not checked |
+| Into a BackboneElement, an element with a `contentReference`, an element typed with another model of the package, and a FHIR complex type (`CodeableConcept`, by the FHIR R4 and R5 core types) | |
+| The columns under `repeat`, when every node it reaches has the same elements (a tree whose children element refers back to its parent with `contentReference`) | The columns under a `repeat` whose nodes differ, or whose paths are not chains of element names |
+| `id` and `resourceType` at the top of a record | |
+
+A path it cannot follow is not reported. The check runs in `import check`
+only; `import run` and `import test` do not run it.
+
+`import check` also warns where the view engine can read one element for
+another. When an object has no member `a`, the engine looks for a member
+named `a` and then a capital letter, as it would for a choice element
+`a[x]`, and returns that. So where a model has elements `name` and
+`nameLocal`, a record with no `name` gives `nameLocal`'s value for a path
+that reads `name`:
+
+```
+warning: view Shop (Shop): Shop has elements `name` and `nameLocal`: in a record with no `name`, the view engine reads `nameLocal` for a path that reads `name`, as if `name` were a choice element
+```
+
+The same happens in a `repeat` whose paths are applied to nodes that do not
+have them: `repeat: ["boundary", "children"]` over a DIGIT boundary tree
+reads `boundary` on each boundary, which has no such member, as its
+`boundaryType`. Use `forEach` with a `unionAll` instead:
+
+```json
+"select": [{"forEach": "boundary", "unionAll": [
+  {"column": [{"name": "code", "path": "code"}]},
+  {"repeat": ["children"], "column": [{"name": "code", "path": "code"}]}]}]
+```
+
+### Names
+
+A logical model whose type is also a FHIR type (`Location`, `HumanName`) is
+refused when the package is loaded: a view over it, or a record whose
+`resourceType` names it, could be either.
+
 ### Compare
 
 ```toml
@@ -233,11 +416,14 @@ Loads the package and reports:
 - syntax and type errors in the maps, as [map check](maps.md#map-check)
   does;
 - problems with the manifest: a map, model, Library or view that does not
-  resolve, a step out of order, a test of a Library no step runs. These
-  stop the check with exit 2.
+  resolve, a step out of order, a test of a Library no step runs, a record
+  view the manifest does not allow. These stop the check with exit 2;
+- the record views, on one line, and the paths in them that name an
+  element their model does not have (see
+  [What import check verifies](#what-import-check-verifies)).
 
 With `--in`, it also checks every record of every file against its logical
-model, and reports a file that no step reads. Each problem is printed as
+model, and reports a file that no step or record view reads. Each problem is printed as
 `file:line: message`, at most 20 per file, then a count of the rest. A
 record is checked against its model's snapshot:
 
@@ -250,6 +436,14 @@ record is checked against its model's snapshot:
 | No value is null | `` `task[1]` is null `` |
 | A primitive has its JSON type: string-like types a string, `boolean` a boolean, `integer`, `positiveInt` and `unsignedInt` a whole number in range, `decimal` a number | `` `count` must be a whole JSON number (integer), not a string `` |
 | A BackboneElement, a `contentReference`, and an element typed with another model of the package are checked inside the same way | ``missing required element `task[0].crid` `` |
+
+With [`[records]`](#records), nulls and the members the model does not
+describe are taken out first, as the run does, and the check prints one line
+per file naming the members it left out:
+
+```
+in/DIGITFacility.ndjson: ignored 16 members the model does not describe (records with each): additionalFields (75), address.addressLine1 (75), ...
+```
 
 Choice elements (`value[x]`) are matched by their type suffix
 (`valueString`). A FHIR complex type such as CodeableConcept is checked only
@@ -279,8 +473,8 @@ fhir-pipes import run --package DIR --in RAW --out OUT [--threads N] [--report F
 | `--changed DIR` | Requires `--previous`. Gets the resources that are new or differ from the previous run, one `<ResourceType>.ndjson` per type, in the same order as in `--out`. A type with nothing changed gets no file. Must be empty or not exist, unless `--overwrite` |
 | `--removed FILE` | Requires `--previous`. Gets one `ResourceType/id` per line, sorted, for every resource of the previous run that this run did not write. Replaced if it exists |
 
-Each record is checked against its model (as `import check --in` does)
-before its map runs. The first record that does not fit, or that its map
+Each record is read by the package's [`[records]`](#records) rules and
+checked against its model (as `import check --in` does) before its map runs. The first record that does not fit, or that its map
 fails on, stops the run with exit 2 and names the file and line, or the
 Library and row. Engine warnings, such as a code a ConceptMap has no target
 for, do not stop the run: they are printed (the first 10 per step) and kept
@@ -309,7 +503,7 @@ readable by its owner only, and every file in it is mode 0600 on Unix.
 
 | File | What it holds |
 |---|---|
-| `staged/<ResourceType>.ndjson` | The resources of the stage steps |
+| `staged/<ResourceType>.ndjson` | The resources of the stage steps. Record views read `--in`, not this |
 | `tables/<table>.parquet` | Each view's rows and each Library's result |
 | `rows/<table>.ndjson` | A Library's result as records, for a map |
 | `out/<ResourceType>.ndjson` | The output, before it is moved to `--out` |
@@ -358,7 +552,8 @@ run had:
 
 `status` is `ok`, `failed` (a data test failed; `examples` holds the first
 5 failing rows of each failed test) or `error` (with `error`, the message).
-`file` is `null` for a step whose record file is missing. The report is
+`file` is `null` for a step whose record file is missing. A table of a
+record view has `file` too: the record file the view read, or `null`. The report is
 written whatever the outcome once the steps have started; a problem found
 before then (a bad package, a non-empty `--out`) is only printed.
 
@@ -438,12 +633,17 @@ there; check the change before committing it.
 
 - Maps are read as FHIR R4.
 - A map sees one record. Joins and grouping are done with views and
-  Libraries over staged resources.
+  Libraries, over staged resources or, with record views, over the record
+  files.
 - Views and Libraries run in DuckDB, one Parquet file per table. The import
   has no partitions, no Location tables and no PostgreSQL.
 - Library parameters are not supported.
 - Records are checked against the snapshot only. Constraints, value set
   bindings and string formats are not checked.
-- Each record file is read once per step that reads it; staged resources and
+- One record is one transform. A record that holds many resources' worth
+  of data (a tree of boundaries) is mapped on one thread, and may need
+  `[maps] max_values`.
+- Each record file is read once per step that reads it, and once per
+  library step that runs record views of its type; staged resources and
   Library results are written to disk, not held in memory. A view's rows
   are held in memory while it runs, as in `refresh`.

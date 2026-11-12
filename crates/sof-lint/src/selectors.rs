@@ -82,7 +82,9 @@ fn walk_select(
         });
     }
     if !select.repeat.is_empty() {
-        inner = None;
+        inner = inner
+            .as_deref()
+            .and_then(|pre| repeat_focus(&select.repeat, resource, pre, model));
     }
     if let Some(pre) = inner.as_deref() {
         for col in select.column.iter().flatten() {
@@ -92,6 +94,74 @@ fn walk_select(
     for nested in select.nested() {
         walk_select(nested, resource, inner.as_deref(), model, out);
     }
+}
+
+/// The steps to the nodes a `repeat` reaches from `prefix`, when every
+/// node it can reach has the same elements, so the columns under it can be
+/// checked as if they were under one `forEach`. That holds for a tree whose
+/// children element refers back to its parent (`item.item`, or a logical
+/// model's `children` with a `contentReference`). `None` when the paths are
+/// not plain chains of element names, or the nodes differ.
+fn repeat_focus(
+    paths: &[String],
+    resource: &str,
+    prefix: &[Step],
+    model: &dyn ElementModel,
+) -> Option<Vec<Step>> {
+    // A node: the element names from the resource that reach it.
+    let fields = |steps: &[Step]| -> Option<Vec<String>> {
+        steps
+            .iter()
+            .filter(|s| !matches!(s, Step::Collapse))
+            .map(|s| match s {
+                Step::Field(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let start = fields(prefix)?;
+    let own: Vec<Vec<String>> = paths
+        .iter()
+        .map(|p| fields(&steps(p)?))
+        .collect::<Option<_>>()?;
+    let names = |node: &[String]| {
+        let refs: Vec<&str> = node.iter().map(String::as_str).collect();
+        model.element_names(resource, &refs)
+    };
+    // Every node a path reaches from one reached already, a few levels
+    // down: enough to see that each level has the elements of the last.
+    let mut frontier = vec![start];
+    let mut reached: Vec<Vec<String>> = Vec::new();
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for node in &frontier {
+            for path in &own {
+                let mut child = node.clone();
+                let mut ok = true;
+                for f in path {
+                    // A name the node does not have reaches nothing.
+                    if !names(&child).is_some_and(|n| n.contains(f)) {
+                        ok = false;
+                        break;
+                    }
+                    child.push(f.clone());
+                }
+                if ok {
+                    next.push(child);
+                }
+            }
+        }
+        reached.extend(next.iter().cloned());
+        frontier = next;
+    }
+    let first = reached.first()?;
+    let want = names(first)?;
+    if reached.iter().any(|n| names(n).as_ref() != Some(&want)) {
+        return None;
+    }
+    let mut out: Vec<Step> = first.iter().cloned().map(Step::Field).collect();
+    out.push(Step::Collapse);
+    Some(out)
 }
 
 fn check_column(
@@ -478,6 +548,36 @@ mod tests {
             "where": [{ "path": "category.coding.where(code = 'laboratory').exists()" }]
         }))
         .unwrap();
+        assert!(lint_selectors(&v, &CoreTypes).is_empty());
+    }
+
+    #[test]
+    fn columns_under_repeat_are_checked_when_every_level_is_alike() {
+        let v = view(
+            "QuestionnaireResponse",
+            json!([{ "repeat": ["item"], "column": [
+                { "name": "link", "path": "linkId" },
+                { "name": "bad", "path": "linkid" }
+            ] }]),
+        );
+        let f = lint_selectors(&v, &CoreTypes);
+        assert_eq!(codes(&f), ["FH01"], "{f:?}");
+        assert_eq!(f[0].location.as_deref(), Some("bad"));
+        // Paths that are not plain names leave the columns unchecked.
+        let v = view(
+            "QuestionnaireResponse",
+            json!([{ "repeat": ["item.where(linkId = 'x')"], "column": [
+                { "name": "bad", "path": "linkid" }
+            ] }]),
+        );
+        assert!(lint_selectors(&v, &CoreTypes).is_empty());
+        // As do nodes of different kinds: an item and an answer.
+        let v = view(
+            "QuestionnaireResponse",
+            json!([{ "repeat": ["item", "answer"], "column": [
+                { "name": "bad", "path": "linkid" }
+            ] }]),
+        );
         assert!(lint_selectors(&v, &CoreTypes).is_empty());
     }
 

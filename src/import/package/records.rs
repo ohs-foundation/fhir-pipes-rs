@@ -21,12 +21,18 @@
 //!   `contentReference`, and an element typed with another model of the
 //!   package are checked inside the same way. A FHIR complex type, such as
 //!   CodeableConcept, is checked only to be a JSON object.
+//!
+//! The manifest's `[records]` can loosen the first and the null check for
+//! the record files (`prepare`): members whose value is null are read as
+//! absent, and members the model does not describe are left out, before the
+//! record is checked and mapped.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use super::manifest::RecordRules;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::NdjsonReader;
 
@@ -247,6 +253,20 @@ impl Models {
     }
 
     fn add(&mut self, model: Model) -> std::result::Result<(), String> {
+        // A view names what it reads by type alone (`resource`), and so does
+        // a record's `resourceType`: a record type that is also a FHIR type
+        // could be either.
+        if let Some(kind) = fhir_pipes_sof::fhir_model::type_kind(&model.type_name) {
+            let what = match kind {
+                fhir_pipes_sof::fhir_model::Kind::Resource => "resource type",
+                _ => "datatype",
+            };
+            return Err(format!(
+                "{} is record type {}, which is also a FHIR {what}: a record of it, or a view \
+                 over it, could be either. Give the model a URL that ends in another name",
+                model.url, model.type_name
+            ));
+        }
         if let Some(other) = self.by_type.get(&model.type_name) {
             return Err(format!(
                 "{} and {} are both record type {}",
@@ -285,6 +305,98 @@ impl Models {
         };
         self.check_object(model, &model.root, object, "", true, &mut out);
         out
+    }
+
+    /// Applies `rules` to `record` before it is checked: with `null_absent`
+    /// every member whose value is null is removed, and with `ignore_unknown`
+    /// every member the model does not describe, at any depth the model
+    /// describes. Returns the paths of the members left out as unknown,
+    /// without array indexes (`auditDetails`, `address.city`). A null item
+    /// of an array is kept, and the check reports it.
+    pub fn prepare(&self, type_name: &str, record: &mut Value, rules: RecordRules) -> Vec<String> {
+        let mut ignored = Vec::new();
+        if rules == RecordRules::default() {
+            return ignored;
+        }
+        if let (Some(model), Some(object)) = (self.get(type_name), record.as_object_mut()) {
+            self.prepare_object(model, &model.root, object, "", true, rules, &mut ignored);
+        }
+        ignored
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_object(
+        &self,
+        model: &Model,
+        path: &str,
+        object: &mut Map<String, Value>,
+        at: &str,
+        top: bool,
+        rules: RecordRules,
+        ignored: &mut Vec<String>,
+    ) {
+        let none = Vec::new();
+        let children = model.children.get(path).unwrap_or(&none);
+        object.retain(|key, value| {
+            if rules.null_absent && value.is_null() {
+                return false;
+            }
+            if top && (key == "resourceType" || key == "id") {
+                return true;
+            }
+            if let Some(base) = key.strip_prefix('_')
+                && children.iter().any(|e| e.name == base)
+            {
+                return true;
+            }
+            let at = if at.is_empty() {
+                key.clone()
+            } else {
+                format!("{at}.{key}")
+            };
+            let Some((element, type_code)) = find(children, key) else {
+                if rules.ignore_unknown {
+                    ignored.push(at);
+                    return false;
+                }
+                // Kept for the check to report; its nulls go all the same.
+                if rules.null_absent {
+                    drop_nulls_in(value);
+                }
+                return true;
+            };
+            // Where the value's own members are described, if anywhere.
+            let code = type_code.or(match element.types.as_slice() {
+                [one] => Some(one.as_str()),
+                _ => None,
+            });
+            let inner: Option<(&Model, String)> = if let Some(r) = &element.content_reference {
+                Some((model, r.clone()))
+            } else {
+                match code {
+                    Some("BackboneElement" | "Element") => {
+                        Some((model, format!("{path}.{}", element.name)))
+                    }
+                    Some(c) => self.by_url(c).map(|other| (other, other.root.clone())),
+                    None => None,
+                }
+            };
+            let items: Vec<&mut Value> = match value {
+                Value::Array(items) => items.iter_mut().collect(),
+                v => vec![v],
+            };
+            for item in items {
+                match (&inner, item.as_object_mut()) {
+                    (Some((m, p)), Some(o)) => {
+                        self.prepare_object(m, p, o, &at, false, rules, ignored)
+                    }
+                    // A FHIR complex type: its members are not described.
+                    (None, Some(_)) if rules.null_absent => drop_nulls_in(item),
+                    _ => {}
+                }
+            }
+            true
+        });
     }
 
     fn check_object(
@@ -403,6 +515,240 @@ impl Models {
             Some(object) => self.check_object(model, path, object, at, false, out),
             None => out.push(format!("`{at}` must be a JSON object, not {}", kind(item))),
         }
+    }
+}
+
+/// What a path of element names reaches in a record, for the checks of a
+/// record view's paths ([`Models::elements`]).
+enum Node<'m> {
+    /// An element of a model with members of its own: the model and the
+    /// element's path in it (its root, a BackboneElement, or what a
+    /// `contentReference` names).
+    Model(&'m Model, String),
+    /// A FHIR complex type (`CodeableConcept`) and the element names inside
+    /// it, which the FHIR core types answer for.
+    Fhir(String, Vec<String>),
+    /// A primitive, or an element with several types: nothing to follow.
+    Leaf,
+}
+
+/// The logical models of a package as element information for the checks
+/// of a view's paths (`fhir-pipes-sof-lint`), with a record type as the
+/// root. An element typed with a FHIR complex type is answered for by the
+/// FHIR core types.
+pub struct ModelElements<'m>(&'m Models);
+
+impl Models {
+    /// The elements of the model of `type_name` that the view engine can
+    /// read for another: `(parent, a, b)` where `b`'s name is `a`'s and then
+    /// a capital letter (`boundary` and `boundaryType`). Where a record has
+    /// no `a`, the engine takes `b` for a choice element `a[x]`, and a path
+    /// that reads `a` gets `b`'s value.
+    pub fn misread_pairs(&self, type_name: &str) -> Vec<(String, String, String)> {
+        let Some(model) = self.get(type_name) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut parents: Vec<&String> = model.children.keys().collect();
+        parents.sort();
+        for parent in parents {
+            let children = &model.children[parent];
+            for a in children.iter().filter(|e| !e.name.ends_with("[x]")) {
+                for b in children {
+                    let capital = b
+                        .name
+                        .strip_prefix(a.name.as_str())
+                        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()));
+                    if capital {
+                        out.push((parent.clone(), a.name.clone(), b.name.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// These models as element information for `lint_selectors`.
+    pub fn elements(&self) -> ModelElements<'_> {
+        ModelElements(self)
+    }
+}
+
+/// What one element of a model holds, for the path checks.
+struct Found<'e> {
+    element: &'e Element,
+    /// The type a choice element's JSON name gives (`valueString`).
+    type_code: Option<&'e str>,
+    /// The element is a choice element named by its own name (`value`).
+    choice: bool,
+}
+
+impl<'m> ModelElements<'m> {
+    /// The node `path` reaches from the root of record type `root`.
+    fn node(&self, root: &str, path: &[&str]) -> Option<Node<'m>> {
+        let model = self.0.get(root)?;
+        let mut node = Node::Model(model, model.root.clone());
+        for (i, name) in path.iter().enumerate() {
+            node = match node {
+                Node::Model(m, p) => {
+                    if i == 0 && (*name == "id" || *name == "resourceType") {
+                        Node::Leaf
+                    } else {
+                        let found = self.find(m, &p, name)?;
+                        self.inner(m, &p, &found)
+                    }
+                }
+                Node::Fhir(t, mut rest) => {
+                    rest.push(name.to_string());
+                    Node::Fhir(t, rest)
+                }
+                Node::Leaf => return None,
+            };
+        }
+        Some(node)
+    }
+
+    fn find<'e>(&self, m: &'e Model, parent: &str, name: &str) -> Option<Found<'e>> {
+        let children = m.children.get(parent)?;
+        if let Some((element, type_code)) = find(children, name) {
+            return Some(Found {
+                element,
+                type_code,
+                choice: false,
+            });
+        }
+        let element = children
+            .iter()
+            .find(|e| e.name.strip_suffix("[x]") == Some(name))?;
+        Some(Found {
+            element,
+            type_code: None,
+            choice: true,
+        })
+    }
+
+    /// Where the members of what `found` holds are described.
+    fn inner(&self, m: &'m Model, parent: &str, found: &Found) -> Node<'m> {
+        if found.choice {
+            return Node::Leaf;
+        }
+        if let Some(r) = &found.element.content_reference {
+            return Node::Model(m, r.clone());
+        }
+        let code = found.type_code.or(match found.element.types.as_slice() {
+            [one] => Some(one.as_str()),
+            _ => None,
+        });
+        match code {
+            Some("BackboneElement" | "Element") => {
+                Node::Model(m, format!("{parent}.{}", found.element.name))
+            }
+            Some(c) => match self.0.by_url(c) {
+                Some(other) => Node::Model(other, other.root.clone()),
+                None if fhir_pipes_sof::fhir_model::type_kind(c)
+                    == Some(fhir_pipes_sof::fhir_model::Kind::Complex) =>
+                {
+                    Node::Fhir(c.to_string(), Vec::new())
+                }
+                None => Node::Leaf,
+            },
+            None => Node::Leaf,
+        }
+    }
+
+    /// The last element of `path`, when its parent is a model's.
+    fn last(&self, root: &str, path: &[&str]) -> Option<Found<'m>> {
+        let (name, parent) = path.split_last()?;
+        match self.node(root, parent)? {
+            Node::Model(m, p) => self.find(m, &p, name),
+            _ => None,
+        }
+    }
+}
+
+impl fhir_pipes_sof_lint::ElementModel for ModelElements<'_> {
+    fn element_names(&self, root: &str, path: &[&str]) -> Option<Vec<String>> {
+        match self.node(root, path)? {
+            Node::Model(m, p) => {
+                let mut names = Vec::new();
+                if p == m.root && path.is_empty() {
+                    names.extend(["resourceType".to_string(), "id".to_string()]);
+                }
+                for e in m.children.get(&p).into_iter().flatten() {
+                    match e.name.strip_suffix("[x]") {
+                        Some(base) => {
+                            names.push(base.to_string());
+                            names.extend(
+                                e.types.iter().map(|t| format!("{base}{}", capitalised(t))),
+                            );
+                        }
+                        None => names.push(e.name.clone()),
+                    }
+                }
+                Some(names)
+            }
+            Node::Fhir(t, rest) => {
+                let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+                fhir_pipes_sof_lint::CoreTypes.element_names(&t, &rest)
+            }
+            Node::Leaf => None,
+        }
+    }
+
+    fn is_array(&self, root: &str, path: &[&str]) -> Option<bool> {
+        if let Some(f) = self.last(root, path) {
+            return Some(f.element.max == Max::Many);
+        }
+        let (name, parent) = path.split_last()?;
+        match self.node(root, parent)? {
+            Node::Fhir(t, mut rest) => {
+                rest.push(name.to_string());
+                let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+                fhir_pipes_sof_lint::CoreTypes.is_array(&t, &rest)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_choice(&self, root: &str, path: &[&str]) -> bool {
+        self.last(root, path).is_some_and(|f| f.choice)
+    }
+
+    fn kind(&self, root: &str, path: &[&str]) -> Option<fhir_pipes_sof_lint::ElementKind> {
+        use fhir_pipes_sof_lint::ElementKind;
+        let f = self.last(root, path)?;
+        if f.choice {
+            return None;
+        }
+        if f.element.content_reference.is_some() {
+            return Some(ElementKind::Complex);
+        }
+        let code = f.type_code.or(match f.element.types.as_slice() {
+            [one] => Some(one.as_str()),
+            _ => None,
+        })?;
+        Some(match code {
+            "Reference" => ElementKind::Reference,
+            c if c.starts_with("http://hl7.org/fhirpath/System.")
+                || c.starts_with(|ch: char| ch.is_ascii_lowercase()) =>
+            {
+                ElementKind::Primitive
+            }
+            _ => ElementKind::Complex,
+        })
+    }
+}
+
+/// Removes every object member whose value is null, at any depth inside
+/// `value`. Array items are kept.
+fn drop_nulls_in(value: &mut Value) {
+    match value {
+        Value::Object(o) => {
+            o.retain(|_, v| !v.is_null());
+            o.values_mut().for_each(drop_nulls_in);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_nulls_in),
+        _ => {}
     }
 }
 
@@ -612,6 +958,160 @@ mod tests {
                 "missing required element `task`"
             ]
         );
+    }
+
+    #[test]
+    fn nulls_can_be_read_as_absent_and_unknown_members_ignored() {
+        let m = models();
+        let record = json!({"resourceType": "Visit", "id": "v1", "key": "k", "count": null,
+            "audit": {"by": "u1", "at": null}, "place": {"name": "Bo", "geometry": null, "x": 1},
+            "code": {"text": "x", "extra": null},
+            "task": [{"id": "t1", "rowVersion": 2, "sub": [{"id": "t2", "deep": true}]}, null]});
+
+        // By default the record is not changed.
+        let mut r = record.clone();
+        assert!(
+            m.prepare("Visit", &mut r, RecordRules::default())
+                .is_empty()
+        );
+        assert_eq!(r, record);
+
+        // Nulls as absent: null members go at any depth, also inside a FHIR
+        // complex type; a null array item stays, and is reported.
+        let nulls = RecordRules {
+            null_absent: true,
+            ignore_unknown: false,
+        };
+        let mut r = record.clone();
+        assert!(m.prepare("Visit", &mut r, nulls).is_empty());
+        assert!(r.get("count").is_none());
+        assert_eq!(r["audit"], json!({"by": "u1"}));
+        assert_eq!(r["place"], json!({"name": "Bo", "x": 1}));
+        assert_eq!(r["code"], json!({"text": "x"}));
+        assert_eq!(
+            m.check("Visit", &r),
+            [
+                "unknown element `audit`",
+                "unknown element `place.x`",
+                "unknown element `task[0].rowVersion`",
+                "unknown element `task[0].sub[0].deep`",
+                "`task[1]` is null",
+            ]
+        );
+
+        // Unknown members ignored: they go, each listed by its path without
+        // array indexes; nulls are still reported.
+        let unknown = RecordRules {
+            null_absent: false,
+            ignore_unknown: true,
+        };
+        let mut r = record.clone();
+        assert_eq!(
+            m.prepare("Visit", &mut r, unknown),
+            [
+                "audit",
+                "place.geometry",
+                "place.x",
+                "task.rowVersion",
+                "task.sub.deep"
+            ]
+        );
+        assert_eq!(
+            m.check("Visit", &r),
+            ["`count` is null", "`task[1]` is null"]
+        );
+
+        // Both: the record as its model describes it.
+        let both = RecordRules {
+            null_absent: true,
+            ignore_unknown: true,
+        };
+        let mut r = record.clone();
+        assert_eq!(
+            m.prepare("Visit", &mut r, both),
+            ["audit", "place.x", "task.rowVersion", "task.sub.deep"]
+        );
+        assert_eq!(
+            r,
+            json!({"resourceType": "Visit", "id": "v1", "key": "k", "place": {"name": "Bo"},
+                "code": {"text": "x"}, "task": [{"id": "t1", "sub": [{"id": "t2"}]}, null]})
+        );
+        assert_eq!(m.check("Visit", &r), ["`task[1]` is null"]);
+
+        // A required element that is null is missing; another model's
+        // elements are prepared by that model.
+        let mut r =
+            json!({"key": null, "task": [{"id": "t"}], "place": {"name": "Bo", "x": null, "y": 1}});
+        assert_eq!(m.prepare("Visit", &mut r, both), ["place.y"]);
+        assert_eq!(r["place"], json!({"name": "Bo"}));
+        assert_eq!(m.check("Visit", &r), ["missing required element `key`"]);
+    }
+
+    #[test]
+    fn models_answer_for_the_paths_of_a_record_view() {
+        use fhir_pipes_sof_lint::{ElementKind, ElementModel};
+        let m = models();
+        let e = m.elements();
+        let names = e.element_names("Visit", &[]).unwrap();
+        for want in [
+            "resourceType",
+            "id",
+            "key",
+            "value",
+            "valueString",
+            "valueInteger",
+            "task",
+        ] {
+            assert!(names.contains(&want.to_string()), "{want}: {names:?}");
+        }
+        assert!(!names.contains(&"gone".to_string()), "max 0: {names:?}");
+        // Into a BackboneElement, a contentReference and another model.
+        assert!(
+            e.element_names("Visit", &["task"])
+                .unwrap()
+                .contains(&"tag".to_string())
+        );
+        assert!(
+            e.element_names("Visit", &["task", "sub"])
+                .unwrap()
+                .contains(&"tag".to_string())
+        );
+        assert_eq!(e.element_names("Visit", &["place"]).unwrap(), ["name"]);
+        // A FHIR complex type is answered for by the core types.
+        assert!(
+            e.element_names("Visit", &["code"])
+                .unwrap()
+                .contains(&"coding".to_string())
+        );
+        assert_eq!(e.is_array("Visit", &["code", "coding"]), Some(true));
+        assert_eq!(e.element_names("Visit", &["key"]), None);
+        assert_eq!(e.element_names("Visit", &["nope"]), None);
+        assert_eq!(e.element_names("NotAType", &[]), None);
+        assert_eq!(e.is_array("Visit", &["task"]), Some(true));
+        assert_eq!(e.is_array("Visit", &["key"]), Some(false));
+        assert!(e.is_choice("Visit", &["value"]));
+        assert!(!e.is_choice("Visit", &["valueString"]));
+        assert_eq!(e.kind("Visit", &["key"]), Some(ElementKind::Primitive));
+        assert_eq!(e.kind("Visit", &["code"]), Some(ElementKind::Complex));
+        assert_eq!(e.kind("Visit", &["task"]), Some(ElementKind::Complex));
+    }
+
+    #[test]
+    fn a_model_named_like_a_fhir_type_is_refused() {
+        let sd = json!({"resourceType": "StructureDefinition",
+            "url": "https://example.org/StructureDefinition/Patient", "kind": "logical",
+            "snapshot": {"element": [{"id": "Patient", "path": "Patient"}]}});
+        let err = Models::default()
+            .add(Model::from_json(&sd).unwrap())
+            .unwrap_err();
+        assert!(err.contains("is also a FHIR resource type"), "{err}");
+        let sd = json!({"resourceType": "StructureDefinition",
+            "url": "https://example.org/StructureDefinition/HumanName", "kind": "logical",
+            "snapshot": {"element": [{"id": "HumanName", "path": "HumanName"}]}});
+        let err = Models::default()
+            .add(Model::from_json(&sd).unwrap())
+            .unwrap_err();
+        assert!(err.contains("is also a FHIR datatype"), "{err}");
     }
 
     #[test]
