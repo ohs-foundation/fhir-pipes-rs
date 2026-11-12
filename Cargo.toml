@@ -97,10 +97,31 @@ httptest = "0.16"
 # Router tests call the router as a service (`oneshot`); in the tree through axum.
 tower = { version = "0.5", features = ["util"] }
 
+# Released binaries: the smallest and fastest, and slow to build (about 15
+# minutes).
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
+
+# An optimised build in a few minutes, for timing and profiling locally:
+# `cargo build --profile fast`, written to target/fast. It keeps symbols.
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+strip = false
+
+# Debug builds: file and line numbers in backtraces, without the full debug
+# information that slows linking and fills target/.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies are optimised in debug builds too. They are compiled once and
+# cached, and the tests spend most of their time in them (the FHIRPath and
+# map engines, arrow, parquet).
+[profile.dev.package."*"]
+opt-level = 2
 
 [workspace]
 members = ["crates/sof", "crates/sof-lint"]
