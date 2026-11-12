@@ -286,7 +286,7 @@ impl Runner {
     /// A slot to run a query in, or `None` when all are taken.
     pub(super) fn slot(&self) -> Option<Slot<'_>> {
         self.running
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < self.concurrency).then_some(n + 1)
             })
             .ok()
