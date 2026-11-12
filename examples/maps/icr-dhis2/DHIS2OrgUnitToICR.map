@@ -5,6 +5,11 @@
 
 // Run by `fhir-pipes dhis2 locations --maps`. Each org unit becomes an
 // ICRLocation; a facility also gets its ICRFacilityOrganization, written first.
+//
+// Ids, references and systems are joined with `append` from source variables
+// rather than with FHIRPath, and `where` tests run on a single field or group,
+// not the whole org unit: each FHIRPath call parses its expression and copies
+// its input.
 
 uses "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2OrgUnit" alias DHIS2OrgUnit as source
 uses "http://hl7.org/fhir/StructureDefinition/Bundle" alias Bundle as target
@@ -13,12 +18,13 @@ uses "http://hl7.org/fhir/StructureDefinition/Organization" alias Organization a
 
 group OrgUnit(source src : DHIS2OrgUnit, target bundle : Bundle) {
   src -> bundle.type = 'collection' "bundleType";
-  src where kind = 'facility' -> bundle.entry as e, e.resource = create('Organization') as org then OrgUnitToOrganization(src, org) "organization";
+  // A facility also gets its Organization, written first.
+  src.kind as k where k = 'facility' -> bundle.entry as e, e.resource = create('Organization') as org then OrgUnitToOrganization(src, org) "organization";
   src -> bundle.entry as e, e.resource = create('Location') as loc then OrgUnitToLocation(src, loc) "location";
 }
 
 group OrgUnitToLocation(source src : DHIS2OrgUnit, target loc : Location) {
-  src -> loc.id = evaluate(src, idPrefix + '-' + uid) "locationId";
+  src.idPrefix as p, src.uid as u -> loc.id = append(p, '-', u) "locationId";
   src -> loc.meta as meta then {
     src -> meta.profile = 'https://icr.healthcampaigns.org/StructureDefinition/ICRLocation' "locationProfile";
     src.instance as i -> meta.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs', tag.code = i "locationTag";
@@ -26,29 +32,26 @@ group OrgUnitToLocation(source src : DHIS2OrgUnit, target loc : Location) {
   src.boundary as b -> loc.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson', ext.value = create('Attachment') as att, att.contentType = 'application/geo+json', att.data = evaluate(b, $this.encode('base64')) "boundary";
   src -> loc then Identifiers(src, loc) "locationIdentifiers";
   src.countryCode as cc -> loc.identifier as ident, ident.system = 'https://icr.healthcampaigns.org/identifiers/national-admin-code', ident.value = cc "countryCode";
-  src where closedDate.exists() -> loc.status = 'inactive' "closed";
+  src.closedDate as closed -> loc.status = 'inactive' "closed";
   src where closedDate.empty() -> loc.status = 'active' "open";
   src.name as n -> loc.name = n "locationName";
-  src where shortName.exists() and shortName != name -> loc.alias = evaluate(src, shortName) "alias";
+  src.name as n, src.shortName as s where s != n -> loc.alias = s "alias";
   src.kind as k -> loc.type as t, t.coding as c, c.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs', c.code = translate(k, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-location-type', 'code') "locationType";
   src.group as g -> loc.type as t then GroupType(src, g, t) "locationGroups";
   src.kind as k -> loc.physicalType = translate(k, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-org-unit-kind-to-physical-type', 'CodeableConcept') "physicalType";
-  src where longitude.exists() and latitude.exists() -> loc.position as pos then {
-    src.longitude as v -> pos.longitude = v "longitude";
-    src.latitude as v -> pos.latitude = v "latitude";
-  } "position";
-  src where kind = 'facility' -> loc.managingOrganization as r, r.reference = evaluate(src, 'Organization/org-' + idPrefix + '-' + uid) "managingOrganization";
-  src.parentUid as p -> loc.partOf as r, r.reference = evaluate(src, 'Location/' + idPrefix + '-' + parentUid) "partOf";
+  src.longitude as lon, src.latitude as lat -> loc.position as pos, pos.longitude = lon, pos.latitude = lat "position";
+  src.kind as k where k = 'facility', src.idPrefix as p, src.uid as u -> loc.managingOrganization as r, r.reference = append('Organization/org-', p, '-', u) "managingOrganization";
+  src.parentUid as parent, src.idPrefix as p -> loc.partOf as r, r.reference = append('Location/', p, '-', parent) "partOf";
 }
 
 group OrgUnitToOrganization(source src : DHIS2OrgUnit, target org : Organization) {
-  src -> org.id = evaluate(src, 'org-' + idPrefix + '-' + uid) "organizationId";
+  src.idPrefix as p, src.uid as u -> org.id = append('org-', p, '-', u) "organizationId";
   src -> org.meta as meta then {
     src -> meta.profile = 'https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization' "organizationProfile";
     src.instance as i -> meta.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs', tag.code = i "organizationTag";
   } "organizationMeta";
   src -> org then Identifiers(src, org) "organizationIdentifiers";
-  src where closedDate.exists() -> org.active = false "inactive";
+  src.closedDate as closed -> org.active = false "inactive";
   src where closedDate.empty() -> org.active = true "active";
   src -> org.type as t, t.coding as c, c.system = 'http://terminology.hl7.org/CodeSystem/organization-type', c.code = 'prov', c.display = 'Healthcare Provider' "provider";
   src.group as g -> org.type as t then GroupType(src, g, t) "organizationGroups";
@@ -57,14 +60,14 @@ group OrgUnitToOrganization(source src : DHIS2OrgUnit, target org : Organization
 
 // The org unit UID, and its code when it has one, under systems named after the instance.
 group Identifiers(source src : DHIS2OrgUnit, target tgt) {
-  src.uid as uid -> tgt.identifier as ident, ident.use = 'official', ident.system = evaluate(src, 'https://icr.healthcampaigns.org/identifiers/dhis2/' + instance + '/orgunit'), ident.value = uid "uid";
-  src.code as code -> tgt.identifier as ident, ident.system = evaluate(src, 'https://icr.healthcampaigns.org/identifiers/dhis2/' + instance + '/orgunit-code'), ident.value = code "code";
+  src.uid as uid, src.instance as i -> tgt.identifier as ident, ident.use = 'official', ident.system = append('https://icr.healthcampaigns.org/identifiers/dhis2/', i, '/orgunit'), ident.value = uid "uid";
+  src.code as code, src.instance as i -> tgt.identifier as ident, ident.system = append('https://icr.healthcampaigns.org/identifiers/dhis2/', i, '/orgunit-code'), ident.value = code "code";
 }
 
 // An org unit group as a type: coded once per group set it was asked for
 // under, or under org-unit-group when it is in no set.
 group GroupType(source src : DHIS2OrgUnit, source g, target t : CodeableConcept) {
-  g.set as s -> t.coding as c, c.system = evaluate(src, 'https://icr.healthcampaigns.org/CodeSystem/dhis2/' + instance + '/dimension/' + %s), c.code = evaluate(g, uid), c.display = evaluate(g, name) "inSet";
-  g where set.empty() -> t.coding as c, c.system = evaluate(src, 'https://icr.healthcampaigns.org/CodeSystem/dhis2/' + instance + '/org-unit-group'), c.code = evaluate(g, uid), c.display = evaluate(g, name) "inNoSet";
+  g.set as s, g.uid as u, g.name as n, src.instance as i -> t.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/dimension/', s), c.code = u, c.display = n "inSet";
+  g where set.empty(), g.uid as u, g.name as n, src.instance as i -> t.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/org-unit-group'), c.code = u, c.display = n "inNoSet";
   g.name as n -> t.text = n "groupName";
 }

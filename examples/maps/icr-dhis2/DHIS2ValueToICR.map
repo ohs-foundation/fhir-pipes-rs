@@ -5,6 +5,9 @@
 
 // Run by `fhir-pipes dhis2 reports --maps`. One summary MeasureReport per
 // value, with a stratifier for each breakdown.
+//
+// References and systems are joined with `append` from source variables, not
+// with FHIRPath: each FHIRPath call parses its expression and copies its input.
 
 uses "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value" alias DHIS2Value as source
 uses "http://hl7.org/fhir/StructureDefinition/MeasureReport" alias MeasureReport as target
@@ -18,9 +21,9 @@ group Value(source src : DHIS2Value, target r : MeasureReport) {
   src.source as s -> r.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/report-source', ext.value = create('CodeableConcept') as cc, cc.coding = translate(s, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-value-source-to-report-source', 'Coding') "source";
   src -> r.status = 'complete' "status";
   src -> r.type = 'summary' "type";
-  src -> r.measure = evaluate(src, 'https://icr.healthcampaigns.org/Measure/' + instance + '-' + indicatorKey) "measure";
+  src.instance as i, src.indicatorKey as k -> r.measure = append('https://icr.healthcampaigns.org/Measure/', i, '-', k) "measure";
   src -> r.subject as subject then {
-    src.locationId as l -> subject.reference = evaluate(src, 'Location/' + locationId) "location";
+    src.locationId as l -> subject.reference = append('Location/', l) "location";
     src.locationName as n -> subject.display = n "locationName";
   } "subject";
   src.date as d -> r.date = d "date";
@@ -46,12 +49,12 @@ group Figures(source f, target g) {
 // One breakdown: the dimension as the stratifier's code, each option as a stratum.
 group Stratifier(source src : DHIS2Value, source st, target stratifier) {
   st -> stratifier.code as cc then {
-    st.dimension as d -> cc.coding as c, c.system = evaluate(src, 'https://icr.healthcampaigns.org/CodeSystem/dhis2/' + instance + '/dimension'), c.code = d, c.display = evaluate(st, name) "dimensionCoding";
+    st.dimension as d, st.name as n, src.instance as i -> cc.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/dimension'), c.code = d, c.display = n "dimensionCoding";
     st.name as n -> cc.text = n "dimensionText";
   } "dimension";
-  st.stratum as s -> stratifier.stratum as stratum then {
+  st.stratum as s, st.dimension as d, src.instance as i -> stratifier.stratum as stratum then {
     s -> stratum.value as cc then {
-      s.option as o -> cc.coding as c, c.system = evaluate(src, 'https://icr.healthcampaigns.org/CodeSystem/dhis2/' + instance + '/dimension/' + %st.dimension), c.code = o, c.display = evaluate(s, name) "optionCoding";
+      s.option as o, s.name as n -> cc.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/dimension/', d), c.code = o, c.display = n "optionCoding";
       s.name as n -> cc.text = n "optionText";
     } "option";
     s -> stratum then Figures(s, stratum) "stratumFigures";
