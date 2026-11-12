@@ -14,7 +14,7 @@ use fml_model::StructureMap;
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::mapping::MapPackage;
+use crate::mapping::{MapPackage, Output};
 use crate::report::Report;
 
 pub const ORG_UNIT_MODEL: &str =
@@ -36,6 +36,9 @@ pub const MODELS: [&str; 3] = [
 pub struct RecordMap {
     package: MapPackage,
     map: StructureMap,
+    /// Threads for `transform_all`: one per core. The DHIS2 commands'
+    /// `--concurrency` is for requests, not for the maps.
+    threads: usize,
 }
 
 impl RecordMap {
@@ -51,13 +54,31 @@ impl RecordMap {
             map.name.as_deref().unwrap_or("unnamed"),
             map.url.as_deref().unwrap_or("no url")
         );
-        Ok(Some(Self { package, map }))
+        Ok(Some(Self {
+            package,
+            map,
+            threads: crate::work::default_threads(),
+        }))
     }
 
     /// The resources the map writes for `record`. What the engine left out
     /// (a code a ConceptMap has no target for) is reported under `key`.
+    #[cfg(test)]
     pub fn run(&self, record: &Value, key: &str, report: &mut Report) -> Result<Vec<Value>> {
-        let output = self.package.transform(&self.map, record)?;
+        Self::take(self.package.transform(&self.map, record), key, report)
+    }
+
+    /// The map's outputs for `records`, transformed on several threads, in
+    /// record order. Pass each to `take`, in order, so the warnings reach
+    /// the run report in the order `run` would add them.
+    pub fn transform_all(&self, records: &[&Value]) -> Vec<Result<Output>> {
+        self.package.transform_all(&self.map, records, self.threads)
+    }
+
+    /// The resources of one output of `transform_all`, after reporting its
+    /// warnings under `key`.
+    pub fn take(output: Result<Output>, key: &str, report: &mut Report) -> Result<Vec<Value>> {
+        let output = output?;
         for warning in &output.warnings {
             report.add("map_warning", key, warning);
         }

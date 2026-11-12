@@ -664,15 +664,22 @@ pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile)
     let indicators = fetch_indicators(&api, &args.select)?;
     let mut report = Report::default();
     let mut measures: Vec<Value> = Vec::with_capacity(indicators.len());
-    for ind in indicators.values() {
-        match &maps {
-            Some(map) => measures.extend(map.run(
-                &record(ind, &instance, &api.info),
-                &ind.id,
-                &mut report,
-            )?),
-            None => measures.push(measure(ind, &instance, &api.info)),
+    match &maps {
+        Some(map) => {
+            let records: Vec<Value> = indicators
+                .values()
+                .map(|ind| record(ind, &instance, &api.info))
+                .collect();
+            let records: Vec<&Value> = records.iter().collect();
+            for (ind, output) in indicators.values().zip(map.transform_all(&records)) {
+                measures.extend(RecordMap::take(output, &ind.id, &mut report)?);
+            }
         }
+        None => measures.extend(
+            indicators
+                .values()
+                .map(|ind| measure(ind, &instance, &api.info)),
+        ),
     }
     let n = write_ndjson(&args.out, &measures)?;
     let mut by_scoring: BTreeMap<&str, usize> = BTreeMap::new();

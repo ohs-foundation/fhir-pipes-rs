@@ -47,6 +47,20 @@ group Facility(source src : Facility, target loc : Location) {
 A map that writes more than one resource per record uses a `Bundle` as its
 target and puts each resource in an entry.
 
+### Writing a map that runs fast
+
+Every FHIRPath expression in a map is parsed and evaluated each time its rule
+runs: an `evaluate(...)` transform, a `where` or `check` condition. Native
+transforms and copied variables are not. In the example maps, replacing
+FHIRPath string joins with `append` roughly halved the run time.
+
+- Join strings with `append`: `src.id as i -> ref.reference = append('Location/', i)`,
+  not `evaluate(src, 'Location/' + id)`.
+- Copy a field through a variable: `g.name as n -> c.display = n`, not
+  `c.display = evaluate(g, name)`.
+- Test a condition once and nest the rules that depend on it in
+  `then { ... }`, instead of repeating the `where` on each rule.
+
 ## map run
 
 Runs one map over every line of an NDJSON file.
@@ -57,6 +71,7 @@ Runs one map over every line of an NDJSON file.
 | `--map NAME` | The map to run, by name or canonical URL. Not needed when the folders hold one map |
 | `--in FILE` | NDJSON, one record per line. A record with no `resourceType` is read as the map's source type |
 | `--out FILE` | NDJSON of the resources written |
+| `--threads N` | Threads that run the map. Default: one per core. The output is the same, in input order, at any count |
 
 For a `Bundle` target the output is the resources in its entries, one per
 line; for any other target it is the target. A record the map fails on stops
@@ -124,9 +139,11 @@ Notes:
 - A map sees one record. Anything that needs several records, such as
   grouping or a lookup in another file, has to be done before the map runs.
 - Maps are read as FHIR R4.
-- A map is much slower than the built-in mapping: about 1 millisecond per
-  record on one core (20,000 org units in 23 seconds, 20,000 values with a
-  breakdown in 15 seconds, release build). The built-in mapping stays the
-  better choice for `dhis2 reports` runs of millions of values.
+- A map is slower than the built-in mapping: about 0.25 milliseconds of CPU
+  per record with the example maps. `map run` and the `dhis2` commands run
+  the map on every core, and the output is the same at any thread count:
+  20,000 org units or 20,000 values with a breakdown take 2 to 3 seconds on
+  10 cores, and about 10 seconds on one thread. The built-in mapping is still
+  faster for `dhis2 reports` runs of many millions of values.
 - The engine is [fml-rs](https://github.com/octofhir/fml-rs), first released
   in November 2026.

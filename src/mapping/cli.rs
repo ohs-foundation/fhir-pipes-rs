@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::MapPackage;
+use super::{BATCH, MapPackage};
 use crate::dhis2::maps::MODELS as BUILT_IN;
 use crate::error::{PipesError, Result};
-use crate::fhir::ndjson::{NdjsonReader, NdjsonWriter};
+use crate::fhir::ndjson::{Line, NdjsonReader, NdjsonWriter};
 use crate::fs::check_out;
 
 #[derive(clap::Subcommand, Debug)]
@@ -32,6 +32,9 @@ pub struct RunArgs {
     /// Output NDJSON of the resources produced: the entries of a Bundle target, or the target itself
     #[arg(long)]
     pub out: PathBuf,
+    /// Threads that run the map (default: the number of CPUs). The output keeps the input order whatever the count
+    #[arg(long)]
+    pub threads: Option<usize>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -58,10 +61,8 @@ fn run_map(args: &RunArgs) -> Result<()> {
     // The type a record is read as when it does not name one.
     let source_type =
         super::first_source_url(map).and_then(|url| url.rsplit('/').next().map(str::to_string));
-    let mut out = NdjsonWriter::create(&args.out)?;
-    let mut records = 0usize;
-    let mut warnings = 0usize;
-    for line in NdjsonReader::open(&args.input)? {
+    let threads = args.threads.unwrap_or_else(crate::work::default_threads);
+    let read = |line: Result<Line>| -> Result<(usize, Value)> {
         let line = line?;
         let mut record: Value = serde_json::from_str(&line.text).map_err(|e| {
             PipesError::Usage(format!(
@@ -75,21 +76,51 @@ fn run_map(args: &RunArgs) -> Result<()> {
         {
             object.insert("resourceType".into(), Value::String(source_type.clone()));
         }
-        let output = package.transform(map, &record).map_err(|e| {
-            PipesError::Environment(format!(
-                "{}: line {}: {e}",
-                args.input.display(),
-                line.number
-            ))
-        })?;
-        for warning in &output.warnings {
-            warnings += 1;
-            eprintln!("line {}: {warning}", line.number);
+        Ok((line.number, record))
+    };
+    let mut out = NdjsonWriter::create(&args.out)?;
+    let mut lines = NdjsonReader::open(&args.input)?;
+    let mut records = 0usize;
+    let mut warnings = 0usize;
+    loop {
+        // A batch of records, transformed on several threads and written in
+        // input order. A line that cannot be read ends the batch, and its
+        // error is returned once the lines before it are written.
+        let mut batch = Vec::with_capacity(BATCH);
+        let mut unread = None;
+        for line in lines.by_ref() {
+            match read(line) {
+                Ok(numbered) => batch.push(numbered),
+                Err(e) => {
+                    unread = Some(e);
+                    break;
+                }
+            }
+            if batch.len() == BATCH {
+                break;
+            }
         }
-        for resource in &output.resources {
-            out.write(resource)?;
+        let sources: Vec<&Value> = batch.iter().map(|(_, record)| record).collect();
+        let outputs = package.transform_all(map, &sources, threads);
+        for ((number, _), output) in batch.iter().zip(outputs) {
+            let output = output.map_err(|e| {
+                PipesError::Environment(format!("{}: line {number}: {e}", args.input.display()))
+            })?;
+            for warning in &output.warnings {
+                warnings += 1;
+                eprintln!("line {number}: {warning}");
+            }
+            for resource in &output.resources {
+                out.write(resource)?;
+            }
+            records += 1;
         }
-        records += 1;
+        if let Some(e) = unread {
+            return Err(e);
+        }
+        if batch.len() < BATCH {
+            break;
+        }
     }
     let written = out.finish()?;
     println!(

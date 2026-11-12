@@ -25,6 +25,11 @@ use fhirpath::FhirPath;
 
 pub mod cli;
 
+/// Records transformed together by the commands that read more records than
+/// they hold in memory: enough to keep every core busy, few enough to hold
+/// with their outputs.
+pub const BATCH: usize = 2048;
+
 /// A map with the file it came from.
 struct Loaded {
     path: PathBuf,
@@ -288,6 +293,21 @@ impl MapPackage {
         })
     }
 
+    /// Runs `map` over each of `records` on up to `threads` threads; the
+    /// outputs in record order. Each thread drives its transforms on its own
+    /// runtime (`crate::runtime::block_on`) against this one package.
+    pub fn transform_all(
+        &self,
+        map: &StructureMap,
+        records: &[&Value],
+        threads: usize,
+    ) -> Vec<Result<Output>> {
+        if threads <= 1 || records.len() <= 1 {
+            return records.iter().map(|r| self.transform(map, r)).collect();
+        }
+        crate::work::parallel(records, threads, |r| self.transform(map, r))
+    }
+
     /// Syntax and type problems of every FML file, as `file:line:column:
     /// message` lines: errors, then warnings.
     pub fn check(&self) -> (Vec<String>, Vec<String>) {
@@ -416,6 +436,61 @@ mod tests {
             errors.is_empty() && warnings.is_empty(),
             "{errors:?} {warnings:?}"
         );
+    }
+
+    #[test]
+    fn transform_all_gives_the_outputs_in_record_order_at_any_thread_count() {
+        // Every 37th record fails the check, so failures show where they are.
+        let body = "  src.code as c check (c.endsWith('x').not()) -> loc.id = c \"id\";\n  \
+                    src.kind as k -> loc.physicalType = translate(k, 'https://example.org/ConceptMap/kinds', 'CodeableConcept') \"kind\";\n";
+        let dir = folder(&[
+            ("m.map", &map("M", body)),
+            ("Facility.json", FACILITY),
+            ("kinds.json", KINDS),
+        ]);
+        let package = load(&dir).unwrap();
+        let map = package.only_map().unwrap();
+        let records: Vec<Value> = (0..300)
+            .map(|i| {
+                let code = if i % 37 == 5 {
+                    format!("f{i}x")
+                } else {
+                    format!("f{i}")
+                };
+                // Odd records have a kind the ConceptMap does not know: a warning.
+                let kind = if i % 2 == 0 { "site" } else { "other" };
+                json!({"resourceType": "Facility", "code": code, "name": "n", "kind": kind})
+            })
+            .collect();
+        let records: Vec<&Value> = records.iter().collect();
+        let summary =
+            |outputs: Vec<Result<Output>>| -> Vec<std::result::Result<(Value, usize), String>> {
+                outputs
+                    .into_iter()
+                    .map(|o| {
+                        o.map(|o| (o.resources[0]["id"].clone(), o.warnings.len()))
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect()
+            };
+        let one = summary(package.transform_all(map, &records, 1));
+        for (i, result) in one.iter().enumerate() {
+            match result {
+                Ok((id, warnings)) => {
+                    assert_eq!(id, &json!(format!("f{i}")));
+                    assert_eq!(*warnings, i % 2, "record {i}");
+                }
+                Err(e) => assert!(i % 37 == 5 && e.contains("failed"), "record {i}: {e}"),
+            }
+        }
+        assert_eq!(one.iter().filter(|r| r.is_err()).count(), 8);
+        for threads in [2, 8] {
+            assert_eq!(
+                summary(package.transform_all(map, &records, threads)),
+                one,
+                "{threads} threads"
+            );
+        }
     }
 
     #[test]
