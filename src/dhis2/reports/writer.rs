@@ -267,19 +267,31 @@ impl<'a> Writer<'a> {
             }
         }
 
-        for r in out.values() {
-            if self
-                .tally
-                .ids
-                .contains(r["id"].as_str().unwrap_or_default())
-            {
-                continue;
-            }
+        // The reports not written already. `out` is keyed by id and a map
+        // must keep the id, so none of these repeats another.
+        let pending: Vec<&Value> = out
+            .values()
+            .filter(|r| {
+                !self
+                    .tally
+                    .ids
+                    .contains(r["id"].as_str().unwrap_or_default())
+            })
+            .collect();
+        // With --maps, the unit's records are transformed on several
+        // threads, then written in order.
+        let mut outputs = self
+            .maps
+            .map(|map| map.transform_all(&pending))
+            .unwrap_or_default()
+            .into_iter();
+        for r in pending {
             let mapped;
             let r = match self.maps {
-                Some(map) => {
+                Some(_) => {
                     let id = r["id"].as_str().unwrap_or_default();
-                    let mut written = map.run(r, id, &mut self.state.report)?;
+                    let output = outputs.next().expect("an output for each record");
+                    let mut written = RecordMap::take(output, id, &mut self.state.report)?;
                     if written.len() != 1 || written[0]["id"] != r["id"] {
                         return Err(PipesError::Usage(format!(
                             "the --maps map must write one MeasureReport with the record's id for {id}; it wrote {}",

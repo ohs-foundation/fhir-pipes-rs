@@ -462,28 +462,59 @@ pub fn build(
     let top = units.iter().map(|u| u.level).min().unwrap_or(1);
     let mut sorted: Vec<&OrgUnit> = units.iter().collect();
     sorted.sort_by(|a, b| (a.level, &a.id).cmp(&(b.level, &b.id)));
-    for unit in sorted {
-        if unit.level > opts.facility_level {
-            report.add(
-                "below_facility_level",
-                &unit.id,
-                &format!(
-                    "level {} is below the facility level {}; skipped",
-                    unit.level, opts.facility_level
-                ),
-            );
-            continue;
-        }
-        let parent_known = unit.parent.as_deref().is_some_and(|p| known.contains(p));
-        let Some(p) = prepare(unit, opts, parent_known, unit.level == top, report) else {
-            continue;
+    for batch in sorted.chunks(crate::mapping::BATCH) {
+        // Units are prepared one after another. Each unit's issues are held
+        // apart, then added with its map warnings in unit order.
+        let prepared: Vec<(Report, Option<Prepared>)> = batch
+            .iter()
+            .map(|unit| {
+                let mut issues = Report::default();
+                if unit.level > opts.facility_level {
+                    issues.add(
+                        "below_facility_level",
+                        &unit.id,
+                        &format!(
+                            "level {} is below the facility level {}; skipped",
+                            unit.level, opts.facility_level
+                        ),
+                    );
+                    return (issues, None);
+                }
+                let parent_known = unit.parent.as_deref().is_some_and(|p| known.contains(p));
+                let p = prepare(unit, opts, parent_known, unit.level == top, &mut issues);
+                (issues, p)
+            })
+            .collect();
+        // With --maps, the batch's records are transformed on several threads.
+        let records: Vec<Value> = match maps {
+            Some(_) => prepared
+                .iter()
+                .filter_map(|(_, p)| p.as_ref())
+                .map(|p| record(p, opts))
+                .collect(),
+            None => Vec::new(),
         };
-        let written = match maps {
-            Some(map) => map.run(&record(&p, opts), &unit.id, report)?,
-            None => built_in(&p, opts),
-        };
-        for resource in written {
-            emit(resource)?;
+        let records: Vec<&Value> = records.iter().collect();
+        let mut outputs = maps
+            .map(|map| map.transform_all(&records))
+            .unwrap_or_default()
+            .into_iter();
+        for (issues, p) in prepared {
+            report.append(issues);
+            let Some(p) = p else {
+                continue;
+            };
+            let written = match maps {
+                Some(_) => RecordMap::take(
+                    outputs.next().expect("an output for each record"),
+                    &p.unit.id,
+                    report,
+                )?,
+                None => built_in(&p, opts),
+            };
+            for resource in written {
+                emit(resource)?;
+            }
         }
     }
     Ok(())
