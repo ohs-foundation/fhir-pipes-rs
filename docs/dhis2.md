@@ -25,7 +25,7 @@ the example connector of [connectors.md](connectors.md).
 | `--dhis2-token`, `$FHIR_PIPES_DHIS2_TOKEN` | Personal access token, sent as `Authorization: ApiToken …` |
 | `--dhis2-user` / `--dhis2-password`, `$FHIR_PIPES_DHIS2_USER` / `$FHIR_PIPES_DHIS2_PASSWORD` | Basic authentication |
 | `--instance` | A short name for the instance: letters, digits and hyphens, up to 16 characters, such as `sl-demo` |
-| `--profile`, `$FHIR_PIPES_PROFILE` | A profile with a `[dhis2]` section. Without one the command stops with exit 2. See [profiles.md](profiles.md). `dhis2 extract` does not need one |
+| `--profile`, `$FHIR_PIPES_PROFILE` | A profile with a `[dhis2]` section. Without one the command stops with exit 2. See [profiles.md](profiles.md). `dhis2 extract` does not read one |
 | `--maps DIR`, `$FHIR_PIPES_DHIS2_MAPS` | Write the resources with FHIR Mapping Language maps in this folder instead of the built-in mapping. See [maps.md](maps.md#maps-for-the-dhis2-import). Not for `dhis2 extract` |
 
 Use a read-only DHIS2 user. Keep
@@ -91,7 +91,7 @@ days old. `--max-analytics-age 7d` refuses the run instead.
 - `--resume` continues a failed or stopped run from `OUT.ndjson.resume`. It is
   refused if the arguments (other than `--concurrency`), the DHIS2 URL, an org
   unit count, the analytics build time, or the `--locations` or `--previous`
-  file have changed. A run of `dhis2 extract reports` is not resumed by
+  file (for `dhis2 extract reports`, the org unit records file) have changed. A run of `dhis2 extract reports` is not resumed by
   `dhis2 reports`, nor the other way round. Run without `--resume` to start
   over. It works with `dhis2 extract reports`.
 - `--previous PREV.ndjson` compares with an earlier run. `--out` still gets
@@ -114,7 +114,11 @@ fhir-pipes dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndj
 `--source data-values` reads raw data values and computes each value itself,
 in the same shape as analytics. Only SUM and AVERAGE_SUM_ORG_UNIT data
 elements and simple indicator expressions are supported; anything else is
-refused, naming the indicator. `--locations` must then include the data-entry units and their complete parent chains up to the requested levels, or totals are undercounted. `--updated-since DATE` (with `--previous`)
+refused, naming the indicator. `--locations` (for `dhis2 extract reports`, the
+org unit records) must then include the data-entry units and their complete
+parent chains up to the requested levels, or totals are undercounted. Org
+units below the facility level of `dhis2 locations` have no Location and no
+record, so values entered there are left out. `--updated-since DATE` (with `--previous`)
 recomputes only the periods holding data values changed since then.
 
 ## Records and the import package
@@ -148,26 +152,43 @@ requests, checks, run report and summary (which counts records), except:
   `$FHIR_PIPES_DHIS2_MAPS` is ignored;
 - `--previous`, `--changed`, `--removed` and `--updated-since`: they
   compare MeasureReports. Compare after the import instead, as below;
-- `extract reports` takes `--org-unit-system URL`, below.
+- `--locations`: `extract reports` reads the org unit records instead, below.
 
-`dhis2 extract` needs no `[dhis2]` section in the profile, nor `[location]
-admin_unit_type` or `[organization] facility_type`. The records carry none
-of the systems, profiles, extensions or type codes: the package's maps
-write them, from the package's parameters (see
+`dhis2 extract` reads no profile, so it needs no `[dhis2]` section,
+`[location] admin_unit_type` or `[organization] facility_type`. The records
+carry none of the systems, profiles, extensions or type codes: the package's
+maps write them, from the package's parameters (see
 [examples/import/icr-dhis2/import.toml](../examples/import/icr-dhis2/import.toml)
 and [import.md](import.md#parameters)). To write other URLs, change the
 parameters, for example `import run --param base=https://example.org`.
 
-`extract reports` reads `--locations` to find the Location of each org unit,
-by the identifier the Location carries the org unit UID under. That system
-is one the package's map wrote, so it is given with `--org-unit-system URL`:
-for examples/import/icr-dhis2 with its default `base`,
-`https://icr.healthcampaigns.org/identifiers/dhis2/<instance>/orgunit`.
-Without it, the system the profile's `[dhis2] base` names is used, as
-`dhis2 reports` does; with neither, the command stops with exit 2.
+`extract reports` reads the `DHIS2OrgUnit` records that `extract locations`
+wrote: `--org-units FILE` (NDJSON, or `.ndjson.gz`), or without it
+`DHIS2OrgUnit.ndjson` (or `.ndjson.gz`) in `--out`. So `extract locations`
+then `extract reports` into one folder needs no extra option. With neither,
+the command stops with exit 2. Only the records of `--instance` are read.
 
-The file is written under a temporary name and renamed when the run ends.
-An interrupted `dhis2 extract reports` leaves `DHIS2Value.ndjson.tmp` and
+From each record it takes the org unit's UID, the id of the Location the
+record becomes (`<idPrefix>-<uid>`, as the package's map writes it), its
+name, and for `--source data-values` its parent. These are the facts
+`dhis2 reports` reads from a Location, so a `DHIS2Value` record is the same
+whichever was read, when the Locations came from the same org units:
+
+- An org unit that `extract locations` left out (below the facility level,
+  or with an id that is not a valid FHIR id) has no record and no Location.
+  Its values are left out and reported as `unmapped_org_unit` both ways.
+- A merged boundary changes only the boundary; no org unit is merged or
+  dropped.
+- A parent that was not exported is in neither: no `parentUid`, no `partOf`.
+- A Locations file can differ from the records when something other than
+  the package's map wrote or changed it. `dhis2 reports` follows the
+  Locations; `extract reports` follows the records. If a package's map gave
+  Locations other ids than `<idPrefix>-<uid>`, or wrote no Location for some
+  org units, the `DHIS2Value` records would refer to Locations that the
+  import does not write.
+
+Each record file is written under a temporary name and renamed when the run
+ends. An interrupted `dhis2 extract reports` leaves `DHIS2Value.ndjson.tmp` and
 `DHIS2Value.ndjson.resume` in the folder for `--resume`; `import run` reads
 only `*.ndjson` and `*.ndjson.gz` files, so it does not read them.
 `--report FILE` is a file of your choosing, as for the other commands; put
@@ -179,20 +200,16 @@ into the resources the built-in mapping writes, one file per resource type
 (see [import.md](import.md)). The package's maps are the ones
 `--maps examples/import/icr-dhis2/maps` runs.
 
-`dhis2 reports` still needs `--locations`, the Location resources, to map
-org units. The first import run writes them:
+Three runs into one folder, then one import run:
 
 ```sh
 fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-code SLE \
   --out raw
 fhir-pipes dhis2 extract measures --instance sl-demo --indicator-group srxUNt2w5jn \
   --out raw
-fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 fhir-pipes dhis2 extract reports --instance sl-demo --indicator-group srxUNt2w5jn \
-  --locations fhir/Location.ndjson \
-  --org-unit-system https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit \
   --period 2025 --level 2 --level 3 --out raw
-fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 for t in Organization Location Measure MeasureReport; do
   fhir-pipes load --server URL --in fhir/$t.ndjson
 done

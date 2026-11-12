@@ -2,7 +2,8 @@
 //! raw data values (`/api/dataValueSets`) instead of DHIS2's analytics.
 //!
 //! Each batch's data values are added up the org unit hierarchy (the
-//! `partOf` chain of the `--locations` file) to every requested level, and
+//! `partOf` chain of the `--locations` file, or the `parentUid` of the
+//! `DHIS2OrgUnit` records for `dhis2 extract`) to every requested level, and
 //! each item is then computed the way DHIS2 analytics computes it:
 //!
 //! - A data element's value is its total over category option combos and
@@ -548,7 +549,7 @@ impl RawSource {
                 note(
                     "unmapped_org_unit",
                     &dv.org_unit,
-                    "no Location carries this org unit (or it is not under a reported level); its values are skipped".into(),
+                    "this org unit is not among the org units read (--locations, or the DHIS2OrgUnit records), or not under a reported level; its values are skipped".into(),
                 );
                 continue;
             }

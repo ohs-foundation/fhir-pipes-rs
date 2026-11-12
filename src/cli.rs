@@ -410,6 +410,9 @@ pub struct Dhis2ReportsArgs {
     pub conn: Dhis2Conn,
     #[command(flatten)]
     pub select: IndicatorSelection,
+    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `fhir-pipes dhis2 locations`, a snapshot's locations.ndjson, or a Location.ndjson that `import run` wrote
+    #[arg(long, required = true)]
+    pub locations: Option<PathBuf>,
     #[command(flatten)]
     pub opts: ReportsOptions,
     #[command(flatten)]
@@ -432,10 +435,10 @@ pub struct Dhis2ReportsArgs {
     /// Write DHIS2Value records instead of resources: set by `dhis2 extract reports`.
     #[arg(skip)]
     pub records: bool,
-    /// `dhis2 extract reports --org-unit-system`: the identifier system of
-    /// the org unit UIDs on the --locations Locations.
+    /// `dhis2 extract reports`: the `DHIS2OrgUnit` records read in place of
+    /// `--locations`.
     #[arg(skip)]
-    pub org_unit_system: Option<String>,
+    pub org_units: Option<PathBuf>,
 }
 
 /// `dhis2 extract reports`. The comparison with a previous run
@@ -453,17 +456,19 @@ pub struct ExtractReportsArgs {
     /// Output folder; the records are written to DIR/DHIS2Value.ndjson. It is created if missing. An interrupted run leaves DHIS2Value.ndjson.tmp and DHIS2Value.ndjson.resume there for --resume; `import run` reads neither
     #[arg(long, value_name = "DIR")]
     pub out: PathBuf,
-    /// The identifier system that carries the org unit UIDs on the --locations Locations, as the import package's map writes it (for examples/import/icr-dhis2, https://icr.healthcampaigns.org/identifiers/dhis2/<instance>/orgunit). Default: the one the profile's [dhis2] base gives; needed when the profile has no [dhis2] section
-    #[arg(long, value_name = "URL")]
-    pub org_unit_system: Option<String>,
+    /// The DHIS2OrgUnit records `dhis2 extract locations` wrote (NDJSON, or .ndjson.gz): each org unit's Location and, for --source data-values, its parent. Default: DIR/DHIS2OrgUnit.ndjson (or .ndjson.gz) when --out holds it
+    #[arg(long, value_name = "FILE")]
+    pub org_units: Option<PathBuf>,
 }
 
 impl ExtractReportsArgs {
-    /// The `dhis2 reports` run that writes these records.
-    pub fn into_command(self, out: PathBuf) -> Dhis2ReportsArgs {
+    /// The `dhis2 reports` run that writes these records, reading the org
+    /// units from `org_units`.
+    pub fn into_command(self, out: PathBuf, org_units: PathBuf) -> Dhis2ReportsArgs {
         Dhis2ReportsArgs {
             conn: self.conn,
             select: self.select,
+            locations: None,
             opts: self.opts,
             maps: Dhis2Maps::default(),
             updated_since: None,
@@ -472,7 +477,7 @@ impl ExtractReportsArgs {
             changed: None,
             removed: None,
             records: true,
-            org_unit_system: self.org_unit_system,
+            org_units: Some(org_units),
         }
     }
 }
@@ -480,9 +485,6 @@ impl ExtractReportsArgs {
 /// What `dhis2 reports` and `dhis2 extract reports` ask DHIS2 for, and how.
 #[derive(clap::Args, Debug, Clone)]
 pub struct ReportsOptions {
-    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `fhir-pipes dhis2 locations`, a snapshot's locations.ndjson, or the Location.ndjson that `import run` writes from `dhis2 extract locations`
-    #[arg(long)]
-    pub locations: PathBuf,
     /// DHIS2 period, repeatable: ISO (2025, 2025Q1, 202501, 2025W5, …) or relative (LAST_12_MONTHS, THIS_YEAR, …). Needed unless --range is given
     #[arg(long = "period", required_unless_present = "ranges")]
     pub periods: Vec<String>,
@@ -508,7 +510,7 @@ pub struct ReportsOptions {
     /// Rows to aim for per analytics request: periods of the same kind (days, weeks, months, …) are asked for together while indicators × periods × org units at the level stays under this. Breakdown requests return a row per option on top; whatever DHIS2 still calls too large is split, periods first
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_MAX_ROWS)]
     pub max_rows: usize,
-    /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the --locations hierarchy and computed by fhir-pipes: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
+    /// Where values come from: analytics (DHIS2 computes them) or data-values (raw data values from /api/dataValueSets, added up the org unit tree (the parents in --locations, or in the org unit records for dhis2 extract) and computed by fhir-pipes: SUM and AVERAGE_SUM_ORG_UNIT data elements, indicators of #{…}, C{…} and arithmetic, category breakdowns)
     #[arg(long, value_enum, default_value_t = ReportSource::Analytics)]
     pub source: ReportSource,
     /// Refuse to run when DHIS2's analytics tables were last built longer ago than this (e.g. 36h, 7d, 2w): values are only as fresh as that build. Without it, a build over 7 days old is warned about
@@ -517,7 +519,7 @@ pub struct ReportsOptions {
     /// Analytics requests in flight at once; reports are written as each batch arrives, in the same order whatever the setting
     #[arg(long, default_value_t = DEFAULT_ANALYTICS_CONCURRENCY)]
     pub concurrency: usize,
-    /// Continue an interrupted run after its last fully written batch instead of starting over. Refused if anything that shapes the batches has changed since (arguments, org unit counts, the analytics build, the --locations or --previous file)
+    /// Continue an interrupted run after its last fully written batch instead of starting over. Refused if anything that shapes the batches has changed since (arguments, org unit counts, the analytics build, the --locations, --org-units or --previous file)
     #[arg(long)]
     pub resume: bool,
     /// Also write the report as JSON to this file

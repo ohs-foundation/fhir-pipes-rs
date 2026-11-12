@@ -38,18 +38,20 @@ pub const MAX_INSTANCE_LEN: usize = 16;
 /// For `locations`, `measures` and `reports`, every system, profile and
 /// extension URL comes from the profile's [dhis2] section (and the Location
 /// roles from [location] and [organization]). `extract` writes records, which
-/// carry none of them, so it needs no [dhis2] section.
+/// carry none of them, and reads nothing else from a profile, so it does not
+/// load one.
 pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
+    if let Dhis2Command::Extract(cmd) = cmd {
+        return Ok(extract(cmd)?);
+    }
     let profile = Profile::load(profile)?;
     eprintln!("profile: {} ({})", profile.name, profile.source);
-    if !matches!(cmd, Dhis2Command::Extract(_)) {
-        profile.dhis2()?;
-    }
+    profile.dhis2()?;
     match cmd {
         Dhis2Command::Locations(args) => locations::run_locations(args, &profile)?,
         Dhis2Command::Measures(args) => measures::run_measures(args, &profile)?,
         Dhis2Command::Reports(args) => reports::run_reports(args, &profile)?,
-        Dhis2Command::Extract(cmd) => extract(cmd, &profile)?,
+        Dhis2Command::Extract(_) => unreachable!("handled above"),
     }
     Ok(())
 }
@@ -57,8 +59,11 @@ pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
 /// `dhis2 extract`: the matching command run with its records written to
 /// `--out/<RecordType>.ndjson` instead of resources. Its temporary and
 /// `--resume` files sit beside that file, as `<RecordType>.ndjson.tmp` and
-/// `.resume`, which `import run` does not read.
-fn extract(cmd: &Dhis2ExtractCommand, profile: &Profile) -> Result<()> {
+/// `.resume`, which `import run` does not read. It runs with the base
+/// profile, which has no [dhis2] section: nothing it writes comes from one.
+fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
+    let base = Profile::base();
+    let profile = &base;
     let file = |dir: &Path, model: &str| -> Result<PathBuf> {
         if dir.exists() && !dir.is_dir() {
             return Err(PipesError::Usage(format!(
@@ -80,9 +85,31 @@ fn extract(cmd: &Dhis2ExtractCommand, profile: &Profile) -> Result<()> {
         }
         Dhis2ExtractCommand::Reports(args) => {
             let out = file(&args.out, maps::VALUE_MODEL)?;
-            reports::run_reports(&(**args).clone().into_command(out), profile)
+            let org_units = match &args.org_units {
+                Some(p) => p.clone(),
+                None => org_units_in(&args.out).ok_or_else(|| {
+                    PipesError::Usage(format!(
+                        "dhis2 extract reports needs the org units: there is no {name}.ndjson in \
+                         {dir}. Run `fhir-pipes dhis2 extract locations --out {dir}` first, or give \
+                         --org-units FILE",
+                        name = maps::record_type(maps::ORG_UNIT_MODEL),
+                        dir = args.out.display()
+                    ))
+                })?,
+            };
+            reports::run_reports(&(**args).clone().into_command(out, org_units), profile)
         }
     }
+}
+
+/// The `DHIS2OrgUnit` records in `dir`, as `dhis2 extract locations` wrote
+/// them there: `DHIS2OrgUnit.ndjson`, else `DHIS2OrgUnit.ndjson.gz`.
+fn org_units_in(dir: &Path) -> Option<PathBuf> {
+    let name = maps::record_type(maps::ORG_UNIT_MODEL);
+    [format!("{name}.ndjson"), format!("{name}.ndjson.gz")]
+        .into_iter()
+        .map(|f| dir.join(f))
+        .find(|p| p.is_file())
 }
 
 /// True for a name made of ASCII letters, digits and hyphens, 1–`max` long.
@@ -98,8 +125,8 @@ pub fn valid_name(name: &str, max: usize) -> bool {
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub name: String,
-    /// The profile's [dhis2] section: `None` for `dhis2 extract` with a
-    /// profile that has none, which uses none of the URLs.
+    /// The profile's [dhis2] section: `None` for `dhis2 extract`, which
+    /// reads no profile and uses none of the URLs.
     urls: Option<Dhis2Profile>,
     /// [location] admin_unit_type: the type code of an org unit above facility level.
     pub admin_unit_type: Option<String>,
@@ -134,11 +161,6 @@ impl Instance {
         self.urls
             .as_ref()
             .expect("dhis2 run checked that the profile has a [dhis2] section")
-    }
-
-    /// Whether the profile has a [dhis2] section.
-    pub fn has_urls(&self) -> bool {
-        self.urls.is_some()
     }
 
     fn base(&self) -> &str {
@@ -237,11 +259,12 @@ mod tests {
     fn instance_names_are_short_and_plain() {
         assert!(Instance::new("sl-demo", &crate::profile::icr_example()).is_ok());
         assert!(Instance::new("", &crate::profile::icr_example()).is_err());
-        // dhis2 extract runs with a profile that has no [dhis2] section.
+        // dhis2 extract runs with the base profile, which has no [dhis2] section.
         assert!(
-            !Instance::new("sl-demo", &crate::profile::Profile::base())
+            Instance::new("sl-demo", &crate::profile::Profile::base())
                 .unwrap()
-                .has_urls()
+                .urls
+                .is_none()
         );
         assert!(Instance::new("sl demo", &crate::profile::icr_example()).is_err());
         assert!(Instance::new("sl_demo", &crate::profile::icr_example()).is_err());

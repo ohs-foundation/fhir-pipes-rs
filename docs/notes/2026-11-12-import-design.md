@@ -6,7 +6,9 @@ check`, `run` and `test` with the manifest, Library results as the input of
 a map, record checks and package tests; `dhis2 extract`; external
 commands (`fhir-pipes NAME` runs `fhir-pipes-NAME`); and package
 parameters, so `dhis2 extract` no longer reads the profile's `[dhis2]`
-section. Related notes:
+section; and `dhis2 extract reports` reading the org unit records of
+`extract locations` instead of FHIR Locations, so it reads no profile at
+all and one `import run` maps the three record files. Related notes:
 [staged import pipeline](2026-11-11-staged-import-pipeline-and-features-to-add.md),
 [ViewDefinitions over logical models](2026-11-11-viewdefinition-over-logical-models.md).
 
@@ -120,7 +122,9 @@ A connector does only what needs the source's API. It is a separate
 program, not part of the core binary; see [connectors.md](../connectors.md).
 
 - `dhis2 extract`: org units, indicators and values. It keeps the request
-  planning and resume that `dhis2 reports` has. The `--previous` comparison
+  planning and resume that `dhis2 reports` has. `extract reports` finds
+  each org unit in the `DHIS2OrgUnit` records, not in the Locations an
+  import wrote, so it does not depend on the mapping's output. The `--previous` comparison
   stays with `dhis2 reports`, since it compares MeasureReports; after the
   import, `import run --previous` compares the resources. For now it is a
   command of fhir-pipes; it moves to `fhir-pipes-dhis2` later (see the

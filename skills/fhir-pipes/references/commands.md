@@ -188,8 +188,10 @@ records (`DHIS2OrgUnit`, `DHIS2Indicator`, `DHIS2Value`) instead of
 resources, to `DIR/<RecordType>.ndjson`, for
 `import run --package examples/import/icr-dhis2 --in DIR`. It takes the
 options of the matching command except `--maps`; `extract reports` has no
-`--previous`, `--changed`, `--removed` or `--updated-since`. `--resume`
-works. See docs/dhis2.md.
+`--previous`, `--changed`, `--removed` or `--updated-since`, and no
+`--locations`: it reads the `DHIS2OrgUnit` records, `--org-units FILE` or
+`DIR/DHIS2OrgUnit.ndjson` from an earlier `extract locations --out DIR`.
+`--resume` works. `dhis2 extract` reads no profile. See docs/dhis2.md.
 
 `fhir-pipes NAME ARGS…`, where NAME is not a built-in command, runs the
 program `fhir-pipes-NAME` from the folder of fhir-pipes or the PATH. See

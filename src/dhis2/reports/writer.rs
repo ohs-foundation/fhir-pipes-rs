@@ -161,11 +161,13 @@ impl<'a> Writer<'a> {
         };
         let Some(location) = mapping.get(&row.ou) else {
             if self.state.unmapped.insert(row.ou.clone()) {
-                self.state.report.add(
-                    "unmapped_org_unit",
-                    &row.ou,
-                    "no Location carries this org unit; its values are skipped",
-                );
+                let detail = match self.writes {
+                    Writes::Records => {
+                        "no DHIS2OrgUnit record for this org unit; its values are skipped"
+                    }
+                    _ => "no Location carries this org unit; its values are skipped",
+                };
+                self.state.report.add("unmapped_org_unit", &row.ou, detail);
             }
             return None;
         };

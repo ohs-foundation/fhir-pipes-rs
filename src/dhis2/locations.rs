@@ -753,9 +753,8 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         };
         println!("  level {level} {name}: {count} ({role})");
     }
-    // dhis2 extract may run with no [dhis2] section; the package's maps
-    // then name the system.
-    if instance.has_urls() {
+    // dhis2 extract reads no profile; the package's maps name the system.
+    if !args.records {
         println!("Org unit identifier system: {}", instance.orgunit_system());
     }
     println!("{}", report.summary());
