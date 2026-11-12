@@ -26,6 +26,25 @@ fn have_duckdb(skipped: &str) -> bool {
     found
 }
 
+/// The file's bytes with LF line ends. On Windows, Git checks the example
+/// files out with CRLF.
+fn read_lf(path: &Path) -> Vec<u8> {
+    let bytes = fs::read(path).unwrap();
+    let mut out = Vec::with_capacity(bytes.len());
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            continue;
+        }
+        out.push(*b);
+    }
+    out
+}
+
+/// Copies a file of the example package, with LF line ends.
+fn copy_file(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
+    fs::write(to, read_lf(from.as_ref()))
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
@@ -34,7 +53,7 @@ fn copy_dir(from: &Path, to: &Path) {
         if path.is_dir() {
             copy_dir(&path, &dest);
         } else {
-            fs::copy(&path, &dest).unwrap();
+            copy_file(&path, &dest).unwrap();
         }
     }
 }
@@ -463,11 +482,11 @@ fn without_a_manifest_each_file_runs_through_the_map_that_reads_it() {
         "maps/ConceptMap-digit-facility-usage.json",
     ] {
         fs::create_dir_all(pkg.join(f).parent().unwrap()).unwrap();
-        fs::copy(p.join(f), pkg.join(f)).unwrap();
+        copy_file(p.join(f), pkg.join(f)).unwrap();
     }
     let input = tmp.path().join("in");
     fs::create_dir(&input).unwrap();
-    fs::copy(
+    copy_file(
         sample_in(&p).join("DIGITFacility.ndjson"),
         input.join("DIGITFacility.ndjson"),
     )
@@ -482,13 +501,13 @@ fn without_a_manifest_each_file_runs_through_the_map_that_reads_it() {
     );
     assert_eq!(
         fs::read(out.join("Location.ndjson")).unwrap(),
-        fs::read(p.join("tests/sample/expected/Location.ndjson")).unwrap()
+        read_lf(&p.join("tests/sample/expected/Location.ndjson"))
     );
     let o = import(&["check", "--package", s(&pkg), "--in", s(&input)]);
     assert!(o.status.success(), "{:?}", text(&o));
     assert!(text(&o).0.contains("facilities: 1 maps, 1 logical models"));
     // A record file no map reads.
-    fs::copy(
+    copy_file(
         sample_in(&p).join("DIGITTask.ndjson"),
         input.join("DIGITTask.ndjson"),
     )
@@ -528,11 +547,11 @@ fn out_must_be_empty_unless_overwrite_and_overwrite_removes_only_its_own_files()
         "maps/ConceptMap-digit-facility-usage.json",
     ] {
         fs::create_dir_all(pkg.join(f).parent().unwrap()).unwrap();
-        fs::copy(p.join(f), pkg.join(f)).unwrap();
+        copy_file(p.join(f), pkg.join(f)).unwrap();
     }
     let input = tmp.path().join("in");
     fs::create_dir(&input).unwrap();
-    fs::copy(
+    copy_file(
         sample_in(&p).join("DIGITFacility.ndjson"),
         input.join("DIGITFacility.ndjson"),
     )

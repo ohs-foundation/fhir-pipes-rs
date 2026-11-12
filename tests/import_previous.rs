@@ -20,6 +20,25 @@ fn icr_dhis2() -> PathBuf {
     root().join("examples/import/icr-dhis2")
 }
 
+/// The file's bytes with LF line ends. On Windows, Git checks the example
+/// files out with CRLF.
+fn read_lf(path: &Path) -> Vec<u8> {
+    let bytes = fs::read(path).unwrap();
+    let mut out = Vec::with_capacity(bytes.len());
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            continue;
+        }
+        out.push(*b);
+    }
+    out
+}
+
+/// Copies a file of the example package, with LF line ends.
+fn copy_file(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
+    fs::write(to, read_lf(from.as_ref()))
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
@@ -28,7 +47,7 @@ fn copy_dir(from: &Path, to: &Path) {
         if path.is_dir() {
             copy_dir(&path, &dest);
         } else {
-            fs::copy(&path, &dest).unwrap();
+            copy_file(&path, &dest).unwrap();
         }
     }
 }
