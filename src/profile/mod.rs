@@ -111,24 +111,19 @@ fn default_org_prefix() -> String {
     "org-".into()
 }
 
+/// `[dhis2]`: the URLs the `dhis2` commands wrote before the built-in
+/// mapping was removed. The `dhis2` commands no longer read it: the import
+/// package's parameters give those values. Four of its keys are still read
+/// as the fallbacks of `[location]` and `[organization]` keys (see
+/// `location_profile` and the methods after it); the other keys are
+/// accepted and ignored, so a profile written for an earlier fhir-pipes
+/// still loads.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Dhis2Profile {
-    pub base: String,
-    pub project_tag_system: String,
     pub location_profile: String,
     pub facility_organization_profile: String,
     pub location_type_system: String,
-    /// The identifier system `dhis2 locations --country-code` writes on the
-    /// top org unit (it should be one the admin code column reads).
     pub country_code_system: String,
-    pub period_extension: String,
-    pub campaign_extension: String,
-    /// Where each MeasureReport came from: a CodeableConcept under
-    /// `source_system`, `dhis2-analytics` or `dhis2-data-values`.
-    pub source_extension: String,
-    pub source_system: String,
-    pub indicator_extension: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -345,16 +340,6 @@ impl Profile {
     pub fn admin_code_index(&self) -> Option<usize> {
         let name = self.location.admin_code_column.as_deref()?;
         self.location.columns.iter().position(|c| c.name == name)
-    }
-
-    pub fn dhis2(&self) -> Result<&Dhis2Profile> {
-        self.dhis2.as_ref().ok_or_else(|| {
-            PipesError::Usage(format!(
-                "dhis2 needs a profile with a [dhis2] section (the identifier systems and \
-                 profiles it writes); {}",
-                self.lacks("[dhis2] section")
-            ))
-        })
     }
 
     pub fn population(&self) -> Result<&PopulationProfile> {
@@ -601,7 +586,7 @@ mod tests {
     fn base_has_nothing_extra() {
         let p = Profile::base();
         assert_eq!(p.column_names().count(), 0);
-        assert!(p.dhis2().is_err());
+        assert!(p.dhis2.is_none());
         assert!(p.population().is_err());
         assert!(p.spatial_index_extension().is_err());
     }
@@ -610,20 +595,20 @@ mod tests {
     fn a_missing_section_is_described_plainly() {
         let base = Profile::base();
         assert!(base.is_base());
-        let err = base.dhis2().unwrap_err().to_string();
+        let err = base.population().unwrap_err().to_string();
         assert!(
             err.ends_with("; no profile was given. Pass one with --profile; see docs/profiles.md"),
             "{err}"
         );
         let mut named = icr_example();
-        named.dhis2 = None;
+        named.population = None;
         named.source = "ig/profile.toml".into();
         assert!(!named.is_base());
-        let err = named.dhis2().unwrap_err().to_string();
+        let err = named.population().unwrap_err().to_string();
         assert!(
             err.ends_with(
-                "; the profile ig/profile.toml has no [dhis2] section. Pass a profile that has \
-                 it; see docs/profiles.md"
+                "; the profile ig/profile.toml has no [population] section. Pass a profile that \
+                 has it; see docs/profiles.md"
             ),
             "{err}"
         );

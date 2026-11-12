@@ -1,5 +1,6 @@
-//! `fhir-pipes dhis2 reports`: indicator values from DHIS2 analytics as
-//! MeasureReports, one per indicator, org unit and period.
+//! `fhir-pipes dhis2 reports` and `dhis2 extract reports`: indicator values
+//! from DHIS2 analytics as `DHIS2Value` records, one per indicator, org unit
+//! and period, and with a package as MeasureReports.
 //!
 //! DHIS2 computes every value itself: it adds up the numerator and the
 //! denominator for the org unit and period, then divides, so values are
@@ -11,9 +12,9 @@
 //! `endDate` instead, and gives one value for the whole range.
 //!
 //! Org units are mapped to Locations through the identifier that
-//! `fhir-pipes dhis2 locations` writes. `dhis2 extract reports` reads the
-//! `DHIS2OrgUnit` records of `dhis2 extract locations` instead, and no
-//! Locations. A row whose org unit has no Location (or no record) is
+//! `fhir-pipes dhis2 locations` writes (`--locations`). `dhis2 extract
+//! reports` reads the `DHIS2OrgUnit` records of `dhis2 extract locations`
+//! instead, and no Locations. A row whose org unit has no Location (or no record) is
 //! reported and skipped.
 //!
 //! An export can run to millions of values, so the work is planned in
@@ -30,7 +31,7 @@
 //! instead (see `raw`), so everything after the fetch is shared.
 //!
 //! `plan` divides a run into units, `analytics` fetches each unit, `build`
-//! turns its rows into MeasureReports and `writer` writes them in planned
+//! turns its rows into records and `writer` maps and writes them in planned
 //! order; `periods` reads period codes and date ranges.
 
 mod analytics;
@@ -50,7 +51,7 @@ use serde_json::{Value, json};
 
 use super::Instance;
 use super::api::{Dhis2, ServerInfo, check_analytics_age};
-use super::maps::{ORG_UNIT_MODEL, RecordMap, VALUE_MODEL, Writes, record_type};
+use super::maps::{ORG_UNIT_MODEL, VALUE_MODEL, Writes, record_type};
 use super::measures::{fetch_indicators, fhir_key};
 use super::raw::load_parents;
 use super::rerun::{Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines};
@@ -101,10 +102,16 @@ fn unique<T: Clone + PartialEq>(list: &[T]) -> Vec<T> {
     out
 }
 
-pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -> Result<()> {
+pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
     check_args(args)?;
     let from_values = args.opts.source == ReportSource::DataValues;
-    let instance = Instance::new(&args.conn.instance, profile)?;
+    let instance = Instance::new(&args.conn.instance)?;
+    let map = if args.records {
+        None
+    } else {
+        Some(super::package_map("reports", &args.package, VALUE_MODEL)?)
+    };
+    let instance = instance.with_package(map.as_ref());
     let ranges = unique(&args.opts.ranges)
         .iter()
         .map(|r| DateRange::parse(r))
@@ -114,7 +121,6 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
     }
     let (mapping, parents) = load_org_units(args, &instance, from_values)?;
 
-    let maps = RecordMap::load(&args.maps.dirs, VALUE_MODEL)?;
     let api = Dhis2::connect(&args.conn)?;
     if !from_values {
         match &api.info.last_analytics {
@@ -176,7 +182,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         mapping: &mapping,
         campaign: args.opts.campaign.as_deref(),
         source: args.opts.source,
-        writes: Writes::new(maps.as_ref(), args.records),
+        writes: Writes::new(map.as_ref()),
         state,
         checkpoint: checkpoint.clone(),
         tally: Tally::default(),
@@ -250,9 +256,9 @@ fn load_org_units(
             path.display()
         )));
     }
-    // dhis2 run checked the profile has a [dhis2] section, which names the
-    // system the Locations carry the org unit UIDs under.
-    let system = instance.orgunit_system();
+    // The package's `base` names the system the Locations carry the org
+    // unit UIDs under.
+    let system = instance.orgunit_system()?;
     let mapping = load_mapping(path, &system)?;
     if mapping.is_empty() {
         return Err(PipesError::Usage(format!(
@@ -447,16 +453,12 @@ fn fingerprint(
     if args.records {
         plan["records"] = json!(true);
     }
-    // Only with --maps, so a run without it resumes a checkpoint written
-    // before the option existed.
-    if !args.maps.dirs.is_empty() {
-        plan["maps"] = json!(
-            args.maps
-                .dirs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-        );
+    // The package and its parameters shape what is written.
+    if let Some(dir) = &args.package.dir {
+        plan["package"] = json!(dir.display().to_string());
+    }
+    if !args.package.params.is_empty() {
+        plan["params"] = json!(args.package.params);
     }
     plan
 }
@@ -562,7 +564,7 @@ fn compare_with_previous(
         measures: ids
             .iter()
             .map(|dx| instance.measure_url(&fhir_key(dx)))
-            .collect(),
+            .collect::<Result<_>>()?,
         subjects: w
             .state
             .scope_org_units
@@ -581,9 +583,10 @@ fn compare_with_previous(
     scope
         .periods
         .extend(plan.ranges.iter().map(DateRange::label));
+    let period_extension = instance.period_extension()?;
     let out = &mut w.out;
     let removed = prev.removed(
-        |r| scope.contains(r, &instance.urls().period_extension),
+        |r| scope.contains(r, period_extension),
         |r| {
             if keep_rest {
                 kept += 1;
@@ -682,7 +685,7 @@ mod tests {
 
     #[test]
     fn a_long_period_code_is_checked_against_the_id_limit() {
-        let instance = Instance::new("a-sixteen-chars1", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("a-sixteen-chars1").unwrap();
         let rate = ["x".repeat(UID_LEN) + ".REPORTING_RATE"];
         assert!(check_report_ids(&instance, &[], &["202610".into()], &rate).is_ok());
         // Relative periods become codes DHIS2 picks; not checked here.

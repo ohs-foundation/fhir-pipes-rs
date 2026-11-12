@@ -122,9 +122,68 @@ pub struct TestArgs {
     pub params: Vec<(String, String)>,
 }
 
+/// `NAME=VALUE`, as `--param` takes it, for the commands outside `import`
+/// that run a package's maps.
+pub fn parse_param(text: &str) -> std::result::Result<(String, String), String> {
+    parameters::parse_assignment(text)
+}
+
+/// A package's maps, with the values of a run's parameters, for the
+/// commands that map records one at a time as they read them instead of
+/// running `import run` over a folder (`dhis2 locations|measures|reports`).
+pub struct PackageMaps {
+    /// The package folder.
+    pub dir: PathBuf,
+    pub name: String,
+    pub maps: crate::mapping::MapPackage,
+    /// The value of each parameter: its default, or `--param`.
+    pub values: BTreeMap<String, serde_json::Value>,
+}
+
+/// Loads the package in `dir`, or the package whose `maps/` folder `dir` is,
+/// and sets its parameters: the defaults, then `params`. Only a package
+/// without steps can be run this way, since each record goes through the
+/// one map that reads its type.
+pub fn package_maps(dir: &Path, params: &[(String, String)]) -> Result<PackageMaps> {
+    let root = if !dir.join(manifest::FILE).is_file()
+        && dir.file_name().is_some_and(|n| n == "maps")
+        && dir.join("..").join(manifest::FILE).is_file()
+    {
+        dir.join("..")
+    } else {
+        dir.to_path_buf()
+    };
+    let mut package = Package::load(&root)?;
+    if package
+        .manifest
+        .as_ref()
+        .is_some_and(|m| !m.steps.is_empty())
+    {
+        return Err(usage(anyhow!(
+            "{}: the package has [[step]]s, so its records cannot be mapped one at a time; \
+             write the records with `fhir-pipes dhis2 extract`, then run `fhir-pipes import \
+             run --package {}`",
+            root.display(),
+            root.display()
+        )));
+    }
+    package.set_values(&[Given::Text(params)], true)?;
+    let values = package
+        .values
+        .iter()
+        .map(|(n, v)| (n.clone(), v.json()))
+        .collect();
+    Ok(PackageMaps {
+        dir: root,
+        name: package.name,
+        maps: package.maps,
+        values,
+    })
+}
+
 /// The parameter defaults of the package each folder of maps belongs to,
-/// for the commands that run a package's maps outside `import` (`map run`,
-/// `dhis2 --maps`): the `[parameters]` of `DIR/import.toml` or, for a
+/// for the commands that run a package's maps outside `import` (`map run`):
+/// the `[parameters]` of `DIR/import.toml` or, for a
 /// package's `maps/` folder, `DIR/../import.toml`. Each value is (name, JSON,
 /// FHIR type) for `MapPackage::set_parameters`, and the manifests read are
 /// returned too. A parameter with no default is an error: those commands

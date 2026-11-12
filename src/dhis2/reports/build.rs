@@ -1,5 +1,5 @@
-//! MeasureReports from analytics rows: the Location an org unit maps to,
-//! the populations and score of a row, and the strata of a breakdown.
+//! `DHIS2Value` records from analytics rows: the Location an org unit maps
+//! to, the counts and score of a row, and the strata of a breakdown.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -11,7 +11,7 @@ use crate::dhis2::Instance;
 use crate::dhis2::api::ServerInfo;
 use crate::dhis2::locations::location_id;
 use crate::dhis2::maps::{ORG_UNIT_MODEL, VALUE_MODEL, record_type};
-use crate::dhis2::measures::{Indicator, MEASURE_POPULATION_SYSTEM, Scoring, fhir_key};
+use crate::dhis2::measures::{Indicator, Scoring, fhir_key};
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
 use crate::fhir::ndjson::NdjsonReader;
@@ -155,13 +155,6 @@ fn count(raw: &str, key: &str, what: &str, report: &mut Report) -> Option<i64> {
     Some(r as i64)
 }
 
-fn population(code: &str, display: &str, count: i64) -> Value {
-    json!({
-        "code": {"coding": [{"system": MEASURE_POPULATION_SYSTEM, "code": code, "display": display}]},
-        "count": count,
-    })
-}
-
 pub fn report_id(instance: &Instance, row: &AnalyticsRow) -> String {
     format!(
         "{}-{}-{}-{}",
@@ -172,70 +165,8 @@ pub fn report_id(instance: &Instance, row: &AnalyticsRow) -> String {
     )
 }
 
-/// The MeasureReport for one analytics row, or `None` after reporting why
-/// there is none. Its extensions are the period, the `--campaign` if given,
-/// and the source of its values.
-#[allow(clippy::too_many_arguments)]
-pub fn measure_report(
-    row: &AnalyticsRow,
-    ind: &Indicator,
-    location: &Target,
-    period: &(String, String),
-    instance: &Instance,
-    info: &ServerInfo,
-    campaign: Option<&str>,
-    source: ReportSource,
-    report: &mut Report,
-) -> Option<Value> {
-    let id = valid_report_id(instance, row, report)?;
-    let figures = figures(row, ind, &id, report)?;
-    let populations = figures.populations();
-    let mut group = json!({});
-    if !populations.is_empty() {
-        group["population"] = Value::Array(populations);
-    }
-    group["measureScore"] = json!({"value": figures.score});
-    let pe = period_value(&row.pe);
-    let mut extension = vec![json!({"url": instance.urls().period_extension, "valueString": pe})];
-    if let Some(c) = campaign {
-        extension.push(
-            json!({"url": instance.urls().campaign_extension, "valueReference": {"reference": c}}),
-        );
-    }
-    let (code, display) = source.coding();
-    extension.push(json!({"url": instance.urls().source_extension,
-        "valueCodeableConcept": {"coding": [{"system": instance.urls().source_system,
-            "code": code, "display": display}]}}));
-    let mut r = json!({
-        "resourceType": "MeasureReport",
-        "id": id,
-        "meta": {"tag": [instance.tag()]},
-        "extension": extension,
-        "status": "complete",
-        "type": "summary",
-        "measure": instance.measure_url(&ind.fhir_key()),
-        "subject": {"reference": format!("Location/{}", location.id)},
-    });
-    if let Some(name) = &location.name {
-        r["subject"]["display"] = json!(name);
-    }
-    if let Some(d) = info
-        .last_analytics
-        .as_deref()
-        .and_then(|t| info.timestamp(t))
-    {
-        r["date"] = json!(d);
-    }
-    if let Some(name) = &info.system_name {
-        r["reporter"] = json!({"display": name});
-    }
-    r["period"] = json!({"start": period.0, "end": period.1});
-    r["group"] = json!([group]);
-    Some(r)
-}
-
 /// The row as a `DHIS2Value` record (examples/import/icr-dhis2/models), the
-/// input of a `--maps` map or the line `dhis2 extract` writes, or `None` after
+/// input of the package's map or the line `dhis2 extract` writes, or `None` after
 /// reporting why there is none. Breakdowns are added to its `stratifier`
 /// afterwards.
 #[allow(clippy::too_many_arguments)]
@@ -305,21 +236,6 @@ pub struct Figures {
 }
 
 impl Figures {
-    /// The populations of a MeasureReport group or stratum.
-    fn populations(&self) -> Vec<Value> {
-        [
-            self.initial
-                .map(|n| population("initial-population", "Initial Population", n)),
-            self.numerator
-                .map(|n| population("numerator", "Numerator", n)),
-            self.denominator
-                .map(|n| population("denominator", "Denominator", n)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
-
     /// The counts and score as fields of a `DHIS2Value` record or stratum.
     fn write(&self, record: &mut Value) {
         if let Some(n) = self.initial {
@@ -385,30 +301,6 @@ pub fn figures(
     Some(figures)
 }
 
-/// One stratum: a breakdown option with its own populations and score.
-pub fn stratum(
-    row: &AnalyticsRow,
-    ind: &Indicator,
-    breakdown: &str,
-    names: &HashMap<String, String>,
-    instance: &Instance,
-    report: &mut Report,
-) -> Option<Value> {
-    let option = row.option.as_deref()?;
-    let key = format!("{}/{breakdown}:{option}", report_id(instance, row));
-    let figures = figures(row, ind, &key, report)?;
-    let populations = figures.populations();
-    let name = names.get(option).map(String::as_str).unwrap_or(option);
-    let mut s = json!({
-        "value": {"coding": [{"system": instance.dimension_system(Some(breakdown)), "code": option, "display": name}], "text": name},
-    });
-    if !populations.is_empty() {
-        s["population"] = Value::Array(populations);
-    }
-    s["measureScore"] = json!({"value": figures.score});
-    Some(s)
-}
-
 /// One stratum of a `DHIS2Value` record: a breakdown option with its own
 /// counts and score.
 pub fn stratum_record(
@@ -440,6 +332,66 @@ mod tests {
         }
     }
 
+    /// The MeasureReport the example package writes for one row, or `None`
+    /// when the row gives no record.
+    #[allow(clippy::too_many_arguments)]
+    fn measure_report(
+        row: &AnalyticsRow,
+        ind: &Indicator,
+        location: &Target,
+        period: &(String, String),
+        instance: &Instance,
+        info: &ServerInfo,
+        campaign: Option<&str>,
+        source: ReportSource,
+        report: &mut Report,
+    ) -> Option<Value> {
+        let record = value_record(
+            row, ind, location, period, instance, info, campaign, source, report,
+        )?;
+        Some(map(&record, report))
+    }
+
+    fn map(record: &Value, report: &mut Report) -> Value {
+        let maps = crate::dhis2::maps::icr_package(VALUE_MODEL);
+        let mut out = maps
+            .run(record, record["id"].as_str().unwrap(), report)
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        out.remove(0)
+    }
+
+    /// The stratum the example package writes for a breakdown row, attached
+    /// to a total from the same row.
+    fn stratum(
+        row: &AnalyticsRow,
+        ind: &Indicator,
+        breakdown: &str,
+        names: &HashMap<String, String>,
+        instance: &Instance,
+        report: &mut Report,
+    ) -> Option<Value> {
+        let st = stratum_record(row, ind, breakdown, names, instance, report)?;
+        let mut total = value_record(
+            row,
+            ind,
+            &loc(),
+            &("2025-01-01".into(), "2025-12-31".into()),
+            instance,
+            &ServerInfo::default(),
+            None,
+            ReportSource::Analytics,
+            report,
+        )?;
+        let name = names
+            .get(breakdown)
+            .cloned()
+            .unwrap_or(breakdown.to_string());
+        total["stratifier"] = json!([{"dimension": breakdown, "name": name, "stratum": [st]}]);
+        let r = map(&total, report);
+        Some(r["group"][0]["stratifier"][0]["stratum"][0].clone())
+    }
+
     fn penta3() -> Indicator {
         Indicator::parse(&json!({"id":"tUIlpyeeX9N","name":"Penta 3 Coverage <1y",
             "indicatorType":{"factor":100},"numerator":"#{a}","denominator":"#{b}"}))
@@ -449,7 +401,7 @@ mod tests {
     #[test]
     fn a_row_becomes_a_summary_report_with_the_score_as_a_proportion() {
         let t = parse_analytics(&analytics(), None).unwrap();
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
             last_analytics: Some("2026-10-12T02:07:00.052".into()),
@@ -494,7 +446,7 @@ mod tests {
 
     #[test]
     fn fractional_and_blank_counts() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let row = AnalyticsRow {
             dx: "tUIlpyeeX9N".into(),
             pe: "202501".into(),
@@ -546,7 +498,7 @@ mod tests {
 
     #[test]
     fn a_cohort_reports_the_numerator_as_its_population() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let ind = Indicator::parse(&json!({"id":"dy1a1mseGR7","indicatorType":{"factor":1},"numerator":"#{a}","denominator":"1"})).unwrap();
         let row = AnalyticsRow {
             dx: "dy1a1mseGR7".into(),
@@ -578,7 +530,7 @@ mod tests {
 
     #[test]
     fn a_data_element_row_counts_its_value() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let de =
             Indicator::from_data_element(&json!({"id": "s46m5MS0hxu", "name": "BCG doses given"}))
                 .unwrap();
@@ -615,7 +567,7 @@ mod tests {
 
     #[test]
     fn a_breakdown_row_is_a_coded_stratum_with_its_own_figures() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let v = json!({
             "headers": [{"name":"dx"},{"name":"fMZEcRHuamy"},{"name":"pe"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
             "metaData": {"items": {"fMZEcRHuamy": {"name": "Location Fixed/Outreach"}, "qkPbeWaFsnU": {"name": "Fixed"}}},
@@ -636,7 +588,7 @@ mod tests {
         assert_eq!(s["value"]["text"], "Fixed");
         assert_eq!(
             s["value"]["coding"][0]["system"],
-            instance.dimension_system(Some("fMZEcRHuamy"))
+            "https://icr.healthcampaigns.org/CodeSystem/dhis2/sl-demo/dimension/fMZEcRHuamy"
         );
         assert_eq!(s["population"][0]["count"], 50);
         assert_eq!(s["measureScore"]["value"], 0.25);
@@ -644,12 +596,12 @@ mod tests {
     }
 
     #[test]
-    fn the_example_map_writes_what_the_built_in_mapping_writes() {
-        use crate::dhis2::maps::RecordMap;
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
-        let maps = RecordMap::load(&[dir], VALUE_MODEL).unwrap().unwrap();
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+    /// The records are the package's test case values, and the package maps
+    /// them to the case's expected MeasureReports: what the built-in mapping
+    /// wrote before it was removed.
+    fn the_records_are_the_package_case_values() {
+        let maps = crate::dhis2::maps::icr_package(VALUE_MODEL);
+        let instance = Instance::new("sl-demo").unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
             last_analytics: Some("2026-10-12T02:07:00.052".into()),
@@ -723,23 +675,10 @@ mod tests {
             ),
         ];
         let mut all_records = Vec::new();
-        let mut all_expected = Vec::new();
+        let mut all_mapped = Vec::new();
         for (row, ind, location, info, campaign, source) in &cases {
             let mut row = row.clone();
             row.dx = ind.id.clone();
-            let mut built_in_report = Report::default();
-            let mut expected = measure_report(
-                &row,
-                ind,
-                location,
-                &period,
-                &instance,
-                info,
-                *campaign,
-                *source,
-                &mut built_in_report,
-            )
-            .unwrap();
             let mut mapped_report = Report::default();
             let mut record = value_record(
                 &row,
@@ -776,7 +715,6 @@ mod tests {
                 ("J5jldMd8OHv", vec![("CXw2yu5fodb", "1.5", "3", "2")]),
             ];
             for (dimension, options) in &breakdowns {
-                let mut strata = Vec::new();
                 let mut records = Vec::new();
                 for (option, value, numerator, denominator) in options {
                     let mut r = row.clone();
@@ -784,14 +722,6 @@ mod tests {
                     r.value = value.to_string();
                     r.numerator = numerator.to_string();
                     r.denominator = denominator.to_string();
-                    strata.extend(stratum(
-                        &r,
-                        ind,
-                        dimension,
-                        &names,
-                        &instance,
-                        &mut built_in_report,
-                    ));
                     records.extend(stratum_record(
                         &r,
                         ind,
@@ -802,17 +732,6 @@ mod tests {
                     ));
                 }
                 let name = &names[*dimension];
-                let stratifier = json!({
-                    "code": [{"coding": [{"system": instance.dimension_system(None), "code": dimension, "display": name}], "text": name}],
-                    "stratum": strata,
-                });
-                match expected["group"][0]
-                    .get_mut("stratifier")
-                    .and_then(Value::as_array_mut)
-                {
-                    Some(list) => list.push(stratifier),
-                    None => expected["group"][0]["stratifier"] = json!([stratifier]),
-                }
                 let stratifier = json!({"dimension": dimension, "name": name, "stratum": records});
                 match record.get_mut("stratifier").and_then(Value::as_array_mut) {
                     Some(list) => list.push(stratifier),
@@ -820,17 +739,14 @@ mod tests {
                 }
             }
 
-            let id = expected["id"].as_str().unwrap().to_string();
-            let mapped = maps.run(&record, &id, &mut mapped_report).unwrap();
+            let id = record["id"].as_str().unwrap().to_string();
+            let mut mapped = maps.run(&record, &id, &mut mapped_report).unwrap();
             assert_eq!(mapped.len(), 1, "{id}");
-            // The same MeasureReport, key for key and in the same order.
-            assert_eq!(mapped[0].to_string(), expected.to_string(), "{id}");
-            assert_eq!(mapped_report.summary(), built_in_report.summary(), "{id}");
             all_records.push(record);
-            all_expected.push(expected);
+            all_mapped.push(mapped.remove(0));
         }
         crate::dhis2::maps::case::records("values", &all_records);
-        crate::dhis2::maps::case::expected("values", &all_expected);
+        crate::dhis2::maps::case::expected("values", &all_mapped);
     }
 
     #[test]
@@ -901,7 +817,7 @@ mod tests {
 
     #[test]
     fn a_range_report_carries_the_range_as_its_period() {
-        let instance = Instance::new("bgd-epi-2026", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("bgd-epi-2026").unwrap();
         let row = AnalyticsRow {
             dx: "tUIlpyeeX9N".into(),
             pe: "20260405-20260520".into(),
@@ -936,7 +852,7 @@ mod tests {
 
     #[test]
     fn the_campaign_and_the_source_follow_the_period_extension() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let row = AnalyticsRow {
             dx: "tUIlpyeeX9N".into(),
             pe: "2025".into(),

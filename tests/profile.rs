@@ -246,20 +246,6 @@ fn commands_that_need_an_ig_say_so_without_a_profile() {
         .assert()
         .failure()
         .stderr(contains("spatial_index_extension"));
-    fhir_pipes()
-        .args([
-            "dhis2",
-            "measures",
-            "--dhis2",
-            "http://127.0.0.1:9",
-            "--dhis2-token",
-            "d2pat_x",
-        ])
-        .args(["--instance", "x", "--indicator", "abcdefghijk", "--out"])
-        .arg(work.path().join("m.ndjson"))
-        .assert()
-        .failure()
-        .stderr(contains("[dhis2]"));
 }
 
 #[test]

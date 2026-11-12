@@ -1,15 +1,16 @@
-//! `fhir-pipes dhis2 measures`: DHIS2 indicators and data elements as FHIR Measures.
+//! `fhir-pipes dhis2 measures` and `dhis2 extract measures`: DHIS2
+//! indicators, data elements and data set reporting rates as
+//! `DHIS2Indicator` records, and with a package as Measures.
 //!
 //! An indicator is numerator ÷ denominator × factor. A percent (factor 100)
 //! is scored `proportion`, any other factor `ratio`, and a plain number
-//! (denominator `1`) `cohort` with a single population. The expressions,
-//! the factor and the annualized flag ride along so a reader can see how
-//! DHIS2 computes the value; `measureScore` on the reports is the DHIS2
-//! value divided by this factor (45.18 % → 0.4518), the ICR convention.
+//! (denominator `1`) `cohort` with a single population. The record carries
+//! the expressions, the factor and the annualized flag; the score of a
+//! `DHIS2Value` is the DHIS2 value divided by this factor (45.18 % → 0.4518).
 //!
-//! A data element (an aggregate count such as "BCG doses given") becomes a
-//! `cohort` Measure too: its value is the total over every disaggregation,
-//! the same number DHIS2 shows for `#{uid}`.
+//! A data element (an aggregate count such as "BCG doses given") is scored
+//! `cohort` too: its value is the total over every disaggregation, the same
+//! number DHIS2 shows for `#{uid}`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,12 +24,6 @@ use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::write_ndjson;
 use crate::fs::check_out;
 use crate::report::{Report, write_report};
-
-pub const MEASURE_SCORING_SYSTEM: &str = "http://terminology.hl7.org/CodeSystem/measure-scoring";
-pub const MEASURE_POPULATION_SYSTEM: &str =
-    "http://terminology.hl7.org/CodeSystem/measure-population";
-/// DHIS2's indicator expression language; not a registered media type.
-pub const EXPRESSION_LANGUAGE: &str = "text/x-dhis2-expression";
 
 const INDICATOR_FIELDS: &str = "id,code,name,description,numerator,numeratorDescription,\
 denominator,denominatorDescription,decimals,annualized,lastUpdated,\
@@ -117,13 +112,6 @@ impl Scoring {
             Scoring::Proportion => "proportion",
             Scoring::Ratio => "ratio",
             Scoring::Cohort => "cohort",
-        }
-    }
-    fn display(self) -> &'static str {
-        match self {
-            Scoring::Proportion => "Proportion",
-            Scoring::Ratio => "Ratio",
-            Scoring::Cohort => "Cohort",
         }
     }
 }
@@ -249,95 +237,8 @@ impl Indicator {
     }
 }
 
-fn population(code: &str, display: &str, description: Option<&str>, expression: &str) -> Value {
-    let mut p = json!({
-        "code": {"coding": [{"system": MEASURE_POPULATION_SYSTEM, "code": code, "display": display}]},
-    });
-    if let Some(d) = description {
-        p["description"] = json!(d);
-    }
-    p["criteria"] = json!({"language": EXPRESSION_LANGUAGE, "expression": expression});
-    p
-}
-
-pub fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
-    let scoring = ind.scoring();
-    let mut sub = vec![json!({"url": "factor", "valueDecimal": ind.factor})];
-    if let Some(t) = &ind.type_name {
-        sub.push(json!({"url": "indicatorType", "valueString": t}));
-    }
-    sub.push(json!({"url": "annualized", "valueBoolean": ind.annualized}));
-    if let Some(d) = ind.decimals {
-        sub.push(json!({"url": "decimals", "valueInteger": d}));
-    }
-    let (system, code_system) = match ind.kind {
-        Kind::Indicator => (
-            instance.indicator_system(),
-            instance.indicator_code_system(),
-        ),
-        Kind::DataElement => (
-            instance.data_element_system(),
-            instance.data_element_code_system(),
-        ),
-        Kind::ReportingRate => (instance.data_set_system(), instance.data_set_code_system()),
-    };
-    let mut identifier = vec![json!({"use": "official", "system": system, "value": ind.uid()})];
-    if let Some(code) = &ind.code {
-        identifier.push(json!({"system": code_system, "value": code}));
-    }
-    let mut m = json!({
-        "resourceType": "Measure",
-        "id": instance.measure_id(&ind.fhir_key()),
-        "meta": {"tag": [instance.tag()]},
-        "extension": [{"url": instance.urls().indicator_extension, "extension": sub}],
-        "url": instance.measure_url(&ind.fhir_key()),
-        "identifier": identifier,
-        "title": ind.name,
-        "status": "active",
-    });
-    if let Some(d) = ind.last_updated.as_deref().and_then(|t| info.timestamp(t)) {
-        m["date"] = json!(d);
-    }
-    if let Some(p) = &info.system_name {
-        m["publisher"] = json!(p);
-    }
-    if let Some(d) = &ind.description {
-        m["description"] = json!(d);
-    }
-    if !ind.groups.is_empty() {
-        m["topic"] = Value::Array(topics(ind, instance));
-    }
-    m["subjectCodeableConcept"] =
-        json!({"coding": [{"system": "http://hl7.org/fhir/resource-types", "code": "Location"}]});
-    m["scoring"] = json!({"coding": [{"system": MEASURE_SCORING_SYSTEM, "code": scoring.code(), "display": scoring.display()}]});
-    let populations = match scoring {
-        Scoring::Cohort => vec![population(
-            "initial-population",
-            "Initial Population",
-            ind.numerator_description.as_deref(),
-            &ind.numerator,
-        )],
-        _ => vec![
-            population(
-                "numerator",
-                "Numerator",
-                ind.numerator_description.as_deref(),
-                &ind.numerator,
-            ),
-            population(
-                "denominator",
-                "Denominator",
-                ind.denominator_description.as_deref(),
-                &ind.denominator,
-            ),
-        ],
-    };
-    m["group"] = json!([{"population": populations}]);
-    m
-}
-
 /// The item as a `DHIS2Indicator` record (examples/import/icr-dhis2/models):
-/// the input of a `--maps` map, or the line `dhis2 extract` writes.
+/// the input of the package's map, or the line `dhis2 extract` writes.
 pub fn record(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
     let mut r = json!({
         "resourceType": record_type(INDICATOR_MODEL),
@@ -399,33 +300,6 @@ pub fn record(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value 
         set("group", Some(Value::Array(groups)));
     }
     r
-}
-
-/// One topic per group, coded so a reader can regroup items the way DHIS2
-/// does: by indicator group, by data element group, or by the groups of a
-/// data element group set (one topic per set the group is in).
-fn topics(ind: &Indicator, instance: &Instance) -> Vec<Value> {
-    let mut out = Vec::new();
-    for g in &ind.groups {
-        let coded = |system: String| match &g.id {
-            Some(id) => {
-                json!({"coding": [{"system": system, "code": id, "display": g.name}], "text": g.name})
-            }
-            None => json!({"text": g.name}),
-        };
-        match ind.kind {
-            Kind::DataElement if !g.sets.is_empty() => {
-                for set in &g.sets {
-                    out.push(coded(
-                        instance.group_system(&format!("data-element-group-set/{set}")),
-                    ));
-                }
-            }
-            Kind::DataElement => out.push(coded(instance.group_system("data-element-group"))),
-            _ => out.push(coded(instance.group_system("indicator-group"))),
-        }
-    }
-    out
 }
 
 /// A DHIS2 analytics item (`uid`, `uid.REPORTING_RATE`) as a FHIR id part.
@@ -664,11 +538,19 @@ pub fn fetch_indicators(
     Ok(found)
 }
 
-pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile) -> Result<()> {
+pub fn run_measures(args: &Dhis2MeasuresArgs) -> Result<()> {
     check_out(&args.out)?;
-    let instance = Instance::new(&args.conn.instance, profile)?;
-    let maps = RecordMap::load(&args.maps.dirs, INDICATOR_MODEL)?;
-    let writes = Writes::new(maps.as_ref(), args.records);
+    let instance = Instance::new(&args.conn.instance)?;
+    let map = if args.records {
+        None
+    } else {
+        Some(super::package_map(
+            "measures",
+            &args.package,
+            INDICATOR_MODEL,
+        )?)
+    };
+    let writes = Writes::new(map.as_ref());
     let api = Dhis2::connect(&args.conn)?;
     let indicators = fetch_indicators(&api, &args.select)?;
     let mut report = Report::default();
@@ -689,11 +571,6 @@ pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile)
                 measures.extend(RecordMap::take(output, &ind.id, &mut report)?);
             }
         }
-        Writes::BuiltIn => measures.extend(
-            indicators
-                .values()
-                .map(|ind| measure(ind, &instance, &api.info)),
-        ),
     }
     let n = write_ndjson(&args.out, &measures)?;
     let mut by_scoring: BTreeMap<&str, usize> = BTreeMap::new();
@@ -736,16 +613,27 @@ mod tests {
                "indicatorGroups":[{"id":"oehv9EO3vP7","name":"ANC"}]})
     }
 
-    /// The example ICR maps (examples/import/icr-dhis2/maps).
-    fn icr_maps() -> RecordMap {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
-        RecordMap::load(&[dir], INDICATOR_MODEL).unwrap().unwrap()
+    const IDS: &str = "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo";
+    const CODES: &str = "https://icr.healthcampaigns.org/CodeSystem/dhis2/sl-demo";
+
+    /// The Measure the example package writes for `ind`.
+    fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
+        let map = crate::dhis2::maps::icr_package(INDICATOR_MODEL);
+        let mut report = Report::default();
+        let mut out = map
+            .run(&record(ind, instance, info), &ind.id, &mut report)
+            .unwrap();
+        assert_eq!(out.len(), 1, "{}", ind.id);
+        assert_eq!(report.summary(), Report::default().summary(), "{}", ind.id);
+        out.remove(0)
     }
 
     #[test]
-    fn the_example_map_writes_what_the_built_in_mapping_writes() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+    /// The records are the package's test case indicators, and the package
+    /// maps them to the case's expected Measures: what the built-in mapping
+    /// wrote before it was removed.
+    fn the_records_are_the_package_case_indicators() {
+        let instance = Instance::new("sl-demo").unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
             utc: true,
@@ -784,28 +672,16 @@ mod tests {
         let mut items = items;
         items[1].id = "Uvn6LCg7dV1".into();
         items[2].id = "Uvn6LCg7dV2".into();
-        let maps = icr_maps();
         let records: Vec<Value> = items
             .iter()
             .map(|ind| record(ind, &instance, &info))
             .collect();
-        let expected: Vec<Value> = items
+        crate::dhis2::maps::case::records("indicators", &records);
+        let mapped: Vec<Value> = items
             .iter()
             .map(|ind| measure(ind, &instance, &info))
             .collect();
-        crate::dhis2::maps::case::records("indicators", &records);
-        crate::dhis2::maps::case::expected("indicators", &expected);
-        for ind in &items {
-            let mut report = Report::default();
-            let mapped = maps
-                .run(&record(ind, &instance, &info), &ind.id, &mut report)
-                .unwrap();
-            assert_eq!(mapped.len(), 1, "{}", ind.id);
-            // The same Measure. The map writes the keys in the order FHIR
-            // defines them, so subjectCodeableConcept comes before date.
-            assert_eq!(mapped[0], measure(ind, &instance, &info), "{}", ind.id);
-            assert_eq!(report.summary(), Report::default().summary(), "{}", ind.id);
-        }
+        crate::dhis2::maps::case::expected("indicators", &mapped);
     }
 
     #[test]
@@ -828,7 +704,7 @@ mod tests {
 
     #[test]
     fn a_proportion_measure_carries_both_expressions_and_the_factor() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
             utc: true,
@@ -859,7 +735,7 @@ mod tests {
 
     #[test]
     fn a_data_element_is_a_count_under_its_own_identifier_system() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let ind = Indicator::from_data_element(&json!({"id":"s46m5MS0hxu","code":"DE_359706","name":"BCG doses given",
             "aggregationType":"SUM","dataElementGroups":[{"id":"h9cuJOkOwY2","name":"Immunization"}]}))
         .unwrap();
@@ -867,10 +743,10 @@ mod tests {
         assert_eq!(ind.scoring(), Scoring::Cohort);
         let m = measure(&ind, &instance, &ServerInfo::default());
         assert_eq!(m["id"], "sl-demo-s46m5MS0hxu");
-        assert_eq!(m["identifier"][0]["system"], instance.data_element_system());
+        assert_eq!(m["identifier"][0]["system"], format!("{IDS}/data-element"));
         assert_eq!(
             m["identifier"][1]["system"],
-            instance.data_element_code_system()
+            format!("{IDS}/data-element-code")
         );
         assert_eq!(
             m["group"][0]["population"][0]["criteria"]["expression"],
@@ -880,7 +756,7 @@ mod tests {
         assert_eq!(m["topic"][0]["coding"][0]["code"], "h9cuJOkOwY2");
         assert_eq!(
             m["topic"][0]["coding"][0]["system"],
-            instance.group_system("data-element-group")
+            format!("{CODES}/data-element-group")
         );
         let ext = m["extension"][0]["extension"].as_array().unwrap();
         assert!(ext.contains(&json!({"url": "factor", "valueDecimal": 1.0})));
@@ -891,7 +767,7 @@ mod tests {
 
     #[test]
     fn a_data_set_becomes_its_reporting_rate_under_a_valid_fhir_id() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let rate = Indicator::from_data_set(
             &json!({"id":"QX4ZTUbOt3a","name":"Reproductive Health","periodType":"Monthly"}),
         )
@@ -903,7 +779,7 @@ mod tests {
         assert_eq!(m["id"], "sl-demo-QX4ZTUbOt3a.REPORTING-RATE");
         assert!(crate::fhir::group::is_valid_id(m["id"].as_str().unwrap()));
         assert_eq!(m["title"], "Reproductive Health - Reporting rate");
-        assert_eq!(m["identifier"][0]["system"], instance.data_set_system());
+        assert_eq!(m["identifier"][0]["system"], format!("{IDS}/data-set"));
         assert_eq!(m["identifier"][0]["value"], "QX4ZTUbOt3a");
         let pops = m["group"][0]["population"].as_array().unwrap();
         assert_eq!(
@@ -915,7 +791,7 @@ mod tests {
 
     #[test]
     fn data_element_groups_in_a_group_set_are_coded_by_that_set() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let de = Indicator::from_data_element(&json!({"id":"a","name":"Malaria new",
             "dataElementGroups":[{"id":"TzwKbcw1nUK","name":"Malaria","groupSets":[{"id":"jp826jAJHUc"}]},
                                  {"id":"weRMUzBs8T7","name":"New cases","groupSets":[{"id":"lv8UXn17ZOm"}]}]})).unwrap();
@@ -924,7 +800,7 @@ mod tests {
         assert_eq!(topics.len(), 2);
         assert_eq!(
             topics[0]["coding"][0]["system"],
-            instance.group_system("data-element-group-set/jp826jAJHUc")
+            format!("{CODES}/data-element-group-set/jp826jAJHUc")
         );
         assert_eq!(topics[0]["coding"][0]["code"], "TzwKbcw1nUK");
         assert_eq!(topics[1]["coding"][0]["display"], "New cases");
@@ -932,7 +808,7 @@ mod tests {
 
     #[test]
     fn a_number_indicator_is_a_cohort_with_one_population() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let ind = Indicator::parse(&json!({"id":"dy1a1mseGR7","name":"ANC visits total",
             "indicatorType":{"name":"Number (Factor 1)","factor":1,"number":true},
             "numerator":"#{a}+#{b}","denominator":"1"}))
