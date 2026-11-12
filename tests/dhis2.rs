@@ -1,4 +1,6 @@
 //! Binary-level tests for `fhir-pipes dhis2` against a fake DHIS2 Web API.
+//! The commands write their resources with the example package
+//! examples/import/icr-dhis2.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -13,20 +15,15 @@ use serde_json::{Value, json};
 mod stub;
 use stub::*;
 
+/// `fhir-pipes` with the example package examples/import/icr-dhis2, given
+/// as `$FHIR_PIPES_DHIS2_MAPS`: the `dhis2` commands write their resources
+/// with its maps.
 fn fhir_pipes() -> Command {
     let mut c = stub::fhir_pipes();
-    // tests/dhis2_maps.rs runs this file again as a module: every command
-    // then writes its resources with the example ICR maps, not the built-in
-    // mapping, and every test here has to pass the same way.
-    if module_path!().starts_with("dhis2_maps") {
-        c.env(
-            "FHIR_PIPES_DHIS2_MAPS",
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/examples/import/icr-dhis2/maps"
-            ),
-        );
-    }
+    c.env(
+        "FHIR_PIPES_DHIS2_MAPS",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/import/icr-dhis2"),
+    );
     c
 }
 
@@ -135,6 +132,14 @@ fn measures_are_written_for_every_indicator_in_the_group() {
         .assert()
         .success();
     assert!(stdout(&a).contains("Wrote 2 Measures"));
+    // The example ICR profile still has a [dhis2] section, which is not read.
+    assert!(
+        stderr(&a).contains(
+            "dhis2 no longer reads the [dhis2] section; the package's parameters give those values"
+        ),
+        "{}",
+        stderr(&a)
+    );
     let m = read_ndjson(&out);
     assert_eq!(m[0]["id"], "sl-demo-FbKK4ofIv5R");
     assert_eq!(
@@ -142,6 +147,49 @@ fn measures_are_written_for_every_indicator_in_the_group() {
         "https://icr.healthcampaigns.org/Measure/sl-demo-tUIlpyeeX9N"
     );
     assert_eq!(m[1]["scoring"]["coding"][0]["code"], "proportion");
+}
+
+/// `--package`, or `--maps` with the package's maps/ folder as scripts gave
+/// it before, and `--param` to change one of the package's parameters.
+#[test]
+fn the_package_is_given_by_flag_and_its_parameters_change_the_urls() {
+    let package = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/import/icr-dhis2");
+    let maps = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/import/icr-dhis2/maps"
+    );
+    for (flag, dir, base) in [
+        ("--package", package, None),
+        ("--maps", maps, None),
+        ("--package", package, Some("https://example.org")),
+    ] {
+        let server = Server::run();
+        expect_info(&server);
+        expect_group(&server);
+        let dir_out = tempfile::tempdir().unwrap();
+        let out = dir_out.path().join("measures.ndjson");
+        let mut c = stub::fhir_pipes();
+        c.args(["dhis2", "measures", flag, dir])
+            .args(["--dhis2", &stub::base(&server), "--instance", "sl-demo"])
+            .args(["--indicator-group", "srxUNt2w5jn", "--out"])
+            .arg(&out)
+            .env_remove("FHIR_PIPES_PROFILE")
+            .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
+        if let Some(b) = base {
+            c.args(["--param", &format!("base={b}")]);
+        }
+        let a = c.assert().success();
+        assert!(!stderr(&a).contains("[dhis2]"), "{}", stderr(&a));
+        let m = read_ndjson(&out);
+        assert_eq!(
+            m[1]["url"],
+            format!(
+                "{}/Measure/sl-demo-tUIlpyeeX9N",
+                base.unwrap_or("https://icr.healthcampaigns.org")
+            ),
+            "{flag} {dir}"
+        );
+    }
 }
 
 #[test]

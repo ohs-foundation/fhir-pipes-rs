@@ -1,15 +1,13 @@
-//! `fhir-pipes dhis2`: read a DHIS2 instance into FHIR NDJSON for `fhir-pipes load`.
+//! `fhir-pipes dhis2`: read a DHIS2 instance into records, and with an
+//! import package into FHIR NDJSON for `fhir-pipes load`.
 //!
-//! - `locations`: org units become ICR Locations (facilities also get their
-//!   Organization), each carrying the org unit UID as an identifier under a
-//!   system named after the instance.
-//! - `measures`: indicators become Measures.
-//! - `reports`: indicator values from `/api/analytics` become one
-//!   MeasureReport per indicator, org unit and period. The org unit is mapped
-//!   to its Location through that identifier.
-//!
-//! - `extract locations|measures|reports`: the records each of the above
-//!   maps, written to a folder for `fhir-pipes import run` instead.
+//! - `extract locations|measures|reports`: org units, indicators and
+//!   indicator values as `DHIS2OrgUnit`, `DHIS2Indicator` and `DHIS2Value`
+//!   records, written to a folder for `fhir-pipes import run`.
+//! - `locations`, `measures`, `reports`: the same records, each run through
+//!   the map of an import package (`--package`) that reads its type, so the
+//!   command writes resources: Locations and facility Organizations,
+//!   Measures, MeasureReports.
 //!
 //! Every id is deterministic (`INSTANCE-<uid>…`), so re-running replaces the
 //! same resources. Nothing is written to DHIS2.
@@ -26,44 +24,68 @@ pub mod rerun;
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
-
-use crate::cli::{Dhis2Command, Dhis2ExtractCommand};
+use crate::cli::{Dhis2Command, Dhis2ExtractCommand, Dhis2Package};
 use crate::error::{PipesError, Result};
-use crate::profile::{Dhis2Profile, Profile};
+use crate::profile::Profile;
+use maps::RecordMap;
 
 /// Instance names go into every id, so they are kept short.
 pub const MAX_INSTANCE_LEN: usize = 16;
 
-/// For `locations`, `measures` and `reports`, every system, profile and
-/// extension URL comes from the profile's [dhis2] section (and the Location
-/// roles from [location] and [organization]). `extract` writes records, which
-/// carry none of them, and reads nothing else from a profile, so it does not
-/// load one.
+/// No `dhis2` command reads the profile. The URLs the resources carry are
+/// the package's parameters. A profile given with a `[dhis2]` section, which
+/// these commands read before, gets a warning that it is not read.
 pub fn run(cmd: &Dhis2Command, profile: Option<&str>) -> anyhow::Result<()> {
     if let Dhis2Command::Extract(cmd) = cmd {
         return Ok(extract(cmd)?);
     }
-    let profile = Profile::load(profile)?;
-    eprintln!("profile: {} ({})", profile.name, profile.source);
-    profile.dhis2()?;
+    warn_of_dhis2_section(profile);
     match cmd {
-        Dhis2Command::Locations(args) => locations::run_locations(args, &profile)?,
-        Dhis2Command::Measures(args) => measures::run_measures(args, &profile)?,
-        Dhis2Command::Reports(args) => reports::run_reports(args, &profile)?,
+        Dhis2Command::Locations(args) => locations::run_locations(args)?,
+        Dhis2Command::Measures(args) => measures::run_measures(args)?,
+        Dhis2Command::Reports(args) => reports::run_reports(args)?,
         Dhis2Command::Extract(_) => unreachable!("handled above"),
     }
     Ok(())
 }
 
+/// One line on stderr when `profile`, a local file, has a `[dhis2]`
+/// section. A profile that cannot be read is left to the commands that
+/// read it.
+fn warn_of_dhis2_section(profile: Option<&str>) {
+    let Some(spec) = profile.filter(|s| !s.is_empty() && !s.starts_with("https://")) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(spec) else {
+        return;
+    };
+    if Profile::parse(&text, spec).is_ok_and(|p| p.dhis2.is_some()) {
+        eprintln!(
+            "warning: profile {spec}: dhis2 no longer reads the [dhis2] section; the package's \
+             parameters give those values (change one with --param NAME=VALUE)"
+        );
+    }
+}
+
+/// The package of `dhis2 locations|measures|reports`, and the map in it
+/// that reads `model`. Without `--package` (or `$FHIR_PIPES_DHIS2_MAPS`) the
+/// command stops.
+pub fn package_map(command: &str, package: &Dhis2Package, model: &str) -> Result<RecordMap> {
+    let Some(dir) = &package.dir else {
+        return Err(PipesError::Usage(format!(
+            "dhis2 {command} needs an import package to write resources with: give --package DIR \
+             (such as examples/import/icr-dhis2) or set $FHIR_PIPES_DHIS2_MAPS. To write the \
+             records without mapping them, run `fhir-pipes dhis2 extract {command}`"
+        )));
+    };
+    RecordMap::load(dir, &package.params, model)
+}
+
 /// `dhis2 extract`: the matching command run with its records written to
 /// `--out/<RecordType>.ndjson` instead of resources. Its temporary and
 /// `--resume` files sit beside that file, as `<RecordType>.ndjson.tmp` and
-/// `.resume`, which `import run` does not read. It runs with the base
-/// profile, which has no [dhis2] section: nothing it writes comes from one.
+/// `.resume`, which `import run` does not read.
 fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
-    let base = Profile::base();
-    let profile = &base;
     let file = |dir: &Path, model: &str| -> Result<PathBuf> {
         if dir.exists() && !dir.is_dir() {
             return Err(PipesError::Usage(format!(
@@ -77,11 +99,11 @@ fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
     match cmd {
         Dhis2ExtractCommand::Locations(args) => {
             let out = file(&args.out, maps::ORG_UNIT_MODEL)?;
-            locations::run_locations(&args.clone().into_command(out), profile)
+            locations::run_locations(&args.clone().into_command(out))
         }
         Dhis2ExtractCommand::Measures(args) => {
             let out = file(&args.out, maps::INDICATOR_MODEL)?;
-            measures::run_measures(&args.clone().into_command(out), profile)
+            measures::run_measures(&args.clone().into_command(out))
         }
         Dhis2ExtractCommand::Reports(args) => {
             let out = file(&args.out, maps::VALUE_MODEL)?;
@@ -97,7 +119,7 @@ fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
                     ))
                 })?,
             };
-            reports::run_reports(&(**args).clone().into_command(out, org_units), profile)
+            reports::run_reports(&(**args).clone().into_command(out, org_units))
         }
     }
 }
@@ -119,27 +141,23 @@ pub fn valid_name(name: &str, max: usize) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// The short name an instance is filed under, and everything derived from
-/// it: identifier systems, ids, canonical URLs and the meta tag, all under
-/// the profile's [dhis2] base.
-#[derive(Debug, Clone)]
+/// The short name an instance is filed under. Ids start with it. The URLs
+/// `dhis2 reports` reads from earlier output (the org unit identifier
+/// system of `--locations`, the Measure URL and period extension of
+/// `--previous`) come from the package's parameters `base` and
+/// `periodExtension`, as its maps write them.
+#[derive(Debug, Clone, Default)]
 pub struct Instance {
     pub name: String,
-    /// The profile's [dhis2] section: `None` for `dhis2 extract`, which
-    /// reads no profile and uses none of the URLs.
-    urls: Option<Dhis2Profile>,
-    /// [location] admin_unit_type: the type code of an org unit above facility level.
-    pub admin_unit_type: Option<String>,
-    /// [organization] facility_type: the type code of a facility.
-    pub facility_type: Option<String>,
-    /// [organization] id_prefix of a facility's Organization (`org-`).
-    pub org_id_prefix: String,
-    /// The boundary extension a written Location carries.
-    pub boundary_extension: String,
+    /// The package's `base`: `None` for `dhis2 extract`, which has no
+    /// package, or a package without that parameter.
+    base: Option<String>,
+    /// The package's `periodExtension`.
+    period_extension: Option<String>,
 }
 
 impl Instance {
-    pub fn new(name: &str, profile: &Profile) -> Result<Self> {
+    pub fn new(name: &str) -> Result<Self> {
         if !valid_name(name, MAX_INSTANCE_LEN) {
             return Err(PipesError::Usage(format!(
                 "--instance must be letters, digits and hyphens, at most {MAX_INSTANCE_LEN} characters, got {name:?}"
@@ -147,107 +165,54 @@ impl Instance {
         }
         Ok(Self {
             name: name.to_string(),
-            urls: profile.dhis2.clone(),
-            admin_unit_type: profile.location.admin_unit_type.clone(),
-            facility_type: profile.organization.facility_type.clone(),
-            org_id_prefix: profile.organization.id_prefix.clone(),
-            boundary_extension: profile.boundary_extension().to_string(),
+            ..Self::default()
         })
     }
 
-    /// The profile's [dhis2] section. Only the built-in mapping and the
-    /// `--maps` route use it, and `run` refuses those without one.
-    pub fn urls(&self) -> &Dhis2Profile {
-        self.urls
-            .as_ref()
-            .expect("dhis2 run checked that the profile has a [dhis2] section")
-    }
-
-    fn base(&self) -> &str {
-        self.urls().base.trim_end_matches('/')
-    }
-
-    pub fn orgunit_system(&self) -> String {
-        format!("{}/identifiers/dhis2/{}/orgunit", self.base(), self.name)
-    }
-
-    pub fn orgunit_code_system(&self) -> String {
-        format!(
-            "{}/identifiers/dhis2/{}/orgunit-code",
-            self.base(),
-            self.name
-        )
-    }
-
-    pub fn indicator_system(&self) -> String {
-        format!("{}/identifiers/dhis2/{}/indicator", self.base(), self.name)
-    }
-
-    pub fn indicator_code_system(&self) -> String {
-        format!(
-            "{}/identifiers/dhis2/{}/indicator-code",
-            self.base(),
-            self.name
-        )
-    }
-
-    pub fn data_element_system(&self) -> String {
-        format!(
-            "{}/identifiers/dhis2/{}/data-element",
-            self.base(),
-            self.name
-        )
-    }
-
-    pub fn data_element_code_system(&self) -> String {
-        format!(
-            "{}/identifiers/dhis2/{}/data-element-code",
-            self.base(),
-            self.name
-        )
-    }
-
-    pub fn data_set_system(&self) -> String {
-        format!("{}/identifiers/dhis2/{}/data-set", self.base(), self.name)
-    }
-
-    pub fn data_set_code_system(&self) -> String {
-        format!(
-            "{}/identifiers/dhis2/{}/data-set-code",
-            self.base(),
-            self.name
-        )
-    }
-
-    /// Code system of a group: `indicator-group`, `data-element-group`, or
-    /// `data-element-group-set/<uid>` for the groups of one group set.
-    pub fn group_system(&self, kind: &str) -> String {
-        format!("{}/CodeSystem/dhis2/{}/{kind}", self.base(), self.name)
-    }
-
-    /// Code system of a breakdown's options: `dimension/<uid>` (a category,
-    /// org unit group set or data element group set).
-    pub fn dimension_system(&self, dimension: Option<&str>) -> String {
-        match dimension {
-            Some(d) => format!(
-                "{}/CodeSystem/dhis2/{}/dimension/{d}",
-                self.base(),
-                self.name
-            ),
-            None => format!("{}/CodeSystem/dhis2/{}/dimension", self.base(), self.name),
+    /// The URLs, from the parameters of the package `map` belongs to.
+    pub fn with_package(mut self, map: Option<&RecordMap>) -> Self {
+        if let Some(m) = map {
+            self.base = m
+                .parameter("base")
+                .map(|b| b.trim_end_matches('/').to_string());
+            self.period_extension = m.parameter("periodExtension").map(str::to_string);
         }
+        self
+    }
+
+    fn parameter<'a>(value: &'a Option<String>, name: &str, what: &str) -> Result<&'a str> {
+        value.as_deref().ok_or_else(|| {
+            PipesError::Usage(format!(
+                "{what} needs the package's string parameter {name}, which this package does \
+                 not declare"
+            ))
+        })
+    }
+
+    /// The identifier system of the org unit UIDs on the Locations the
+    /// package writes: `<base>/identifiers/dhis2/<instance>/orgunit`.
+    pub fn orgunit_system(&self) -> Result<String> {
+        let base = Self::parameter(&self.base, "base", "dhis2 reports --locations")?;
+        Ok(format!("{base}/identifiers/dhis2/{}/orgunit", self.name))
     }
 
     pub fn measure_id(&self, indicator: &str) -> String {
         format!("{}-{indicator}", self.name)
     }
 
-    pub fn measure_url(&self, indicator: &str) -> String {
-        format!("{}/Measure/{}", self.base(), self.measure_id(indicator))
+    /// The canonical URL of a Measure: `<base>/Measure/<id>`.
+    pub fn measure_url(&self, indicator: &str) -> Result<String> {
+        let base = Self::parameter(&self.base, "base", "dhis2 reports --previous")?;
+        Ok(format!("{base}/Measure/{}", self.measure_id(indicator)))
     }
 
-    pub fn tag(&self) -> Value {
-        json!({"system": self.urls().project_tag_system, "code": self.name})
+    /// The extension of a MeasureReport that holds the DHIS2 period.
+    pub fn period_extension(&self) -> Result<&str> {
+        Self::parameter(
+            &self.period_extension,
+            "periodExtension",
+            "dhis2 reports --previous",
+        )
     }
 }
 
@@ -257,34 +222,33 @@ mod tests {
 
     #[test]
     fn instance_names_are_short_and_plain() {
-        assert!(Instance::new("sl-demo", &crate::profile::icr_example()).is_ok());
-        assert!(Instance::new("", &crate::profile::icr_example()).is_err());
-        // dhis2 extract runs with the base profile, which has no [dhis2] section.
-        assert!(
-            Instance::new("sl-demo", &crate::profile::Profile::base())
-                .unwrap()
-                .urls
-                .is_none()
-        );
-        assert!(Instance::new("sl demo", &crate::profile::icr_example()).is_err());
-        assert!(Instance::new("sl_demo", &crate::profile::icr_example()).is_err());
-        assert!(
-            Instance::new("a-very-long-instance-name", &crate::profile::icr_example()).is_err()
-        );
+        assert!(Instance::new("sl-demo").is_ok());
+        assert!(Instance::new("").is_err());
+        assert!(Instance::new("sl demo").is_err());
+        assert!(Instance::new("sl_demo").is_err());
+        assert!(Instance::new("a-very-long-instance-name").is_err());
     }
 
     #[test]
     fn systems_and_ids_carry_the_instance() {
-        let i = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let map = maps::icr_package(maps::VALUE_MODEL);
+        let i = Instance::new("sl-demo").unwrap().with_package(Some(&map));
         assert_eq!(
-            i.orgunit_system(),
+            i.orgunit_system().unwrap(),
             "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit"
         );
         assert_eq!(i.measure_id("Uvn6LCg7dVU"), "sl-demo-Uvn6LCg7dVU");
         assert_eq!(
-            i.measure_url("Uvn6LCg7dVU"),
+            i.measure_url("Uvn6LCg7dVU").unwrap(),
             "https://icr.healthcampaigns.org/Measure/sl-demo-Uvn6LCg7dVU"
         );
-        assert_eq!(i.tag()["code"], "sl-demo");
+        assert_eq!(
+            i.period_extension().unwrap(),
+            "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period"
+        );
+        // dhis2 extract has no package, and needs none of them.
+        let bare = Instance::new("sl-demo").unwrap();
+        assert!(bare.orgunit_system().is_err());
+        assert!(bare.measure_url("x").is_err());
     }
 }

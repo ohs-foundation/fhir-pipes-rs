@@ -22,7 +22,7 @@ use crate::fhir::ndjson::NdjsonWriter;
 use crate::work::InOrder;
 
 use super::analytics::{Analytics, AnalyticsRow, Fetched, Values, fetch_unit};
-use super::build::{Target, measure_report, report_id, stratum, stratum_record, value_record};
+use super::build::{Target, report_id, stratum_record, value_record};
 use super::periods::period_value;
 use super::plan::Unit;
 
@@ -113,7 +113,7 @@ impl Tally {
                 self.add_record(r);
                 None
             }
-            _ => self.add(r, previous),
+            Writes::Maps(_) => self.add(r, previous),
         }
     }
 }
@@ -136,9 +136,8 @@ pub(super) struct Writer<'a> {
     pub(super) campaign: Option<&'a str>,
     /// Analytics or data values, written in the source extension.
     pub(super) source: ReportSource,
-    /// The built-in mapping; `--maps`, the map that writes each
-    /// MeasureReport from a `DHIS2Value` record; or `dhis2 extract`, the record
-    /// itself.
+    /// The package's map that writes each MeasureReport from a `DHIS2Value`
+    /// record, or for `dhis2 extract` the record itself.
     pub(super) writes: Writes<'a>,
     pub(super) state: Checkpoint,
     pub(super) checkpoint: PathBuf,
@@ -165,7 +164,7 @@ impl<'a> Writer<'a> {
                     Writes::Records => {
                         "no DHIS2OrgUnit record for this org unit; its values are skipped"
                     }
-                    _ => "no Location carries this org unit; its values are skipped",
+                    Writes::Maps(_) => "no Location carries this org unit; its values are skipped",
                 };
                 self.state.report.add("unmapped_org_unit", &row.ou, detail);
             }
@@ -223,14 +222,8 @@ impl<'a> Writer<'a> {
                     );
                     continue;
                 };
-                // With --maps or dhis2 extract, `out` holds DHIS2Value records
-                // until they are written.
-                let make = if self.writes.prepares_records() {
-                    value_record
-                } else {
-                    measure_report
-                };
-                if let Some(r) = make(
+                // `out` holds DHIS2Value records until they are written.
+                if let Some(r) = value_record(
                     row,
                     ind,
                     location,
@@ -255,12 +248,7 @@ impl<'a> Writer<'a> {
                     let Some((ind, _)) = self.target(row) else {
                         continue;
                     };
-                    let make = if self.writes.prepares_records() {
-                        stratum_record
-                    } else {
-                        stratum
-                    };
-                    if let Some(st) = make(
+                    if let Some(st) = stratum_record(
                         row,
                         ind,
                         b,
@@ -287,30 +275,11 @@ impl<'a> Writer<'a> {
                 );
                 continue;
             };
-            if self.writes.prepares_records() {
-                list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-                let stratifier = json!({"dimension": b, "name": name, "stratum": list});
-                match r.get_mut("stratifier").and_then(Value::as_array_mut) {
-                    Some(existing) => existing.push(stratifier),
-                    None => r["stratifier"] = json!([stratifier]),
-                }
-                continue;
-            }
-            list.sort_by(|a, b| {
-                a["value"]["text"]
-                    .as_str()
-                    .cmp(&b["value"]["text"].as_str())
-            });
-            let stratifier = json!({
-                "code": [{"coding": [{"system": self.instance.dimension_system(None), "code": b, "display": name}], "text": name}],
-                "stratum": list,
-            });
-            match r["group"][0]
-                .get_mut("stratifier")
-                .and_then(Value::as_array_mut)
-            {
+            list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            let stratifier = json!({"dimension": b, "name": name, "stratum": list});
+            match r.get_mut("stratifier").and_then(Value::as_array_mut) {
                 Some(existing) => existing.push(stratifier),
-                None => r["group"][0]["stratifier"] = json!([stratifier]),
+                None => r["stratifier"] = json!([stratifier]),
             }
         }
 
@@ -325,11 +294,11 @@ impl<'a> Writer<'a> {
                     .contains(r["id"].as_str().unwrap_or_default())
             })
             .collect();
-        // With --maps, the unit's records are transformed on several
+        // With a package, the unit's records are transformed on several
         // threads, then written in order.
         let mut outputs = match self.writes {
             Writes::Maps(map) => map.transform_all(&pending),
-            _ => Vec::new(),
+            Writes::Records => Vec::new(),
         }
         .into_iter();
         for r in pending {
@@ -341,14 +310,14 @@ impl<'a> Writer<'a> {
                     let mut written = RecordMap::take(output, id, &mut self.state.report)?;
                     if written.len() != 1 || written[0]["id"] != r["id"] {
                         return Err(PipesError::Usage(format!(
-                            "the --maps map must write one MeasureReport with the record's id for {id}; it wrote {}",
+                            "the package's map must write one MeasureReport with the record's id for {id}; it wrote {}",
                             written.len()
                         )));
                     }
                     mapped = written.remove(0);
                     &mapped
                 }
-                Writes::BuiltIn | Writes::Records => r,
+                Writes::Records => r,
             };
             let change = self.tally.count(r, self.writes, self.previous.as_mut());
             self.out.write(r)?;
@@ -580,12 +549,14 @@ mod tests {
     }
 
     /// A resumed `dhis2 extract` run recounts the summary from the records it
-    /// wrote: they must count as their MeasureReports do.
+    /// wrote: they must count as the MeasureReports the example package
+    /// writes from them do.
     #[test]
     fn a_record_counts_as_its_measure_report() {
-        use crate::dhis2::reports::build::{Target, measure_report, value_record};
+        use crate::dhis2::reports::build::{Target, value_record};
         use crate::report::Report;
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
+        let map = crate::dhis2::maps::icr_package(crate::dhis2::maps::VALUE_MODEL);
         let ind = Indicator::parse(
             &json!({"id": "tUIlpyeeX9N", "indicatorType": {"factor": 100},
             "numerator": "#{a}", "denominator": "#{b}"}),
@@ -611,18 +582,6 @@ mod tests {
             };
             let source = ReportSource::Analytics;
             let mut issues = Report::default();
-            let mut r = measure_report(
-                &row,
-                &ind,
-                &location,
-                &period,
-                &instance,
-                &info,
-                None,
-                source,
-                &mut issues,
-            )
-            .unwrap();
             let mut v = value_record(
                 &row,
                 &ind,
@@ -635,12 +594,13 @@ mod tests {
                 &mut issues,
             )
             .unwrap();
+            let mut r = map.run(&v, &row.dx, &mut issues).unwrap().remove(0);
             // Two breakdowns on the monthly values.
             if ou == "a" {
                 r["group"][0]["stratifier"] = json!([{}, {}]);
                 v["stratifier"] = json!([{}, {}]);
             }
-            report_tally.count(&r, Writes::BuiltIn, None);
+            report_tally.count(&r, Writes::Maps(&map), None);
             record_tally.count(&v, Writes::Records, None);
         }
         let seen = |t: &Tally| {

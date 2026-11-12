@@ -96,10 +96,11 @@ facility_type = "clinic"
     }
 }
 
-/// The source extension before it was made generic, and a code system
-/// without the codes `dhis2 reports` writes.
+/// The `[dhis2]` keys only the removed built-in DHIS2 mapping read (the
+/// MeasureReport and Measure extensions, the source system) are not
+/// checked: a value the IG does not have is no error.
 #[test]
-fn the_dhis2_source_extension_and_system_are_checked() {
+fn the_dhis2_keys_nothing_reads_are_not_checked() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("p.toml");
     let icr = std::fs::read_to_string(ICR_PROFILE).unwrap();
@@ -112,32 +113,8 @@ fn the_dhis2_source_extension_and_system_are_checked() {
         .replace("icr-report-source-cs", "icr-denominator-source-cs"),
     )
     .unwrap();
-    let a = check(&p).code(1);
-    assert_eq!(
-        lines(&a, "error"),
-        [
-            "error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-source is not an extension in the IG",
-            "error: [dhis2] source_system: `dhis2-analytics` is not a code in https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs",
-            "error: [dhis2] source_system: `dhis2-data-values` is not a code in https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs",
-        ]
-    );
-
-    // An extension whose value is not a CodeableConcept.
-    std::fs::write(
-        &p,
-        icr.replace(
-            "StructureDefinition/report-source",
-            "StructureDefinition/dhis2-period",
-        ),
-    )
-    .unwrap();
-    let a = check(&p).code(1);
-    assert_eq!(
-        lines(&a, "error"),
-        [
-            "error: [dhis2] source_extension: https://icr.healthcampaigns.org/StructureDefinition/dhis2-period has value string, not CodeableConcept"
-        ]
-    );
+    let a = check(&p).success();
+    assert_eq!(lines(&a, "error"), Vec::<String>::new());
 }
 
 #[test]

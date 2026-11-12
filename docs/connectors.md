@@ -75,7 +75,7 @@ NAME may hold letters, digits, `-` and `_`.
 ## dhis2 extract
 
 `fhir-pipes dhis2 extract` is the DHIS2 connector. It writes the records
-the `dhis2` commands map, for the package
+of the package
 [examples/import/icr-dhis2](../examples/import/icr-dhis2):
 
 ```sh
@@ -88,7 +88,7 @@ fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 
 Each run writes one file in `raw/`: `DHIS2OrgUnit.ndjson`,
 `DHIS2Indicator.ndjson` and `DHIS2Value.ndjson`. See
-[dhis2.md](dhis2.md#records-and-the-import-package) for the options.
+[dhis2.md](dhis2.md#the-records) for the options.
 
 The records carry what DHIS2 returns and what is worked out from it, and
 none of the URLs the resources have: those are parameters of the import
@@ -97,7 +97,12 @@ that `extract locations` wrote to the same folder, not in FHIR Locations.
 So `dhis2 extract` reads no profile, and one `import run` maps the whole
 folder.
 
+`dhis2 locations`, `dhis2 measures` and `dhis2 reports` run the same
+extraction and map each record with a package as it is read, for those who
+want one command (see
+[dhis2.md](dhis2.md#the-commands-that-write-resources)).
+
 `dhis2 extract` is built into fhir-pipes for now. It will move to its own
-program, `fhir-pipes-dhis2`, once the built-in DHIS2 mapping is removed;
-the same command line, `fhir-pipes dhis2 extract …`, will then run that
-program as an external command.
+program, `fhir-pipes-dhis2`; the same command line,
+`fhir-pipes dhis2 extract …`, will then run that program as an external
+command.

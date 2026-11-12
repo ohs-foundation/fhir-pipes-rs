@@ -1,7 +1,8 @@
 //! The DHIS2 import both ways: for the same fake DHIS2 responses,
 //!
-//! (a) `fhir-pipes dhis2 locations|measures|reports --out a.ndjson`, the
-//!     built-in mapping, and
+//! (a) `fhir-pipes dhis2 locations|measures|reports --package
+//!     examples/import/icr-dhis2 --out a.ndjson`, which maps each record
+//!     as it is read, and
 //! (b) `fhir-pipes dhis2 extract locations|measures|reports --out IN` with
 //!     the same options, writing `IN/<RecordType>.ndjson`, then
 //!     `fhir-pipes import run --package examples/import/icr-dhis2 --in IN`,
@@ -9,6 +10,10 @@
 //! must give the same resources. The import writes one file per resource
 //! type, so the two are compared by `resourceType/id`, as JSON values (key
 //! order is not compared), and in the same order within each resource type.
+//!
+//! What the built-in mapping wrote for these scenarios, before it was
+//! removed, is kept as the package's test cases (examples/import/icr-dhis2/
+//! tests): `sample`, `data-values` and `batches` here.
 //!
 //! The stub server helpers are shared with tests/dhis2.rs through
 //! tests/common/dhis2.rs; that file's tests are not run again here.
@@ -32,8 +37,8 @@ const MAPS: &str = concat!(
     "/examples/import/icr-dhis2/maps"
 );
 
-/// What a scenario writes: resources with `dhis2 <command> --out FILE`, or
-/// records with `dhis2 extract <command> --out DIR`.
+/// What a scenario writes: resources with `dhis2 <command> --package
+/// PACKAGE --out FILE`, or records with `dhis2 extract <command> --out DIR`.
 #[derive(Clone, Copy)]
 enum To<'a> {
     Resources(&'a Path),
@@ -53,21 +58,24 @@ impl To<'_> {
 /// command with `--out` and `extra`, and returns what it printed.
 type Run<'a> = &'a dyn Fn(To, &[&str]) -> Assert;
 
-/// `fhir-pipes dhis2 <command>` (or `dhis2 extract <command>`) against
-/// `server`, signed in, with `--out`.
+/// `fhir-pipes dhis2 <command> --package PACKAGE` (or `dhis2 extract
+/// <command>`) against `server`, signed in, with `--out`.
 ///
-/// `dhis2 extract` reads no profile, so no `[dhis2]` section: the records
-/// carry none of its URLs, and the package's parameters give the maps the
-/// same values. It runs here with a profile that does not exist, which it
-/// would fail to load.
+/// No `dhis2` command reads the profile: the records carry none of the
+/// URLs, and the package's parameters give the maps their values. Both run
+/// here with a profile that does not exist.
 fn dhis2(server: &Server, command: &str, to: To) -> Command {
     let mut c = fhir_pipes();
-    c.arg("dhis2");
+    c.arg("dhis2")
+        .env("FHIR_PIPES_PROFILE", "no-such-profile.toml");
     if let To::Records(_) = to {
-        c.arg("extract")
-            .env("FHIR_PIPES_PROFILE", "no-such-profile.toml");
+        c.arg("extract");
     }
-    c.args([command, "--dhis2", &base(server), "--instance", "sl-demo"])
+    c.arg(command);
+    if let To::Resources(_) = to {
+        c.args(["--package", PACKAGE]);
+    }
+    c.args(["--dhis2", &base(server), "--instance", "sl-demo"])
         .arg("--out")
         .arg(to.path())
         .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
@@ -158,14 +166,10 @@ fn order(resources: &[Value]) -> BTreeMap<String, Vec<String>> {
 
 /// The same resources by `resourceType/id`, equal as JSON values, and in
 /// the same order within each resource type.
-fn assert_same(built_in: &[Value], imported: &[Value]) {
-    let a: BTreeMap<String, &Value> = built_in.iter().map(|r| (key(r), r)).collect();
+fn assert_same(written: &[Value], imported: &[Value]) {
+    let a: BTreeMap<String, &Value> = written.iter().map(|r| (key(r), r)).collect();
     let b: BTreeMap<String, &Value> = imported.iter().map(|r| (key(r), r)).collect();
-    assert_eq!(
-        a.len(),
-        built_in.len(),
-        "the built-in mapping repeats a key"
-    );
+    assert_eq!(a.len(), written.len(), "the command repeats a key");
     assert_eq!(b.len(), imported.len(), "the import repeats a key");
     assert_eq!(
         a.keys().collect::<Vec<_>>(),
@@ -176,7 +180,7 @@ fn assert_same(built_in: &[Value], imported: &[Value]) {
         assert_eq!(*r, b[k], "{k}");
     }
     assert_eq!(
-        order(built_in),
+        order(written),
         order(imported),
         "the order within each type"
     );
@@ -184,7 +188,8 @@ fn assert_same(built_in: &[Value], imported: &[Value]) {
 
 /// What a scenario wrote both ways.
 struct BothWays {
-    built_in: Vec<Value>,
+    /// What `dhis2 <command> --package` wrote.
+    written: Vec<Value>,
     imported: Vec<Value>,
     /// What `dhis2 extract` wrote.
     records: Vec<Value>,
@@ -192,8 +197,8 @@ struct BothWays {
     records_run: Assert,
 }
 
-/// Runs a scenario with the built-in mapping and with `dhis2 extract` then
-/// `import run`, and checks the two agree.
+/// Runs a scenario with `dhis2 <command> --package` and with `dhis2
+/// extract` then `import run`, and checks the two agree.
 fn both_ways(record_type: &str, run: Run) -> BothWays {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.ndjson");
@@ -211,15 +216,68 @@ fn both_ways(record_type: &str, run: Run) -> BothWays {
     let imported = import_run(&input, &out);
     let e = stderr(&imported);
     assert!(!e.contains("is built into fhir-pipes"), "{e}");
-    let built_in = read_ndjson(&a);
+    let written = read_ndjson(&a);
     let imported = read_out(&out);
-    assert!(!built_in.is_empty());
-    assert_same(&built_in, &imported);
+    assert!(!written.is_empty());
+    assert_same(&written, &imported);
     BothWays {
-        built_in,
+        written,
         imported,
         records: read_ndjson(&records_file),
         records_run,
+    }
+}
+
+/// A test case of the package: `records` are its `in/` file of their type
+/// and `resources` its `expected/` files, one per resourceType. The
+/// expected files hold what the built-in mapping wrote before it was
+/// removed, so they are never written here. With
+/// `FHIR_PIPES_UPDATE_SAMPLE=1` the `in/` file is written instead of
+/// compared. With
+/// `undated`, `date` is left out of the comparison: a run from data values
+/// dates its records when it started.
+fn package_case(case: &str, records: &[Value], resources: &[Value], undated: bool) {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if undated {
+            v.as_object_mut().unwrap().remove("date");
+        }
+        v
+    };
+    let dir = Path::new(PACKAGE).join("tests").join(case);
+    let update = std::env::var_os("FHIR_PIPES_UPDATE_SAMPLE").is_some();
+    let write = |path: &Path, list: &[&Value]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = list.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(path, text).unwrap();
+    };
+    let kind = records[0]["resourceType"].as_str().unwrap();
+    let file = dir.join("in").join(format!("{kind}.ndjson"));
+    if update {
+        write(&file, &records.iter().collect::<Vec<_>>());
+    }
+    assert_eq!(
+        read_ndjson(&file).iter().map(strip).collect::<Vec<_>>(),
+        records.iter().map(strip).collect::<Vec<_>>(),
+        "{}",
+        file.display()
+    );
+    let mut by_type: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    for r in resources {
+        by_type
+            .entry(r["resourceType"].as_str().unwrap())
+            .or_default()
+            .push(r);
+    }
+    for (kind, list) in by_type {
+        let file = dir.join("expected").join(format!("{kind}.ndjson"));
+        let want = read_ndjson(&file);
+        assert_eq!(
+            want.iter().map(strip).collect::<Vec<_>>(),
+            list.iter().map(|r| strip(r)).collect::<Vec<_>>(),
+            "{}",
+            file.display()
+        );
     }
 }
 
@@ -573,7 +631,7 @@ fn reports_from_data_values(to: To, extra: &[&str]) -> Assert {
 fn locations_agree() {
     let r = both_ways("DHIS2OrgUnit", &locations);
     // 6 Locations (the level-4 unit is skipped) and 3 facility Organizations.
-    assert_eq!(r.built_in.len(), 9);
+    assert_eq!(r.written.len(), 9);
     assert_eq!(r.records.len(), 6);
     let s = stdout(&r.records_run);
     assert!(s.contains("Wrote 6 DHIS2OrgUnit records to"), "{s}");
@@ -597,7 +655,7 @@ fn locations_agree() {
 #[test]
 fn measures_agree() {
     let r = both_ways("DHIS2Indicator", &measures);
-    assert_eq!(r.built_in.len(), 4);
+    assert_eq!(r.written.len(), 4);
     let s = stdout(&r.records_run);
     assert!(
         s.contains("Wrote 4 DHIS2Indicator records to",)
@@ -609,7 +667,7 @@ fn measures_agree() {
 #[test]
 fn reports_by_period_agree() {
     let r = both_ways("DHIS2Value", &reports_by_period);
-    assert_eq!(r.built_in.len(), 5);
+    assert_eq!(r.written.len(), 5);
     let s = stdout(&r.records_run);
     assert!(
         s.contains("Wrote 5 DHIS2Value records to")
@@ -636,7 +694,7 @@ fn reports_by_period_agree() {
 #[test]
 fn reports_by_range_agree() {
     let r = both_ways("DHIS2Value", &reports_by_range);
-    assert_eq!(r.built_in.len(), 3);
+    assert_eq!(r.written.len(), 3);
     assert!(r.records.iter().all(|v| v.get("campaign").is_none()));
 }
 
@@ -661,9 +719,9 @@ fn reports_from_data_values_agree_but_for_the_date() {
             })
             .collect()
     };
-    let built_in = undated(read_ndjson(&a));
-    assert_eq!(built_in.len(), 28);
-    assert_same(&built_in, &undated(read_out(&out)));
+    let written = undated(read_ndjson(&a));
+    assert_eq!(written.len(), 28);
+    assert_same(&written, &undated(read_out(&out)));
     // The date in each MeasureReport is the date in its record.
     let dates: Vec<Value> = read_ndjson(&records)
         .iter()
@@ -671,10 +729,22 @@ fn reports_from_data_values_agree_but_for_the_date() {
         .collect();
     let imported: Vec<Value> = read_out(&out).iter().map(|r| r["date"].clone()).collect();
     assert_eq!(dates, imported);
+    // The package's case data-values: the records, and the reports with
+    // the date of their records.
+    let dated: Vec<Value> = written
+        .into_iter()
+        .zip(&dates)
+        .map(|(mut r, d)| {
+            r["date"] = d.clone();
+            r
+        })
+        .collect();
+    package_case("data-values", &read_ndjson(&records), &dated, true);
 }
 
 /// Three `dhis2 extract` runs into one folder: one file per record type,
-/// which one `import run` maps to what the three built-in runs write.
+/// which one `import run` maps to what the three `dhis2 --package` runs
+/// write.
 /// `extract reports` is given no org units: it reads the
 /// `DHIS2OrgUnit.ndjson` that `extract locations` wrote in the folder, as
 /// `dhis2 reports` reads the Locations that `dhis2 locations` wrote.
@@ -682,10 +752,10 @@ fn reports_from_data_values_agree_but_for_the_date() {
 fn three_extracts_into_one_folder_import_together() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in");
-    let mut built_in = Vec::new();
-    let built_in_locations = dir.path().join("0.ndjson");
+    let mut written = Vec::new();
+    let written_locations = dir.path().join("0.ndjson");
     let reports = |to: To, extra: &[&str]| {
-        reports_by_period_from(to, extra, OrgUnits::Extracted(&built_in_locations))
+        reports_by_period_from(to, extra, OrgUnits::Extracted(&written_locations))
     };
     for (i, run) in [&locations as Run, &measures, &reports]
         .into_iter()
@@ -693,7 +763,7 @@ fn three_extracts_into_one_folder_import_together() {
     {
         let a = dir.path().join(format!("{i}.ndjson"));
         run(To::Resources(&a), &[]).success();
-        built_in.extend(read_ndjson(&a));
+        written.extend(read_ndjson(&a));
         run(To::Records(&input), &[]).success();
     }
     // Bo and Bombali have Locations and records; the third org unit has
@@ -719,21 +789,22 @@ fn three_extracts_into_one_folder_import_together() {
     );
     let out = dir.path().join("out");
     import_run(&input, &out);
-    assert_same(&built_in, &read_out(&out));
+    assert_same(&written, &read_out(&out));
 }
 
 // ---------------------------------------------------------------------------
-// The package's test case
+// The package's test cases
 
 /// The sample case of examples/import/icr-dhis2: its `in/` is what the
 /// scenarios above write with `dhis2 extract` (both reports scenarios in one
-/// DHIS2Value file), and its `expected/` is what the built-in mapping
-/// writes for them. `import test` passes on it.
+/// DHIS2Value file), and its `expected/` is what the built-in mapping wrote
+/// for them before it was removed, and what `dhis2 --package` writes.
+/// `import test` passes on every case of the package.
 ///
 /// With `FHIR_PIPES_UPDATE_SAMPLE=1` the test writes `in/` instead of
-/// comparing it; then run `fhir-pipes import test --package
-/// examples/import/icr-dhis2 --update` to write `expected/`, and this test
-/// again to check it against the built-in mapping.
+/// comparing it. `expected/` is not to be regenerated: a change there is a
+/// change in what the package writes, to be made in the maps and checked
+/// by hand.
 #[test]
 fn the_package_sample_is_what_the_commands_write() {
     let sample = Path::new(PACKAGE).join("tests/sample");
@@ -743,12 +814,12 @@ fn the_package_sample_is_what_the_commands_write() {
         ("DHIS2Indicator", &[&measures]),
         ("DHIS2Value", &[&reports_by_period, &reports_by_range]),
     ];
-    let mut built_in = Vec::new();
+    let mut written = Vec::new();
     for (record_type, scenarios) in runs {
         let mut records = Vec::new();
         for run in scenarios {
             let r = both_ways(record_type, *run);
-            built_in.extend(r.built_in);
+            written.extend(r.written);
             records.extend(r.records);
         }
         let file = sample.join("in").join(format!("{record_type}.ndjson"));
@@ -762,7 +833,7 @@ fn the_package_sample_is_what_the_commands_write() {
     if update {
         return;
     }
-    assert_same(&built_in, &read_out(&sample.join("expected")));
+    assert_same(&written, &read_out(&sample.join("expected")));
     let a = fhir_pipes()
         .args(["import", "test", "--package", PACKAGE])
         .assert()
@@ -777,9 +848,10 @@ fn the_package_sample_is_what_the_commands_write() {
 // ---------------------------------------------------------------------------
 // What dhis2 extract takes
 
-/// `dhis2 extract` has no `--maps`, `--records` is gone from the FHIR
-/// commands, and `extract reports` has none of the options that compare
-/// MeasureReports with a previous run. clap refuses each with exit 2.
+/// `dhis2 extract` has no `--package` (nor its old name `--maps`) or
+/// `--param`, `--records` is gone from the FHIR commands, and `extract
+/// reports` has none of the options that compare MeasureReports with a
+/// previous run. clap refuses each with exit 2.
 #[test]
 fn extract_refuses_the_options_of_the_fhir_commands() {
     let dir = tempfile::tempdir().unwrap();
@@ -811,7 +883,9 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
             .code(2)
     };
     let l = locations.to_str().unwrap();
-    let cases: [(&str, &[&str]); 7] = [
+    let cases: [(&str, &[&str]); 9] = [
+        ("--package", &["--package", PACKAGE]),
+        ("--param", &["--param", "base=https://example.org"]),
         ("--previous", &["--previous", p]),
         ("--changed", &["--changed", c.to_str().unwrap()]),
         ("--removed", &["--removed", r.to_str().unwrap()]),
@@ -870,11 +944,12 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
     assert!(stderr(&a).contains("is not a folder"), "{}", stderr(&a));
 }
 
-/// With no `[dhis2]` section in the profile, the FHIR commands still stop.
-/// `dhis2 extract` reads no profile, even one that does not exist; `extract
-/// reports` needs the org unit records, and says how to get them.
+/// The FHIR commands need a package, and stop without one, before any
+/// request. Neither they nor `dhis2 extract` read a profile, even one that
+/// does not exist. `extract reports` needs the org unit records, and says
+/// how to get them.
 #[test]
-fn without_a_dhis2_section_only_extract_runs() {
+fn the_fhir_commands_need_a_package_and_no_command_a_profile() {
     let dir = tempfile::tempdir().unwrap();
     let locations = locations_for(dir.path(), &[BO]);
     let out = dir.path().join("out");
@@ -901,9 +976,66 @@ fn without_a_dhis2_section_only_extract_runs() {
         &["--locations".as_ref(), locations.as_os_str()],
     ));
     assert!(
-        e.contains("dhis2 needs a profile with a [dhis2] section"),
+        e.contains("dhis2 reports needs an import package to write resources with")
+            && e.contains("--package DIR")
+            && e.contains("$FHIR_PIPES_DHIS2_MAPS")
+            && e.contains("fhir-pipes dhis2 extract reports"),
         "{e}"
     );
+    // A folder that is not a package.
+    let e = stderr(&run(
+        &["reports"],
+        Some("no-such-profile.toml"),
+        &[
+            "--locations".as_ref(),
+            locations.as_os_str(),
+            "--package".as_ref(),
+            dir.path().as_os_str(),
+        ],
+    ));
+    assert!(e.contains("has no models/ folder"), "{e}");
+    // A package with steps: its records are not mapped one at a time.
+    let stepped = dir.path().join("stepped");
+    for sub in ["models", "maps"] {
+        std::fs::create_dir_all(stepped.join(sub)).unwrap();
+        for f in std::fs::read_dir(Path::new(PACKAGE).join(sub)).unwrap() {
+            let f = f.unwrap().path();
+            std::fs::copy(&f, stepped.join(sub).join(f.file_name().unwrap())).unwrap();
+        }
+    }
+    std::fs::write(
+        stepped.join("import.toml"),
+        "name = \"stepped\"\n\n[[step]]\nmap = \"DHIS2ValueToICR\"\nfrom = \"DHIS2Value\"\n",
+    )
+    .unwrap();
+    let e = stderr(&run(
+        &["reports"],
+        None,
+        &[
+            "--locations".as_ref(),
+            locations.as_os_str(),
+            "--package".as_ref(),
+            stepped.as_os_str(),
+        ],
+    ));
+    assert!(
+        e.contains("the package has [[step]]s") && e.contains("fhir-pipes import run"),
+        "{e}"
+    );
+    // An unknown parameter.
+    let e = stderr(&run(
+        &["reports"],
+        None,
+        &[
+            "--locations".as_ref(),
+            locations.as_os_str(),
+            "--package".as_ref(),
+            PACKAGE.as_ref(),
+            "--param".as_ref(),
+            "nope=1".as_ref(),
+        ],
+    ));
+    assert!(e.contains("the package has no parameter nope"), "{e}");
     // No --org-units and none in --out.
     let e = stderr(&run(
         &["extract", "reports"],
@@ -1023,7 +1155,7 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     // The extract run read org unit records, dhis2 reports reads Locations.
     assert!(
         stderr(&refused)
-            .contains("was planned differently (locations, org_units, records changed)"),
+            .contains("was planned differently (locations, org_units, package, records changed)"),
         "{}",
         stderr(&refused)
     );
@@ -1078,12 +1210,19 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
         summary(&whole)
     );
 
-    // The records import to what the built-in mapping writes.
-    let built_in = dir.path().join("built-in.ndjson");
-    run(&stub_units(false, 0, None), To::Resources(&built_in), &[]).success();
+    // The records import to what dhis2 reports --package writes, and both
+    // are the package's case batches.
+    let written = dir.path().join("written.ndjson");
+    run(&stub_units(false, 0, None), To::Resources(&written), &[]).success();
     let imported = dir.path().join("fhir");
     import_run(&input, &imported);
-    assert_same(&read_ndjson(&built_in), &read_out(&imported));
+    assert_same(&read_ndjson(&written), &read_out(&imported));
+    package_case(
+        "batches",
+        &read_ndjson(&full),
+        &read_ndjson(&written),
+        false,
+    );
 
     // A checkpoint written by dhis2 reports is not resumed by dhis2 extract.
     let plain_dir = dir.path().join("plain");
@@ -1100,7 +1239,7 @@ fn an_interrupted_extract_resumes_to_the_same_file() {
     let refused = run(&server, To::Records(&plain_dir), &["--resume"]).code(2);
     assert!(
         stderr(&refused)
-            .contains("was planned differently (locations, org_units, records changed)"),
+            .contains("was planned differently (locations, org_units, package, records changed)"),
         "{}",
         stderr(&refused)
     );
@@ -1234,11 +1373,11 @@ fn a_rerun_compares_the_same_both_ways() {
             .map(|r| r["id"].as_str().unwrap().to_string())
             .collect()
     };
-    let built_in_changed = ids(read_ndjson(&changed));
-    assert_eq!(built_in_changed.len(), 2);
+    let written_changed = ids(read_ndjson(&changed));
+    assert_eq!(written_changed.len(), 2);
     assert_eq!(
         ids(read_ndjson(&import_changed.join("MeasureReport.ndjson"))),
-        built_in_changed
+        written_changed
     );
     let lines = |p: &Path| -> Vec<String> {
         std::fs::read_to_string(p)
@@ -1247,13 +1386,13 @@ fn a_rerun_compares_the_same_both_ways() {
             .map(str::to_string)
             .collect()
     };
-    let built_in_removed = lines(&removed);
-    assert_eq!(built_in_removed.len(), 1);
+    let written_removed = lines(&removed);
+    assert_eq!(written_removed.len(), 1);
     let import_removed: Vec<String> = lines(&import_removed)
         .iter()
         .map(|l| l.strip_prefix("MeasureReport/").unwrap().to_string())
         .collect();
-    assert_eq!(import_removed, built_in_removed);
+    assert_eq!(import_removed, written_removed);
     // And the same baseline.
     assert_same(&read_ndjson(&reports), &read_out(&fhir));
 }

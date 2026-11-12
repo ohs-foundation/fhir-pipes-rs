@@ -1,10 +1,9 @@
-//! `fhir-pipes dhis2 locations`: the org unit tree as ICR Locations.
+//! `fhir-pipes dhis2 locations` and `dhis2 extract locations`: the org unit
+//! tree as `DHIS2OrgUnit` records, and with a package as Locations.
 //!
-//! Levels above the facility level become admin units; the facility level
-//! becomes facility Locations, each paired with an Organization the way the
-//! ICR models facilities (`managingOrganization` → `org-<location id>`).
-//! Every resource carries the org unit UID as an official identifier, which
-//! is what `fhir-pipes dhis2 reports` maps analytics rows through.
+//! Levels above the facility level are admin units; the facility level is
+//! facilities. Each org unit becomes one record. The package's map turns a
+//! record into a Location and, for a facility, its Organization.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -16,40 +15,12 @@ use super::{Instance, valid_name};
 use crate::cli::Dhis2LocationsArgs;
 use crate::error::{PipesError, Result};
 use crate::fhir::group::is_valid_id;
-use crate::fhir::location::{
-    LocationKey, NewLocation, PhysicalType, boundary_extension, identifier,
-};
 use crate::fhir::ndjson::NdjsonWriter;
-use crate::fhir::organization::{NewOrganization, OrganizationKey};
 use crate::fs::check_out;
 use crate::report::{Report, write_report};
 
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
-
-/// The key order of the Locations dhis2 locations writes.
-const LOCATION_KEYS: [LocationKey; 11] = [
-    LocationKey::Meta,
-    LocationKey::Extension,
-    LocationKey::Identifier,
-    LocationKey::Status,
-    LocationKey::Name,
-    LocationKey::Alias,
-    LocationKey::Type,
-    LocationKey::PhysicalType,
-    LocationKey::Position,
-    LocationKey::ManagingOrganization,
-    LocationKey::PartOf,
-];
-
-/// The key order of the facility Organizations dhis2 locations writes.
-const ORGANIZATION_KEYS: [OrganizationKey; 5] = [
-    OrganizationKey::Meta,
-    OrganizationKey::Identifier,
-    OrganizationKey::Active,
-    OrganizationKey::Type,
-    OrganizationKey::Name,
-];
 
 const ORG_UNIT_FIELDS: &str =
     "id,code,name,shortName,level,parent[id],openingDate,closedDate,geometry";
@@ -121,43 +92,13 @@ pub struct GroupType {
     pub sets: Vec<String>,
 }
 
-impl GroupType {
-    fn concept(&self, instance: &Instance) -> Value {
-        let coding: Vec<Value> = if self.sets.is_empty() {
-            vec![
-                json!({"system": instance.group_system("org-unit-group"), "code": self.group, "display": self.name}),
-            ]
-        } else {
-            self.sets
-                .iter()
-                .map(|set| json!({"system": instance.dimension_system(Some(set)), "code": self.group, "display": self.name}))
-                .collect()
-        };
-        json!({"coding": coding, "text": self.name})
-    }
-}
-
 pub fn location_id(prefix: &str, uid: &str) -> String {
     format!("{prefix}-{uid}")
 }
 
-fn identifiers(unit: &OrgUnit, opts: &Options) -> Vec<Value> {
-    let mut out = vec![json!({
-        "use": "official",
-        "system": opts.instance.orgunit_system(),
-        "value": unit.id,
-    })];
-    if let Some(code) = &unit.code {
-        out.push(identifier(&opts.instance.orgunit_code_system(), code));
-    }
-    out
-}
-
-/// What one org unit becomes, decided once for both ways of writing it:
-/// the built-in mapping and a `--maps` map.
+/// What one org unit becomes: the facts its record holds.
 struct Prepared<'a> {
     unit: &'a OrgUnit,
-    id: String,
     facility: bool,
     /// A Polygon or MultiPolygon geometry as GeoJSON text.
     boundary: Option<String>,
@@ -241,7 +182,6 @@ fn prepare<'a>(
     };
     Some(Prepared {
         unit,
-        id,
         facility: unit.level == opts.facility_level,
         boundary,
         position,
@@ -251,84 +191,8 @@ fn prepare<'a>(
     })
 }
 
-/// The Location (and, at the facility level, its Organization) for one org
-/// unit, by the built-in mapping. The Organization comes first so a
-/// transaction creates it before the Location that refers to it.
-fn built_in(p: &Prepared, opts: &Options) -> Vec<Value> {
-    let unit = p.unit;
-    let id = &p.id;
-    let facility = p.facility;
-    let extension: Vec<Value> = p
-        .boundary
-        .iter()
-        .map(|geojson| boundary_extension(&opts.instance.boundary_extension, geojson.as_bytes()))
-        .collect();
-    let mut ids = identifiers(unit, opts);
-    if let Some(cc) = p.country_code {
-        ids.push(identifier(&opts.instance.urls().country_code_system, cc));
-    }
-    // run_locations checked both are in the profile.
-    let (type_code, physical) = if facility {
-        (
-            opts.instance.facility_type.as_deref().unwrap_or_default(),
-            PhysicalType::Site,
-        )
-    } else {
-        (
-            opts.instance.admin_unit_type.as_deref().unwrap_or_default(),
-            PhysicalType::Jurisdiction,
-        )
-    };
-    let group_types: Vec<Value> = p.groups.iter().map(|g| g.concept(opts.instance)).collect();
-    let org_id = format!("{}{id}", opts.instance.org_id_prefix);
-    let parent = p.parent.map(|uid| location_id(opts.prefix, uid));
-    let meta = |profile: &str| json!({"profile": [profile], "tag": [opts.instance.tag()]});
-    let loc = NewLocation {
-        id,
-        meta: Some(meta(&opts.instance.urls().location_profile)),
-        extension,
-        identifier: ids,
-        status: if unit.closed_date.is_some() {
-            "inactive"
-        } else {
-            "active"
-        },
-        name: &unit.name,
-        alias: unit
-            .short_name
-            .as_ref()
-            .filter(|s| **s != unit.name)
-            .map(std::slice::from_ref)
-            .unwrap_or_default(),
-        type_system: &opts.instance.urls().location_type_system,
-        type_code,
-        extra_types: group_types.clone(),
-        physical_type: Some(physical),
-        position: p.position,
-        managing_organization: facility.then_some(org_id.as_str()),
-        part_of: parent.as_deref(),
-    }
-    .into_json(&LOCATION_KEYS);
-    let mut out = Vec::new();
-    if facility {
-        out.push(
-            NewOrganization {
-                id: &org_id,
-                meta: Some(meta(&opts.instance.urls().facility_organization_profile)),
-                identifier: identifiers(unit, opts),
-                active: unit.closed_date.is_none(),
-                extra_types: group_types,
-                name: Some(&unit.name),
-            }
-            .into_json(&ORGANIZATION_KEYS),
-        );
-    }
-    out.push(loc);
-    out
-}
-
 /// The org unit as a `DHIS2OrgUnit` record (examples/import/icr-dhis2/models):
-/// the input of a `--maps` map, or the line `dhis2 extract` writes.
+/// the input of the package's map, or the line `dhis2 extract` writes.
 fn record(p: &Prepared, opts: &Options) -> Value {
     let unit = p.unit;
     let mut r = json!({
@@ -448,9 +312,9 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
     }
 }
 
-/// Every Location and Organization for `units` (or, with `dhis2 extract`, every
-/// `DHIS2OrgUnit` record), top level first, then by id, handed to `emit` as
-/// each unit is built.
+/// Every `DHIS2OrgUnit` record for `units` (or, with a package, the
+/// resources its map writes from them), top level first, then by id,
+/// handed to `emit` as each unit is built.
 pub fn build(
     units: &[OrgUnit],
     opts: &Options,
@@ -485,19 +349,15 @@ pub fn build(
                 (issues, p)
             })
             .collect();
-        // With --maps, the batch's records are transformed on several threads.
-        let records: Vec<Value> = if writes.prepares_records() {
-            prepared
-                .iter()
-                .filter_map(|(_, p)| p.as_ref())
-                .map(|p| record(p, opts))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // With a package, the batch's records are transformed on several threads.
+        let records: Vec<Value> = prepared
+            .iter()
+            .filter_map(|(_, p)| p.as_ref())
+            .map(|p| record(p, opts))
+            .collect();
         let mut outputs = match writes {
             Writes::Maps(map) => map.transform_all(&records.iter().collect::<Vec<_>>()),
-            _ => Vec::new(),
+            Writes::Records => Vec::new(),
         }
         .into_iter();
         let mut records = records.into_iter();
@@ -513,7 +373,6 @@ pub fn build(
                     report,
                 )?,
                 Writes::Records => vec![records.next().expect("a record for each unit")],
-                Writes::BuiltIn => built_in(&p, opts),
             };
             for resource in written {
                 emit(resource)?;
@@ -587,18 +446,9 @@ fn add_org_unit_groups(
     Ok(list.len())
 }
 
-pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profile) -> Result<()> {
+pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
     check_out(&args.out)?;
-    let instance = Instance::new(&args.conn.instance, profile)?;
-    // The type codes are for the resources; dhis2 extract writes the kind
-    // (facility or admin-unit) and the package's maps choose the codes.
-    if !args.records && (instance.admin_unit_type.is_none() || instance.facility_type.is_none()) {
-        return Err(PipesError::Usage(format!(
-            "dhis2 locations needs [location] admin_unit_type and [organization] facility_type \
-             in the profile, the type codes of admin units and facilities; {}",
-            profile.lacks("[location] admin_unit_type or [organization] facility_type")
-        )));
-    }
+    let instance = Instance::new(&args.conn.instance)?;
     let prefix = args
         .opts
         .id_prefix
@@ -609,8 +459,16 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
             "--id-prefix must be letters, digits and hyphens, at most {MAX_PREFIX_LEN} characters, got {prefix:?}"
         )));
     }
-    let maps = RecordMap::load(&args.maps.dirs, ORG_UNIT_MODEL)?;
-    let writes = Writes::new(maps.as_ref(), args.records);
+    let map = if args.records {
+        None
+    } else {
+        Some(super::package_map(
+            "locations",
+            &args.package,
+            ORG_UNIT_MODEL,
+        )?)
+    };
+    let writes = Writes::new(map.as_ref());
     let api = Dhis2::connect(&args.conn)?;
     eprintln!(
         "DHIS2 {} ({})",
@@ -753,10 +611,6 @@ pub fn run_locations(args: &Dhis2LocationsArgs, profile: &crate::profile::Profil
         };
         println!("  level {level} {name}: {count} ({role})");
     }
-    // dhis2 extract reads no profile; the package's maps name the system.
-    if !args.records {
-        println!("Org unit identifier system: {}", instance.orgunit_system());
-    }
     println!("{}", report.summary());
     if let Some(path) = &args.report {
         write_report(path, &report)?;
@@ -769,9 +623,28 @@ mod tests {
     use super::*;
     use base64::Engine;
 
+    const ORGUNIT_SYSTEM: &str =
+        "https://icr.healthcampaigns.org/identifiers/dhis2/sl-demo/orgunit";
+    const DHIS2_CODES: &str = "https://icr.healthcampaigns.org/CodeSystem/dhis2/sl-demo";
+
+    /// What the example package writes for `units`.
     fn build_all(units: &[OrgUnit], opts: &Options, report: &mut Report) -> Vec<Value> {
+        build_with(
+            units,
+            opts,
+            Writes::Maps(&crate::dhis2::maps::icr_package(ORG_UNIT_MODEL)),
+            report,
+        )
+    }
+
+    fn build_with(
+        units: &[OrgUnit],
+        opts: &Options,
+        writes: Writes,
+        report: &mut Report,
+    ) -> Vec<Value> {
         let mut out = Vec::new();
-        build(units, opts, Writes::BuiltIn, report, |r| {
+        build(units, opts, writes, report, |r| {
             out.push(r);
             Ok(())
         })
@@ -819,16 +692,13 @@ mod tests {
         }
     }
 
-    /// The example ICR maps (examples/import/icr-dhis2/maps).
-    fn icr_maps() -> RecordMap {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
-        RecordMap::load(&[dir], ORG_UNIT_MODEL).unwrap().unwrap()
-    }
-
     #[test]
-    fn the_example_map_writes_what_the_built_in_mapping_writes() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+    /// The records are the package's test case org-units, and the package
+    /// maps them, record by record as `dhis2 locations` runs them, to the
+    /// case's expected resources: what the built-in mapping wrote before it
+    /// was removed.
+    fn the_records_are_the_package_case_org_units() {
+        let instance = Instance::new("sl-demo").unwrap();
         let square = json!({"type":"Polygon","coordinates":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0],[0.0,0.0]]]});
         let mut units = vec![
             // The top unit: no geometry of its own, the country code.
@@ -887,24 +757,14 @@ mod tests {
         let mut filled = Report::default();
         fill_missing_boundaries(&mut units, o.facility_level, &mut filled);
 
-        let mut built_in_report = Report::default();
-        let expected = build_all(&units, &o, &mut built_in_report);
-        let maps = icr_maps();
+        let mut report = Report::default();
+        let records = build_with(&units, &o, Writes::Records, &mut report);
+        crate::dhis2::maps::case::records("org-units", &records);
         let mut mapped_report = Report::default();
-        let mut mapped = Vec::new();
-        build(&units, &o, Writes::Maps(&maps), &mut mapped_report, |r| {
-            mapped.push(r);
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(expected.len(), 7, "5 Locations and 2 Organizations");
-        assert_eq!(mapped.len(), expected.len());
-        for (m, e) in mapped.iter().zip(&expected) {
-            // The same resource, key for key and in the same order.
-            assert_eq!(m.to_string(), e.to_string());
-        }
-        assert_eq!(mapped_report.summary(), built_in_report.summary());
+        let mapped = build_all(&units, &o, &mut mapped_report);
+        assert_eq!(mapped.len(), 7, "5 Locations and 2 Organizations");
+        crate::dhis2::maps::case::expected("org-units", &mapped);
+        assert_eq!(mapped_report.summary(), report.summary());
     }
 
     #[test]
@@ -925,7 +785,7 @@ mod tests {
 
     #[test]
     fn levels_become_admin_units_then_facilities_with_organizations() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let poly =
             json!({"type":"Polygon","coordinates":[[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,0.0]]]});
         let units = vec![
@@ -959,10 +819,7 @@ mod tests {
         );
         assert_eq!(country["identifier"][0]["use"], "official");
         assert_eq!(country["identifier"][0]["value"], "c");
-        assert_eq!(
-            country["identifier"][0]["system"],
-            instance.orgunit_system()
-        );
+        assert_eq!(country["identifier"][0]["system"], ORGUNIT_SYSTEM);
 
         let district = &out[1];
         assert_eq!(district["partOf"]["reference"], "Location/sle-c");
@@ -979,7 +836,7 @@ mod tests {
         // A group in no set is coded under the org-unit-group system.
         assert_eq!(
             district["type"][1],
-            json!({"coding": [{"system": instance.group_system("org-unit-group"),
+            json!({"coding": [{"system": format!("{DHIS2_CODES}/org-unit-group"),
                                "code": "hSgatV6qHFI", "display": "Districts"}],
                    "text": "Districts"})
         );
@@ -998,7 +855,7 @@ mod tests {
         assert_eq!(facility["type"][1]["text"], "CHP");
         assert_eq!(
             facility["type"][1]["coding"][0]["system"],
-            instance.dimension_system(Some("J5jldMd8OHv"))
+            format!("{DHIS2_CODES}/dimension/J5jldMd8OHv")
         );
         assert_eq!(org["type"][1]["coding"][0]["code"], "uYxK4wmcPqA");
         assert_eq!(facility["partOf"]["reference"], "Location/sle-d");
@@ -1006,7 +863,7 @@ mod tests {
 
     #[test]
     fn closed_units_are_inactive_and_missing_parents_are_reported() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let mut closed = unit("d", 2, Some("gone"), None);
         closed.closed_date = Some("2020-01-01".into());
         let units = vec![unit("c", 1, None, None), closed];
@@ -1019,7 +876,7 @@ mod tests {
 
     #[test]
     fn a_subtree_root_has_no_partof_and_no_complaint() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let units = vec![unit("d", 2, Some("c"), None), unit("e", 3, Some("d"), None)];
         let mut report = Report::default();
         let out = build_all(&units, &opts(&instance), &mut report);
@@ -1075,7 +932,7 @@ mod tests {
 
     #[test]
     fn unusable_geometry_is_reported_and_left_out() {
-        let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
+        let instance = Instance::new("sl-demo").unwrap();
         let units = vec![
             unit(
                 "c",

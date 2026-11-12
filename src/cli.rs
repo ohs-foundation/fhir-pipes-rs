@@ -94,7 +94,7 @@ pub enum Command {
     Index(IndexArgs),
     /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `fhir-pipes load` (offline once the raster is cached)
     Population(PopulationArgs),
-    /// Read a DHIS2 instance: org units as Locations, indicators as Measures, indicator values as MeasureReports, all as FHIR NDJSON for `fhir-pipes load`
+    /// Read a DHIS2 instance: `extract` writes org units, indicators and indicator values as records for `fhir-pipes import run`; `locations`, `measures` and `reports` also map them with an import package and write FHIR NDJSON for `fhir-pipes load`
     #[command(subcommand)]
     Dhis2(Box<Dhis2Command>),
     /// Work with the profile given by --profile
@@ -140,13 +140,13 @@ pub enum TransformCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum Dhis2Command {
-    /// Org units as ICR Locations (facilities with their Organizations), each carrying its DHIS2 UID
+    /// Org units as Locations (facilities with their Organizations): `extract locations`, then the package's map, in one step
     Locations(Dhis2LocationsArgs),
-    /// Indicators as Measures
+    /// Indicators as Measures: `extract measures`, then the package's map, in one step
     Measures(Dhis2MeasuresArgs),
-    /// Indicator values from DHIS2 analytics as MeasureReports, one per indicator, org unit and period
+    /// Indicator values from DHIS2 analytics as MeasureReports, one per indicator, org unit and period: `extract reports`, then the package's map, in one step
     Reports(Box<Dhis2ReportsArgs>),
-    /// Write the records the other commands map, without mapping them: one NDJSON file per record type in a folder, for `fhir-pipes import run`
+    /// Write the records, without mapping them: one NDJSON file per record type in a folder, for `fhir-pipes import run`
     #[command(subcommand)]
     Extract(Dhis2ExtractCommand),
 }
@@ -193,7 +193,7 @@ impl ReportSource {
 /// files it under.
 #[derive(clap::Args, Debug, Clone)]
 pub struct Dhis2Conn {
-    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-41-10 (a trailing /api is accepted); falls back to $FHIR_PIPES_DHIS2_URL
+    /// DHIS2 base URL, e.g. https://play.im.dhis2.org/stable-2-42-7-1 (a trailing /api is accepted); falls back to $FHIR_PIPES_DHIS2_URL
     #[arg(long = "dhis2", env = "FHIR_PIPES_DHIS2_URL")]
     pub url: String,
     /// Short name for this instance (letters, digits, hyphens; up to 16), used in identifier systems, ids and the meta tag, e.g. sl-demo
@@ -230,17 +230,21 @@ pub struct Dhis2Conn {
     pub timeout: u64,
 }
 
-/// `--maps`: the folders of maps the FHIR commands write with.
+/// `--package`: the import package `dhis2 locations|measures|reports` map
+/// their records with.
 #[derive(clap::Args, Debug, Clone, Default)]
-pub struct Dhis2Maps {
-    /// Write the resources with FHIR Mapping Language maps instead of the built-in mapping: a folder of maps (*.map), ConceptMaps and StructureDefinitions (JSON); repeatable, or comma-separated in $FHIR_PIPES_DHIS2_MAPS. The map whose first group reads the command's record type is run: DHIS2OrgUnit (locations), DHIS2Indicator (measures), DHIS2Value (reports)
+pub struct Dhis2Package {
+    /// The import package that turns the records into resources, such as examples/import/icr-dhis2 (its maps/ folder is also accepted). Each record goes through the package's map that reads its type: DHIS2OrgUnit (locations), DHIS2Indicator (measures), DHIS2Value (reports). Falls back to $FHIR_PIPES_DHIS2_MAPS
     #[arg(
-        long = "maps",
+        long = "package",
+        alias = "maps",
         value_name = "DIR",
-        env = "FHIR_PIPES_DHIS2_MAPS",
-        value_delimiter = ','
+        env = "FHIR_PIPES_DHIS2_MAPS"
     )]
-    pub dirs: Vec<PathBuf>,
+    pub dir: Option<PathBuf>,
+    /// Set a parameter of the package, overriding its default: NAME=VALUE (repeatable)
+    #[arg(long = "param", value_name = "NAME=VALUE", value_parser = crate::import::package::parse_param)]
+    pub params: Vec<(String, String)>,
 }
 
 /// A DHIS2 UID (11 letters and digits, the first a letter), for the flags
@@ -265,7 +269,7 @@ pub struct Dhis2LocationsArgs {
     #[command(flatten)]
     pub opts: LocationsOptions,
     #[command(flatten)]
-    pub maps: Dhis2Maps,
+    pub package: Dhis2Package,
     /// Output NDJSON file of Location and Organization resources
     #[arg(long)]
     pub out: PathBuf,
@@ -298,7 +302,7 @@ impl ExtractLocationsArgs {
         Dhis2LocationsArgs {
             conn: self.conn,
             opts: self.opts,
-            maps: Dhis2Maps::default(),
+            package: Dhis2Package::default(),
             out,
             report: self.report,
             records: true,
@@ -363,7 +367,7 @@ pub struct Dhis2MeasuresArgs {
     #[command(flatten)]
     pub select: IndicatorSelection,
     #[command(flatten)]
-    pub maps: Dhis2Maps,
+    pub package: Dhis2Package,
     /// Output NDJSON file of Measure resources
     #[arg(long)]
     pub out: PathBuf,
@@ -396,7 +400,7 @@ impl ExtractMeasuresArgs {
         Dhis2MeasuresArgs {
             conn: self.conn,
             select: self.select,
-            maps: Dhis2Maps::default(),
+            package: Dhis2Package::default(),
             out,
             report: self.report,
             records: true,
@@ -410,13 +414,13 @@ pub struct Dhis2ReportsArgs {
     pub conn: Dhis2Conn,
     #[command(flatten)]
     pub select: IndicatorSelection,
-    /// NDJSON holding the Locations that carry this instance's org unit UIDs: the output of `fhir-pipes dhis2 locations`, a snapshot's locations.ndjson, or a Location.ndjson that `import run` wrote
+    /// NDJSON holding the Locations that carry this instance's org unit UIDs, under the identifier system <base>/identifiers/dhis2/<instance>/orgunit (base: the package's parameter): the output of `fhir-pipes dhis2 locations`, a snapshot's locations.ndjson, or a Location.ndjson that `import run` wrote
     #[arg(long, required = true)]
     pub locations: Option<PathBuf>,
     #[command(flatten)]
     pub opts: ReportsOptions,
     #[command(flatten)]
-    pub maps: Dhis2Maps,
+    pub package: Dhis2Package,
     /// With --source data-values and --previous: recompute only the periods and ranges with data values updated or deleted since this date or time (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS); --out keeps the previous reports for the rest
     #[arg(long, requires = "previous")]
     pub updated_since: Option<String>,
@@ -470,7 +474,7 @@ impl ExtractReportsArgs {
             select: self.select,
             locations: None,
             opts: self.opts,
-            maps: Dhis2Maps::default(),
+            package: Dhis2Package::default(),
             updated_since: None,
             out,
             previous: None,

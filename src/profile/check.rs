@@ -22,10 +22,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use clap::ValueEnum;
 use serde_json::Value;
 
-use crate::cli::ReportSource;
 use crate::error::{Findings, PipesError, Result};
 use crate::fhir::package::Index;
 use crate::profile::{Column, Kind, Profile};
@@ -699,49 +697,10 @@ pub fn check(profile: &Profile, ig: &Ig) -> CheckResult {
             &type_codes,
             Severity::Error,
         );
-        c.code_system(
-            "[dhis2] project_tag_system",
-            &d.project_tag_system,
-            &[],
-            Severity::Error,
-        );
         c.identifier_system(
             "[dhis2] country_code_system",
             &d.country_code_system,
             "Location",
-        );
-        for (key, url) in [
-            ("period_extension", &d.period_extension),
-            ("campaign_extension", &d.campaign_extension),
-        ] {
-            c.extension(
-                &format!("[dhis2] {key}"),
-                url,
-                &["MeasureReport"],
-                Expect::Any,
-            );
-        }
-        c.extension(
-            "[dhis2] source_extension",
-            &d.source_extension,
-            &["MeasureReport"],
-            Expect::Concept(&d.source_system),
-        );
-        let codes: Vec<&str> = ReportSource::value_variants()
-            .iter()
-            .map(|s| s.coding().0)
-            .collect();
-        c.code_system(
-            "[dhis2] source_system",
-            &d.source_system,
-            &codes,
-            Severity::Error,
-        );
-        c.extension(
-            "[dhis2] indicator_extension",
-            &d.indicator_extension,
-            &["Measure"],
-            Expect::Any,
         );
     }
     if let Some(p) = &profile.population {
