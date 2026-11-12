@@ -20,6 +20,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde_json::Value;
 
+use super::manifest::RecordRules;
 use super::plan::{Input, Package, Plan, PlanStep};
 use super::previous::Comparison;
 use super::records::{Records, with_type};
@@ -201,6 +202,12 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                 r.map = Some(name.clone());
                 r.stage = *stage;
                 let sink = if *stage { &mut staged } else { &mut output };
+                // `[records]` loosens the check of the record files only; a
+                // Library's rows are the package's own and are checked as they are.
+                let rules = match input {
+                    Input::File(_) => package.record_rules(),
+                    Input::Rows(_) => RecordRules::default(),
+                };
                 let records: Box<dyn Iterator<Item = Result<(String, Value)>>> = match input {
                     Input::File(t) => {
                         r.from = Some(t.clone());
@@ -231,7 +238,16 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                         Box::new(rows(&path, &lib.name, &model.type_name)?)
                     }
                 };
-                map_step(package, map, &model.type_name, records, sink, o, &mut r)?;
+                map_step(
+                    package,
+                    map,
+                    &model.type_name,
+                    rules,
+                    records,
+                    sink,
+                    o,
+                    &mut r,
+                )?;
                 if o.echo {
                     let to = if *stage { "staged" } else { "output" };
                     println!(
@@ -347,12 +363,15 @@ pub fn describe(counts: &BTreeMap<String, usize>) -> String {
 }
 
 /// Runs `map` over `records` a batch at a time and writes the resources to
-/// `sink` in record order. Each record is checked against its model first;
-/// a record that does not fit, or that the map fails on, stops the run.
+/// `sink` in record order. Each record is prepared by `rules` and checked
+/// against its model first; a record that does not fit, or that the map
+/// fails on, stops the run.
+#[allow(clippy::too_many_arguments)]
 fn map_step(
     package: &Package,
     map: &fml_model::StructureMap,
     type_name: &str,
+    rules: RecordRules,
     mut records: Box<dyn Iterator<Item = Result<(String, Value)>> + '_>,
     sink: &mut TypeFiles,
     o: &Options,
@@ -365,7 +384,8 @@ fn map_step(
         crate::stop::check()?;
         let mut batch: Vec<(String, Value)> = Vec::with_capacity(BATCH);
         for record in records.by_ref() {
-            let (at, record) = record?;
+            let (at, mut record) = record?;
+            package.models.prepare(type_name, &mut record, rules);
             let problems = package.models.check(type_name, &record);
             if let Some(first) = problems.first() {
                 let more = match problems.len() - 1 {

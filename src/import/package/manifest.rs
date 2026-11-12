@@ -1,5 +1,6 @@
-//! `import.toml`: the package's name, its steps in order, its data tests and
-//! the elements `import run --previous` does not compare.
+//! `import.toml`: the package's name, its steps in order, its data tests,
+//! how records that do not fit their model exactly are read, the limit on a
+//! map's values and the elements `import run --previous` does not compare.
 //! Parsing checks the manifest on its own: the keys, the shape of each step
 //! and test, and that every stage step comes before the first library step.
 //! What the names refer to is checked against the package (`plan`).
@@ -20,6 +21,23 @@ pub struct Manifest {
     /// `[compare] ignore`: elements left out when `import run --previous`
     /// compares a resource with the previous run's.
     pub ignore: Vec<IgnorePath>,
+    /// `[records]`: how the records of the input folder are read.
+    pub records: RecordRules,
+    /// `[maps] max_values`: the values a map may create from one record.
+    pub max_values: Option<usize>,
+}
+
+/// `[records]`: what a record of the input folder may hold beyond its
+/// model. Both are off unless the manifest turns them on. They apply to the
+/// record files, not to the rows of a Library result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecordRules {
+    /// `null = "absent"`: a member whose value is JSON null is read as if
+    /// it were not there.
+    pub null_absent: bool,
+    /// `unknown = "ignore"`: a member the model does not describe is left
+    /// out before the record is checked and mapped.
+    pub ignore_unknown: bool,
 }
 
 /// `ResourceType.path`: an element of a resource type, by the object keys
@@ -80,6 +98,21 @@ struct File {
     #[serde(default)]
     test: Vec<TestFile>,
     compare: Option<CompareFile>,
+    records: Option<RecordsFile>,
+    maps: Option<MapsFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordsFile {
+    null: Option<String>,
+    unknown: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MapsFile {
+    max_values: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -143,12 +176,45 @@ pub fn parse(text: &str, origin: &str) -> Result<Manifest> {
             ))
         })?);
     }
+    let records = record_rules(file.records, origin)?;
+    let max_values = match file.maps.and_then(|m| m.max_values) {
+        None => None,
+        Some(n) if n >= 1 => Some(usize::try_from(n).unwrap_or(usize::MAX)),
+        Some(n) => {
+            return Err(usage(format!(
+                "{origin}: maps.max_values is {n}; give a whole number of 1 or more"
+            )));
+        }
+    };
     Ok(Manifest {
         name: file.name,
         title: file.title,
         steps,
         tests,
         ignore,
+        records,
+        max_values,
+    })
+}
+
+/// `[records] null` is `error` (the default) or `absent`; `unknown` is
+/// `error` (the default) or `ignore`.
+fn record_rules(file: Option<RecordsFile>, origin: &str) -> Result<RecordRules> {
+    let Some(file) = file else {
+        return Ok(RecordRules::default());
+    };
+    let choose = |key: &str, value: Option<String>, on: &str| -> Result<bool> {
+        match value.as_deref() {
+            None | Some("error") => Ok(false),
+            Some(v) if v == on => Ok(true),
+            Some(v) => Err(usage(format!(
+                "{origin}: records.{key} is {v:?}; give \"error\" or \"{on}\""
+            ))),
+        }
+    };
+    Ok(RecordRules {
+        null_absent: choose("null", file.null, "absent")?,
+        ignore_unknown: choose("unknown", file.unknown, "ignore")?,
     })
 }
 
@@ -473,6 +539,55 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT id FROM t;"
         assert!(m.contains("unknown field `ignored`"), "{m}");
         let m = message("name = \"x\"\n[compare]\nignore = \"MeasureReport.date\"\n");
         assert!(m.contains("invalid type"), "{m}");
+    }
+
+    #[test]
+    fn records_and_maps_settings_are_read_and_checked() {
+        let m = parse("name = \"x\"\n", "import.toml").unwrap();
+        assert_eq!(m.records, RecordRules::default());
+        assert_eq!(m.max_values, None);
+        let m = parse(
+            "name = \"x\"\n[records]\nnull = \"absent\"\nunknown = \"ignore\"\n[maps]\nmax_values = 10_000_000\n",
+            "import.toml",
+        )
+        .unwrap();
+        assert_eq!(
+            m.records,
+            RecordRules {
+                null_absent: true,
+                ignore_unknown: true
+            }
+        );
+        assert_eq!(m.max_values, Some(10_000_000));
+        let m = parse(
+            "name = \"x\"\n[records]\nnull = \"error\"\nunknown = \"error\"\n",
+            "import.toml",
+        )
+        .unwrap();
+        assert_eq!(m.records, RecordRules::default());
+        let m = parse(
+            "name = \"x\"\n[records]\nunknown = \"ignore\"\n",
+            "import.toml",
+        )
+        .unwrap();
+        assert!(m.records.ignore_unknown && !m.records.null_absent);
+
+        let m = message("name = \"x\"\n[records]\nnull = \"skip\"\n");
+        assert!(
+            m.contains("records.null is \"skip\"; give \"error\" or \"absent\""),
+            "{m}"
+        );
+        let m = message("name = \"x\"\n[records]\nunknown = \"absent\"\n");
+        assert!(
+            m.contains("records.unknown is \"absent\"; give \"error\" or \"ignore\""),
+            "{m}"
+        );
+        let m = message("name = \"x\"\n[records]\nnulls = \"absent\"\n");
+        assert!(m.contains("unknown field `nulls`"), "{m}");
+        let m = message("name = \"x\"\n[maps]\nmax_values = 0\n");
+        assert!(m.contains("maps.max_values is 0"), "{m}");
+        let m = message("name = \"x\"\n[maps]\nmax_rules = 5\n");
+        assert!(m.contains("unknown field `max_rules`"), "{m}");
     }
 
     #[test]

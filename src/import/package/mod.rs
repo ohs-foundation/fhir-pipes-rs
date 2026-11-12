@@ -38,6 +38,9 @@ use run::{Options, Report};
 /// The record problems printed per file by `import check --in`.
 const PROBLEMS_PER_FILE: usize = 20;
 
+/// The ignored members named per file by `import check --in`.
+const IGNORED_PER_FILE: usize = 20;
+
 /// The file in `--out` that lists what the last run wrote there, so a run
 /// with `--overwrite` removes only its own files.
 const WRITTEN: &str = ".fhir-pipes-import.json";
@@ -159,8 +162,11 @@ pub fn check(args: &CheckArgs) -> Result<()> {
                 problems += 1;
                 continue;
             }
-            let (n, found) = check_file(&package, t, path);
+            let (n, found, ignored) = check_file(&package, t, path);
             records_read += n;
+            if !ignored.is_empty() {
+                println!("{}", ignored_line(path, &ignored));
+            }
             for line in found.iter().take(PROBLEMS_PER_FILE) {
                 println!("{line}");
             }
@@ -185,18 +191,34 @@ pub fn check(args: &CheckArgs) -> Result<()> {
     }
 }
 
-/// The records read, and the problems as `file:line: message`.
-fn check_file(package: &Package, t: &str, path: &Path) -> (usize, Vec<String>) {
+/// The records read, the problems as `file:line: message`, and with
+/// `[records] unknown = "ignore"` how many records had each member the
+/// model does not describe.
+fn check_file(
+    package: &Package,
+    t: &str,
+    path: &Path,
+) -> (usize, Vec<String>, BTreeMap<String, usize>) {
     let mut found = Vec::new();
+    let mut ignored: BTreeMap<String, usize> = BTreeMap::new();
     let mut n = 0;
     let records = match records::Records::open(path, t) {
         Ok(r) => r,
-        Err(e) => return (0, vec![e.to_string()]),
+        Err(e) => return (0, vec![e.to_string()], ignored),
     };
+    let rules = package.record_rules();
     for record in records {
         match record {
-            Ok((line, r)) => {
+            Ok((line, mut r)) => {
                 n += 1;
+                let left_out: BTreeSet<String> = package
+                    .models
+                    .prepare(t, &mut r, rules)
+                    .into_iter()
+                    .collect();
+                for p in left_out {
+                    *ignored.entry(p).or_default() += 1;
+                }
                 for p in package.models.check(t, &r) {
                     found.push(format!("{}:{line}: {p}", path.display()));
                 }
@@ -204,7 +226,26 @@ fn check_file(package: &Package, t: &str, path: &Path) -> (usize, Vec<String>) {
             Err(e) => found.push(e.to_string()),
         }
     }
-    (n, found)
+    (n, found, ignored)
+}
+
+/// `file: ignored N members the model does not describe: a (in 3 records), ...`,
+/// naming the first `IGNORED_PER_FILE`.
+fn ignored_line(path: &Path, ignored: &BTreeMap<String, usize>) -> String {
+    let mut named: Vec<String> = ignored
+        .iter()
+        .take(IGNORED_PER_FILE)
+        .map(|(p, n)| format!("{p} ({n})"))
+        .collect();
+    if ignored.len() > IGNORED_PER_FILE {
+        named.push(format!("and {} more", ignored.len() - IGNORED_PER_FILE));
+    }
+    format!(
+        "{}: ignored {} members the model does not describe (records with each): {}",
+        path.display(),
+        ignored.len(),
+        named.join(", ")
+    )
 }
 
 /// Where a run writes its intermediate files: a temporary folder removed

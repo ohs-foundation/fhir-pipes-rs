@@ -21,12 +21,18 @@
 //!   `contentReference`, and an element typed with another model of the
 //!   package are checked inside the same way. A FHIR complex type, such as
 //!   CodeableConcept, is checked only to be a JSON object.
+//!
+//! The manifest's `[records]` can loosen the first and the null check for
+//! the record files (`prepare`): members whose value is null are read as
+//! absent, and members the model does not describe are left out, before the
+//! record is checked and mapped.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use super::manifest::RecordRules;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::NdjsonReader;
 
@@ -287,6 +293,98 @@ impl Models {
         out
     }
 
+    /// Applies `rules` to `record` before it is checked: with `null_absent`
+    /// every member whose value is null is removed, and with `ignore_unknown`
+    /// every member the model does not describe, at any depth the model
+    /// describes. Returns the paths of the members left out as unknown,
+    /// without array indexes (`auditDetails`, `address.city`). A null item
+    /// of an array is kept, and the check reports it.
+    pub fn prepare(&self, type_name: &str, record: &mut Value, rules: RecordRules) -> Vec<String> {
+        let mut ignored = Vec::new();
+        if rules == RecordRules::default() {
+            return ignored;
+        }
+        if let (Some(model), Some(object)) = (self.get(type_name), record.as_object_mut()) {
+            self.prepare_object(model, &model.root, object, "", true, rules, &mut ignored);
+        }
+        ignored
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_object(
+        &self,
+        model: &Model,
+        path: &str,
+        object: &mut Map<String, Value>,
+        at: &str,
+        top: bool,
+        rules: RecordRules,
+        ignored: &mut Vec<String>,
+    ) {
+        let none = Vec::new();
+        let children = model.children.get(path).unwrap_or(&none);
+        object.retain(|key, value| {
+            if rules.null_absent && value.is_null() {
+                return false;
+            }
+            if top && (key == "resourceType" || key == "id") {
+                return true;
+            }
+            if let Some(base) = key.strip_prefix('_')
+                && children.iter().any(|e| e.name == base)
+            {
+                return true;
+            }
+            let at = if at.is_empty() {
+                key.clone()
+            } else {
+                format!("{at}.{key}")
+            };
+            let Some((element, type_code)) = find(children, key) else {
+                if rules.ignore_unknown {
+                    ignored.push(at);
+                    return false;
+                }
+                // Kept for the check to report; its nulls go all the same.
+                if rules.null_absent {
+                    drop_nulls_in(value);
+                }
+                return true;
+            };
+            // Where the value's own members are described, if anywhere.
+            let code = type_code.or(match element.types.as_slice() {
+                [one] => Some(one.as_str()),
+                _ => None,
+            });
+            let inner: Option<(&Model, String)> = if let Some(r) = &element.content_reference {
+                Some((model, r.clone()))
+            } else {
+                match code {
+                    Some("BackboneElement" | "Element") => {
+                        Some((model, format!("{path}.{}", element.name)))
+                    }
+                    Some(c) => self.by_url(c).map(|other| (other, other.root.clone())),
+                    None => None,
+                }
+            };
+            let items: Vec<&mut Value> = match value {
+                Value::Array(items) => items.iter_mut().collect(),
+                v => vec![v],
+            };
+            for item in items {
+                match (&inner, item.as_object_mut()) {
+                    (Some((m, p)), Some(o)) => {
+                        self.prepare_object(m, p, o, &at, false, rules, ignored)
+                    }
+                    // A FHIR complex type: its members are not described.
+                    (None, Some(_)) if rules.null_absent => drop_nulls_in(item),
+                    _ => {}
+                }
+            }
+            true
+        });
+    }
+
     fn check_object(
         &self,
         model: &Model,
@@ -403,6 +501,19 @@ impl Models {
             Some(object) => self.check_object(model, path, object, at, false, out),
             None => out.push(format!("`{at}` must be a JSON object, not {}", kind(item))),
         }
+    }
+}
+
+/// Removes every object member whose value is null, at any depth inside
+/// `value`. Array items are kept.
+fn drop_nulls_in(value: &mut Value) {
+    match value {
+        Value::Object(o) => {
+            o.retain(|_, v| !v.is_null());
+            o.values_mut().for_each(drop_nulls_in);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_nulls_in),
+        _ => {}
     }
 }
 
@@ -612,6 +723,93 @@ mod tests {
                 "missing required element `task`"
             ]
         );
+    }
+
+    #[test]
+    fn nulls_can_be_read_as_absent_and_unknown_members_ignored() {
+        let m = models();
+        let record = json!({"resourceType": "Visit", "id": "v1", "key": "k", "count": null,
+            "audit": {"by": "u1", "at": null}, "place": {"name": "Bo", "geometry": null, "x": 1},
+            "code": {"text": "x", "extra": null},
+            "task": [{"id": "t1", "rowVersion": 2, "sub": [{"id": "t2", "deep": true}]}, null]});
+
+        // By default the record is not changed.
+        let mut r = record.clone();
+        assert!(
+            m.prepare("Visit", &mut r, RecordRules::default())
+                .is_empty()
+        );
+        assert_eq!(r, record);
+
+        // Nulls as absent: null members go at any depth, also inside a FHIR
+        // complex type; a null array item stays, and is reported.
+        let nulls = RecordRules {
+            null_absent: true,
+            ignore_unknown: false,
+        };
+        let mut r = record.clone();
+        assert!(m.prepare("Visit", &mut r, nulls).is_empty());
+        assert!(r.get("count").is_none());
+        assert_eq!(r["audit"], json!({"by": "u1"}));
+        assert_eq!(r["place"], json!({"name": "Bo", "x": 1}));
+        assert_eq!(r["code"], json!({"text": "x"}));
+        assert_eq!(
+            m.check("Visit", &r),
+            [
+                "unknown element `audit`",
+                "unknown element `place.x`",
+                "unknown element `task[0].rowVersion`",
+                "unknown element `task[0].sub[0].deep`",
+                "`task[1]` is null",
+            ]
+        );
+
+        // Unknown members ignored: they go, each listed by its path without
+        // array indexes; nulls are still reported.
+        let unknown = RecordRules {
+            null_absent: false,
+            ignore_unknown: true,
+        };
+        let mut r = record.clone();
+        assert_eq!(
+            m.prepare("Visit", &mut r, unknown),
+            [
+                "audit",
+                "place.geometry",
+                "place.x",
+                "task.rowVersion",
+                "task.sub.deep"
+            ]
+        );
+        assert_eq!(
+            m.check("Visit", &r),
+            ["`count` is null", "`task[1]` is null"]
+        );
+
+        // Both: the record as its model describes it.
+        let both = RecordRules {
+            null_absent: true,
+            ignore_unknown: true,
+        };
+        let mut r = record.clone();
+        assert_eq!(
+            m.prepare("Visit", &mut r, both),
+            ["audit", "place.x", "task.rowVersion", "task.sub.deep"]
+        );
+        assert_eq!(
+            r,
+            json!({"resourceType": "Visit", "id": "v1", "key": "k", "place": {"name": "Bo"},
+                "code": {"text": "x"}, "task": [{"id": "t1", "sub": [{"id": "t2"}]}, null]})
+        );
+        assert_eq!(m.check("Visit", &r), ["`task[1]` is null"]);
+
+        // A required element that is null is missing; another model's
+        // elements are prepared by that model.
+        let mut r =
+            json!({"key": null, "task": [{"id": "t"}], "place": {"name": "Bo", "x": null, "y": 1}});
+        assert_eq!(m.prepare("Visit", &mut r, both), ["place.y"]);
+        assert_eq!(r["place"], json!({"name": "Bo"}));
+        assert_eq!(m.check("Visit", &r), ["missing required element `key`"]);
     }
 
     #[test]

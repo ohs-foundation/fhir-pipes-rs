@@ -119,9 +119,11 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT u.t.crid FROM digit_visit, unnest(t
 | `title` | A title. Optional |
 | `[[step]]` | The steps, run in the order given |
 | `[[test]]` | Data tests on the Library results |
+| `[records]` | How records with nulls or members their model does not describe are read. Optional |
+| `[maps]` | The limit on the values a map may create from one record. Optional |
 | `[compare]` | What `import run --previous` does not compare. Optional |
 
-Any other key, here or in a step, test or `[compare]`, is an error.
+Any other key, here or in a step, test, `[records]`, `[maps]` or `[compare]`, is an error.
 
 ### Steps
 
@@ -195,6 +197,55 @@ after it. Every test runs, and every failure is reported with its count and
 first rows. If any fails, the run stops with exit 1 and writes nothing to
 `--out`: not even the output of steps that ran before the tests.
 
+### Records
+
+```toml
+[records]
+null = "absent"
+unknown = "ignore"
+```
+
+| Key | Meaning |
+|---|---|
+| `null` | `error` (the default): a null value is a problem. `absent`: a member whose value is null is read as if it were not there, at any depth. A null item of an array is still a problem |
+| `unknown` | `error` (the default): a member the model does not describe is a problem. `ignore`: it is left out of the record before the record is checked and mapped, at any depth the model describes |
+
+Records that a system's API returns as they are, such as DIGIT search
+results, set most members to null when they have no value, and carry
+members a mapping has no use for: audit details, row versions, free-form
+`additionalDetails` objects whose keys no model can list. With both set,
+the model describes only what the package reads, and a record is read as
+an instance of it.
+
+The cost is that a member renamed at the source is no longer reported, but
+left out: make the elements the maps need `min` 1 where the source always
+has them, so a rename is still found. `import check --in` names the members
+it left out, with the number of records that had each, so what is ignored
+can be read.
+
+`[records]` applies to the record files of `--in`. The rows of a Library
+result are always read with SQL NULLs left out and every column checked
+against the model.
+
+### Maps
+
+```toml
+[maps]
+max_values = 20_000_000
+```
+
+| Key | Meaning |
+|---|---|
+| `max_values` | The values one transform may create: the elements it writes and the values it works with. Default 2,000,000 |
+
+The limit stops a map that runs away, such as a group that calls itself
+without end. A record that is a large tree, such as a DIGIT boundary
+hierarchy with 80,000 boundaries in one record, needs more: its map writes
+every Location in one transform. A run past the limit stops with
+`the transform created more than 2000000 values`, and says where to raise it.
+Memory grows with the values: the 83,194 Locations of one DIGIT hierarchy
+took about 2.5 GB.
+
 ### Compare
 
 ```toml
@@ -248,6 +299,14 @@ record is checked against its model's snapshot:
 | A primitive has its JSON type: string-like types a string, `boolean` a boolean, `integer`, `positiveInt` and `unsignedInt` a whole number in range, `decimal` a number | `` `count` must be a whole JSON number (integer), not a string `` |
 | A BackboneElement, a `contentReference`, and an element typed with another model of the package are checked inside the same way | ``missing required element `task[0].crid` `` |
 
+With [`[records]`](#records), nulls and the members the model does not
+describe are taken out first, as the run does, and the check prints one line
+per file naming the members it left out:
+
+```
+in/DIGITFacility.ndjson: ignored 16 members the model does not describe (records with each): additionalFields (75), address.addressLine1 (75), ...
+```
+
 Choice elements (`value[x]`) are matched by their type suffix
 (`valueString`). A FHIR complex type such as CodeableConcept is checked only
 to be a JSON object; its content is not checked. String formats (dates,
@@ -276,8 +335,8 @@ fhir-pipes import run --package DIR --in RAW --out OUT [--threads N] [--report F
 | `--changed DIR` | Requires `--previous`. Gets the resources that are new or differ from the previous run, one `<ResourceType>.ndjson` per type, in the same order as in `--out`. A type with nothing changed gets no file. Must be empty or not exist, unless `--overwrite` |
 | `--removed FILE` | Requires `--previous`. Gets one `ResourceType/id` per line, sorted, for every resource of the previous run that this run did not write. Replaced if it exists |
 
-Each record is checked against its model (as `import check --in` does)
-before its map runs. The first record that does not fit, or that its map
+Each record is read by the package's [`[records]`](#records) rules and
+checked against its model (as `import check --in` does) before its map runs. The first record that does not fit, or that its map
 fails on, stops the run with exit 2 and names the file and line, or the
 Library and row. Engine warnings, such as a code a ConceptMap has no target
 for, do not stop the run: they are printed (the first 10 per step) and kept
@@ -441,6 +500,9 @@ there; check the change before committing it.
 - Library parameters are not supported.
 - Records are checked against the snapshot only. Constraints, value set
   bindings and string formats are not checked.
+- One record is one transform. A record that holds many resources' worth
+  of data (a tree of boundaries) is mapped on one thread, and may need
+  `[maps] max_values`.
 - Each record file is read once per step that reads it; staged resources and
   Library results are written to disk, not held in memory. A view's rows
   are held in memory while it runs, as in `refresh`.

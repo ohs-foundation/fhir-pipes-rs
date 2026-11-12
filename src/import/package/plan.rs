@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use fml_model::StructureMap;
 
-use super::manifest::{self, Check, Manifest, Source, Step};
+use super::manifest::{self, Check, Manifest, RecordRules, Source, Step};
 use super::records::{Model, Models};
 use crate::error::usage;
 use crate::library::resolve::{Artifact, Catalog, HIERARCHY_URL, LOCATION_URL};
@@ -64,7 +64,14 @@ impl Package {
             }
         }
         let models = Models::load(&models_dir)?;
-        let maps = MapPackage::load(&[models_dir, maps_dir], &[])?;
+        let mut maps = MapPackage::load(&[models_dir, maps_dir], &[])?;
+        if let Some(n) = manifest.as_ref().and_then(|m| m.max_values) {
+            maps.set_max_values(n);
+        }
+        maps.set_values_hint(&format!(
+            "a record this large needs a higher limit: set max_values under [maps] in {}",
+            manifest::FILE
+        ));
         let views_dir = dir.join("views");
         let mut sources = Vec::new();
         if views_dir.is_dir() {
@@ -88,6 +95,13 @@ impl Package {
             models,
             catalog,
         })
+    }
+
+    /// How the record files are read: the manifest's `[records]`.
+    pub fn record_rules(&self) -> RecordRules {
+        self.manifest
+            .as_ref()
+            .map_or(RecordRules::default(), |m| m.records)
     }
 
     /// The SQLQuery Library with this name, URL or `url|version`.
