@@ -91,7 +91,7 @@ fn catchment_of(profile: &Profile) -> Option<String> {
     let url = profile.location.catchment_extension.as_deref()?;
     Some(format!(
         "json_extract_string(list_filter(json_extract(fhir_json, '$.extension[*]'), \
-         e -> json_extract_string(e, '$.url') = {})[1], '$.valueReference.reference') AS catchment_of",
+         lambda e: json_extract_string(e, '$.url') = {})[1], '$.valueReference.reference') AS catchment_of",
         sql_str(url)
     ))
 }
