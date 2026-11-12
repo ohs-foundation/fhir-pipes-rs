@@ -4,7 +4,9 @@
 
 fhir-pipes is a high performance rust library/service for pulling data out of and into FHIR servers.  fhir-pipes is available as a binary in linux, windows, osx with no external runtime dependencies. It builds a SQL-on-FHIR warehouse of Parquet tables from a FHIR
 server, downloads resources as NDJSON, turns the Location registry into
-GeoParquet, and loads resources back with version-checked writes. It works
+GeoParquet, and loads resources back with version-checked writes. It also
+turns records from other systems, such as DHIS2, into FHIR resources, with
+mappings that an implementation guide can publish. It works
 with HAPI FHIR, Medplum, Aidbox, the Google Cloud Healthcare API and other
 FHIR R4 servers.
 
@@ -61,6 +63,59 @@ Query the tables with anything that reads Parquet, such as DuckDB
 
 [docs/refresh.md](docs/refresh.md) covers the other steps, reading from
 files, partitioning and hooks.
+
+## Quickstart: importing from another system
+
+An import has three parts:
+
+1. A **connector** reads the source system and writes its records as NDJSON,
+   one file per record type. `fhir-pipes dhis2 extract` is one. Any program
+   in any language can be one.
+2. An **import package** is a folder that says how the records become FHIR
+   resources: a logical model of each record type and FHIR Mapping Language
+   maps, with ViewDefinitions and SQL where records have to be joined or
+   grouped. It holds no code, so an implementation guide can publish it.
+3. **`fhir-pipes import run`** runs the package over the records and writes
+   one NDJSON file per resource type, for `fhir-pipes load`.
+
+DHIS2 org units, indicators and values from the open Sierra Leone demo, with
+the example package [examples/import/icr-dhis2](examples/import/icr-dhis2):
+
+```sh
+export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-42-7-1
+export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
+
+# 1. The connector writes records to raw/.
+fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-code SLE --out raw
+fhir-pipes dhis2 extract measures  --instance sl-demo --indicator-group srxUNt2w5jn --out raw
+fhir-pipes dhis2 extract reports   --instance sl-demo --indicator-group srxUNt2w5jn \
+  --period 2025 --level 2 --level 3 --out raw
+
+# 2. Check the records against the package's logical models.
+fhir-pipes import check --package examples/import/icr-dhis2 --in raw
+
+# 3. Map them: fhir/Location.ndjson, Organization.ndjson, Measure.ndjson, MeasureReport.ndjson.
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
+
+# 4. Send them to a FHIR server.
+for t in Organization Location Measure MeasureReport; do
+  fhir-pipes load --server URL --in fhir/$t.ndjson
+done
+```
+
+The demo's address carries the DHIS2 version and changes with each release;
+https://play.dhis2.org lists the current ones.
+
+A package has parameters for the values that differ between deployments,
+such as the base URL of identifier systems. `--param NAME=VALUE` sets one
+for a run: `import run --param base=https://example.org`.
+
+| To read about | See |
+|---|---|
+| Packages, `import.toml`, parameters, joining records with views and SQL, tests | [docs/import.md](docs/import.md) |
+| Writing a connector, and running it as `fhir-pipes NAME` | [docs/connectors.md](docs/connectors.md) |
+| The DHIS2 connector and its options | [docs/dhis2.md](docs/dhis2.md) |
+| Writing and checking maps | [docs/maps.md](docs/maps.md) |
 
 ## Commands
 

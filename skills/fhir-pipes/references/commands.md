@@ -138,6 +138,7 @@ package commands do not.
 - `import check --package DIR [--in RAW]`: type-check an import package's maps, check its `import.toml` against what the package holds, and with `--in` check every record against its logical model (`file:line: message`). Exit 1 on findings, 2 on a bad package or manifest.
 - `import run --package DIR --in RAW --out OUT [--threads N] [--report FILE] [--overwrite] [--keep-work DIR]`: run the package's steps over RAW (one `<Type>.ndjson` per record type) and write one `<ResourceType>.ndjson` per type in OUT. OUT must be empty unless `--overwrite`. A failed data test exits 1 and writes nothing. Needs `duckdb` when the package has a library step.
 - `import test --package DIR [--case NAME] [--update]`: run each `tests/<case>/in/` and compare with `tests/<case>/expected/`. Exit 1 when a case fails. See docs/import.md.
+- `--param NAME=VALUE` (repeatable) on `import check`, `import run` and `import test` sets a parameter the package declares under `[parameters]` in `import.toml`, such as an id prefix or the base URL of identifier systems. An undeclared name is an error. A parameter with no default must be given. `import run --previous PREV --changed DIR --removed FILE` compares with an earlier run's output, to load only what changed.
 - `population --snapshot DIR --raster PATH_OR_URL (--level N | --type CODE) --year YYYY --out GROUPS.ndjson [--source worldpop] [--planning-denominator] [--estimate-date YYYY-MM-DD] [--cache-dir DIR] [--timeout 3600]`
 
 ## dhis2
