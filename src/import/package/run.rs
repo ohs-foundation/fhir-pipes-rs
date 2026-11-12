@@ -54,6 +54,9 @@ pub struct Options<'a> {
 #[derive(Debug, Default, Serialize)]
 pub struct Report {
     pub package: String,
+    /// The value of each parameter the run used.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, Value>,
     /// `ok`, `failed` (a data test failed) or `error`.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,6 +190,11 @@ impl TypeFiles {
 /// steps after the tests did not run. A step that cannot run is an error.
 pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> Result<()> {
     report.package = package.name.clone();
+    report.parameters = package
+        .values
+        .iter()
+        .map(|(n, v)| (n.clone(), v.json()))
+        .collect();
     let mut staged = TypeFiles::new(o.work.join("staged"))?;
     let mut output = TypeFiles::new(o.work.join("out"))?;
     let mut tables = None;
@@ -295,7 +303,7 @@ pub fn run(package: &Package, plan: &Plan, o: &Options, report: &mut Report) -> 
                 }
                 for q in queries {
                     crate::stop::check()?;
-                    let n = t.run_query(q, &package.catalog)?;
+                    let n = t.run_query(q, &package.catalog, &package.values)?;
                     r.tables.push(TableReport {
                         table: q.table(&[]),
                         from: format!("Library {}", q.name),
@@ -522,6 +530,8 @@ fn run_views<'v>(
     o: &Options,
 ) -> Result<Vec<(&'v View, fhir_pipes_sof::ViewResult)>> {
     let threads = o.threads;
+    // Each view with the parameters as constants, so its paths read them.
+    let owned: Vec<View> = views.iter().map(|v| package.with_parameters(v)).collect();
     let mut by_type: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, v) in views.iter().enumerate() {
         by_type.entry(v.resource.as_str()).or_default().push(i);
@@ -529,7 +539,7 @@ fn run_views<'v>(
     let mut results: Vec<Option<fhir_pipes_sof::ViewResult>> = views.iter().map(|_| None).collect();
     for (t, idx) in by_type {
         crate::stop::check()?;
-        let vs: Vec<&View> = idx.iter().map(|&i| views[i]).collect();
+        let vs: Vec<&View> = idx.iter().map(|&i| &owned[i]).collect();
         let path = staged.path(t);
         let out = if package.models.get(t).is_some() {
             record_view_rows(

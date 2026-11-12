@@ -6,8 +6,10 @@
 uses "https://icr.healthcampaigns.org/StructureDefinition/DIGITFacility" alias DIGITFacility as source
 uses "http://hl7.org/fhir/StructureDefinition/Location" alias Location as target
 
+let idPrefix = %idPrefix;
+
 group Facility(source src : DIGITFacility, target loc : Location) {
-  src.facilityId as f -> loc.id = append('dgt-', f) "id";
+  src.facilityId as f -> loc.id = append(idPrefix, f) "id";
   src.facilityId as f -> loc.identifier as i, i.system = 'https://icr.healthcampaigns.org/sid/digit-facility', i.value = f "identifier";
   src -> loc.status = 'active' "status";
   src.name as n -> loc.name = n "name";

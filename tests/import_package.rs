@@ -484,6 +484,7 @@ fn without_a_manifest_each_file_runs_through_the_map_that_reads_it() {
         fs::create_dir_all(pkg.join(f).parent().unwrap()).unwrap();
         copy_file(p.join(f), pkg.join(f)).unwrap();
     }
+    fixed_prefix(&pkg);
     let input = tmp.path().join("in");
     fs::create_dir(&input).unwrap();
     copy_file(
@@ -521,6 +522,17 @@ fn without_a_manifest_each_file_runs_through_the_map_that_reads_it() {
     );
 }
 
+/// The facility map of a package built from the example's files reads the
+/// id prefix as the parameter %idPrefix, which only the example's manifest
+/// declares; give it the default as a literal instead.
+fn fixed_prefix(pkg: &Path) {
+    edit(
+        &pkg.join("maps/DIGITFacilityToICR.map"),
+        "let idPrefix = %idPrefix;",
+        "let idPrefix = 'dgt-';",
+    );
+}
+
 /// A package of the example's facility map and model alone, with
 /// `manifest` as its import.toml, and an input folder with its records.
 fn facility_package(manifest: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -535,6 +547,7 @@ fn facility_package(manifest: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         fs::create_dir_all(pkg.join(f).parent().unwrap()).unwrap();
         copy_file(p.join(f), pkg.join(f)).unwrap();
     }
+    fixed_prefix(&pkg);
     fs::write(pkg.join("import.toml"), manifest).unwrap();
     let input = tmp.path().join("in");
     fs::create_dir(&input).unwrap();
@@ -686,6 +699,7 @@ fn out_must_be_empty_unless_overwrite_and_overwrite_removes_only_its_own_files()
         fs::create_dir_all(pkg.join(f).parent().unwrap()).unwrap();
         copy_file(p.join(f), pkg.join(f)).unwrap();
     }
+    fixed_prefix(&pkg);
     let input = tmp.path().join("in");
     fs::create_dir(&input).unwrap();
     copy_file(

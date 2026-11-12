@@ -53,7 +53,12 @@ pub fn run(command: &MapCommand) -> anyhow::Result<()> {
 
 fn run_map(args: &RunArgs) -> Result<()> {
     check_out(&args.out)?;
-    let package = MapPackage::load(&args.maps, &BUILT_IN)?;
+    let mut package = MapPackage::load(&args.maps, &BUILT_IN)?;
+    let (values, manifests) = crate::import::package::map_parameter_defaults(&args.maps)?;
+    package.set_parameters(&values);
+    for m in &manifests {
+        eprintln!("parameters: the defaults in {}", m.display());
+    }
     let map = match &args.map {
         Some(name) => package.map_named(name)?,
         None => package.only_map()?,

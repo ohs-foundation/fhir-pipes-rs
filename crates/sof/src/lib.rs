@@ -60,6 +60,7 @@ mod view_definition;
 
 pub use column::{ColumnInfo, ColumnType};
 pub use eval::{CompiledView, calls_any, execute, execute_blocking, execute_parallel};
+pub use lexer::percent_variables;
 pub use runner::ViewResult;
 #[cfg(feature = "postgres")]
 pub use runner::{ViewRunner, run_view};

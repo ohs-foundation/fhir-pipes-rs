@@ -16,20 +16,28 @@
 uses "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Indicator" alias DHIS2Indicator as source
 uses "http://hl7.org/fhir/StructureDefinition/Measure" alias Measure as target
 
+
+// The systems, profiles and extensions it writes are parameters of the
+// package (import.toml). Each is a constant here, so `append` and plain
+// copies can use it; FHIRPath reads it as %name.
+let base = %base;
+let indicatorExtension = %indicatorExtension;
+let projectTagSystem = %projectTagSystem;
+
 group Indicator(source src : DHIS2Indicator, target m : Measure) {
   src.instance as i, src.key as k -> m.id = append(i, '-', k) "id";
-  src.instance as i -> m.meta as meta, meta.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs', tag.code = i "tag";
+  src.instance as i -> m.meta as meta, meta.tag as tag, tag.system = projectTagSystem, tag.code = i "tag";
   // How DHIS2 computes the value.
-  src -> m.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/dhis2-indicator' then {
+  src -> m.extension as ext, ext.url = indicatorExtension then {
     src.factor as v -> ext.extension as sub, sub.url = 'factor', sub.value = v "factor";
     src.typeName as v -> ext.extension as sub, sub.url = 'indicatorType', sub.value = v "indicatorType";
     src.annualized as v -> ext.extension as sub, sub.url = 'annualized', sub.value = v "annualized";
     src.decimals as v -> ext.extension as sub, sub.url = 'decimals', sub.value = v "decimals";
   } "computation";
-  src.instance as i, src.key as k -> m.url = append('https://icr.healthcampaigns.org/Measure/', i, '-', k) "url";
+  src.instance as i, src.key as k -> m.url = append(base, '/Measure/', i, '-', k) "url";
   // The identifier system is named after what the item is: indicator, data-element or data-set.
-  src.uid as uid -> m.identifier as ident, ident.use = 'official', ident.system = evaluate(src, 'https://icr.healthcampaigns.org/identifiers/dhis2/' + instance + '/' + iif(kind = 'reporting-rate', 'data-set', kind)), ident.value = uid "uid";
-  src.code as code -> m.identifier as ident, ident.system = evaluate(src, 'https://icr.healthcampaigns.org/identifiers/dhis2/' + instance + '/' + iif(kind = 'reporting-rate', 'data-set', kind) + '-code'), ident.value = code "code";
+  src.uid as uid -> m.identifier as ident, ident.use = 'official', ident.system = evaluate(src, %base + '/identifiers/dhis2/' + instance + '/' + iif(kind = 'reporting-rate', 'data-set', kind)), ident.value = uid "uid";
+  src.code as code -> m.identifier as ident, ident.system = evaluate(src, %base + '/identifiers/dhis2/' + instance + '/' + iif(kind = 'reporting-rate', 'data-set', kind) + '-code'), ident.value = code "code";
   src.name as v -> m.title = v "title";
   src -> m.status = 'active' "status";
   src.date as v -> m.date = v "date";
@@ -63,11 +71,11 @@ group Indicator(source src : DHIS2Indicator, target m : Measure) {
 // data element group in group sets gives one topic per set.
 group Topics(source src : DHIS2Indicator, source g, target m : Measure) {
   g.set as s where %src.kind = 'data-element' -> m.topic as t then {
-    g.uid as uid, g.name as n, src.instance as i -> t.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/data-element-group-set/', s), c.code = uid, c.display = n "setCoding";
+    g.uid as uid, g.name as n, src.instance as i -> t.coding as c, c.system = append(base, '/CodeSystem/dhis2/', i, '/data-element-group-set/', s), c.code = uid, c.display = n "setCoding";
     g.name as n -> t.text = n "setText";
   } "inSet";
   g where %src.kind != 'data-element' or set.empty() -> m.topic as t then {
-    g.uid as uid, g.name as n -> t.coding as c, c.system = evaluate(src, 'https://icr.healthcampaigns.org/CodeSystem/dhis2/' + instance + '/' + iif(kind = 'data-element', 'data-element-group', 'indicator-group')), c.code = uid, c.display = n "groupCoding";
+    g.uid as uid, g.name as n -> t.coding as c, c.system = evaluate(src, %base + '/CodeSystem/dhis2/' + instance + '/' + iif(kind = 'data-element', 'data-element-group', 'indicator-group')), c.code = uid, c.display = n "groupCoding";
     g.name as n -> t.text = n "groupText";
   } "inGroup";
 }

@@ -151,6 +151,19 @@ fn ident_end(bytes: &[u8], from: usize) -> usize {
     i
 }
 
+/// The names of the `%` variables in `path`, in order, without the `%` or
+/// backticks (`%resource.id + %off` gives `resource`, `off`). A `%` inside a
+/// string literal, a backtick-quoted name or a comment is not one.
+pub fn percent_variables(path: &str) -> Vec<String> {
+    tokens(path)
+        .into_iter()
+        .filter(|t| t.kind == Kind::Variable)
+        .map(|t| &path[t.span])
+        .filter(|text| text.starts_with('%'))
+        .map(|text| variable_name(text).to_string())
+        .collect()
+}
+
 /// The name of a [`Kind::Variable`] token's text, without its sigil or
 /// backticks.
 pub(crate) fn variable_name(text: &str) -> &str {

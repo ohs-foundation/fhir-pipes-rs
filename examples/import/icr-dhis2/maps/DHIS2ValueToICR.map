@@ -14,16 +14,26 @@
 uses "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value" alias DHIS2Value as source
 uses "http://hl7.org/fhir/StructureDefinition/MeasureReport" alias MeasureReport as target
 
+
+// The systems, profiles and extensions it writes are parameters of the
+// package (import.toml). Each is a constant here, so `append` and plain
+// copies can use it; FHIRPath reads it as %name.
+let base = %base;
+let campaignExtension = %campaignExtension;
+let periodExtension = %periodExtension;
+let projectTagSystem = %projectTagSystem;
+let sourceExtension = %sourceExtension;
+
 group Value(source src : DHIS2Value, target r : MeasureReport) {
   src.id as id -> r.id = id "id";
-  src.instance as i -> r.meta as meta, meta.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs', tag.code = i "tag";
+  src.instance as i -> r.meta as meta, meta.tag as tag, tag.system = projectTagSystem, tag.code = i "tag";
   // The period extension is first: fhir-pipes reads the period from it.
-  src.period as p -> r.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/dhis2-period', ext.value = p "period";
-  src.campaign as c -> r.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/campaign', ext.value = create('Reference') as ref, ref.reference = c "campaign";
-  src.source as s -> r.extension as ext, ext.url = 'https://icr.healthcampaigns.org/StructureDefinition/report-source', ext.value = create('CodeableConcept') as cc, cc.coding = translate(s, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-value-source-to-report-source', 'Coding') "source";
+  src.period as p -> r.extension as ext, ext.url = periodExtension, ext.value = p "period";
+  src.campaign as c -> r.extension as ext, ext.url = campaignExtension, ext.value = create('Reference') as ref, ref.reference = c "campaign";
+  src.source as s -> r.extension as ext, ext.url = sourceExtension, ext.value = create('CodeableConcept') as cc, cc.coding = translate(s, 'https://icr.healthcampaigns.org/ConceptMap/dhis2-value-source-to-report-source', 'Coding') "source";
   src -> r.status = 'complete' "status";
   src -> r.type = 'summary' "type";
-  src.instance as i, src.indicatorKey as k -> r.measure = append('https://icr.healthcampaigns.org/Measure/', i, '-', k) "measure";
+  src.instance as i, src.indicatorKey as k -> r.measure = append(base, '/Measure/', i, '-', k) "measure";
   src -> r.subject as subject then {
     src.locationId as l -> subject.reference = append('Location/', l) "location";
     src.locationName as n -> subject.display = n "locationName";
@@ -51,12 +61,12 @@ group Figures(source f, target g) {
 // One breakdown: the dimension as the stratifier's code, each option as a stratum.
 group Stratifier(source src : DHIS2Value, source st, target stratifier) {
   st -> stratifier.code as cc then {
-    st.dimension as d, st.name as n, src.instance as i -> cc.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/dimension'), c.code = d, c.display = n "dimensionCoding";
+    st.dimension as d, st.name as n, src.instance as i -> cc.coding as c, c.system = append(base, '/CodeSystem/dhis2/', i, '/dimension'), c.code = d, c.display = n "dimensionCoding";
     st.name as n -> cc.text = n "dimensionText";
   } "dimension";
   st.stratum as s, st.dimension as d, src.instance as i -> stratifier.stratum as stratum then {
     s -> stratum.value as cc then {
-      s.option as o, s.name as n -> cc.coding as c, c.system = append('https://icr.healthcampaigns.org/CodeSystem/dhis2/', i, '/dimension/', d), c.code = o, c.display = n "optionCoding";
+      s.option as o, s.name as n -> cc.coding as c, c.system = append(base, '/CodeSystem/dhis2/', i, '/dimension/', d), c.code = o, c.display = n "optionCoding";
       s.name as n -> cc.text = n "optionText";
     } "option";
     s -> stratum then Figures(s, stratum) "stratumFigures";

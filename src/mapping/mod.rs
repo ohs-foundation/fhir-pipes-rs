@@ -12,11 +12,13 @@
 
 mod fhirpath;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use fml_check::{CoreDefinitions, PackageDefinitions, Release};
 use fml_engine::{ConceptMapSet, Engine, ErrorKind, Limits, MapSet};
 use fml_model::StructureMap;
+use fml_syntax::ast::AstNode;
 use fml_syntax::{Diagnostic, Severity};
 use serde_json::Value;
 
@@ -35,6 +37,10 @@ struct Loaded {
     path: PathBuf,
     map: StructureMap,
 }
+
+/// A value every expression of the maps can read as `%name`: the name, the
+/// JSON value and its FHIR type (`string`, `integer`, `decimal`, `boolean`).
+pub type MapParameter = (String, Value, &'static str);
 
 /// What a map produced from one record.
 #[derive(Debug, Default)]
@@ -202,6 +208,81 @@ impl MapPackage {
         self.limits.max_values = n;
     }
 
+    /// Values every FHIRPath expression of the maps can read as `%name`:
+    /// an import package's parameters, as (name, JSON value, FHIR type).
+    pub fn set_parameters(&mut self, parameters: &[MapParameter]) {
+        self.expressions.set_parameters(
+            parameters
+                .iter()
+                .map(|(name, json, t)| {
+                    (
+                        name.clone(),
+                        fml_engine::Item {
+                            json: json.clone(),
+                            type_name: Some((*t).to_string()),
+                        },
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    /// The `%name` variables each FML map reads that the map does not
+    /// define itself (as a group parameter, a rule variable or a `let`
+    /// constant), with the file; in `let name = %name;` the `%name` is one.
+    /// The names FHIRPath defines (`%resource`, `%ucum` and the like) are
+    /// left out.
+    pub fn external_variables(&self) -> Vec<(PathBuf, BTreeSet<String>)> {
+        let mut out = Vec::new();
+        for (path, text) in &self.sources {
+            let tree = fml_syntax::parse(text).tree();
+            let root = tree.syntax().clone();
+            let mut defined = BTreeSet::new();
+            let mut used = BTreeSet::new();
+            let mut own_constants = BTreeSet::new();
+            for node in root.descendants() {
+                use fml_syntax::ast::{Alias, ConstantDeclaration, Parameter};
+                if let Some(c) = ConstantDeclaration::cast(node.clone()) {
+                    defined.extend(c.name());
+                } else if let Some(p) = Parameter::cast(node.clone()) {
+                    defined.extend(p.name());
+                } else if let Some(a) = Alias::cast(node.clone()) {
+                    defined.extend(a.name());
+                } else if node.kind() == fml_syntax::SyntaxKind::ExternalConstant {
+                    let name = node
+                        .descendants_with_tokens()
+                        .filter_map(|e| e.into_token())
+                        .find(|t| {
+                            matches!(
+                                t.kind(),
+                                fml_syntax::SyntaxKind::Ident
+                                    | fml_syntax::SyntaxKind::DelimitedIdent
+                            )
+                        })
+                        .map(|t| fml_syntax::ast::name_text(&t));
+                    let Some(name) = name else { continue };
+                    // `let base = %base;`: in its own constant's value, the
+                    // name is the one from outside the map.
+                    let own = node
+                        .ancestors()
+                        .find_map(ConstantDeclaration::cast)
+                        .is_some_and(|c| c.name().as_deref() == Some(name.as_str()));
+                    if own {
+                        own_constants.insert(name.clone());
+                    }
+                    used.insert(name);
+                }
+            }
+            let external: BTreeSet<String> = used
+                .into_iter()
+                .filter(|n| own_constants.contains(n) || !defined.contains(n))
+                .filter(|n| !fhirpath_defines(n))
+                .collect();
+            out.push((path.clone(), external));
+        }
+        out
+    }
+
     /// A hint added to the message of a transform that ran past the limit
     /// on values: where that limit is set.
     pub fn set_values_hint(&mut self, hint: &str) {
@@ -358,6 +439,24 @@ impl MapPackage {
     pub fn map_count(&self) -> usize {
         self.maps.len()
     }
+}
+
+/// Whether FHIRPath, or the FHIR terminology conventions it follows, define
+/// the environment variable `%name`.
+pub fn fhirpath_defines(name: &str) -> bool {
+    matches!(
+        name,
+        "context"
+            | "resource"
+            | "rootResource"
+            | "ucum"
+            | "sct"
+            | "loinc"
+            | "factory"
+            | "terminologies"
+            | "server"
+    ) || name.starts_with("vs-")
+        || name.starts_with("ext-")
 }
 
 /// The URL of the type the map's first group reads.

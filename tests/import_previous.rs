@@ -485,10 +485,13 @@ fn the_package_names_elements_that_are_not_compared() {
     let mr = read_lines(&out.join("MeasureReport.ndjson"));
     assert!(mr.iter().all(|r| r["date"] == "2026-10-13T02:07:00.052Z"));
 
-    // The same package with no [compare]: every report changed.
+    // The same package with no [compare]: every report changed. The
+    // parameters stay: the maps read them.
     let bare = tmp.path().join("icr-dhis2");
     copy_dir(&pkg, &bare);
-    fs::write(bare.join("import.toml"), "name = \"icr-dhis2\"\n").unwrap();
+    let manifest = fs::read_to_string(bare.join("import.toml")).unwrap();
+    let (without_compare, _) = manifest.split_once("[compare]").unwrap();
+    fs::write(bare.join("import.toml"), without_compare).unwrap();
     let printed = ok(run(
         &bare,
         &second,
@@ -502,7 +505,7 @@ fn the_package_names_elements_that_are_not_compared() {
     // A bad path is refused when the manifest is read.
     fs::write(
         bare.join("import.toml"),
-        "name = \"icr-dhis2\"\n[compare]\nignore = [\"MeasureReport.group[0].measureScore\"]\n",
+        format!("{without_compare}[compare]\nignore = [\"MeasureReport.group[0].measureScore\"]\n"),
     )
     .unwrap();
     let o = run(&bare, &second, &tmp.path().join("out3"), &[]);
@@ -512,7 +515,8 @@ fn the_package_names_elements_that_are_not_compared() {
 
 #[test]
 fn a_manifest_with_no_steps_runs_each_file_through_its_map() {
-    // examples/import/icr-dhis2/import.toml has a name and [compare] only.
+    // examples/import/icr-dhis2/import.toml has a name, parameters and
+    // [compare], and no steps.
     let tmp = tempfile::tempdir().unwrap();
     let printed = ok(run(
         &icr_dhis2(),

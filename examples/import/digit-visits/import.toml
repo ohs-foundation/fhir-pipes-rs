@@ -1,6 +1,14 @@
 name = "digit-visits"
 title = "DIGIT household visits to the Integrated Campaign Registry (synthetic example)"
 
+# Settings a run can change with --param NAME=VALUE. The maps read them as
+# %idPrefix and %stagingTag, the views as %stagingTag, and the DigitVisit
+# Library, which declares visitGapSeconds, as :visitGapSeconds.
+[parameters]
+idPrefix = { default = "dgt-", description = "Put before every id the output resources have and refer to" }
+stagingTag = { default = "digit-staging", description = "The meta.tag code of the staged resources the views read" }
+visitGapSeconds = { default = 7200, description = "A visit ends when more than this many seconds pass between two tasks" }
+
 # Facilities map on their own: one record, one Location, to the output.
 [[step]]
 map = "DIGITFacilityToICR"

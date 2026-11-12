@@ -96,6 +96,57 @@ pub fn has_several_statements(sql: &str) -> bool {
         .any(|i| text.as_bytes()[i] == b';')
 }
 
+/// The `:name` parameter placeholders in the code of `sql` (not in a string,
+/// quoted identifier or comment), as SQL on FHIR's SQLQuery profile writes
+/// them: the byte range of each, colon included, and the name. `::` (a
+/// cast) is not one.
+pub fn placeholders(sql: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let bytes = sql.as_bytes();
+    let code: std::collections::HashSet<usize> = code_bytes(sql).into_iter().collect();
+    let name_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let starts = bytes[i] == b':'
+            && code.contains(&i)
+            && (i == 0 || bytes[i - 1] != b':')
+            && bytes
+                .get(i + 1)
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_');
+        if !starts {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < bytes.len() && name_byte(bytes[end]) {
+            end += 1;
+        }
+        out.push((i..end, sql[i + 1..end].to_string()));
+        i = end;
+    }
+    out
+}
+
+/// `sql` with each `:name` placeholder whose name is in `names` replaced by
+/// `to(name)`. Other placeholders, and everything else, are left as they are.
+pub fn bind_placeholders(
+    sql: &str,
+    names: &std::collections::BTreeSet<String>,
+    to: impl Fn(&str) -> String,
+) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut last = 0;
+    for (range, name) in placeholders(sql) {
+        if names.contains(&name) {
+            out.push_str(&sql[last..range.start]);
+            out.push_str(&to(&name));
+            last = range.end;
+        }
+    }
+    out.push_str(&sql[last..]);
+    out
+}
+
 /// The byte index of the last byte of `sql` that is SQL code: not
 /// whitespace, not in a comment, and not inside a string or quoted
 /// identifier (a closing quote counts as code).
@@ -387,6 +438,20 @@ mod tests {
                 assert_eq!(out.trim(), "1", "{text:?} composed to:\n{sql}");
             }
         }
+    }
+
+    #[test]
+    fn placeholders_are_found_in_code_only() {
+        let sql = "SELECT a::int, ':gap' AS \":gap\" -- :gap\nFROM t WHERE g > :gap AND h = :other /* :gap */ AND x = :gap2";
+        let names: Vec<String> = placeholders(sql).into_iter().map(|(_, n)| n).collect();
+        assert_eq!(names, ["gap", "other", "gap2"]);
+        let bound = bind_placeholders(sql, &["gap".to_string()].into(), |n| {
+            format!("getvariable('{n}')")
+        });
+        assert_eq!(
+            bound,
+            "SELECT a::int, ':gap' AS \":gap\" -- :gap\nFROM t WHERE g > getvariable('gap') AND h = :other /* :gap */ AND x = :gap2"
+        );
     }
 
     #[test]

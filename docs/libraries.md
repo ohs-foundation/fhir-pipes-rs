@@ -50,7 +50,7 @@ resource = "https://healthcampaigns.org/fhir/analytics/Library/LocationHierarchy
 `SQLQuery`) are required. A SQLQuery's table is named from `name`. Each
 `[[depends_on]]` has a `label` (matching `[a-z_][a-z0-9_]*`) and a `resource`,
 a canonical URL (add `|version` to pick one). `version`, `title` and
-`description` are also accepted; SQLQueries also accept `[[parameter]]` metadata (execution does not yet support parameters). Any other key is an error.
+`description` are also accepted; SQLQueries also accept `[[parameter]]` metadata. `import run` gives such a parameter the value of the import package's parameter of the same name, written `:NAME` in the SQL (see [import.md](import.md#in-sqlquery-libraries)); `refresh` and `serve` do not yet bind parameters. Any other key is an error.
 
 SQLQueries run in DuckDB; SQLViews run inline there and can also become PostgreSQL views. So write standard
 SQL that both accept, or add a `<name>.duckdb.sql` or `<name>.postgresql.sql`

@@ -20,6 +20,7 @@
 
 mod compare;
 mod manifest;
+mod parameters;
 mod plan;
 mod previous;
 mod records;
@@ -33,6 +34,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 
 use crate::error::{Findings, usage};
+use parameters::Given;
 use plan::{Package, Plan};
 use previous::{Ignores, Previous};
 use run::{Options, Report};
@@ -42,6 +44,10 @@ const PROBLEMS_PER_FILE: usize = 20;
 
 /// The ignored members named per file by `import check --in`.
 const IGNORED_PER_FILE: usize = 20;
+
+/// A test case's parameter values: `tests/<case>/parameters.toml`, one
+/// `NAME = value` per line.
+const CASE_PARAMETERS: &str = "parameters.toml";
 
 /// The file in `--out` that lists what the last run wrote there, so a run
 /// with `--overwrite` removes only its own files.
@@ -55,6 +61,9 @@ pub struct CheckArgs {
     /// Also check every record of every file in this folder against its logical model
     #[arg(long = "in", value_name = "DIR")]
     pub input: Option<PathBuf>,
+    /// Set a parameter of the package, overriding its default: NAME=VALUE (repeatable)
+    #[arg(long = "param", value_name = "NAME=VALUE", value_parser = parameters::parse_assignment)]
+    pub params: Vec<(String, String)>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -89,6 +98,9 @@ pub struct RunArgs {
     /// With --previous: write here, sorted, one ResourceType/id per line for every resource of the previous run that this run did not write
     #[arg(long, value_name = "FILE", requires = "previous")]
     pub removed: Option<PathBuf>,
+    /// Set a parameter of the package, overriding its default: NAME=VALUE (repeatable)
+    #[arg(long = "param", value_name = "NAME=VALUE", value_parser = parameters::parse_assignment)]
+    pub params: Vec<(String, String)>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -105,6 +117,56 @@ pub struct TestArgs {
     /// Threads that run the maps and views (default: the number of CPUs)
     #[arg(long)]
     pub threads: Option<usize>,
+    /// Set a parameter of the package for every case, overriding its default: NAME=VALUE (repeatable). A case's parameters.toml overrides it
+    #[arg(long = "param", value_name = "NAME=VALUE", value_parser = parameters::parse_assignment)]
+    pub params: Vec<(String, String)>,
+}
+
+/// The parameter defaults of the package each folder of maps belongs to,
+/// for the commands that run a package's maps outside `import` (`map run`,
+/// `dhis2 --maps`): the `[parameters]` of `DIR/import.toml` or, for a
+/// package's `maps/` folder, `DIR/../import.toml`. Each value is (name, JSON,
+/// FHIR type) for `MapPackage::set_parameters`, and the manifests read are
+/// returned too. A parameter with no default is an error: those commands
+/// have no `--param`.
+pub fn map_parameter_defaults(
+    dirs: &[PathBuf],
+) -> crate::error::Result<(Vec<crate::mapping::MapParameter>, Vec<PathBuf>)> {
+    let mut values: BTreeMap<String, (serde_json::Value, &'static str)> = BTreeMap::new();
+    let mut read = Vec::new();
+    for dir in dirs {
+        let found = [
+            dir.join(manifest::FILE),
+            dir.join("..").join(manifest::FILE),
+        ]
+        .into_iter()
+        .find(|p| p.is_file());
+        let Some(path) = found else { continue };
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| crate::error::PipesError::io(&path, e))?;
+        let m = manifest::parse(&text, &path.display().to_string())?;
+        for p in &m.parameters {
+            let Some(v) = &p.default else {
+                return Err(crate::error::PipesError::Usage(format!(
+                    "{}: parameter {} has no default, and these maps are run without \
+                     `import run`, which is where a value is given (--param {}=VALUE)",
+                    path.display(),
+                    p.name,
+                    p.name
+                )));
+            };
+            values
+                .entry(p.name.clone())
+                .or_insert((v.json(), v.kind().name()));
+        }
+        if !m.parameters.is_empty() {
+            read.push(path);
+        }
+    }
+    Ok((
+        values.into_iter().map(|(n, (v, t))| (n, v, t)).collect(),
+        read,
+    ))
 }
 
 fn threads(n: Option<usize>) -> usize {
@@ -136,10 +198,14 @@ fn check_files(plan: &Plan, files: &BTreeMap<String, PathBuf>) -> Result<()> {
 }
 
 pub fn check(args: &CheckArgs) -> Result<()> {
-    let package = Package::load(&args.package)?;
+    let mut package = Package::load(&args.package)?;
+    package.set_values(&[Given::Text(&args.params)], false)?;
     let (mut errors, mut warnings) = package.maps.check();
     errors.extend(package.record_view_problems());
     warnings.extend(package.record_view_warnings());
+    let (e, w) = package.parameter_findings();
+    errors.extend(e);
+    warnings.extend(w);
     for line in &warnings {
         println!("warning: {line}");
     }
@@ -156,6 +222,18 @@ pub fn check(args: &CheckArgs) -> Result<()> {
              specification: {}",
             record_views.join(", ")
         );
+    }
+    if !package.parameters.is_empty() {
+        println!("parameters:");
+        for p in &package.parameters {
+            match package.values.get(&p.name) {
+                Some(v) => println!("  {} = {}", p.name, v.json()),
+                None => println!(
+                    "  {} has no value; a run must give --param {}=VALUE",
+                    p.name, p.name
+                ),
+            }
+        }
     }
     println!(
         "{}: {} maps, {} logical models: {} errors, {} warnings",
@@ -328,7 +406,8 @@ fn parent(path: &Path) -> PathBuf {
 }
 
 pub fn run_command(args: &RunArgs) -> Result<()> {
-    let package = Package::load(&args.package)?;
+    let mut package = Package::load(&args.package)?;
+    package.set_values(&[Given::Text(&args.params)], true)?;
     let files = records::scan(&args.input)?;
     let plan = Plan::new(&package, Some(&files))?;
     check_files(&plan, &files)?;
@@ -582,7 +661,7 @@ fn publish<'a>(
 }
 
 pub fn test_command(args: &TestArgs) -> Result<()> {
-    let package = Package::load(&args.package)?;
+    let mut package = Package::load(&args.package)?;
     let tests = package.dir.join("tests");
     let mut cases: Vec<(String, PathBuf)> = if tests.is_dir() {
         crate::fs::sorted_entries(&tests)
@@ -612,8 +691,23 @@ pub fn test_command(args: &TestArgs) -> Result<()> {
     }
     let mut failed = 0;
     for (name, dir) in &cases {
+        let case_file = dir.join(CASE_PARAMETERS);
+        let case_values = if case_file.is_file() {
+            let text = std::fs::read_to_string(&case_file)
+                .with_context(|| format!("reading {}", case_file.display()))?;
+            toml::from_str::<toml::Table>(&text)
+                .map_err(|e| usage(anyhow!("{}: {e}", case_file.display())))?
+        } else {
+            toml::Table::new()
+        };
+        let shown = case_file.display().to_string();
+        package.set_values(
+            &[Given::Text(&args.params), Given::Toml(&case_values, &shown)],
+            true,
+        )?;
+        let package = &package;
         let files = records::scan(&dir.join("in"))?;
-        let plan = Plan::new(&package, Some(&files))?;
+        let plan = Plan::new(package, Some(&files))?;
         check_files(&plan, &files)?;
         require_duckdb(&plan)?;
         let work = tempfile::tempdir().context("creating a work folder")?;
@@ -626,7 +720,7 @@ pub fn test_command(args: &TestArgs) -> Result<()> {
             require_ids: false,
         };
         let mut report = Report::default();
-        let result = run::run(&package, &plan, &options, &mut report);
+        let result = run::run(package, &plan, &options, &mut report);
         let out = work.path().join("out");
         let expected = dir.join("expected");
         let problems: Vec<String> = match result {

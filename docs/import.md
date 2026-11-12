@@ -126,6 +126,7 @@ sql = "SELECT id FROM stg_task EXCEPT SELECT u.t.crid FROM digit_visit, unnest(t
 | `[maps]` | The limit on the values a map may create from one record. Optional |
 | `[views]` | Whether a view may read a record file directly. Optional |
 | `[compare]` | What `import run --previous` does not compare. Optional |
+| `[parameters]` | Settings a run can change, with their defaults. Optional. See [Parameters](#parameters) |
 
 Any other key, here or in a step, test, `[records]`, `[maps]`, `[views]` or `[compare]`, is an error.
 
@@ -261,6 +262,157 @@ records = "allow"
 | Key | Meaning |
 |---|---|
 | `records` | `error` (the default): a view whose `resource` is a record type is refused, naming the view and this setting. `allow`: such a view reads the record file of its type (see [Record views](#record-views)) |
+
+## Parameters
+
+A package can take settings that would otherwise be written into its maps,
+views and SQL: an id prefix, a system URL, a time window. They are declared
+under `[parameters]` with their defaults, and a run can change them with
+`--param NAME=VALUE`.
+
+```toml
+[parameters]
+idPrefix = "dgt-"
+visitGapSeconds = { default = 7200, description = "A visit ends when more than this many seconds pass between two tasks" }
+asOf = { type = "string", description = "When the records were extracted" }
+```
+
+Each key is a parameter. Its value is either the default, or a table with:
+
+| Key | Meaning |
+|---|---|
+| `default` | The default value. Without it, every run must give a value |
+| `type` | `string`, `integer`, `decimal` or `boolean`. Needed without `default`; otherwise taken from it. An integer default of a `decimal` parameter is read as a decimal |
+| `description` | One line saying what the parameter is for |
+
+A name is letters, digits and `_`, and does not start with a digit. The
+names FHIRPath and the view engine already use (`context`, `resource`,
+`rootResource`, `ucum`, `sct`, `loinc`, `factory`, `terminologies`,
+`server`, `recordLine`, `rowIndex`) are refused. A value is a string, an
+integer, a decimal or a boolean; dates and times are strings.
+
+### Giving values
+
+`import check`, `import run` and `import test` take `--param NAME=VALUE`,
+repeatable. The value is read as the parameter's type (`--param
+visitGapSeconds=3600`, `--param strict=true`). A name the package does not
+declare, a value that is not of the type, or one name given twice is an
+error (exit 2). A parameter with no default and no `--param` stops `import
+run` and `import test`; `import check` lists it as having no value.
+
+A test case of `import test` can set values in `tests/<case>/parameters.toml`,
+one `NAME = value` per line, typed as in TOML:
+
+```toml
+visitGapSeconds = 86400
+```
+
+The values a case runs with are the defaults, then `--param`, then the
+case's file: `--param` applies to every case, and a case's file wins over
+it, so a case keeps the values its `expected/` was made with.
+
+The run report has the value of every parameter under `parameters`:
+
+```json
+"parameters": {"idPrefix": "dgt-", "stagingTag": "digit-staging", "visitGapSeconds": 7200}
+```
+
+### In maps
+
+A map reads a parameter as the FHIRPath environment variable `%NAME`, in
+any expression it evaluates: `where`, `check`, `log`, `evaluate(...)` and a
+`let` constant. A transform such as `append` or a plain copy takes a
+variable, not an expression, so give the parameter a `let` constant of the
+same name first:
+
+```
+let idPrefix = %idPrefix;
+let stagingTag = %stagingTag;
+
+group StageTask(source src : DIGITTask, target tk : Task) {
+  src -> tk.meta as m, m.tag as tag, tag.code = stagingTag "tag";
+  src.roundId as r -> tk.basedOn as ref, ref.reference = append('CarePlan/', idPrefix, r) "round";
+}
+```
+
+In an expression the parameter is read directly:
+
+```
+  src -> tk.id = evaluate(src, visitKey.replace('stg-', %idPrefix + 'visit-')) "id";
+```
+
+A variable or constant of the map with the same name hides the parameter,
+except in its own `let` (`let idPrefix = %idPrefix;` reads the parameter).
+A `%NAME` that is neither stops the transform with `Unknown variable`.
+ConceptMaps cannot read parameters.
+
+`map run` and `dhis2 --maps` run a package's maps outside `import run`:
+they give the maps the defaults in `import.toml` of the folder given with
+`--maps`, or of the folder above it (the package of a `maps/` folder), and
+have no `--param`. A parameter with no default is an error there.
+
+### In views
+
+Every view the run runs, over staged resources or a record view, gets each
+parameter as a ViewDefinition constant, so its paths read it as `%NAME`, as
+they read the view's own `constant` values:
+
+```json
+"where": [{"path": "meta.tag.where(code = %stagingTag).exists()"}]
+```
+
+A view may not declare a constant with a parameter's name (exit 2 when the
+package is loaded).
+
+### In SQLQuery Libraries
+
+A Library declares the parameters it reads under `[[parameter]]` in its
+`.toml`, as [libraries build](libraries.md#writing-a-library) reads them,
+and writes each as `:NAME` in its SQL, as the SQL on FHIR SQLQuery profile
+does:
+
+```toml
+[[parameter]]
+name = "visitGapSeconds"
+type = "integer"
+```
+
+```sql
+SELECT ... CASE WHEN gap IS NULL OR gap > :visitGapSeconds THEN 1 ELSE 0 END ...
+```
+
+Each parameter a Library declares must be a parameter of the package with
+the same name, and its `type` one the package's value can be cast to; both
+are checked when the package is loaded (exit 2). The value is not written
+into the SQL: each `:NAME` becomes `getvariable('NAME')`, and the script
+sets that variable with `SET VARIABLE NAME = CAST(getenv('FHIR_PIPES_PARAM_NAME') AS TYPE)`,
+the value passed to duckdb in its environment. This needs duckdb 1.1 or
+later.
+
+| Library `type` | duckdb type | Package parameter |
+|---|---|---|
+| `string`, `code`, `id`, `uri`, `url`, `canonical`, `markdown`, `oid`, `uuid` | `VARCHAR` | string |
+| `date`, `dateTime`, `instant`, `time` | `DATE`, `TIMESTAMPTZ`, `TIME` | string |
+| `integer`, `positiveInt`, `unsignedInt`, `integer64` | `BIGINT` | integer |
+| `decimal` | `DOUBLE` | decimal or integer |
+| `boolean` | `BOOLEAN` | boolean |
+
+A `:NAME` is found only in the code of the Library's own SQL, not in a
+string, a quoted name or a comment, and `::` is a cast. Only the names the
+Library declares are replaced; any other `:NAME` is left for duckdb. A
+SQLView cannot declare parameters, as before, and the SQL of `sql` data
+tests does not take them.
+
+### What import check reports
+
+| Finding | |
+|---|---|
+| A map or view reads `%NAME`, and `NAME` is neither a parameter nor the map's variable or the view's constant | error. FHIRPath's own names (`%resource`, `%ucum`, `%vs-…` and the like) and `%recordLine` in a record view are not reported |
+| A parameter that no map or view reads as `%NAME` and no Library declares | warning |
+| A Library declares a parameter and its SQL has no `:NAME` | warning |
+| A Library's SQL has `:NAME` for a package parameter it does not declare, so it gets no value | warning |
+
+It also lists each parameter with the value a run would use.
 
 ## Record views
 
@@ -408,7 +560,7 @@ built its analytics tables, which changes every day.
 ## import check
 
 ```
-fhir-pipes import check --package DIR [--in RAW]
+fhir-pipes import check --package DIR [--in RAW] [--param NAME=VALUE ...]
 ```
 
 Loads the package and reports:
@@ -420,7 +572,9 @@ Loads the package and reports:
   view the manifest does not allow. These stop the check with exit 2;
 - the record views, on one line, and the paths in them that name an
   element their model does not have (see
-  [What import check verifies](#what-import-check-verifies)).
+  [What import check verifies](#what-import-check-verifies));
+- the parameters and their values, and what is wrong in their use (see
+  [What import check reports](#what-import-check-reports)).
 
 With `--in`, it also checks every record of every file against its logical
 model, and reports a file that no step or record view reads. Each problem is printed as
@@ -457,7 +611,7 @@ package or the options.
 
 ```
 fhir-pipes import run --package DIR --in RAW --out OUT [--threads N] [--report FILE] [--overwrite] [--keep-work DIR]
-                      [--previous DIR [--changed DIR] [--removed FILE]]
+                      [--previous DIR [--changed DIR] [--removed FILE]] [--param NAME=VALUE ...]
 ```
 
 | Option | Meaning |
@@ -471,6 +625,7 @@ fhir-pipes import run --package DIR --in RAW --out OUT [--threads N] [--report F
 | `--keep-work DIR` | Keep the intermediate files in `DIR`, which must be empty or not exist |
 | `--previous DIR` | The `--out` folder of an earlier run of the same package. This run's resources are compared with it. See [Running an import repeatedly](#running-an-import-repeatedly) |
 | `--changed DIR` | Requires `--previous`. Gets the resources that are new or differ from the previous run, one `<ResourceType>.ndjson` per type, in the same order as in `--out`. A type with nothing changed gets no file. Must be empty or not exist, unless `--overwrite` |
+| `--param NAME=VALUE` | The value of a package parameter, instead of its default. Repeatable. See [Parameters](#parameters) |
 | `--removed FILE` | Requires `--previous`. Gets one `ResourceType/id` per line, sorted, for every resource of the previous run that this run did not write. Replaced if it exists |
 
 Each record is read by the package's [`[records]`](#records) rules and
@@ -516,6 +671,7 @@ or read when a map does something unexpected.
 ```json
 {
   "package": "digit-visits",
+  "parameters": {"idPrefix": "dgt-", "stagingTag": "digit-staging", "visitGapSeconds": 7200},
   "status": "ok",
   "steps": [
     {"step": 1, "map": "DIGITFacilityToICR", "from": "DIGITFacility",
@@ -610,7 +766,7 @@ district, the last month) lists the rest as removed. `dhis2 reports
 ## import test
 
 ```
-fhir-pipes import test --package DIR [--case NAME] [--update] [--threads N]
+fhir-pipes import test --package DIR [--case NAME] [--update] [--threads N] [--param NAME=VALUE ...]
 ```
 
 A test case is a folder `tests/<case>/` with `in/`, record files as for
@@ -625,6 +781,9 @@ A difference is printed with the case, the file, the line and the resource
 paths per resource and 10 resources per file. A case whose run fails, or
 whose data tests fail, fails. The command exits 1 if any case fails.
 
+A case can set parameter values in `tests/<case>/parameters.toml`, and
+`--param` sets them for every case; see [Giving values](#giving-values).
+
 `--case NAME` runs one case. `--update` writes each case's output to its
 `expected/` folder instead of comparing, replacing the `*.ndjson` files
 there; check the change before committing it.
@@ -637,7 +796,8 @@ there; check the change before committing it.
   files.
 - Views and Libraries run in DuckDB, one Parquet file per table. The import
   has no partitions, no Location tables and no PostgreSQL.
-- Library parameters are not supported.
+- A Library gets only the package's parameters as its parameters; `refresh`
+  and `serve` still do not bind Library parameters.
 - Records are checked against the snapshot only. Constraints, value set
   bindings and string formats are not checked.
 - One record is one transform. A record that holds many resources' worth

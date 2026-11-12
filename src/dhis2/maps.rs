@@ -77,7 +77,14 @@ impl RecordMap {
         if dirs.is_empty() {
             return Ok(None);
         }
-        let package = MapPackage::load(dirs, &MODELS)?;
+        let mut package = MapPackage::load(dirs, &MODELS)?;
+        // The maps read the systems and profiles they write as parameters of
+        // their import package (examples/import/icr-dhis2): its defaults.
+        let (values, manifests) = crate::import::package::map_parameter_defaults(dirs)?;
+        package.set_parameters(&values);
+        for m in &manifests {
+            eprintln!("parameters: the defaults in {}", m.display());
+        }
         let map = package.map_for_source(model)?.clone();
         eprintln!(
             "map: {} ({})",
