@@ -179,9 +179,10 @@ pub fn measure_report(
     Some(r)
 }
 
-/// The row as a `DHIS2Value` record (models/), the input of a `--maps` map,
-/// or `None` after reporting why there is none. Breakdowns are added to its
-/// `stratifier` afterwards.
+/// The row as a `DHIS2Value` record (examples/import/icr-dhis2/models), the
+/// input of a `--maps` map or the line `--records` writes, or `None` after
+/// reporting why there is none. Breakdowns are added to its `stratifier`
+/// afterwards.
 #[allow(clippy::too_many_arguments)]
 pub fn value_record(
     row: &AnalyticsRow,
@@ -590,7 +591,8 @@ mod tests {
     #[test]
     fn the_example_map_writes_what_the_built_in_mapping_writes() {
         use crate::dhis2::maps::RecordMap;
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
         let maps = RecordMap::load(&[dir], VALUE_MODEL).unwrap().unwrap();
         let instance = Instance::new("sl-demo", &crate::profile::icr_example()).unwrap();
         let info = ServerInfo {

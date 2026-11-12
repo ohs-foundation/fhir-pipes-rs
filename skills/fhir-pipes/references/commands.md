@@ -130,10 +130,14 @@ since the last sync to it. The auth options are the sink's. State is in
 
 ## import, population
 
-All offline, and all need a profile.
+All offline. The location importers and `population` need a profile; the
+package commands do not.
 
 - `import location-boundaries --in FILE.geojson --country NAME=CODE --level LEVEL=NAME_PROP[:CODE_PROP] … --out UNITS.ndjson [--alias LEVEL=PROP] [--code-system URI] [--dissolve-parents] [--report FILE]`
 - `import location-sites --in SITES.csv --boundaries UNITS.ndjson --type CODE --name-col C --lat-col C --lon-col C --id-col C --parent LEVEL=COLUMN … --out SITES.ndjson [--paired-org] [--identifier SYSTEM=COL] [--where COL=VALUE] [--spatial-index quadkey:18]`
+- `import check --package DIR [--in RAW]`: type-check an import package's maps, check its `import.toml` against what the package holds, and with `--in` check every record against its logical model (`file:line: message`). Exit 1 on findings, 2 on a bad package or manifest.
+- `import run --package DIR --in RAW --out OUT [--threads N] [--report FILE] [--overwrite] [--keep-work DIR]`: run the package's steps over RAW (one `<Type>.ndjson` per record type) and write one `<ResourceType>.ndjson` per type in OUT. OUT must be empty unless `--overwrite`. A failed data test exits 1 and writes nothing. Needs `duckdb` when the package has a library step.
+- `import test --package DIR [--case NAME] [--update]`: run each `tests/<case>/in/` and compare with `tests/<case>/expected/`. Exit 1 when a case fails. See docs/import.md.
 - `population --snapshot DIR --raster PATH_OR_URL (--level N | --type CODE) --year YYYY --out GROUPS.ndjson [--source worldpop] [--planning-denominator] [--estimate-date YYYY-MM-DD] [--cache-dir DIR] [--timeout 3600]`
 
 ## dhis2
@@ -145,7 +149,7 @@ Auth: `--dhis2-token` (`FHIR_PIPES_DHIS2_TOKEN`) or `--dhis2-user` and
 
 - `dhis2 locations --dhis2 URL --instance NAME --out FILE [--country-code CC] [--facility-level N] [--root UID] [--id-prefix P]`
 - `dhis2 measures --dhis2 URL --instance NAME --out FILE (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) …`
-- `dhis2 reports --dhis2 URL --instance NAME --locations LOCATIONS.ndjson --level N … (--period P … | --range START:END …) (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) … --out FILE [--source analytics|data-values] [--previous FILE --changed FILE --removed FILE] [--resume] [--concurrency 4]`: needs at least one of the same selection flags as `measures`.
+- `dhis2 reports --dhis2 URL --instance NAME --locations LOCATIONS.ndjson --level N … (--period P … | --range START:END …) (--indicator-group UID | --indicator UID | --data-element-group UID | --data-element UID | --data-element-group-set UID | --data-set UID) … --out FILE [--source analytics|data-values] [--previous FILE --changed FILE --removed FILE] [--resume] [--concurrency 4] [--records]`: needs at least one of the same selection flags as `measures`.
 
 ## profile check
 
@@ -176,5 +180,12 @@ run one map over every record. A `Bundle` target is written as its entries'
 resources. ConceptMap JSON in the folders serves `translate()`.
 
 `dhis2 locations|measures|reports --maps DIR` writes the resources with maps
-instead of the built-in mapping; examples/maps/icr-dhis2 holds the ICR maps.
-See docs/maps.md.
+instead of the built-in mapping; examples/import/icr-dhis2/maps holds the ICR
+maps. See docs/maps.md.
+
+`dhis2 locations|measures|reports --records` writes the prepared records
+(`DHIS2OrgUnit`, `DHIS2Indicator`, `DHIS2Value`) instead of resources, for
+`import run --package examples/import/icr-dhis2`; name each file after its
+record type in the `--in` folder. Not with `--maps`; `dhis2 reports` refuses
+it with `--previous`, `--changed`, `--removed` and `--updated-since`.
+`--resume` works. See docs/dhis2.md.

@@ -1,0 +1,1006 @@
+//! The DHIS2 import both ways: for the same fake DHIS2 responses,
+//!
+//! (a) `fhir-pipes dhis2 locations|measures|reports --out a.ndjson`, the
+//!     built-in mapping, and
+//! (b) the same command with `--records`, writing `<in>/<RecordType>.ndjson`,
+//!     then `fhir-pipes import run --package examples/import/icr-dhis2`,
+//!
+//! must give the same resources. The import writes one file per resource
+//! type, so the two are compared by `resourceType/id`, as JSON values (key
+//! order is not compared), and in the same order within each resource type.
+//!
+//! The stub server helpers are shared with tests/dhis2.rs through
+//! tests/common/dhis2.rs; that file's tests are not run again here.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use assert_cmd::assert::Assert;
+use assert_cmd::prelude::*;
+use httptest::{Expectation, Server, all_of, matchers::*};
+use serde_json::{Value, json};
+
+#[path = "common/dhis2.rs"]
+mod stub;
+use stub::*;
+
+const PACKAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/import/icr-dhis2");
+const MAPS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/import/icr-dhis2/maps"
+);
+
+/// One run of a dhis2 command: it starts its own stub server, runs the
+/// command with `--out OUT` and `extra`, and returns what it printed.
+type Run<'a> = &'a dyn Fn(&Path, &[&str]) -> Assert;
+
+/// `fhir-pipes dhis2 <command>` against `server`, signed in.
+fn dhis2(server: &Server, command: &str) -> Command {
+    let mut c = fhir_pipes();
+    c.args([
+        "dhis2",
+        command,
+        "--dhis2",
+        &base(server),
+        "--instance",
+        "sl-demo",
+    ])
+    .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test");
+    c
+}
+
+fn import_run(input: &Path, out: &Path) -> Assert {
+    fhir_pipes()
+        .args(["import", "run", "--package", PACKAGE, "--in"])
+        .arg(input)
+        .arg("--out")
+        .arg(out)
+        .assert()
+        .success()
+}
+
+/// Every resource in the `*.ndjson` files of `dir`, file by file in name
+/// order.
+fn read_out(dir: &Path) -> Vec<Value> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ndjson"))
+        .collect();
+    files.sort();
+    files.iter().flat_map(|p| read_ndjson(p)).collect()
+}
+
+fn key(r: &Value) -> String {
+    format!(
+        "{}/{}",
+        r["resourceType"].as_str().unwrap(),
+        r["id"].as_str().unwrap()
+    )
+}
+
+/// The ids of each resource type, in the order given.
+fn order(resources: &[Value]) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for r in resources {
+        out.entry(r["resourceType"].as_str().unwrap().to_string())
+            .or_default()
+            .push(key(r));
+    }
+    out
+}
+
+/// The same resources by `resourceType/id`, equal as JSON values, and in
+/// the same order within each resource type.
+fn assert_same(built_in: &[Value], imported: &[Value]) {
+    let a: BTreeMap<String, &Value> = built_in.iter().map(|r| (key(r), r)).collect();
+    let b: BTreeMap<String, &Value> = imported.iter().map(|r| (key(r), r)).collect();
+    assert_eq!(
+        a.len(),
+        built_in.len(),
+        "the built-in mapping repeats a key"
+    );
+    assert_eq!(b.len(), imported.len(), "the import repeats a key");
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "the same resources"
+    );
+    for (k, r) in &a {
+        assert_eq!(*r, b[k], "{k}");
+    }
+    assert_eq!(
+        order(built_in),
+        order(imported),
+        "the order within each type"
+    );
+}
+
+/// What a scenario wrote both ways.
+struct BothWays {
+    built_in: Vec<Value>,
+    imported: Vec<Value>,
+    /// The `--records` output.
+    records: Vec<Value>,
+    /// What `--records` printed.
+    records_run: Assert,
+}
+
+/// Runs a scenario with the built-in mapping and with `--records` then
+/// `import run`, and checks the two agree.
+fn both_ways(record_type: &str, run: Run) -> BothWays {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.ndjson");
+    run(&a, &[]).success();
+    let input = dir.path().join("in");
+    std::fs::create_dir(&input).unwrap();
+    let records_file = input.join(format!("{record_type}.ndjson"));
+    let records_run = run(&records_file, &["--records"]).success();
+    let out = dir.path().join("out");
+    let imported = import_run(&input, &out);
+    let e = stderr(&imported);
+    assert!(!e.contains("is built into fhir-pipes"), "{e}");
+    let built_in = read_ndjson(&a);
+    let imported = read_out(&out);
+    assert!(!built_in.is_empty());
+    assert_same(&built_in, &imported);
+    BothWays {
+        built_in,
+        imported,
+        records: read_ndjson(&records_file),
+        records_run,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scenarios
+
+const SL: &str = "ImspTQPwCqd";
+const BO: &str = "O6uvpzGd5pu";
+const BOMBALI: &str = "fdc6uOvgoji";
+const NGELEHUN: &str = "DiszpKrYNg8";
+const NJANDAMA: &str = "YuQRtpLP10I";
+const ORPHAN: &str = "vWbkYPRmKyS";
+const WARD: &str = "Rp268JB6Ne4";
+
+/// Org units on four levels: the country with no geometry (its boundary is
+/// merged from its districts), two districts with polygons, one of them
+/// closed, a facility with a point, a closed facility with a point, a
+/// facility whose parent is not exported, and a level-4 unit below the
+/// facility level. Groups from a group set and a group in no set.
+fn locations(out: &Path, extra: &[&str]) -> Assert {
+    let server = Server::run();
+    expect_info(&server);
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/dhis/api/organisationUnitLevels.json",
+        ))
+        .respond_with(ok(json!({"organisationUnitLevels": [
+            {"level": 1, "name": "National"}, {"level": 2, "name": "District"},
+            {"level": 3, "name": "Facility"}, {"level": 4, "name": "Ward"}]}))),
+    );
+    let square = |x: f64, y: f64| json!({"type": "Polygon", "coordinates": [[[x, y], [x + 0.5, y], [x + 0.5, y + 0.5], [x, y + 0.5], [x, y]]]});
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/dhis/api/organisationUnits.json",
+        ))
+        .respond_with(ok(json!({"pager": {"page": 1, "pageCount": 1}, "organisationUnits": [
+            {"id": SL, "code": "OU_525", "name": "Sierra Leone", "shortName": "SL", "level": 1},
+            {"id": BO, "code": "OU_264", "name": "Bo", "shortName": "Bo", "level": 2,
+             "parent": {"id": SL}, "geometry": square(-11.9, 7.6)},
+            {"id": BOMBALI, "name": "Bombali", "level": 2, "parent": {"id": SL},
+             "closedDate": "2025-12-31T00:00:00.000", "geometry": square(-12.2, 9.0)},
+            {"id": NGELEHUN, "code": "OU_559", "name": "Ngelehun CHC", "shortName": "Ngelehun",
+             "level": 3, "parent": {"id": BO},
+             "geometry": {"type": "Point", "coordinates": [-11.4197, 8.1039]}},
+            {"id": NJANDAMA, "name": "Njandama MCHP", "level": 3, "parent": {"id": BOMBALI},
+             "closedDate": "2024-06-30T00:00:00.000",
+             "geometry": {"type": "Point", "coordinates": [-12.05, 9.1]}},
+            {"id": ORPHAN, "name": "Mokpende MCHP", "level": 3, "parent": {"id": "notExported"}},
+            {"id": WARD, "name": "Ward 1", "level": 4, "parent": {"id": NGELEHUN}}
+        ]}))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/dhis/api/organisationUnitGroupSets/J5jldMd8OHv.json",
+        ))
+        .respond_with(ok(json!({"id": "J5jldMd8OHv", "name": "Facility Type",
+            "organisationUnitGroups": [
+                {"id": "CXw2yu5fodb", "name": "CHC", "organisationUnits": [{"id": NGELEHUN}]},
+                {"id": "uYxK4wmcPqA", "name": "MCHP",
+                 "organisationUnits": [{"id": NJANDAMA}, {"id": ORPHAN}]}]}))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/dhis/api/organisationUnitGroups/hSgatV6qHFI.json",
+        ))
+        .respond_with(ok(
+            json!({"id": "hSgatV6qHFI", "name": "Districts", "groupSets": [],
+            "organisationUnits": [{"id": BO}, {"id": BOMBALI}]}),
+        )),
+    );
+    dhis2(&server, "locations")
+        .args(["--id-prefix", "sle", "--country-code", "SLE"])
+        .args(["--facility-level", "3", "--group-set", "J5jldMd8OHv"])
+        .args(["--org-unit-group", "hSgatV6qHFI", "--out"])
+        .arg(out)
+        .args(extra)
+        .assert()
+}
+
+/// An indicator group with a percent and a plain-number indicator, a data
+/// element in a group of a group set, and a data set's reporting rate.
+fn measures(out: &Path, extra: &[&str]) -> Assert {
+    let server = Server::run();
+    expect_info(&server);
+    server.expect(
+        Expectation::matching(request::method_path(
+            "GET",
+            "/dhis/api/indicatorGroups.json",
+        ))
+        .respond_with(ok(json!({"indicatorGroups": [{"id": "srxUNt2w5jn"}]}))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/indicators.json"))
+            .respond_with(ok(json!({"indicators": [
+                {"id": "tUIlpyeeX9N", "code": "IN_1", "name": "Penta 3 Coverage <1y",
+                 "description": "Penta 3 doses over the target population", "annualized": true,
+                 "decimals": 1, "lastUpdated": "2025-03-04T05:06:07.000",
+                 "indicatorType": {"name": "Per cent", "factor": 100, "number": false},
+                 "numerator": "#{a}", "numeratorDescription": "Penta 3 doses",
+                 "denominator": "#{b}", "denominatorDescription": "Target population <1y",
+                 "indicatorGroups": [{"id": "srxUNt2w5jn", "name": "Immunization"}]},
+                {"id": "dy1a1mseGR7", "name": "ANC visits total", "annualized": false,
+                 "indicatorType": {"name": "Number", "factor": 1, "number": true},
+                 "numerator": "#{c}+#{d}", "denominator": "1",
+                 "indicatorGroups": [{"id": "srxUNt2w5jn", "name": "Immunization"}]}
+            ]}))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/dataElements.json"),
+            request::query(url_decoded(contains(("filter", "id:in:[s46m5MS0hxu]")))),
+        ])
+        .respond_with(ok(json!({"dataElements": [
+            {"id": "s46m5MS0hxu", "code": "DE_359706", "name": "BCG doses given",
+             "aggregationType": "SUM", "lastUpdated": "2024-01-02T03:04:05.000",
+             "dataElementGroups": [
+                {"id": "h9cuJOkOwY2", "name": "Immunisation", "groupSets": [{"id": "XY1vwCQskjX"}]},
+                {"id": "SriP0jBXMr6", "name": "All"}]}]}))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/dataSets.json")).respond_with(
+            ok(json!({"dataSets": [{"id": "QX4ZTUbOt3a", "code": "DS_RH",
+                "name": "Reproductive Health", "periodType": "Monthly"}]})),
+        ),
+    );
+    dhis2(&server, "measures")
+        .args([
+            "--indicator-group",
+            "srxUNt2w5jn",
+            "--data-element",
+            "s46m5MS0hxu",
+        ])
+        .args(["--data-set", "QX4ZTUbOt3a", "--out"])
+        .arg(out)
+        .args(extra)
+        .assert()
+}
+
+/// The Locations the reports scenarios read: Bo named, Bombali not.
+fn report_locations(dir: &Path) -> PathBuf {
+    let p = dir.join("locations.ndjson");
+    let text = format!(
+        "{}\n{}\n",
+        json!({"resourceType": "Location", "id": format!("sle-{BO}"), "name": "Bo",
+               "identifier": [{"system": ORGUNIT_SYSTEM, "value": BO}]}),
+        json!({"resourceType": "Location", "id": format!("sle-{BOMBALI}"),
+               "identifier": [{"system": ORGUNIT_SYSTEM, "value": BOMBALI}]})
+    );
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+/// Two percent indicators for two months and two org units, broken down by
+/// a category (both options) and an org unit group set (one option), with
+/// a campaign. One value has no breakdown, one count is not whole, one org
+/// unit has no Location, and one breakdown has no total.
+fn reports_by_period(out: &Path, extra: &[&str]) -> Assert {
+    let server = Server::run();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 3);
+    let t = |dx: &str, pe: &str, ou: &str, v: &str, n: &str, d: &str| json!([dx, pe, ou, v, n, d]);
+    let totals = vec![
+        t("tUIlpyeeX9N", "202501", BO, "50.0", "25.0", "50.0"),
+        t("tUIlpyeeX9N", "202502", BO, "62.5", "12.5", "20.0"),
+        t("tUIlpyeeX9N", "202501", BOMBALI, "40.0", "8.0", "20.0"),
+        t("tUIlpyeeX9N", "202502", BOMBALI, "100.0", "10.0", "10.0"),
+        t("FbKK4ofIv5R", "202501", BO, "33.3333333333", "1.0", "3.0"),
+        t(
+            "tUIlpyeeX9N",
+            "202501",
+            "unknownOU01",
+            "10.0",
+            "1.0",
+            "10.0",
+        ),
+    ];
+    let s = |dx: &str, o: &str, pe: &str, ou: &str, v: &str, n: &str, d: &str| {
+        json!([dx, o, pe, ou, v, n, d])
+    };
+    let category = vec![
+        s(
+            "tUIlpyeeX9N",
+            "qkPbeWaFsnU",
+            "202501",
+            BO,
+            "60.0",
+            "15.0",
+            "25.0",
+        ),
+        s(
+            "tUIlpyeeX9N",
+            "VXJy4z1XYPl",
+            "202501",
+            BO,
+            "40.0",
+            "10.0",
+            "25.0",
+        ),
+        s(
+            "tUIlpyeeX9N",
+            "VXJy4z1XYPl",
+            "202502",
+            BOMBALI,
+            "100.0",
+            "10.0",
+            "10.0",
+        ),
+        // No total for this one.
+        s(
+            "FbKK4ofIv5R",
+            "qkPbeWaFsnU",
+            "202502",
+            BO,
+            "1.0",
+            "1.0",
+            "1.0",
+        ),
+    ];
+    let group_set = vec![s(
+        "tUIlpyeeX9N",
+        "CXw2yu5fodb",
+        "202501",
+        BO,
+        "50.0",
+        "25.0",
+        "50.0",
+    )];
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/dhis/api/analytics.json"),
+            request::query(url_decoded(not(contains(("dimension", "fMZEcRHuamy"))))),
+            request::query(url_decoded(not(contains(("dimension", "J5jldMd8OHv"))))),
+        ])
+        .times(1)
+        .respond_with(ok(json!({
+            "headers": [{"name":"dx"},{"name":"pe"},{"name":"ou"},{"name":"value"},
+                        {"name":"numerator"},{"name":"denominator"}],
+            "metaData": {"items": {
+                "202501": {"startDate": "2025-01-01T00:00:00.000", "endDate": "2025-01-31T00:00:00.000"},
+                "202502": {"startDate": "2025-02-01T00:00:00.000", "endDate": "2025-02-28T00:00:00.000"}}},
+            "rows": totals
+        }))),
+    );
+    let breakdown = |dim: &'static str, name: &str, items: Value, rows: Vec<Value>| {
+        let mut meta = items;
+        meta[dim] = json!({"name": name});
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(("dimension", dim)))),
+            ])
+            .times(1)
+            .respond_with(ok(json!({
+                "headers": [{"name":"dx"},{"name":dim},{"name":"pe"},{"name":"ou"},
+                            {"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+                "metaData": {"items": meta},
+                "rows": rows
+            }))),
+        );
+    };
+    breakdown(
+        "fMZEcRHuamy",
+        "Location Fixed/Outreach",
+        json!({"qkPbeWaFsnU": {"name": "Fixed"}, "VXJy4z1XYPl": {"name": "Outreach"}}),
+        category,
+    );
+    breakdown(
+        "J5jldMd8OHv",
+        "Facility Type",
+        json!({"CXw2yu5fodb": {"name": "CHC"}}),
+        group_set,
+    );
+    let dir = out.parent().unwrap().join(format!(
+        "loc-{}",
+        out.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dhis2(&server, "reports")
+        .args(["--indicator-group", "srxUNt2w5jn", "--level", "2"])
+        .args(["--period", "202501", "--period", "202502"])
+        .args(["--breakdown", "fMZEcRHuamy", "--breakdown", "J5jldMd8OHv"])
+        .args(["--campaign", "CarePlan/sle-penta-2025"])
+        .arg("--locations")
+        .arg(report_locations(&dir))
+        .arg("--out")
+        .arg(out)
+        .args(extra)
+        .assert()
+}
+
+/// A data element's count and a data set's reporting rate over a date
+/// range, with no breakdown and no campaign.
+fn reports_by_range(out: &Path, extra: &[&str]) -> Assert {
+    let server = Server::run();
+    expect_info(&server);
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/dataElements.json"))
+            .respond_with(ok(json!({"dataElements": [
+                {"id": "s46m5MS0hxu", "name": "BCG doses given", "aggregationType": "SUM"}]}))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/dhis/api/dataSets.json")).respond_with(
+            ok(json!({"dataSets": [{"id": "QX4ZTUbOt3a", "name": "Reproductive Health"}]})),
+        ),
+    );
+    expect_units(&server, 2, 2);
+    server.expect(
+        Expectation::matching(by_range("2025-01-01", "2025-03-31"))
+            .times(1)
+            .respond_with(ok(json!({
+                "headers": [{"name":"dx"},{"name":"ou"},{"name":"value"},{"name":"numerator"},{"name":"denominator"}],
+                "metaData": {"items": {}},
+                "rows": [["s46m5MS0hxu", BO, "1204.0", "", ""],
+                         ["s46m5MS0hxu", BOMBALI, "877.0", "", ""],
+                         ["QX4ZTUbOt3a.REPORTING_RATE", BO, "93.33", "28.0", "30.0"]]
+            }))),
+    );
+    let dir = out.parent().unwrap().join(format!(
+        "loc-{}",
+        out.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dhis2(&server, "reports")
+        .args(["--data-element", "s46m5MS0hxu", "--data-set", "QX4ZTUbOt3a"])
+        .args(["--level", "2", "--range", "2025-01-01:2025-03-31"])
+        .arg("--locations")
+        .arg(report_locations(&dir))
+        .arg("--out")
+        .arg(out)
+        .args(extra)
+        .assert()
+}
+
+/// `--source data-values`: the fixture of tests/dhis2.rs (a country, two
+/// districts, four facilities; doses by Fixed/Outreach, population and
+/// coverage), computed by fhir-pipes from raw data values.
+fn reports_from_data_values(out: &Path, extra: &[&str]) -> Assert {
+    let server = values_server("SUM", None);
+    expect_values(&server, "2025-01-01", "2025-02-28", fixture_values());
+    let dir = out.parent().unwrap().join(format!(
+        "loc-{}",
+        out.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dhis2(&server, "reports")
+        .args(["--indicator", COVERAGE, "--data-element", DOSES])
+        .args(["--data-element", POP, "--source", "data-values"])
+        .args(["--level", "1", "--level", "2", "--level", "3"])
+        .args(["--period", "202501", "--period", "202502"])
+        .args(["--breakdown", "fMZEcRHuamy"])
+        .arg("--locations")
+        .arg(hierarchy(&dir))
+        .arg("--out")
+        .arg(out)
+        .args(extra)
+        .assert()
+}
+
+// ---------------------------------------------------------------------------
+// The two routes agree
+
+#[test]
+fn locations_agree() {
+    let r = both_ways("DHIS2OrgUnit", &locations);
+    // 6 Locations (the level-4 unit is skipped) and 3 facility Organizations.
+    assert_eq!(r.built_in.len(), 9);
+    assert_eq!(r.records.len(), 6);
+    let s = stdout(&r.records_run);
+    assert!(s.contains("Wrote 6 DHIS2OrgUnit records to"), "{s}");
+    assert!(s.contains("level 4 Ward: 1 (skipped)"), "{s}");
+    // What is reported about the source is the same with --records.
+    for kind in [
+        "boundary_from_children",
+        "parent_not_exported",
+        "below_facility_level",
+    ] {
+        assert!(s.contains(kind), "{kind}: {s}");
+    }
+    let by_id = |id: &str| r.imported.iter().find(|l| l["id"] == id).unwrap();
+    assert_eq!(by_id(&format!("sle-{NJANDAMA}"))["status"], "inactive");
+    assert!(
+        by_id(&format!("sle-{ORPHAN}")).get("partOf").is_none(),
+        "the parent is not exported"
+    );
+}
+
+#[test]
+fn measures_agree() {
+    let r = both_ways("DHIS2Indicator", &measures);
+    assert_eq!(r.built_in.len(), 4);
+    let s = stdout(&r.records_run);
+    assert!(
+        s.contains("Wrote 4 DHIS2Indicator records to",)
+            && s.contains("1 cohort, 1 data element counts, 1 proportion, 1 reporting rates"),
+        "{s}"
+    );
+}
+
+#[test]
+fn reports_by_period_agree() {
+    let r = both_ways("DHIS2Value", &reports_by_period);
+    assert_eq!(r.built_in.len(), 5);
+    let s = stdout(&r.records_run);
+    assert!(
+        s.contains("Wrote 5 DHIS2Value records to")
+            && s.contains("(2 indicators, 2 Locations, 2 periods;"),
+        "{s}"
+    );
+    assert!(s.contains("3 breakdowns attached (2 dimensions)"), "{s}");
+    for kind in [
+        "unmapped_org_unit",
+        "stratum_without_total",
+        "fractional_count",
+    ] {
+        assert!(s.contains(kind), "{kind}: {s}");
+    }
+    let bo = r
+        .records
+        .iter()
+        .find(|v| v["id"] == format!("sl-demo-tUIlpyeeX9N-{BO}-202501"))
+        .unwrap();
+    assert_eq!(bo["stratifier"].as_array().unwrap().len(), 2);
+    assert_eq!(bo["campaign"], "CarePlan/sle-penta-2025");
+}
+
+#[test]
+fn reports_by_range_agree() {
+    let r = both_ways("DHIS2Value", &reports_by_range);
+    assert_eq!(r.built_in.len(), 3);
+    assert!(r.records.iter().all(|v| v.get("campaign").is_none()));
+}
+
+#[test]
+fn reports_from_data_values_agree_but_for_the_date() {
+    // A run from data values dates its reports when it started, so the two
+    // runs differ there; the import keeps the date the record carries.
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.ndjson");
+    reports_from_data_values(&a, &[]).success();
+    let input = dir.path().join("in");
+    std::fs::create_dir(&input).unwrap();
+    let records = input.join("DHIS2Value.ndjson");
+    reports_from_data_values(&records, &["--records"]).success();
+    let out = dir.path().join("out");
+    import_run(&input, &out);
+    let undated = |list: Vec<Value>| -> Vec<Value> {
+        list.into_iter()
+            .map(|mut r| {
+                assert!(r["date"].as_str().unwrap().ends_with('Z'));
+                r.as_object_mut().unwrap().remove("date");
+                r
+            })
+            .collect()
+    };
+    let built_in = undated(read_ndjson(&a));
+    assert_eq!(built_in.len(), 28);
+    assert_same(&built_in, &undated(read_out(&out)));
+    // The date in each MeasureReport is the date in its record.
+    let dates: Vec<Value> = read_ndjson(&records)
+        .iter()
+        .map(|r| r["date"].clone())
+        .collect();
+    let imported: Vec<Value> = read_out(&out).iter().map(|r| r["date"].clone()).collect();
+    assert_eq!(dates, imported);
+}
+
+// ---------------------------------------------------------------------------
+// The package's test case
+
+/// The sample case of examples/import/icr-dhis2: its `in/` is what the
+/// scenarios above write with `--records` (both reports scenarios in one
+/// DHIS2Value file), and its `expected/` is what the built-in mapping
+/// writes for them. `import test` passes on it.
+///
+/// With `FHIR_PIPES_UPDATE_SAMPLE=1` the test writes `in/` instead of
+/// comparing it; then run `fhir-pipes import test --package
+/// examples/import/icr-dhis2 --update` to write `expected/`, and this test
+/// again to check it against the built-in mapping.
+#[test]
+fn the_package_sample_is_what_the_commands_write() {
+    let sample = Path::new(PACKAGE).join("tests/sample");
+    let update = std::env::var_os("FHIR_PIPES_UPDATE_SAMPLE").is_some();
+    let runs: [(&str, &[Run]); 3] = [
+        ("DHIS2OrgUnit", &[&locations]),
+        ("DHIS2Indicator", &[&measures]),
+        ("DHIS2Value", &[&reports_by_period, &reports_by_range]),
+    ];
+    let mut built_in = Vec::new();
+    for (record_type, scenarios) in runs {
+        let mut records = Vec::new();
+        for run in scenarios {
+            let r = both_ways(record_type, *run);
+            built_in.extend(r.built_in);
+            records.extend(r.records);
+        }
+        let file = sample.join("in").join(format!("{record_type}.ndjson"));
+        if update {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let text: String = records.iter().map(|r| format!("{r}\n")).collect();
+            std::fs::write(&file, text).unwrap();
+        }
+        assert_eq!(read_ndjson(&file), records, "{}", file.display());
+    }
+    if update {
+        return;
+    }
+    assert_same(&built_in, &read_out(&sample.join("expected")));
+    let a = fhir_pipes()
+        .args(["import", "test", "--package", PACKAGE])
+        .assert()
+        .success();
+    assert!(
+        !stderr(&a).contains("is built into fhir-pipes"),
+        "{}",
+        stderr(&a)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The --records rules
+
+#[test]
+fn records_and_maps_together_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = fhir_pipes()
+        .args(["dhis2", "measures", "--dhis2", "https://dhis2.invalid"])
+        .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
+        .args(["--records", "--maps", MAPS, "--out"])
+        .arg(dir.path().join("m.ndjson"))
+        .assert()
+        .code(2);
+    let e = stderr(&a);
+    assert!(e.contains("--records") && e.contains("--maps"), "{e}");
+    // The same with the maps from the environment.
+    let a = fhir_pipes()
+        .args(["dhis2", "locations", "--dhis2", "https://dhis2.invalid"])
+        .args(["--instance", "sl-demo", "--records", "--out"])
+        .arg(dir.path().join("l.ndjson"))
+        .env("FHIR_PIPES_DHIS2_MAPS", MAPS)
+        .assert()
+        .code(2);
+    let e = stderr(&a);
+    assert!(e.contains("--records") && e.contains("--maps"), "{e}");
+}
+
+#[test]
+fn records_are_refused_with_the_comparison_with_a_previous_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &[BO]);
+    let previous = dir.path().join("previous.ndjson");
+    std::fs::write(&previous, "").unwrap();
+    let p = previous.to_str().unwrap();
+    let c = dir.path().join("c.ndjson");
+    let r = dir.path().join("removed.txt");
+    let cases: [&[&str]; 4] = [
+        &["--previous", p],
+        &["--previous", p, "--changed", c.to_str().unwrap()],
+        &["--previous", p, "--removed", r.to_str().unwrap()],
+        &[
+            "--previous",
+            p,
+            "--source",
+            "data-values",
+            "--updated-since",
+            "2026-10-01",
+        ],
+    ];
+    for extra in cases {
+        let a = fhir_pipes()
+            .args(["dhis2", "reports", "--dhis2", "https://dhis2.invalid"])
+            .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
+            .args(["--period", "2025", "--level", "2", "--records"])
+            .arg("--locations")
+            .arg(&locations)
+            .arg("--out")
+            .arg(dir.path().join("r.ndjson"))
+            .args(extra)
+            .assert()
+            .code(2);
+        let e = stderr(&a);
+        assert!(
+            e.contains("--records cannot be used with --previous")
+                && e.contains("needs the MeasureReports"),
+            "{extra:?}: {e}"
+        );
+    }
+}
+
+/// `--records` with `--resume`: an interrupted run (cut mid-line) resumes
+/// to the same bytes and the same summary as an uninterrupted one, and a
+/// checkpoint written with `--records` is not resumed without it, nor one
+/// written without it resumed with it.
+#[test]
+fn an_interrupted_records_run_resumes_to_the_same_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &[BO, BOMBALI, NJANDAMA, ORPHAN]);
+    let run = |server: &Server, out: &Path, extra: &[&str]| {
+        dhis2(server, "reports")
+            .args(["--indicator-group", "srxUNt2w5jn"])
+            .args(["--level", "2", "--level", "3", "--chunk", "1"])
+            .args([
+                "--period", "202501", "--period", "202502", "--period", "202503",
+            ])
+            .args(["--max-rows", "1"])
+            .arg("--locations")
+            .arg(&locations)
+            .arg("--out")
+            .arg(out)
+            .args(extra)
+            .assert()
+    };
+    let full = dir.path().join("full.ndjson");
+    let whole = run(&stub_units(false, 0, None), &full, &["--records"]).success();
+
+    let out = dir.path().join("DHIS2Value.ndjson");
+    let tmp = dir.path().join("DHIS2Value.ndjson.tmp");
+    let checkpoint = dir.path().join("DHIS2Value.ndjson.resume");
+    let mut server = Server::run();
+    expect_units_batches(&server, false, 0, Some(6));
+    let failed = run(&server, &out, &["--records", "--concurrency", "1"]).code(2);
+    assert!(
+        stderr(&failed).contains("6 of 12 batches written"),
+        "{}",
+        stderr(&failed)
+    );
+    let mut partial = std::fs::read(&tmp).unwrap();
+    partial.extend_from_slice(br#"{"resourceType":"DHIS2Va"#);
+    std::fs::write(&tmp, partial).unwrap();
+
+    // Not resumed without --records.
+    server.verify_and_clear();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 2);
+    expect_units(&server, 3, 2);
+    let refused = run(&server, &out, &["--resume"]).code(2);
+    assert!(
+        stderr(&refused).contains("was planned differently (records changed)"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(tmp.exists() && checkpoint.exists());
+
+    server.verify_and_clear();
+    expect_units_batches(&server, false, 6, None);
+    let resumed = run(&server, &out, &["--records", "--resume"]).success();
+    assert!(
+        stderr(&resumed).contains("resuming after batch 6 of 12"),
+        "{}",
+        stderr(&resumed)
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&full).unwrap());
+    assert!(!tmp.exists() && !checkpoint.exists());
+    let summary = |a: &Assert| {
+        stdout(a)
+            .replace(full.to_str().unwrap(), "OUT")
+            .replace(out.to_str().unwrap(), "OUT")
+    };
+    assert_eq!(summary(&resumed), summary(&whole));
+    assert!(
+        summary(&whole).contains(
+            "Wrote 24 DHIS2Value records to OUT (2 indicators, 4 Locations, 3 periods; 24 values from 12 analytics requests)"
+        ),
+        "{}",
+        summary(&whole)
+    );
+
+    // The records import to what the built-in mapping writes.
+    let built_in = dir.path().join("built-in.ndjson");
+    run(&stub_units(false, 0, None), &built_in, &[]).success();
+    let input = dir.path().join("in");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::copy(&out, input.join("DHIS2Value.ndjson")).unwrap();
+    let imported = dir.path().join("fhir");
+    import_run(&input, &imported);
+    assert_same(&read_ndjson(&built_in), &read_out(&imported));
+
+    // A checkpoint written without --records is not resumed with it.
+    let plain = dir.path().join("plain.ndjson");
+    let mut server = Server::run();
+    expect_units_batches(&server, false, 0, Some(6));
+    run(&server, &plain, &["--concurrency", "1"]).code(2);
+    server.verify_and_clear();
+    expect_info(&server);
+    expect_group(&server);
+    expect_units(&server, 2, 2);
+    expect_units(&server, 3, 2);
+    let refused = run(&server, &plain, &["--records", "--resume"]).code(2);
+    assert!(
+        stderr(&refused).contains("was planned differently (records changed)"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Comparing with a previous run, both ways
+
+/// Two runs of `dhis2 reports`, a day and an analytics build apart, over
+/// the same org units and period: one value the same, one changed, one new
+/// and one gone. `dhis2 reports --previous --changed --removed` and the
+/// general route (`--records`, then `import run --previous --changed
+/// --removed` with the package, whose `[compare]` leaves out a report's
+/// `date`) find the same new, changed and removed reports.
+#[test]
+fn a_rerun_compares_the_same_both_ways() {
+    let (a, b) = (BO, BOMBALI);
+    let dir = tempfile::tempdir().unwrap();
+    let locations = locations_for(dir.path(), &[a, b]);
+    let run = |built: &str, rows: Vec<Value>, out: &Path, extra: &[&str]| {
+        let server = Server::run();
+        expect_info_built(&server, built);
+        expect_group(&server);
+        expect_units(&server, 2, 2);
+        let mut response = analytics_for(rows);
+        response["metaData"]["dimensions"] =
+            json!({"ou": [a, b], "pe": ["202501"], "dx": [], "co": []});
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/dhis/api/analytics.json"),
+                request::query(url_decoded(contains(("dimension", "pe:202501")))),
+            ])
+            .times(1)
+            .respond_with(ok(response)),
+        );
+        let assert = dhis2(&server, "reports")
+            .args(["--indicator-group", "srxUNt2w5jn"])
+            .args(["--level", "2", "--period", "202501"])
+            .arg("--locations")
+            .arg(&locations)
+            .arg("--out")
+            .arg(out)
+            .args(extra)
+            .assert()
+            .success();
+        stdout(&assert)
+    };
+    let row = |dx: &str, ou: &str, num: f64| {
+        json!([
+            dx,
+            "202501",
+            ou,
+            format!("{}", num * 10.0),
+            format!("{num}"),
+            "10.0"
+        ])
+    };
+    let first = vec![
+        row("tUIlpyeeX9N", a, 5.0),
+        row("tUIlpyeeX9N", b, 3.0),
+        row("FbKK4ofIv5R", a, 1.0),
+    ];
+    let second = vec![
+        row("tUIlpyeeX9N", a, 5.0),
+        row("tUIlpyeeX9N", b, 4.0),
+        row("FbKK4ofIv5R", b, 2.0),
+    ];
+    let (day1, day2) = ("2026-10-12T02:07:00.052", "2026-10-13T02:07:00.052");
+
+    // dhis2 reports --previous, the baseline rolled in place.
+    let reports = dir.path().join("reports.ndjson");
+    run(day1, first.clone(), &reports, &[]);
+    let changed = dir.path().join("changed.ndjson");
+    let removed = dir.path().join("removed.txt");
+    let printed = run(
+        day2,
+        second.clone(),
+        &reports,
+        &[
+            "--previous",
+            reports.to_str().unwrap(),
+            "--changed",
+            changed.to_str().unwrap(),
+            "--removed",
+            removed.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        printed.contains("1 new, 1 changed, 1 unchanged, 1 removed"),
+        "{printed}"
+    );
+
+    // The general route, with one baseline folder.
+    let fhir = dir.path().join("fhir");
+    let records = |name: &str, built: &str, rows: Vec<Value>| {
+        let input = dir.path().join(name);
+        std::fs::create_dir(&input).unwrap();
+        run(
+            built,
+            rows,
+            &input.join("DHIS2Value.ndjson"),
+            &["--records"],
+        );
+        input
+    };
+    let in1 = records("in1", day1, first);
+    import_run(&in1, &fhir);
+    let in2 = records("in2", day2, second);
+    let import_changed = dir.path().join("import-changed");
+    let import_removed = dir.path().join("import-removed.txt");
+    let a2 = fhir_pipes()
+        .args(["import", "run", "--package", PACKAGE, "--in"])
+        .arg(&in2)
+        .arg("--out")
+        .arg(&fhir)
+        .arg("--overwrite")
+        .arg("--previous")
+        .arg(&fhir)
+        .arg("--changed")
+        .arg(&import_changed)
+        .arg("--removed")
+        .arg(&import_removed)
+        .assert()
+        .success();
+    let printed = stdout(&a2);
+    assert!(
+        printed.contains("1 new, 1 changed, 1 unchanged, 1 removed"),
+        "{printed}"
+    );
+
+    // The same reports, in the same order.
+    let ids = |list: Vec<Value>| -> Vec<String> {
+        list.iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let built_in_changed = ids(read_ndjson(&changed));
+    assert_eq!(built_in_changed.len(), 2);
+    assert_eq!(
+        ids(read_ndjson(&import_changed.join("MeasureReport.ndjson"))),
+        built_in_changed
+    );
+    let lines = |p: &Path| -> Vec<String> {
+        std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let built_in_removed = lines(&removed);
+    assert_eq!(built_in_removed.len(), 1);
+    let import_removed: Vec<String> = lines(&import_removed)
+        .iter()
+        .map(|l| l.strip_prefix("MeasureReport/").unwrap().to_string())
+        .collect();
+    assert_eq!(import_removed, built_in_removed);
+    // And the same baseline.
+    assert_same(&read_ndjson(&reports), &read_out(&fhir));
+}

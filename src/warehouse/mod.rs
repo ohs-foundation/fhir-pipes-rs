@@ -54,7 +54,7 @@ pub(crate) mod sql;
 pub(crate) mod stage;
 mod status;
 mod tiles;
-mod tools;
+pub(crate) mod tools;
 mod views_step;
 
 use std::collections::BTreeSet;

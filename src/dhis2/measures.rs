@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use super::Instance;
 use super::api::{Dhis2, ServerInfo, in_filter};
-use super::maps::{INDICATOR_MODEL, RecordMap, record_type};
+use super::maps::{INDICATOR_MODEL, RecordMap, Writes, record_type};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::write_ndjson;
@@ -328,8 +328,8 @@ pub fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value
     m
 }
 
-/// The item as a `DHIS2Indicator` record (models/), the input of a `--maps`
-/// map.
+/// The item as a `DHIS2Indicator` record (examples/import/icr-dhis2/models):
+/// the input of a `--maps` map, or the line `--records` writes.
 pub fn record(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
     let mut r = json!({
         "resourceType": record_type(INDICATOR_MODEL),
@@ -660,12 +660,18 @@ pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile)
     check_out(&args.out)?;
     let instance = Instance::new(&args.conn.instance, profile)?;
     let maps = RecordMap::load(&args.conn.maps, INDICATOR_MODEL)?;
+    let writes = Writes::new(maps.as_ref(), args.conn.records);
     let api = Dhis2::connect(&args.conn)?;
     let indicators = fetch_indicators(&api, &args.select)?;
     let mut report = Report::default();
     let mut measures: Vec<Value> = Vec::with_capacity(indicators.len());
-    match &maps {
-        Some(map) => {
+    match writes {
+        Writes::Records => measures.extend(
+            indicators
+                .values()
+                .map(|ind| record(ind, &instance, &api.info)),
+        ),
+        Writes::Maps(map) => {
             let records: Vec<Value> = indicators
                 .values()
                 .map(|ind| record(ind, &instance, &api.info))
@@ -675,7 +681,7 @@ pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile)
                 measures.extend(RecordMap::take(output, &ind.id, &mut report)?);
             }
         }
-        None => measures.extend(
+        Writes::BuiltIn => measures.extend(
             indicators
                 .values()
                 .map(|ind| measure(ind, &instance, &api.info)),
@@ -692,8 +698,13 @@ pub fn run_measures(args: &Dhis2MeasuresArgs, profile: &crate::profile::Profile)
         *by_scoring.entry(key).or_default() += 1;
     }
     let scoring: Vec<String> = by_scoring.iter().map(|(k, v)| format!("{v} {k}")).collect();
+    let what = if args.conn.records {
+        format!("{} records", record_type(INDICATOR_MODEL))
+    } else {
+        "Measures".to_string()
+    };
     println!(
-        "Wrote {n} Measures to {} ({})",
+        "Wrote {n} {what} to {} ({})",
         args.out.display(),
         scoring.join(", ")
     );
@@ -717,9 +728,10 @@ mod tests {
                "indicatorGroups":[{"id":"oehv9EO3vP7","name":"ANC"}]})
     }
 
-    /// The example ICR maps (examples/maps/icr-dhis2).
+    /// The example ICR maps (examples/import/icr-dhis2/maps).
     fn icr_maps() -> RecordMap {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
         RecordMap::load(&[dir], INDICATOR_MODEL).unwrap().unwrap()
     }
 

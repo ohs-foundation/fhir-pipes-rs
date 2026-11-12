@@ -316,16 +316,9 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A file with no SQL, given to duckdb's `-init`.
-const NO_INIT: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
-
-/// duckdb for a Library's SQL. `-init` with an empty file keeps duckdb from
-/// running the user's `~/.duckdbrc` first, which could change settings or
-/// the output format the step reads, or run statements of its own.
+/// duckdb for a Library's SQL, without the user's `~/.duckdbrc`.
 fn duckdb_command(s: &Settings) -> Command {
-    let mut c = Command::new(&s.duckdb);
-    c.args(["-init", NO_INIT]);
-    c
+    tools::duckdb_command(&s.duckdb)
 }
 
 /// Run a SQL script with `duckdb_command`, discarding its result table.

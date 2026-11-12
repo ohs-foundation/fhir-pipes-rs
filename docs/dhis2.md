@@ -23,6 +23,7 @@ fhir-pipes dhis2 reports   --dhis2 URL --instance NAME --indicator-group UID --l
 | `--instance` | A short name for the instance: letters, digits and hyphens, up to 16 characters, such as `sl-demo` |
 | `--profile`, `$FHIR_PIPES_PROFILE` | A profile with a `[dhis2]` section. Without one the command stops with exit 2. See [profiles.md](profiles.md) |
 | `--maps DIR`, `$FHIR_PIPES_DHIS2_MAPS` | Write the resources with FHIR Mapping Language maps in this folder instead of the built-in mapping. See [maps.md](maps.md#maps-for-the-dhis2-import) |
+| `--records` | Write the prepared records instead of FHIR resources, for `fhir-pipes import run`. Cannot be used with `--maps`. See [Records and the import package](#records-and-the-import-package) |
 
 Use a read-only DHIS2 user. Keep
 `--instance` the same across runs: it prefixes every id and tags what is
@@ -87,12 +88,18 @@ days old. `--max-analytics-age 7d` refuses the run instead.
 - `--resume` continues a failed or stopped run from `OUT.ndjson.resume`. It is
   refused if the arguments (other than `--concurrency`), the DHIS2 URL, an org
   unit count, the analytics build time, or the `--locations` or `--previous`
-  file have changed. Run without `--resume` to start over.
+  file have changed, or if the run used `--records` and this one does not
+  (or the other way round). Run without `--resume` to start over. It works
+  with `--records`.
 - `--previous PREV.ndjson` compares with an earlier run. `--out` still gets
   every report, so it can be the baseline for the next run. `--changed FILE`
   gets the new and changed reports to load. `--removed FILE` gets the ids of
   reports DHIS2 no longer returns, to delete from the FHIR server. Reports
   for indicators, levels or periods not in this run are left alone.
+  `--previous`, `--changed`, `--removed` and `--updated-since` compare
+  MeasureReports, so they cannot be used with `--records`. With
+  `--records`, compare after the import instead (see
+  [Records and the import package](#records-and-the-import-package)).
 
 ```sh
 fhir-pipes dhis2 reports … --out bgd-reports.ndjson --previous bgd-reports.ndjson \
@@ -106,6 +113,71 @@ in the same shape as analytics. Only SUM and AVERAGE_SUM_ORG_UNIT data
 elements and simple indicator expressions are supported; anything else is
 refused, naming the indicator. `--locations` must then include the data-entry units and their complete parent chains up to the requested levels, or totals are undercounted. `--updated-since DATE` (with `--previous`)
 recomputes only the periods holding data values changed since then.
+
+## Records and the import package
+
+Each command prepares one record per output before it writes resources: a
+`DHIS2OrgUnit` per org unit, a `DHIS2Indicator` per indicator, data element
+or reporting rate, and a `DHIS2Value` per value, with its breakdowns. The
+records' logical models are in
+[examples/import/icr-dhis2/models](../examples/import/icr-dhis2/models).
+With `--records`, `--out` gets these records instead of resources, one per
+line, in the order the resources would have been written, and no mapping
+runs. Everything else is the same: the requests, the checks, the run report
+and the summary, which counts records.
+
+| Command | Record type | Name the file |
+|---|---|---|
+| `dhis2 locations --records` | `DHIS2OrgUnit` | `DHIS2OrgUnit.ndjson` |
+| `dhis2 measures --records` | `DHIS2Indicator` | `DHIS2Indicator.ndjson` |
+| `dhis2 reports --records` | `DHIS2Value` | `DHIS2Value.ndjson` |
+
+`fhir-pipes import run` with the package
+[examples/import/icr-dhis2](../examples/import/icr-dhis2) turns a folder of
+these files into the resources the built-in mapping writes, one file per
+resource type (see [import.md](import.md)). The package's maps are the ones
+`--maps examples/import/icr-dhis2/maps` runs.
+
+`dhis2 reports` still needs `--locations`, the Location resources, to map
+org units. The first import run writes them:
+
+```sh
+fhir-pipes dhis2 locations --instance sl-demo --id-prefix sle --country-code SLE \
+  --records --out raw/DHIS2OrgUnit.ndjson
+fhir-pipes dhis2 measures --instance sl-demo --indicator-group srxUNt2w5jn \
+  --records --out raw/DHIS2Indicator.ndjson
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
+fhir-pipes dhis2 reports --instance sl-demo --indicator-group srxUNt2w5jn \
+  --locations fhir/Location.ndjson --period 2025 --level 2 --level 3 \
+  --records --out raw/DHIS2Value.ndjson
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite
+for t in Organization Location Measure MeasureReport; do
+  fhir-pipes load --server URL --in fhir/$t.ndjson
+done
+```
+
+Load Organizations before Locations: a facility Location refers to its
+Organization.
+
+`dhis2 reports --previous` cannot be combined with `--records`. To load
+only what changed on this route, compare after the import, with
+`import run --previous`, `--changed` and `--removed` (see
+[import.md](import.md#running-an-import-repeatedly)). The package's
+`import.toml` leaves a MeasureReport's `date`, the analytics build time,
+out of the comparison:
+
+```sh
+fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir --overwrite \
+  --previous fhir --changed fhir-changed --removed fhir-removed.txt
+```
+
+`--removed` then lists every resource of the previous run that this run did
+not write, of every type in the folder. Unlike `dhis2 reports --removed`, it
+has no scope of indicators, org units and periods: give each run the same
+`--level`, `--period` and indicator options, and the same `locations` and
+`measures` selection, or the resources the run did not ask for are listed
+as removed. The lines are `MeasureReport/<id>`, sorted, where `dhis2 reports`
+writes the bare id in file order.
 
 ## Example
 

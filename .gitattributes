@@ -1,0 +1,3 @@
+# The example import packages are read byte for byte by tools and tests:
+# keep LF line ends on every platform.
+examples/import/** text eol=lf

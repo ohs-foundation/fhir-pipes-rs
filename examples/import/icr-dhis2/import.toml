@@ -1,0 +1,11 @@
+name = "icr-dhis2"
+title = "DHIS2 to the Integrated Campaign Registry"
+
+# No [[step]]: each record file goes through the one map in maps/ that
+# reads its type.
+
+# `import run --previous`: a MeasureReport's `date` is when DHIS2 last built
+# its analytics tables. It changes after every build, whether or not the
+# value did, so it is not compared.
+[compare]
+ignore = ["MeasureReport.date"]

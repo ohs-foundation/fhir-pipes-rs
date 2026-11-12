@@ -1,0 +1,48 @@
+name = "digit-visits"
+title = "DIGIT household visits to the Integrated Campaign Registry (synthetic example)"
+
+# Facilities map on their own: one record, one Location, to the output.
+[[step]]
+map = "DIGITFacilityToICR"
+from = "DIGITFacility"
+
+# Tasks, beneficiaries and household members are staged as FHIR resources
+# for the views. Staged resources are not written to the output.
+[[step]]
+map = "StageDIGITTask"
+from = "DIGITTask"
+stage = true
+
+[[step]]
+map = "StageDIGITProjectBeneficiary"
+from = "DIGITProjectBeneficiary"
+stage = true
+
+[[step]]
+map = "StageDIGITHouseholdMember"
+from = "DIGITHouseholdMember"
+stage = true
+
+# The views StgTask, StgBeneficiary and StgHouseholdMember flatten the staged
+# resources; the Library joins them and groups the tasks into visits.
+[[step]]
+library = "DigitVisit"
+
+# Each visit through a map: a Task for the visit, a MedicationAdministration per task.
+[[step]]
+map = "DIGITVisitToICR"
+from = { library = "DigitVisit" }
+
+[[test]]
+name = "one row per visit"
+library = "DigitVisit"
+unique = ["visitKey"]
+not_null = ["householdId", "workerId"]
+
+[[test]]
+name = "every staged task is in a visit"
+sql = """
+SELECT id FROM stg_task
+EXCEPT
+SELECT u.t.crid FROM digit_visit, unnest(task) AS u(t)
+"""

@@ -1,0 +1,42 @@
+{
+ "resourceType": "ConceptMap",
+ "id": "digit-task-status",
+ "url": "https://icr.healthcampaigns.org/ConceptMap/digit-task-status-to-task-status",
+ "name": "DIGITTaskStatusToTaskStatus",
+ "status": "draft",
+ "group": [
+  {
+   "source": "https://icr.healthcampaigns.org/CodeSystem/digit-task-status",
+   "target": "http://hl7.org/fhir/task-status",
+   "element": [
+    {
+     "code": "ADMINISTRATION_SUCCESS",
+     "target": [
+      {
+       "code": "completed",
+       "equivalence": "equivalent"
+      }
+     ]
+    },
+    {
+     "code": "BENEFICIARY_REFUSED",
+     "target": [
+      {
+       "code": "rejected",
+       "equivalence": "wider"
+      }
+     ]
+    },
+    {
+     "code": "BENEFICIARY_ABSENT",
+     "target": [
+      {
+       "code": "failed",
+       "equivalence": "wider"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

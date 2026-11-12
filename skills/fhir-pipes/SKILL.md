@@ -1,6 +1,6 @@
 ---
 name: fhir-pipes
-description: Run the fhir-pipes command-line tool to move data into and out of FHIR R4 servers. Use when the user wants to export or extract FHIR resources to NDJSON from HAPI FHIR, Medplum, Aidbox, Google Cloud Healthcare API or another FHIR server (paged search, Bulk Data $export, or HAPI's PostgreSQL database), build SQL-on-FHIR ViewDefinitions into Parquet tables, refresh a warehouse with fhir-pipes.toml, load view tables into PostgreSQL, turn Location registries and admin boundaries into GeoParquet or map tiles, load or sync resources into a FHIR server, import DHIS2 data, work with fhir-pipes profiles, or explain a fhir-pipes error or exit code.
+description: Run the fhir-pipes command-line tool to move data into and out of FHIR R4 servers. Use when the user wants to export or extract FHIR resources to NDJSON from HAPI FHIR, Medplum, Aidbox, Google Cloud Healthcare API or another FHIR server (paged search, Bulk Data $export, or HAPI's PostgreSQL database), build SQL-on-FHIR ViewDefinitions into Parquet tables, refresh a warehouse with fhir-pipes.toml, load view tables into PostgreSQL, turn Location registries and admin boundaries into GeoParquet or map tiles, load or sync resources into a FHIR server, import DHIS2 data, run an import package of FHIR Mapping Language maps, views and SQL over non-FHIR records, work with fhir-pipes profiles, or explain a fhir-pipes error or exit code.
 license: Apache-2.0
 compatibility: Needs the fhir-pipes binary (release v0.6.0 or later, or a build from main) and a shell. Network access only for the FHIR servers, databases and DHIS2 instances the user names.
 metadata:
@@ -65,6 +65,7 @@ From source (needs Rust): `cargo install --git https://github.com/ohs-foundation
 | Check a fhir-pipes profile against its IG | `profile check` |
 | A value set or concept map as a table to join views to | `terminology valueset`, `terminology conceptmap` |
 | Turn non-FHIR records into FHIR resources with FHIR Mapping Language maps | `map check`, `map run` |
+| Run an import package (models, maps, views, Libraries) over a folder of records | `import check`, `import run`, `import test`, then `load` |
 
 ## Choosing `--server-kind`
 
@@ -173,8 +174,9 @@ fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson --dry
 fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson
 ```
 
-`import`, `index`, `population` and `dhis2` need a profile (`--profile` or
-`FHIR_PIPES_PROFILE`). See [references/profiles.md](references/profiles.md).
+`import location-boundaries`, `import location-sites`, `index`,
+`population` and `dhis2` need a profile (`--profile` or
+`FHIR_PIPES_PROFILE`); `import check`, `run` and `test` do not. See [references/profiles.md](references/profiles.md).
 
 ## Safety rules
 

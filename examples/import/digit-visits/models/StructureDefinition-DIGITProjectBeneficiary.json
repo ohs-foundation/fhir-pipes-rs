@@ -1,0 +1,77 @@
+{
+ "resourceType": "StructureDefinition",
+ "id": "DIGITProjectBeneficiary",
+ "url": "https://icr.healthcampaigns.org/StructureDefinition/DIGITProjectBeneficiary",
+ "name": "DIGITProjectBeneficiary",
+ "status": "draft",
+ "fhirVersion": "4.0.1",
+ "kind": "logical",
+ "abstract": false,
+ "type": "https://icr.healthcampaigns.org/StructureDefinition/DIGITProjectBeneficiary",
+ "baseDefinition": "http://hl7.org/fhir/StructureDefinition/Element",
+ "derivation": "specialization",
+ "snapshot": {
+  "element": [
+   {
+    "id": "DIGITProjectBeneficiary",
+    "path": "DIGITProjectBeneficiary",
+    "min": 0,
+    "max": "*"
+   },
+   {
+    "id": "DIGITProjectBeneficiary.clientReferenceId",
+    "path": "DIGITProjectBeneficiary.clientReferenceId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITProjectBeneficiary.beneficiaryClientReferenceId",
+    "path": "DIGITProjectBeneficiary.beneficiaryClientReferenceId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   }
+  ]
+ },
+ "differential": {
+  "element": [
+   {
+    "id": "DIGITProjectBeneficiary",
+    "path": "DIGITProjectBeneficiary",
+    "min": 0,
+    "max": "*"
+   },
+   {
+    "id": "DIGITProjectBeneficiary.clientReferenceId",
+    "path": "DIGITProjectBeneficiary.clientReferenceId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   },
+   {
+    "id": "DIGITProjectBeneficiary.beneficiaryClientReferenceId",
+    "path": "DIGITProjectBeneficiary.beneficiaryClientReferenceId",
+    "min": 1,
+    "max": "1",
+    "type": [
+     {
+      "code": "string"
+     }
+    ]
+   }
+  ]
+ }
+}

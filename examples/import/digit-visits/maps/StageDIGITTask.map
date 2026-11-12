@@ -1,0 +1,20 @@
+/// url = 'https://icr.healthcampaigns.org/StructureMap/StageDIGITTask'
+/// name = 'StageDIGITTask'
+/// status = 'draft'
+
+// One DIGIT task (one person, one delivery attempt) as a staged Task. The
+// staged Tasks are read by the StgTask view and are not written to the output.
+uses "https://icr.healthcampaigns.org/StructureDefinition/DIGITTask" alias DIGITTask as source
+uses "http://hl7.org/fhir/StructureDefinition/Task" alias Task as target
+
+group StageTask(source src : DIGITTask, target tk : Task) {
+  src.clientReferenceId as c -> tk.id = append('stg-', c) "id";
+  src -> tk.meta as m, m.tag as tag, tag.system = 'https://icr.healthcampaigns.org/CodeSystem/staging', tag.code = 'digit-staging' "tag";
+  src.status as s -> tk.status = translate(s, 'https://icr.healthcampaigns.org/ConceptMap/digit-task-status-to-task-status', 'code') "status";
+  src.status as s -> tk.businessStatus as bs, bs.coding as c, c.system = 'https://icr.healthcampaigns.org/CodeSystem/digit-task-status', c.code = s "businessStatus";
+  src -> tk.intent = 'order' "intent";
+  src.roundId as r -> tk.basedOn as ref, ref.reference = append('CarePlan/dgt-', r) "round";
+  src.projectBeneficiaryClientReferenceId as b -> tk.for as ref, ref.reference = append('Basic/stg-', b) "beneficiary";
+  src.createdBy as w -> tk.owner as ref, ref.reference = append('Practitioner/dgt-', w) "worker";
+  src.createdTime as t -> tk.executionPeriod as p, p.start = t "time";
+}

@@ -1,0 +1,5 @@
+{"resourceType":"ViewDefinition","url":"https://icr.healthcampaigns.org/ViewDefinition/StgHouseholdMember","name":"StgHouseholdMember","status":"draft","resource":"Basic",
+ "where":[{"path":"code.text = 'household-member'"}],
+ "select":[{"column":[
+  {"name":"person_id","path":"subject.getReferenceKey(Patient)","type":"string"},
+  {"name":"household_id","path":"extension('https://icr.healthcampaigns.org/StructureDefinition/staging-household').value.ofType(Reference).getReferenceKey(Group)","type":"string"}]}]}

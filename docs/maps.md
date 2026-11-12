@@ -12,6 +12,8 @@ fhir-pipes map run   --maps maps/ --in records.ndjson --out resources.ndjson
 
 `fhir-pipes dhis2 --maps` uses the same engine to write Locations, Measures
 and MeasureReports; see [Maps for the DHIS2 import](#maps-for-the-dhis2-import).
+To run several maps over a folder of records as one pipeline, with views and
+SQL where records have to be joined, see [import.md](import.md).
 
 ## A folder of maps
 
@@ -97,29 +99,37 @@ and published with an implementation guide without a new fhir-pipes release.
 
 ```sh
 fhir-pipes dhis2 locations --dhis2 URL --instance sl-demo --id-prefix sle \
-  --maps examples/maps/icr-dhis2 --out sl-locations.ndjson
+  --maps examples/import/icr-dhis2/maps --out sl-locations.ndjson
 ```
 
 fhir-pipes still does everything a map cannot: it reads the DHIS2 API,
 checks each record, and works out the values that depend on other records or
-on the run. It hands the map one prepared record at a time. The record's
-logical model is built in:
+on the run. It hands the map one prepared record at a time. The records'
+logical models are in
+[examples/import/icr-dhis2/models](../examples/import/icr-dhis2/models), and
+are built into fhir-pipes for `--maps`:
 
 | Command | Record | What fhir-pipes prepares |
 |---|---|---|
-| `dhis2 locations` | [DHIS2OrgUnit](../src/dhis2/models/StructureDefinition-DHIS2OrgUnit.json) | The id prefix, facility or admin unit from the level, the parent only when it was exported, the boundary (merged from the children for a unit with none), the point, the org unit groups |
-| `dhis2 measures` | [DHIS2Indicator](../src/dhis2/models/StructureDefinition-DHIS2Indicator.json) | Indicators, data elements and reporting rates in one shape, the date in the server's time zone |
-| `dhis2 reports` | [DHIS2Value](../src/dhis2/models/StructureDefinition-DHIS2Value.json) | The report id, the Location the org unit maps to, the period's dates, counts as whole numbers, the score, and each breakdown with its options |
+| `dhis2 locations` | [DHIS2OrgUnit](../examples/import/icr-dhis2/models/StructureDefinition-DHIS2OrgUnit.json) | The id prefix, facility or admin unit from the level, the parent only when it was exported, the boundary (merged from the children for a unit with none), the point, the org unit groups |
+| `dhis2 measures` | [DHIS2Indicator](../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Indicator.json) | Indicators, data elements and reporting rates in one shape, the date in the server's time zone |
+| `dhis2 reports` | [DHIS2Value](../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Value.json) | The report id, the Location the org unit maps to, the period's dates, counts as whole numbers, the score, and each breakdown with its options |
 
 For each command the folders must hold exactly one map whose first group
 reads that record type. The map for `dhis2 reports` must write one
 MeasureReport with the record's `id`, and put the period extension first.
 
-[examples/maps/icr-dhis2](../examples/maps/icr-dhis2) holds the maps and
-ConceptMaps for the Integrated Campaign Registry. They write the same
-resources as the built-in mapping with `examples/profiles/icr.toml`; the
+[examples/import/icr-dhis2/maps](../examples/import/icr-dhis2/maps) holds
+the maps and ConceptMaps for the Integrated Campaign Registry. They write the
+same resources as the built-in mapping with `examples/profiles/icr.toml`; the
 tests run the DHIS2 import both ways and compare. Copy them to start a
 mapping for another implementation guide.
+
+The folder is part of an import package,
+[examples/import/icr-dhis2](../examples/import/icr-dhis2). With `--records`
+the `dhis2` commands write the prepared records instead of resources, and
+`fhir-pipes import run` turns them into the same resources with these maps
+(see [dhis2.md](dhis2.md#records-and-the-import-package)).
 
 Notes:
 

@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 
 use super::Instance;
 use super::api::{Dhis2, ServerInfo, check_analytics_age};
-use super::maps::{RecordMap, VALUE_MODEL};
+use super::maps::{RecordMap, VALUE_MODEL, Writes, record_type};
 use super::measures::{fetch_indicators, fhir_key};
 use super::rerun::{Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
@@ -186,7 +186,7 @@ pub fn run_reports(args: &Dhis2ReportsArgs, profile: &crate::profile::Profile) -
         mapping: &mapping,
         campaign: args.campaign.as_deref(),
         source: args.source,
-        maps: maps.as_ref(),
+        writes: Writes::new(maps.as_ref(), args.conn.records),
         state,
         checkpoint: checkpoint.clone(),
         tally: Tally::default(),
@@ -292,6 +292,16 @@ fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
             )));
         }
     }
+    // --changed, --removed and --updated-since need --previous, so this
+    // refuses them too.
+    if args.conn.records && args.previous.is_some() {
+        return Err(PipesError::Usage(
+            "--records cannot be used with --previous: the comparison with a previous run \
+             (--previous, --changed, --removed, --updated-since) needs the MeasureReports, \
+             and --records writes DHIS2Value records instead"
+                .into(),
+        ));
+    }
     if let Some(p) = &args.previous
         && !p.is_file()
     {
@@ -388,6 +398,11 @@ fn fingerprint(
         "previous": args.previous.as_deref().map(file_stamp),
         "changed": args.changed.as_ref().map(|p| p.display().to_string()),
     });
+    // Only with --records, so a run without it resumes a checkpoint written
+    // before the option existed, and a run is not resumed in the other mode.
+    if args.conn.records {
+        plan["records"] = json!(true);
+    }
     // Only with --maps, so a run without it resumes a checkpoint written
     // before the option existed.
     if !args.conn.maps.is_empty() {
@@ -545,8 +560,13 @@ fn print_summary(
     removed: Option<&[String]>,
     kept: usize,
 ) -> Result<()> {
+    let what = if args.conn.records {
+        format!("{} records", record_type(VALUE_MODEL))
+    } else {
+        "MeasureReports".to_string()
+    };
     println!(
-        "Wrote {} MeasureReports to {} ({} indicators, {} Locations, {} periods; {} values from {} {} requests)",
+        "Wrote {} {what} to {} ({} indicators, {} Locations, {} periods; {} values from {} {} requests)",
         tally.written,
         args.out.display(),
         indicators,

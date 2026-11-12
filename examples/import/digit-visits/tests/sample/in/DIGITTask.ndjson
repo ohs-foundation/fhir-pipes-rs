@@ -1,0 +1,4 @@
+{"clientReferenceId":"t-001","projectBeneficiaryClientReferenceId":"pb-1","roundId":"r1","createdBy":"w1","status":"ADMINISTRATION_SUCCESS","createdTime":"2026-07-01T09:00:00Z"}
+{"clientReferenceId":"t-002","projectBeneficiaryClientReferenceId":"pb-2","roundId":"r1","createdBy":"w1","status":"BENEFICIARY_REFUSED","createdTime":"2026-07-01T09:05:00Z"}
+{"clientReferenceId":"t-003","projectBeneficiaryClientReferenceId":"pb-2","roundId":"r1","createdBy":"w1","status":"ADMINISTRATION_SUCCESS","createdTime":"2026-07-01T15:00:00Z"}
+{"clientReferenceId":"t-004","projectBeneficiaryClientReferenceId":"pb-3","roundId":"r1","createdBy":"w1","status":"BENEFICIARY_ABSENT","createdTime":"2026-07-01T09:40:00Z"}

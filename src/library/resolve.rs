@@ -90,6 +90,18 @@ impl Catalog {
     /// the first source that has it wins. Every Library's dependencies are
     /// resolved here, so a missing one or a cycle stops the load.
     pub fn load(sources: &[String], base: &Path, strip_prefix: &[String]) -> Result<Catalog> {
+        Self::load_with(sources, None, base, strip_prefix)
+    }
+
+    /// As `load`, then the resources of `extra` (a label for messages, and
+    /// each resource with the file it came from) as one more source: for
+    /// Libraries built in memory from `.sql` and `.toml` sources.
+    pub fn load_with(
+        sources: &[String],
+        extra: Option<(&str, Vec<(String, Value)>)>,
+        base: &Path,
+        strip_prefix: &[String],
+    ) -> Result<Catalog> {
         let mut catalog = Catalog::default();
         for a in builtin::artifacts() {
             catalog.insert(a);
@@ -99,38 +111,60 @@ impl Catalog {
             let spec = resolve_spec(source, base);
             let mut found = Vec::new();
             crate::fhir::package::read_json_files(&spec, "libraries", |name, v| {
-                let a = artifact(&v, strip_prefix).with_context(|| format!("reading {name}"));
-                found.push((name.to_string(), a));
+                found.push((name.to_string(), v));
             })
             .map_err(usage)?;
-            // A directory is read in the file system's order; file-name order
-            // keeps `libraries` and `order` the same from run to run.
-            found.sort_by(|a, b| a.0.cmp(&b.0));
-            for (_, a) in found {
-                let Some(a) = a.map_err(usage)? else {
-                    continue;
-                };
-                let built_in = [LOCATION_URL, HIERARCHY_URL].contains(&a.url())
-                    || catalog.artifacts[..builtins]
-                        .iter()
-                        .any(|b| b.url() == a.url());
-                if built_in {
-                    return Err(usage(anyhow!(
-                        "libraries {source}: {} is built in to fhir-pipes and cannot be \
-                         redefined; remove it from the source",
-                        a.url()
-                    )));
-                }
-                if catalog.find(a.url(), a.version()).is_none() {
-                    catalog.insert(a);
-                }
-            }
+            catalog.add_source(source, found, builtins, strip_prefix)?;
+        }
+        if let Some((label, found)) = extra {
+            catalog.add_source(label, found, builtins, strip_prefix)?;
         }
         catalog
             .check_tables(builtins, strip_prefix)
             .map_err(usage)?;
         catalog.order()?;
         Ok(catalog)
+    }
+
+    /// The artefacts among the resources of one source, each with the file
+    /// it came from, after the first `builtins` artefacts.
+    fn add_source(
+        &mut self,
+        source: &str,
+        found: Vec<(String, Value)>,
+        builtins: usize,
+        strip_prefix: &[String],
+    ) -> Result<()> {
+        let mut found: Vec<_> = found
+            .into_iter()
+            .map(|(name, v)| {
+                let a = artifact(&v, strip_prefix).with_context(|| format!("reading {name}"));
+                (name, a)
+            })
+            .collect();
+        // A directory is read in the file system's order; file-name order
+        // keeps `libraries` and `order` the same from run to run.
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, a) in found {
+            let Some(a) = a.map_err(usage)? else {
+                continue;
+            };
+            let built_in = [LOCATION_URL, HIERARCHY_URL].contains(&a.url())
+                || self.artifacts[..builtins]
+                    .iter()
+                    .any(|b| b.url() == a.url());
+            if built_in {
+                return Err(usage(anyhow!(
+                    "libraries {source}: {} is built in to fhir-pipes and cannot be \
+                     redefined; remove it from the source",
+                    a.url()
+                )));
+            }
+            if self.find(a.url(), a.version()).is_none() {
+                self.insert(a);
+            }
+        }
+        Ok(())
     }
 
     fn insert(&mut self, a: Artifact) {

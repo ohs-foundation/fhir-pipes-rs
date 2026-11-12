@@ -6,101 +6,38 @@
 //! hash per id; `--resume` keeps a small checkpoint file beside the output's
 //! temporary file.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::{PipesError, Result};
+pub use crate::fhir::content::Change;
+use crate::fhir::content::{self, Ignore};
 use crate::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
 use crate::fs::{AtomicFile, atomic_write};
 use crate::report::Report;
 
-/// A report's content, as a 64-bit hash. Left out: `date`, which is when
-/// DHIS2 last built its analytics tables and so changes every night whether
-/// or not the value did, and `meta.lastUpdated` / `meta.versionId`, which a
-/// FHIR server sets. Object keys are taken in sorted order, so key order
-/// does not matter.
+/// The elements of a report left out of its content hash: `date`, which is
+/// when DHIS2 last built its analytics tables and so changes every night
+/// whether or not the value did, and `meta.lastUpdated` / `meta.versionId`,
+/// which a FHIR server sets.
+static IGNORED: LazyLock<Ignore> =
+    LazyLock::new(|| Ignore::of(&["date", "meta.lastUpdated", "meta.versionId"]));
+
+/// A report's content, as a 64-bit hash, without the elements in `IGNORED`.
+/// Object keys are taken in sorted order, so key order does not matter.
 pub fn content_hash(r: &Value) -> u64 {
-    let mut h = DefaultHasher::new();
-    match r.as_object() {
-        Some(o) => {
-            let mut keys: Vec<&String> = o.keys().filter(|k| *k != "date").collect();
-            keys.sort();
-            h.write_u8(b'{');
-            for k in keys {
-                k.hash(&mut h);
-                let skip: &[&str] = if k == "meta" {
-                    &["lastUpdated", "versionId"]
-                } else {
-                    &[]
-                };
-                hash_value(&o[k.as_str()], skip, &mut h);
-            }
-        }
-        None => hash_value(r, &[], &mut h),
-    }
-    h.finish()
+    content::content_hash(r, &IGNORED)
 }
 
-/// `skip` names keys left out of this object (not of objects inside it).
-fn hash_value(v: &Value, skip: &[&str], h: &mut DefaultHasher) {
-    match v {
-        Value::Null => h.write_u8(0),
-        Value::Bool(b) => {
-            h.write_u8(1);
-            b.hash(h);
-        }
-        Value::Number(n) => {
-            h.write_u8(2);
-            n.to_string().hash(h);
-        }
-        Value::String(s) => {
-            h.write_u8(3);
-            s.hash(h);
-        }
-        Value::Array(a) => {
-            h.write_u8(4);
-            h.write_usize(a.len());
-            for x in a {
-                hash_value(x, &[], h);
-            }
-        }
-        Value::Object(o) => {
-            h.write_u8(5);
-            let mut keys: Vec<&String> = o.keys().filter(|k| !skip.contains(&k.as_str())).collect();
-            keys.sort();
-            h.write_usize(keys.len());
-            for k in keys {
-                k.hash(h);
-                hash_value(&o[k.as_str()], &[], h);
-            }
-        }
-    }
-}
-
-/// An id as a 128-bit key: two hashes, so that two of a million ids
-/// sharing a key is not a practical concern.
+/// An id as a 128-bit key.
 fn id_key(id: &str) -> u128 {
-    let mut a = DefaultHasher::new();
-    id.hash(&mut a);
-    let mut b = DefaultHasher::new();
-    0x5bd1_e995u32.hash(&mut b);
-    id.hash(&mut b);
-    (u128::from(a.finish()) << 64) | u128::from(b.finish())
-}
-
-/// How a report written this run compares with the previous run's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Change {
-    New,
-    Changed,
-    Unchanged,
+    content::key_hash(id)
 }
 
 /// The previous run's reports: per id, a content hash and whether this run

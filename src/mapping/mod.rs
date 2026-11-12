@@ -334,7 +334,7 @@ impl MapPackage {
 }
 
 /// The URL of the type the map's first group reads.
-fn first_source_url(map: &StructureMap) -> Option<String> {
+pub(crate) fn first_source_url(map: &StructureMap) -> Option<String> {
     let group = map.group.first()?;
     let input = group.input.iter().find(|i| i.mode == "source")?;
     let type_name = input.type_name.as_deref()?;
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn the_example_icr_maps_check_clean_and_cover_every_dhis2_record() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/maps/icr-dhis2");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2/maps");
         let package = MapPackage::load(&[dir], &MODELS).unwrap();
         let (errors, warnings) = package.check();
         assert!(

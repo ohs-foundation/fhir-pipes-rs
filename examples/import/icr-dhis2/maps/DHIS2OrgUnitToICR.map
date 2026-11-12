@@ -3,8 +3,11 @@
 /// title = 'DHIS2 organisation unit to ICRLocation and ICRFacilityOrganization'
 /// status = 'draft'
 
-// Run by `fhir-pipes dhis2 locations --maps`. Each org unit becomes an
-// ICRLocation; a facility also gets its ICRFacilityOrganization, written first.
+// Run by `fhir-pipes dhis2 locations --maps`, and by `fhir-pipes import run`
+// over the records `dhis2 locations --records` writes.
+//
+// Each org unit becomes an ICRLocation; a facility also gets its
+// ICRFacilityOrganization, written first.
 //
 // Ids, references and systems are joined with `append` from source variables
 // rather than with FHIRPath, and `where` tests run on a single field or group,
