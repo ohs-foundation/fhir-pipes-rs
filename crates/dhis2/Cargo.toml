@@ -24,6 +24,7 @@ mimalloc = { version = "0.1.52", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
+toml = "1"
 url = "2.5"
 
 [dev-dependencies]

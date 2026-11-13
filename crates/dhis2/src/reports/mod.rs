@@ -60,7 +60,6 @@ use fhir_pipes::error::{PipesError, Result};
 use fhir_pipes::fhir::group::is_valid_id;
 use fhir_pipes::fhir::ndjson::NdjsonWriter;
 use fhir_pipes::fs::check_out;
-use fhir_pipes::report::write_report;
 use fhir_pipes::snapshot::instant::format_utc;
 
 use analytics::Values;
@@ -72,8 +71,26 @@ use writer::{Tally, Writer, fetch_and_write};
 /// DHIS2 UIDs are 11 characters.
 const UID_LEN: usize = 11;
 
+/// A `--breakdown`: a dimension with items (`UID:a;b`) names its analytics
+/// column by the UID alone, and goes into report ids and codes, so only a
+/// bare UID.
+pub fn check_breakdown(b: &str) -> std::result::Result<(), String> {
+    if b.len() != UID_LEN || !b.bytes().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "--breakdown {b:?}: expected the UID of a category or group set (11 letters \
+             and digits); choosing some of its items is not supported"
+        ));
+    }
+    Ok(())
+}
+
+/// A `--range`, as the run parses it.
+pub fn check_range(s: &str) -> std::result::Result<(), String> {
+    DateRange::parse(s).map(drop).map_err(|e| e.to_string())
+}
+
 /// A `--campaign` reference, `ResourceType/id`.
-fn check_campaign(reference: &str) -> Result<()> {
+pub fn check_campaign(reference: &str) -> Result<()> {
     let ok = match reference.split_once('/') {
         Some((kind, id)) => {
             kind.starts_with(|c: char| c.is_ascii_uppercase())
@@ -102,10 +119,11 @@ fn unique<T: Clone + PartialEq>(list: &[T]) -> Vec<T> {
     out
 }
 
-pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<()> {
+/// Returns the run report, as JSON.
+pub fn run_reports(args: &Dhis2ReportsArgs) -> Result<Value> {
     check_args(args)?;
     let from_values = args.opts.source == ReportSource::DataValues;
-    let instance = Instance::new(&args.conn.instance)?;
+    let instance = Instance::new(args.conn.instance())?;
     let map = if args.records {
         None
     } else {
@@ -278,15 +296,8 @@ fn load_org_units(
 /// The checks of the flags alone, before anything is read or requested.
 fn check_args(args: &Dhis2ReportsArgs) -> Result<()> {
     check_out(&args.out)?;
-    // A dimension with items (`UID:a;b`) names its analytics column by the
-    // UID alone, and goes into report ids and codes: only a bare UID.
     for b in &args.opts.breakdowns {
-        if b.len() != UID_LEN || !b.bytes().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(PipesError::Usage(format!(
-                "--breakdown {b:?}: expected the UID of a category or group set (11 letters \
-                 and digits); choosing some of its items is not supported"
-            )));
-        }
+        check_breakdown(b).map_err(PipesError::Usage)?;
     }
     if args.opts.chunk == 0 {
         return Err(PipesError::Usage("--chunk must be at least 1".into()));
@@ -421,7 +432,7 @@ fn fingerprint(
 ) -> Value {
     let from_values = args.opts.source == ReportSource::DataValues;
     let mut plan = json!({
-        "dhis2": fhir_pipes::redact::url(&args.conn.url),
+        "dhis2": fhir_pipes::redact::url(args.conn.url()),
         "instance": instance.name,
         "source": args.opts.source.code(),
         "updated_since": args.updated_since,
@@ -606,7 +617,7 @@ fn print_summary(
     state: &Checkpoint,
     removed: Option<&[String]>,
     kept: usize,
-) -> Result<()> {
+) -> Result<Value> {
     let what = if args.records {
         format!("{} records", record_type(VALUE_MODEL))
     } else {
@@ -661,10 +672,7 @@ fn print_summary(
         }
     }
     println!("{}", state.report.summary());
-    if let Some(path) = &args.opts.report {
-        write_report(path, &state.report)?;
-    }
-    Ok(())
+    crate::run_report(args.opts.report.as_deref(), &state.report, &args.conn)
 }
 
 #[cfg(test)]
