@@ -23,7 +23,7 @@ use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
 use fhir_pipes::error::{PipesError, Result};
 use fhir_pipes::fhir::ndjson::write_ndjson;
 use fhir_pipes::fs::check_out;
-use fhir_pipes::report::{Report, write_report};
+use fhir_pipes::report::Report;
 
 const INDICATOR_FIELDS: &str = "id,code,name,description,numerator,numeratorDescription,\
 denominator,denominatorDescription,decimals,annualized,lastUpdated,\
@@ -538,9 +538,10 @@ pub fn fetch_indicators(
     Ok(found)
 }
 
-pub fn run_measures(args: &Dhis2MeasuresArgs) -> Result<()> {
+/// Returns the run report, as JSON.
+pub fn run_measures(args: &Dhis2MeasuresArgs) -> Result<Value> {
     check_out(&args.out)?;
-    let instance = Instance::new(&args.conn.instance)?;
+    let instance = Instance::new(args.conn.instance())?;
     let map = if args.records {
         None
     } else {
@@ -594,10 +595,7 @@ pub fn run_measures(args: &Dhis2MeasuresArgs) -> Result<()> {
         scoring.join(", ")
     );
     println!("{}", report.summary());
-    if let Some(path) = &args.report {
-        write_report(path, &report)?;
-    }
-    Ok(())
+    crate::run_report(args.report.as_deref(), &report, &args.conn)
 }
 
 #[cfg(test)]

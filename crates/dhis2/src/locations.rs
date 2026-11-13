@@ -17,7 +17,7 @@ use fhir_pipes::error::{PipesError, Result};
 use fhir_pipes::fhir::group::is_valid_id;
 use fhir_pipes::fhir::ndjson::NdjsonWriter;
 use fhir_pipes::fs::check_out;
-use fhir_pipes::report::{Report, write_report};
+use fhir_pipes::report::Report;
 
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
@@ -446,9 +446,10 @@ fn add_org_unit_groups(
     Ok(list.len())
 }
 
-pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
+/// Returns the run report, as JSON.
+pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<serde_json::Value> {
     check_out(&args.out)?;
-    let instance = Instance::new(&args.conn.instance)?;
+    let instance = Instance::new(args.conn.instance())?;
     let prefix = args
         .opts
         .id_prefix
@@ -494,7 +495,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
         .collect();
 
     let mut query = vec![("fields", ORG_UNIT_FIELDS.to_string())];
-    if let Some(root) = &args.opts.root {
+    if let Some(root) = &args.root {
         query.push(("filter", under(root)));
     }
     let raw = api.paged("organisationUnits.json", "organisationUnits", &query)?;
@@ -505,7 +506,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
         .filter_map(|v| OrgUnit::parse(&v, &mut report))
         .collect();
     if units.is_empty() {
-        return Err(PipesError::Usage(match &args.opts.root {
+        return Err(PipesError::Usage(match &args.root {
             Some(r) => format!("DHIS2 returned no org units at or below {r}"),
             None => "DHIS2 returned no org units; does this user have any assigned?".into(),
         }));
@@ -612,10 +613,7 @@ pub fn run_locations(args: &Dhis2LocationsArgs) -> Result<()> {
         println!("  level {level} {name}: {count} ({role})");
     }
     println!("{}", report.summary());
-    if let Some(path) = &args.report {
-        write_report(path, &report)?;
-    }
-    Ok(())
+    crate::run_report(args.report.as_deref(), &report, &args.conn)
 }
 
 #[cfg(test)]

@@ -200,7 +200,7 @@ impl Dhis2 {
     /// Signs in by reading `system/info`, so bad credentials or a wrong URL
     /// fail here, before any other request.
     pub fn connect(conn: &Dhis2Conn) -> Result<Self> {
-        let base = api_base(&conn.url)?;
+        let base = api_base(conn.url())?;
         let client = FhirClient::new(auth(conn), conn.retries, Duration::from_secs(conn.timeout))?
             .for_server(&base);
         let mut d = Dhis2 {
@@ -442,13 +442,14 @@ mod tests {
     #[test]
     fn credentials_become_one_authorization_value() {
         let conn = |token: Option<&str>, user: Option<&str>, password: Option<&str>| Dhis2Conn {
-            url: "https://x".into(),
-            instance: "x".into(),
+            url: Some("https://x".into()),
+            instance: Some("x".into()),
             token: token.map(str::to_string),
             user: user.map(str::to_string),
             password: password.map(str::to_string),
             retries: 1,
             timeout: 1,
+            config: None,
         };
         assert!(
             matches!(auth(&conn(Some("d2pat_1"), None, None)), Auth::Header(h) if h == "ApiToken d2pat_1")

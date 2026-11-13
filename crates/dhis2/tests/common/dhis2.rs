@@ -52,6 +52,7 @@ fn with_env(mut c: Command) -> Command {
         "FHIR_PIPES_DHIS2_USER",
         "FHIR_PIPES_DHIS2_PASSWORD",
         "FHIR_PIPES_DHIS2_MAPS",
+        "FHIR_PIPES_DHIS2_CONFIG",
     ] {
         c.env_remove(var);
     }

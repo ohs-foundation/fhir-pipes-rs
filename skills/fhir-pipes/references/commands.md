@@ -204,6 +204,25 @@ options of the matching command except `--maps`; `extract reports` has no
 `DIR/DHIS2OrgUnit.ndjson` from an earlier `extract locations --out DIR`.
 `--resume` works. `dhis2 extract` reads no profile. See docs/dhis2.md.
 
+`dhis2 extract all --out DIR` runs `extract locations`, `measures` and
+`reports` into one folder, stopping at the first failure; `--skip STEP`
+leaves one out. Every `dhis2` command takes `--config FILE`
+(`FHIR_PIPES_DHIS2_CONFIG`): a TOML settings file of one instance with
+`url`, `instance`, `user`, `package`, `[parameters]`, `[locations]`,
+`[indicators]` and `[reports]`, keys named after the options
+(`examples/dhis2/sierra-leone.toml`). An option overrides the file; a
+repeatable option replaces the file's list. Passwords and tokens are
+refused in the file (environment only). `dhis2 config check --config FILE`
+checks it and prints the settings, exit 0 or 2.
+
+`dhis2 list KIND [--filter TEXT] [--group UID] [--level N] [--format table|json]`
+prints the UIDs (or levels) an option takes, read with GET requests from the
+metadata API, all pages, sorted by name: `indicator-groups`, `indicators`,
+`data-element-groups`, `data-element-group-sets`, `data-elements`,
+`data-sets`, `org-unit-levels`, `org-unit-group-sets`, `org-unit-groups`,
+`org-units`, `categories`. Server and credentials as for the other commands
+(`--config`, `--dhis2`, environment); no `--instance`.
+
 `fhir-pipes NAME ARGS…`, where NAME is not a built-in command, runs the
 program `fhir-pipes-NAME` from the folder of fhir-pipes or the PATH. See
 docs/connectors.md.

@@ -15,7 +15,9 @@
 
 mod api;
 mod calendar;
+mod config;
 mod expression;
+mod list;
 mod locations;
 mod maps;
 mod measures;
@@ -27,10 +29,15 @@ mod cli;
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
+use serde_json::{Value, json};
 
-use crate::cli::{Dhis2Command, Dhis2ExtractCommand, Dhis2Package};
+use crate::cli::{
+    ConfigCommand, Dhis2Command, Dhis2Conn, Dhis2ExtractCommand, Dhis2Package, ExtractAllArgs,
+    ExtractLocationsArgs, ExtractMeasuresArgs, ExtractReportsArgs, Step,
+};
 use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::report::Report;
 use maps::RecordMap;
 
 /// Instance names go into every id, so they are kept short.
@@ -43,8 +50,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Exits 0 on success, and as fhir-pipes does on an error: 2 for one the
 /// user can fix before running again, 1 for a failure while running.
 fn main() {
-    let cli = cli::Cli::parse();
-    if let Err(err) = run(&cli.command) {
+    let matches = cli::Cli::command().get_matches();
+    let cli = cli::Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if let Err(err) = run(cli, &matches) {
         eprintln!("fhir-pipes-dhis2: {}", fhir_pipes::error::message(&err));
         std::process::exit(fhir_pipes::error::exit_code(&err));
     }
@@ -52,18 +60,35 @@ fn main() {
 
 /// No `dhis2` command reads the profile, `--profile` or
 /// `$FHIR_PIPES_PROFILE`. The URLs the resources carry are the package's
-/// parameters.
-pub fn run(cmd: &Dhis2Command) -> anyhow::Result<()> {
-    if let Dhis2Command::Extract(cmd) = cmd {
-        return Ok(extract(cmd)?);
-    }
-    match cmd {
-        Dhis2Command::Locations(args) => locations::run_locations(args)?,
-        Dhis2Command::Measures(args) => measures::run_measures(args)?,
-        Dhis2Command::Reports(args) => reports::run_reports(args)?,
-        Dhis2Command::Extract(_) => unreachable!("handled above"),
+/// parameters. The settings file (`--config`) fills in what the command
+/// line leaves out (see config.rs).
+pub fn run(cli: cli::Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
+    let cfg = cli.config.as_deref().map(config::load).transpose()?;
+    let mut cmd = cli.command;
+    config::settle(&mut cmd, matches, cfg.as_ref())?;
+    match &cmd {
+        Dhis2Command::Locations(args) => drop(locations::run_locations(args)?),
+        Dhis2Command::Measures(args) => drop(measures::run_measures(args)?),
+        Dhis2Command::Reports(args) => drop(reports::run_reports(args)?),
+        Dhis2Command::Extract(Dhis2ExtractCommand::All(args)) => extract_all(args)?,
+        Dhis2Command::Extract(cmd) => drop(extract(cmd)?),
+        Dhis2Command::Config(ConfigCommand::Check(args)) => config::check(cfg.as_ref(), args)?,
+        Dhis2Command::List(args) => list::run_list(args)?,
     }
     Ok(())
+}
+
+/// The run report as JSON, written to `path` when there is one, with the
+/// settings file the run read.
+pub fn run_report(path: Option<&Path>, report: &Report, conn: &Dhis2Conn) -> Result<Value> {
+    let mut v = report.to_json();
+    if let Some(c) = &conn.config {
+        v["config"] = json!(c.display().to_string());
+    }
+    if let Some(path) = path {
+        fhir_pipes::report::write_json(path, &v)?;
+    }
+    Ok(v)
 }
 
 /// The package of `dhis2 locations|measures|reports`, and the map in it
@@ -84,7 +109,7 @@ pub fn package_map(command: &str, package: &Dhis2Package, model: &str) -> Result
 /// `--out/<RecordType>.ndjson` instead of resources. Its temporary and
 /// `--resume` files sit beside that file, as `<RecordType>.ndjson.tmp` and
 /// `.resume`, which `import run` does not read.
-fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
+fn extract(cmd: &Dhis2ExtractCommand) -> Result<Value> {
     let file = |dir: &Path, model: &str| -> Result<PathBuf> {
         if dir.exists() && !dir.is_dir() {
             return Err(PipesError::Usage(format!(
@@ -120,7 +145,83 @@ fn extract(cmd: &Dhis2ExtractCommand) -> Result<()> {
             };
             reports::run_reports(&(**args).clone().into_command(out, org_units))
         }
+        Dhis2ExtractCommand::All(_) => unreachable!("run by extract_all"),
     }
+}
+
+/// `dhis2 extract all`: the three extract commands, in order, into one
+/// folder, each as it runs on its own. The first step that fails stops the
+/// run, with its exit code. With `--resume`, a locations or measures step
+/// whose records are already in the folder is not run again: rewriting
+/// the org unit records would change the plan the reports step resumes.
+fn extract_all(a: &ExtractAllArgs) -> anyhow::Result<()> {
+    let runs = |s: Step| !a.skip.contains(&s);
+    let done = |model: &str| {
+        a.reports.resume
+            && a.out
+                .join(format!("{}.ndjson", maps::record_type(model)))
+                .is_file()
+    };
+    let mut report = serde_json::Map::new();
+    if let Some(c) = &a.conn.config {
+        report.insert("config".into(), json!(c.display().to_string()));
+    }
+    let steps = [
+        (Step::Locations, maps::ORG_UNIT_MODEL),
+        (Step::Measures, maps::INDICATOR_MODEL),
+        (Step::Reports, maps::VALUE_MODEL),
+    ];
+    for (n, (step, model)) in steps.into_iter().enumerate() {
+        let name = step.name();
+        if !runs(step) {
+            eprintln!(
+                "extract all: step {} of 3, {name}: left out (--skip)",
+                n + 1
+            );
+            continue;
+        }
+        if step != Step::Reports && done(model) {
+            eprintln!(
+                "extract all: step {} of 3, {name}: already done, not run again with --resume",
+                n + 1
+            );
+            continue;
+        }
+        eprintln!("extract all: step {} of 3, {name}", n + 1);
+        let cmd = match step {
+            Step::Locations => Dhis2ExtractCommand::Locations(ExtractLocationsArgs {
+                conn: a.conn.clone(),
+                opts: a.locations.clone(),
+                root: a.locations_root.clone(),
+                out: a.out.clone(),
+                report: None,
+            }),
+            Step::Measures => Dhis2ExtractCommand::Measures(ExtractMeasuresArgs {
+                conn: a.conn.clone(),
+                select: a.select.clone(),
+                out: a.out.clone(),
+                report: None,
+            }),
+            Step::Reports => {
+                let mut opts = a.reports.clone();
+                opts.report = None;
+                Dhis2ExtractCommand::Reports(Box::new(ExtractReportsArgs {
+                    conn: a.conn.clone(),
+                    select: a.select.clone(),
+                    opts,
+                    out: a.out.clone(),
+                    org_units: a.org_units.clone(),
+                }))
+            }
+        };
+        let v = extract(&cmd)
+            .map_err(|e| anyhow::Error::from(e).context(format!("extract all, {name} step")))?;
+        report.insert(name.into(), v);
+    }
+    if let Some(path) = &a.reports.report {
+        fhir_pipes::report::write_json(path, &Value::Object(report))?;
+    }
+    Ok(())
 }
 
 /// The `DHIS2OrgUnit` records in `dir`, as `dhis2 extract locations` wrote
