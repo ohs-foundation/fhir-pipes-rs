@@ -6,9 +6,14 @@ records, which an import package turns into FHIR NDJSON for
 [locations.md](locations.md) for the Location registry the org units become.
 
 ```
-fhir-pipes dhis2 extract locations|measures|reports [OPTIONS] --out RAW
+fhir-pipes dhis2 extract all --config dhis2.toml --out RAW
 fhir-pipes import run --package examples/import/icr-dhis2 --in RAW --out FHIR
 ```
+
+`dhis2.toml` is the instance's settings file (see
+[The settings file](#the-settings-file)). `extract all` runs
+`extract locations`, `extract measures` and `extract reports`, which can
+also be run one at a time, with the settings as options or in the file.
 
 `dhis2 extract` writes one file of records per command in the folder `RAW`.
 `import run` maps the folder with the package
@@ -57,6 +62,7 @@ PATH`.
 | `--dhis2-user` / `--dhis2-password`, `$FHIR_PIPES_DHIS2_USER` / `$FHIR_PIPES_DHIS2_PASSWORD` | Basic authentication |
 | `--instance` | A short name for the instance: letters, digits and hyphens, up to 16 characters, such as `sl-demo` |
 | `--report FILE` | Also write the run report as JSON |
+| `--config FILE`, `$FHIR_PIPES_DHIS2_CONFIG` | The instance's settings file; see [The settings file](#the-settings-file) |
 
 Use a read-only DHIS2 user. Keep `--instance` the same across runs: it
 prefixes every id and is in every record, and ids are deterministic, so a
@@ -66,6 +72,150 @@ No `dhis2` command reads the profile, whether it is given as `--profile`
 before or after `dhis2`, or as `$FHIR_PIPES_PROFILE`. The systems, profiles and extensions
 the resources carry are parameters of the package (see
 [import.md](import.md#parameters)).
+
+## The settings file
+
+The settings of one DHIS2 instance (its server, its instance name, and what
+to export) can be written down once in a TOML file and given with
+`--config FILE` or `$FHIR_PIPES_DHIS2_CONFIG`. Every command reads it. Each
+key stands for an option, and the option can still be given:
+
+```toml
+url = "https://play.im.dhis2.org/stable-2-42-7-1"
+instance = "sl-demo"
+
+[locations]
+id_prefix = "sle"
+country_code = "SLE"
+
+[indicators]
+indicator_groups = ["srxUNt2w5jn"]
+
+[reports]
+levels = [2, 3]
+periods = ["2025", "LAST_12_MONTHS"]
+```
+
+[examples/dhis2/sierra-leone.toml](../examples/dhis2/sierra-leone.toml) is
+a commented file for the open Sierra Leone demo.
+
+| Key | Option | Meaning |
+|---|---|---|
+| `url` | `--dhis2`, `$FHIR_PIPES_DHIS2_URL` | The instance's base URL |
+| `instance` | `--instance` | The short name of the instance |
+| `user` | `--dhis2-user`, `$FHIR_PIPES_DHIS2_USER` | User name for Basic authentication; the password comes from `$FHIR_PIPES_DHIS2_PASSWORD` |
+| `retries` | `--retries` | Attempts per request |
+| `timeout` | `--timeout` | Seconds per request |
+| `package` | `--package`, `$FHIR_PIPES_DHIS2_MAPS` | The import package of `dhis2 locations\|measures\|reports`, relative to the file's folder. `dhis2 extract` does not use it |
+| `[parameters]` `NAME = VALUE` | `--param NAME=VALUE` | A parameter of that package: a string, a number or `true`/`false` |
+| `[locations]` `id_prefix` | `--id-prefix` | Location id prefix |
+| `[locations]` `country_code` | `--country-code` | National admin code of the top org unit |
+| `[locations]` `facility_level` | `--facility-level` | Org unit level of the facilities |
+| `[locations]` `root` | `--root` of `extract locations` | Read one subtree |
+| `[locations]` `group_sets` | `--group-set` | Org unit group set UIDs |
+| `[locations]` `org_unit_groups` | `--org-unit-group` | Org unit group UIDs |
+| `[locations]` `all_org_unit_groups` | `--all-org-unit-groups` | `true`: every org unit group |
+| `[indicators]` `indicator_groups` | `--indicator-group` | Indicator group UIDs |
+| `[indicators]` `indicators` | `--indicator` | Indicator UIDs |
+| `[indicators]` `data_element_groups` | `--data-element-group` | Data element group UIDs |
+| `[indicators]` `data_elements` | `--data-element` | Data element UIDs |
+| `[indicators]` `data_element_group_sets` | `--data-element-group-set` | Data element group set UIDs |
+| `[indicators]` `data_sets` | `--data-set` | Data set UIDs, for their reporting rates |
+| `[reports]` `periods` | `--period` | DHIS2 periods |
+| `[reports]` `ranges` | `--range` | Date ranges, `START:END` |
+| `[reports]` `levels` | `--level` | Org unit levels to report |
+| `[reports]` `root` | `--root` of `extract reports` | Only org units in this tree |
+| `[reports]` `breakdowns` | `--breakdown` | Dimensions to break values down by |
+| `[reports]` `campaign` | `--campaign` | Campaign reference, `TYPE/ID` |
+| `[reports]` `source` | `--source` | `analytics` or `data-values` |
+| `[reports]` `chunk` | `--chunk` | Indicators per analytics request |
+| `[reports]` `max_rows` | `--max-rows` | Rows to aim for per analytics request |
+| `[reports]` `concurrency` | `--concurrency` | Analytics requests in flight at once |
+| `[reports]` `max_analytics_age` | `--max-analytics-age` | Refuse analytics older than this, such as `7d` |
+
+`[indicators]` is what both `measures` and `reports` select. A value in
+the file is checked as the option checks it, and a file with an error stops
+every command with exit 2, naming the file and the key. So does a key the
+file does not know. The file is read the way `fhir-pipes.toml` is
+([refresh.md](refresh.md#settings)).
+
+### Which value is used
+
+- An option given on the command line, or its environment variable, wins
+  over the file's key.
+- A repeatable option replaces the file's whole list; the two are not
+  merged. `--level 4` with `levels = [2, 3]` in the file reports level 4
+  only.
+- Some options together form one setting, and any of them on the command
+  line replaces all of the file's keys for it: `--period` and `--range`
+  replace `periods` and `ranges`; any of the six indicator options
+  replaces the whole `[indicators]` table; `--org-unit-group` or
+  `--all-org-unit-groups` replaces `org_unit_groups` and
+  `all_org_unit_groups`.
+- `--param NAME=VALUE` replaces the file's value of that one parameter; the
+  file's other parameters still apply.
+- A token (`--dhis2-token`, `$FHIR_PIPES_DHIS2_TOKEN`) or a user name given
+  on the command line or in the environment is used instead of the file's
+  `user`.
+
+A run still needs `url`, `instance`, an indicator selection (for measures
+and reports), and for reports `levels` and `periods` or `ranges`. When
+neither the command line nor the file gives one, the command stops with
+exit 2 and says which option or key to give.
+
+These are per run, and only options: `--out`, `--resume`, `--report`,
+`--previous`, `--changed`, `--removed`, `--updated-since`, `--org-units`
+and `--locations`. `--report` records the settings file's path under
+`config`.
+
+### Passwords and tokens
+
+The file holds no secret. A key whose name has `password`, `token` or
+`secret` in it is refused, with exit 2: give the password in
+`$FHIR_PIPES_DHIS2_PASSWORD` and the personal access token in
+`$FHIR_PIPES_DHIS2_TOKEN` (or with `--dhis2-password` and `--dhis2-token`).
+The user name may be in the file as `user`, as `fhir-pipes.toml` allows
+`server.username`. Package parameters are not checked for these names.
+
+### dhis2 extract all
+
+```
+fhir-pipes dhis2 extract all [--config FILE] [OPTIONS] --out DIR
+```
+
+Runs `extract locations`, then `extract measures`, then `extract reports`,
+into `DIR`, as the three commands would. It works without a file when the
+options give every setting. The first step that fails stops the run, with
+that step's exit code, and the error names the step. The settings of every
+step are checked before the first one runs. A step whose settings are
+missing, such as reports with no levels, stops the run before it starts;
+`--skip reports` (repeatable, also `locations` or `measures`) leaves a step
+out on purpose.
+
+It takes the options of the three commands. `--root` is the root of both
+the locations and the reports step; in the file each has its own `root`.
+`--report FILE` writes one JSON object with the settings file's path and
+the report of each step. `--resume` applies to the reports step: a
+locations or measures step whose record file is already in `DIR` is not
+run again, since rewriting the org unit records would change the plan the
+reports step resumes.
+
+### Checking a settings file
+
+```
+fhir-pipes dhis2 config check --config FILE [--connect]
+```
+
+Reads and checks the file without contacting the server, and prints the
+settings a run with no options would use, as TOML: the file's keys, with
+`url`, `user` and `package` from their environment variables when those are
+set, and the package path resolved. Comment lines above say where the
+credentials come from, never their values, and whether each step of
+`extract all` has its settings. Exits 0 when the file is valid, 2 when it
+is not.
+
+`--connect` also signs in to the server, which checks the URL and the
+credentials. The UIDs in the file are not checked against the server.
 
 ## The records
 
@@ -171,7 +321,10 @@ out and reported as `unmapped_org_unit`.
 `--resume` continues a failed or stopped run from `OUT.ndjson.resume`. It is
 refused if the arguments (other than `--concurrency`), the DHIS2 URL, an org
 unit count, the analytics build time, or the file the org units were read
-from has changed. A run of `dhis2 extract reports` is not resumed by
+from has changed. A setting counts whether it was given as an option or in
+the settings file: changing `chunk` in the file is refused like changing
+`--chunk`, and moving a value from the file to the command line is not a
+change. A run of `dhis2 extract reports` is not resumed by
 `dhis2 reports`, nor the other way round. Run without `--resume` to start
 over.
 
@@ -286,30 +439,25 @@ fhir-pipes dhis2 reports --package examples/import/icr-dhis2 … --out bgd-repor
 
 The Sierra Leone demo instance is open. Its address carries the DHIS2
 version and changes with each release; https://play.dhis2.org lists the
-current ones:
+current ones. [examples/dhis2/sierra-leone.toml](../examples/dhis2/sierra-leone.toml)
+has its settings:
 
 ```sh
-export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-42-7-1
 export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
-fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-code SLE --out sl-raw
-fhir-pipes dhis2 extract measures --instance sl-demo --indicator-group srxUNt2w5jn --out sl-raw
-fhir-pipes dhis2 extract reports --instance sl-demo --indicator-group srxUNt2w5jn \
-  --period 2025 --period LAST_12_MONTHS --level 2 --level 3 --out sl-raw
+fhir-pipes dhis2 extract all --config examples/dhis2/sierra-leone.toml --out sl-raw
 fhir-pipes import run --package examples/import/icr-dhis2 --in sl-raw --out sl-fhir
 for t in Organization Location Measure MeasureReport; do
   fhir-pipes load --server URL --in sl-fhir/$t.ndjson
 done
 ```
 
-The same with the commands that write resources:
+The same with the commands that write resources, which take the file's
+`package`:
 
 ```sh
-fhir-pipes dhis2 locations --package examples/import/icr-dhis2 --instance sl-demo \
-  --id-prefix sle --country-code SLE --out sl-locations.ndjson
-fhir-pipes dhis2 measures --package examples/import/icr-dhis2 --instance sl-demo \
-  --indicator-group srxUNt2w5jn --out sl-measures.ndjson
-fhir-pipes dhis2 reports --package examples/import/icr-dhis2 --instance sl-demo \
-  --indicator-group srxUNt2w5jn --locations sl-locations.ndjson \
-  --period 2025 --period LAST_12_MONTHS --level 2 --level 3 --out sl-reports.ndjson
+f=examples/dhis2/sierra-leone.toml
+fhir-pipes dhis2 locations --config $f --out sl-locations.ndjson
+fhir-pipes dhis2 measures --config $f --out sl-measures.ndjson
+fhir-pipes dhis2 reports --config $f --locations sl-locations.ndjson --out sl-reports.ndjson
 for f in sl-locations sl-measures sl-reports; do fhir-pipes load --server URL --in $f.ndjson; done
 ```

@@ -1,0 +1,30 @@
+# Settings for the open Sierra Leone demo of DHIS2, for fhir-pipes-dhis2:
+#
+#   export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
+#   fhir-pipes dhis2 extract all --config examples/dhis2/sierra-leone.toml --out sl-raw
+#
+# Every key stands for an option of the same name (see docs/dhis2.md). An
+# option given on the command line overrides the key. Passwords and tokens
+# are never put here; they are read from the environment.
+
+# The demo's address carries the DHIS2 version and changes with each
+# release; https://play.dhis2.org lists the current ones.
+url = "https://play.im.dhis2.org/stable-2-42-7-1"
+# A short name, in every id and record. Keep it the same across runs.
+instance = "sl-demo"
+
+# The import package of `fhir-pipes dhis2 locations|measures|reports`,
+# relative to this file. `extract` does not use it.
+package = "../import/icr-dhis2"
+
+[locations]
+id_prefix = "sle"         # Location ids are sle-<uid>
+country_code = "SLE"      # on the top org unit, for transform locations
+# facility_level = 4      # default: the deepest level
+
+[indicators]
+indicator_groups = ["srxUNt2w5jn"]   # Immunization
+
+[reports]
+levels = [2, 3]           # districts and chiefdoms
+periods = ["2025", "LAST_12_MONTHS"]

@@ -92,15 +92,16 @@ for FHIR NDJSON, HTTP, run reports and import packages.
 [examples/import/icr-dhis2](../examples/import/icr-dhis2):
 
 ```sh
-fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-code SLE --out raw
-fhir-pipes dhis2 extract measures --instance sl-demo --indicator-group srxUNt2w5jn --out raw
-fhir-pipes dhis2 extract reports --instance sl-demo --indicator-group srxUNt2w5jn \
-  --period 2025 --level 2 --level 3 --out raw
+fhir-pipes dhis2 extract all --config examples/dhis2/sierra-leone.toml --out raw
 fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
 ```
 
-Each run writes one file in `raw/`: `DHIS2OrgUnit.ndjson`,
-`DHIS2Indicator.ndjson` and `DHIS2Value.ndjson`. See
+`extract all` runs `extract locations`, `extract measures` and
+`extract reports`, which write one file each in `raw/`:
+`DHIS2OrgUnit.ndjson`, `DHIS2Indicator.ndjson` and `DHIS2Value.ndjson`.
+The settings of one DHIS2 instance (server, instance name, what to export)
+are in a TOML file given with `--config`; each one is also an option. See
+[dhis2.md](dhis2.md#the-settings-file) for the file and
 [dhis2.md](dhis2.md#the-records) for the options.
 
 The records carry what DHIS2 returns and what is worked out from it, and

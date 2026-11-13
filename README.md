@@ -90,14 +90,11 @@ the example package [examples/import/icr-dhis2](examples/import/icr-dhis2).
 `fhir-pipes dhis2` needs `fhir-pipes-dhis2` installed (see [Install](#install)):
 
 ```sh
-export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-42-7-1
 export FHIR_PIPES_DHIS2_USER=admin FHIR_PIPES_DHIS2_PASSWORD=district
 
-# 1. The connector writes records to raw/.
-fhir-pipes dhis2 extract locations --instance sl-demo --id-prefix sle --country-code SLE --out raw
-fhir-pipes dhis2 extract measures  --instance sl-demo --indicator-group srxUNt2w5jn --out raw
-fhir-pipes dhis2 extract reports   --instance sl-demo --indicator-group srxUNt2w5jn \
-  --period 2025 --level 2 --level 3 --out raw
+# 1. The connector writes org units, indicators and values to raw/, with the
+#    demo's settings file.
+fhir-pipes dhis2 extract all --config examples/dhis2/sierra-leone.toml --out raw
 
 # 2. Check the records against the package's logical models.
 fhir-pipes import check --package examples/import/icr-dhis2 --in raw
@@ -111,7 +108,11 @@ for t in Organization Location Measure MeasureReport; do
 done
 ```
 
-The demo's address carries the DHIS2 version and changes with each release;
+[examples/dhis2/sierra-leone.toml](examples/dhis2/sierra-leone.toml) holds
+the demo's address, instance name, indicator group, levels and periods.
+Each setting in it is also an option, which overrides the file (see
+[docs/dhis2.md](docs/dhis2.md#the-settings-file)). The demo's address
+carries the DHIS2 version and changes with each release;
 https://play.dhis2.org lists the current ones.
 
 A package has parameters for the values that differ between deployments,
