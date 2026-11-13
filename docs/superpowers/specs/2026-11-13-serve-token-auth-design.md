@@ -158,6 +158,10 @@ dashboards-export)`, using `azp` or `client_id` when the token has one.
 
 ## Later: SMART on FHIR Backend Services
 
+The detailed design is
+[2026-11-13-serve-smart-design.md](2026-11-13-serve-smart-design.md)
+(issue #161).
+
 SMART Backend Services is the system-to-system part of SMART App Launch
 2.x, used by the FHIR Bulk Data API: a client gets an access token with the
 `client_credentials` grant, authenticating with a JWT signed by its own
@@ -175,10 +179,11 @@ would be the resource server, as above. Adding it means:
    `serve` itself.
 2. **SMART scopes.** SMART v2 scopes name resource types, not operations.
    `system/Library.rs` (read and search Library) fits `/fhir/Library` and
-   `$sql-run` best, since the queries are Libraries. Defaults would be
-   `query_scope = "system/Library.rs"`, with a custom admin scope for the
-   run API, still configurable. `system/*.rs` and SMART v1's
-   `system/Library.read` would also be accepted.
+   `$sql-run` best, since the queries are Libraries. A SMART deployment
+   sets `query_scope = "system/Library.rs"` itself: there is no new
+   default, so what an unset `query_scope` means does not change.
+   `system/*.rs` and SMART v1's `system/Library.read` would also be
+   accepted.
 3. **The client side.** `refresh` and `export` get tokens with
    `private_key_jwt` from a key file and key id, so fhir-pipes can call
    SMART Backend Services servers too, including another `serve`. The JWT

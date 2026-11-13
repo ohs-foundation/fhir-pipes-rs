@@ -293,7 +293,10 @@ when present). Paths in the file are relative to the file.
 
 Authentication is a token (`FHIR_PIPES_TOKEN`), a username with
 `FHIR_PIPES_PASSWORD`, a client ID and secret (`FHIR_PIPES_CLIENT_ID`,
-`FHIR_PIPES_CLIENT_SECRET`, with `server.token_url`), or `server.google_auth`;
+`FHIR_PIPES_CLIENT_SECRET`, with `server.token_url`), a client ID and private
+key (`FHIR_PIPES_CLIENT_KEY` and `FHIR_PIPES_CLIENT_KEY_ID`, or
+`server.client_key` and `server.client_key_id`; see
+[servers.md](servers.md#connecting-to-a-server)), or `server.google_auth`;
 use only one. Client credentials, passwords and connection strings are read only from the
 environment; a fixed token also accepts `--token`. See the
 [README](../README.md#connecting-to-a-fhir-server).

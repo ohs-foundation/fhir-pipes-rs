@@ -107,6 +107,7 @@ fn server(
     inputs: &crate::warehouse::ServeInputs,
     cfg: config::ServeConfig,
     query: Option<QueryParts>,
+    smart: Option<query::http::Smart>,
 ) -> Result<Arc<api::Server>> {
     let store = Arc::new(store::Store::open(inputs.data.join(".serve/runs"))?);
     let (redactor, warnings) =
@@ -165,6 +166,7 @@ fn server(
             stdout: stdout.clone(),
             redactor: redactor.clone(),
             reloading: Default::default(),
+            smart,
         })
     });
     let job = Arc::new(runner::Job {
@@ -240,7 +242,17 @@ pub fn run(args: &ServeArgs) -> Result<()> {
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let _lock = lock(&dir.join("serve.lock"))?;
     let query_enabled = cfg.query.is_some();
-    let server = server(&inputs, cfg, query)?;
+    let smart = verifier.as_deref().map(query::http::Smart::from_verifier);
+    if let Some(s) = &smart
+        && s.configuration.is_none()
+        && query_enabled
+    {
+        eprintln!(
+            "fhir-pipes: warning: [serve.auth]: the issuer's configuration names no \
+             token_endpoint, so there is no /fhir/.well-known/smart-configuration"
+        );
+    }
+    let server = server(&inputs, cfg, query, smart)?;
     if !server.job.cfg.schedule.is_empty() {
         let s = server.clone();
         std::thread::spawn(move || {
@@ -453,7 +465,9 @@ async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
         .verifier
         .as_ref()
         .filter(|v| fhir || v.config().admin_scope.is_some());
-    if !accepted.is_empty() || verifier.is_some() {
+    // SMART's discovery document is read before a client has a token.
+    let discovery = app.verifier.is_some() && path == query::http::SMART_CONFIGURATION;
+    if !discovery && (!accepted.is_empty() || verifier.is_some()) {
         let given = req
             .headers()
             .get(axum::http::header::AUTHORIZATION)

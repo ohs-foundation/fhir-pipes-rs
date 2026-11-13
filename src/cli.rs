@@ -240,17 +240,24 @@ pub struct AuthArgs {
         conflicts_with = "client_id"
     )]
     pub token: Option<String>,
-    /// OAuth client id; fhir-pipes gets its own token (client-credentials grant) and renews it before it expires. Falls back to $FHIR_PIPES_CLIENT_ID
-    #[arg(long, env = "FHIR_PIPES_CLIENT_ID", requires_all = ["client_secret", "token_url"])]
+    /// OAuth client id; fhir-pipes gets its own token (client-credentials grant) and renews it before it expires. Needs --client-secret or --client-key. Falls back to $FHIR_PIPES_CLIENT_ID
+    #[arg(long, env = "FHIR_PIPES_CLIENT_ID", requires = "token_url")]
     pub client_id: Option<String>,
     /// OAuth client secret; falls back to $FHIR_PIPES_CLIENT_SECRET
     #[arg(
         long,
         env = "FHIR_PIPES_CLIENT_SECRET",
         hide_env_values = true,
-        requires = "client_id"
+        requires = "client_id",
+        conflicts_with = "client_key"
     )]
     pub client_secret: Option<String>,
+    /// A PEM private key (RSA, or EC P-384 or P-256 as PKCS #8) that signs each token request in place of a client secret: private_key_jwt, as SMART Backend Services clients use. Needs --client-id and --client-key-id. Falls back to $FHIR_PIPES_CLIENT_KEY
+    #[arg(long, env = "FHIR_PIPES_CLIENT_KEY", requires_all = ["client_id", "client_key_id"])]
+    pub client_key: Option<PathBuf>,
+    /// The client key's id (kid), as registered with the token endpoint; falls back to $FHIR_PIPES_CLIENT_KEY_ID
+    #[arg(long, env = "FHIR_PIPES_CLIENT_KEY_ID", requires = "client_key")]
+    pub client_key_id: Option<String>,
     /// OAuth token endpoint the client id and secret are sent to; falls back to $FHIR_PIPES_TOKEN_URL
     #[arg(long, env = "FHIR_PIPES_TOKEN_URL", requires = "client_id")]
     pub token_url: Option<String>,
@@ -297,6 +304,8 @@ impl AuthArgs {
             token: None,
             client_id: None,
             client_secret: None,
+            client_key: None,
+            client_key_id: None,
             token_url: None,
             token_auth: None,
             scope: None,
@@ -330,8 +339,13 @@ impl AuthArgs {
             return Err(AuthError::Several(kinds));
         }
         if self.client_id.is_some() {
-            if self.client_secret.is_none() {
-                return Err(AuthError::NoClientSecret);
+            match (&self.client_secret, &self.client_key) {
+                (None, None) => return Err(AuthError::NoClientSecret),
+                (Some(_), Some(_)) => return Err(AuthError::SecretAndKey),
+                _ => {}
+            }
+            if self.client_key.is_some() && self.client_key_id.is_none() {
+                return Err(AuthError::NoClientKeyId);
             }
             if self.token_url.is_none() {
                 return Err(AuthError::NoTokenUrl);
@@ -366,13 +380,32 @@ impl AuthArgs {
                             .join(" and ")
                     ),
                 },
-                AuthError::NoClientSecret => "--client-id needs --client-secret".into(),
+                AuthError::NoClientSecret => {
+                    "--client-id needs --client-secret or --client-key".into()
+                }
+                AuthError::SecretAndKey => {
+                    "use --client-secret or --client-key with --client-id, not both".into()
+                }
+                AuthError::NoClientKeyId => "--client-key needs --client-key-id".into(),
                 AuthError::NoTokenUrl => "--client-id needs --token-url".into(),
                 AuthError::NoPassword => "--username needs --password".into(),
             })
         })?;
         if self.google_auth {
             return Ok(Auth::Google(Credentials::application_default()?));
+        }
+        if let (Some(id), Some(path), Some(kid), Some(url)) = (
+            &self.client_id,
+            &self.client_key,
+            &self.client_key_id,
+            &self.token_url,
+        ) {
+            return Ok(Auth::ClientKey {
+                token_url: url.clone(),
+                client_id: id.clone(),
+                key: std::sync::Arc::new(crate::http::client_key::ClientKey::read(path, kid)?),
+                scope: self.scope.clone(),
+            });
         }
         Ok(
             match (&self.client_id, &self.client_secret, &self.token_url) {
@@ -418,8 +451,12 @@ impl AuthKind {
 pub enum AuthError {
     /// More than one way to authenticate, in `AuthKind` order.
     Several(Vec<AuthKind>),
-    /// A client id without a client secret.
+    /// A client id with neither a client secret nor a client key.
     NoClientSecret,
+    /// A client id with both a client secret and a client key.
+    SecretAndKey,
+    /// A client key without its key id.
+    NoClientKeyId,
     /// A client id and secret without a token URL.
     NoTokenUrl,
     /// A username without a password.
@@ -703,6 +740,23 @@ mod tests {
             ..client
         };
         assert_eq!(client.validate(), Ok(()));
+        let with_key = AuthArgs {
+            client_key: Some("key.pem".into()),
+            ..client.clone()
+        };
+        assert_eq!(with_key.validate(), Err(AuthError::SecretAndKey));
+        let key_only = AuthArgs {
+            client_secret: None,
+            ..with_key
+        };
+        assert_eq!(key_only.validate(), Err(AuthError::NoClientKeyId));
+        let key_only = AuthArgs {
+            client_key_id: Some("k1".into()),
+            ..key_only
+        };
+        assert_eq!(key_only.validate(), Ok(()));
+        let msg = key_only.auth().err().unwrap().to_string();
+        assert!(msg.contains("reading the client key key.pem"), "{msg}");
         let basic = AuthArgs {
             username: Some("u".into()),
             ..AuthArgs::none()

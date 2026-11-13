@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::error::{PipesError, Result};
 
 use super::body::fetched;
+use super::client_key::ClientKey;
 use super::google::{self, Credentials};
 use super::retry::Attempt;
 use super::{FetchError, FhirClient};
@@ -39,6 +40,16 @@ pub enum Auth {
         client_secret: String,
         /// How the id and secret are sent to `token_url`.
         token_auth: TokenAuth,
+        /// The `scope` asked for, when given.
+        scope: Option<String>,
+    },
+    /// OAuth 2.0 client credentials with a private key in place of a
+    /// secret (`private_key_jwt`, as SMART Backend Services clients use):
+    /// each token request carries a newly signed assertion.
+    ClientKey {
+        token_url: String,
+        client_id: String,
+        key: std::sync::Arc<ClientKey>,
         /// The `scope` asked for, when given.
         scope: Option<String>,
     },
@@ -88,6 +99,14 @@ enum Grant {
     },
     /// POST a newly signed JWT (a Google service account key).
     Jwt(google::ServiceAccount),
+    /// POST the client-credentials grant with a newly signed client
+    /// assertion (`private_key_jwt`).
+    Assertion {
+        url: String,
+        client_id: String,
+        key: std::sync::Arc<ClientKey>,
+        scope: Option<String>,
+    },
     /// GET from the Google metadata server.
     Metadata { url: String },
 }
@@ -95,7 +114,7 @@ enum Grant {
 impl Grant {
     fn url(&self) -> &str {
         match self {
-            Grant::Form { url, .. } | Grant::Metadata { url } => url,
+            Grant::Form { url, .. } | Grant::Metadata { url } | Grant::Assertion { url, .. } => url,
             Grant::Jwt(sa) => &sa.token_uri,
         }
     }
@@ -184,6 +203,17 @@ impl FhirClient {
                     authorization,
                 })?
             }
+            Auth::ClientKey {
+                token_url,
+                client_id,
+                key,
+                scope,
+            } => self.renewing(Grant::Assertion {
+                url: token_url,
+                client_id,
+                key,
+                scope,
+            })?,
             Auth::Google(creds) => {
                 if let Some(project) = &creds.quota_project {
                     self.user_project = Some(HeaderValue::from_str(project).map_err(|_| {
@@ -263,6 +293,17 @@ impl FhirClient {
             Grant::Jwt(sa) => post(
                 &sa.token_uri,
                 sa.token_form().map_err(FetchError::Transport)?,
+                None,
+            )?,
+            Grant::Assertion {
+                url,
+                client_id,
+                key,
+                scope,
+            } => post(
+                url,
+                key.token_form(client_id, url, scope.as_deref())
+                    .map_err(FetchError::Transport)?,
                 None,
             )?,
             Grant::Metadata { url } => self.retrying(
@@ -401,6 +442,84 @@ mod tests {
                 .expect("the queued request finished, not stuck behind its own renewal");
             got.unwrap();
         });
+    }
+
+    #[test]
+    fn a_client_key_signs_each_token_request() {
+        /// Keeps each request's `client_assertion`.
+        struct Assertions(std::sync::Arc<Mutex<Vec<String>>>);
+        impl Matcher<httptest::http::Request<httptest::bytes::Bytes>> for Assertions {
+            fn matches(
+                &mut self,
+                req: &httptest::http::Request<httptest::bytes::Bytes>,
+                _: &mut ExecutionContext,
+            ) -> bool {
+                let form: std::collections::HashMap<String, String> =
+                    url::form_urlencoded::parse(req.body())
+                        .into_owned()
+                        .collect();
+                if let Some(a) = form.get("client_assertion") {
+                    self.0.lock().unwrap().push(a.clone());
+                }
+                true
+            }
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("Assertions")
+            }
+        }
+        let (pem, public) = crate::http::client_key::tests::ec_pem(true);
+        let client_key = std::sync::Arc::new(ClientKey::from_pem(&pem, "key-1").unwrap());
+        let server = Server::run();
+        let token_url = server.url_str("/token");
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/token"),
+                request::body(url_decoded(contains(("grant_type", "client_credentials")))),
+                request::body(url_decoded(contains(("scope", "system/*.rs")))),
+                request::body(url_decoded(contains((
+                    "client_assertion_type",
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                )))),
+                request::body(url_decoded(not(contains(key("client_secret"))))),
+                Assertions(seen.clone()),
+            ])
+            .times(1)
+            .respond_with(json_encoded(
+                serde_json::json!({"access_token": "tok-1", "expires_in": 300}),
+            )),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Patient"),
+                request::headers(contains(("authorization", "Bearer tok-1"))),
+            ])
+            .respond_with(status_code(200)),
+        );
+        let client = FhirClient::new(
+            Auth::ClientKey {
+                token_url: token_url.clone(),
+                client_id: "my-client".into(),
+                key: client_key,
+                scope: Some("system/*.rs".into()),
+            },
+            1,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .for_server(&server.url_str("/"));
+        client.get(&server.url_str("/fhir/Patient")).unwrap();
+        let jwt = seen.lock().unwrap()[0].clone();
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let (input, sig) = jwt.rsplit_once('.').unwrap();
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P384_SHA384_FIXED, &public)
+            .verify(input.as_bytes(), &b64.decode(sig).unwrap())
+            .expect("the assertion is signed with the client key");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&b64.decode(input.split('.').nth(1).unwrap()).unwrap()).unwrap();
+        assert_eq!(claims["iss"], "my-client");
+        assert_eq!(claims["aud"], token_url);
     }
 
     #[test]

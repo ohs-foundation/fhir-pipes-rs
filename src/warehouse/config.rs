@@ -79,6 +79,11 @@ pub struct ServerFile {
     pub token_auth: Option<TokenAuth>,
     /// The OAuth scope asked for with the client id (`--scope`).
     pub scope: Option<String>,
+    /// A PEM private key that signs token requests in place of a client
+    /// secret (`private_key_jwt`), relative to this file.
+    pub client_key: Option<String>,
+    /// The client key's id (`kid`).
+    pub client_key_id: Option<String>,
     /// The kind of FHIR server, for its search parameters (`--server-kind`,
     /// default `generic`).
     pub kind: Option<ServerKind>,
@@ -504,6 +509,10 @@ pub struct Overrides {
     pub token: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// `FHIR_PIPES_CLIENT_KEY`: replaces the file's `server.client_key`.
+    pub client_key: Option<PathBuf>,
+    /// `FHIR_PIPES_CLIENT_KEY_ID`: replaces the file's `server.client_key_id`.
+    pub client_key_id: Option<String>,
     pub token_url: Option<String>,
     pub token_auth: Option<TokenAuth>,
     pub scope: Option<String>,
@@ -567,6 +576,13 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
             token: o.token,
             client_id: o.client_id,
             client_secret: o.client_secret,
+            client_key: o.client_key.or_else(|| {
+                file.server
+                    .client_key
+                    .as_deref()
+                    .map(|p| resolve(&base, Path::new(p)))
+            }),
+            client_key_id: o.client_key_id.or(file.server.client_key_id),
             token_url: o.token_url.or(file.server.token_url),
             token_auth: o.token_auth.or(file.server.token_auth),
             scope: o.scope.or(file.server.scope),
@@ -592,6 +608,13 @@ pub fn settings(file: File, base: PathBuf, o: Overrides) -> Result<Settings> {
                 ),
                 AuthError::NoClientSecret =>
                     "set FHIR_PIPES_CLIENT_SECRET with FHIR_PIPES_CLIENT_ID".into(),
+                AuthError::SecretAndKey => "set FHIR_PIPES_CLIENT_SECRET or a client key \
+                                            (FHIR_PIPES_CLIENT_KEY or server.client_key), \
+                                            not both"
+                    .into(),
+                AuthError::NoClientKeyId => "a client key needs its key id: set \
+                                             FHIR_PIPES_CLIENT_KEY_ID or server.client_key_id"
+                    .into(),
                 AuthError::NoTokenUrl => "FHIR_PIPES_CLIENT_ID is set but no token URL: \
                                           pass --token-url or set server.token_url"
                     .into(),
@@ -778,6 +801,41 @@ mod tests {
         assert_eq!(s.auth.token_auth, Some(TokenAuth::Post));
         assert_eq!(s.auth.scope.as_deref(), Some("system/Patient.read"));
         assert!(toml::from_str::<File>("[server]\ntoken_auth = \"header\"").is_err());
+    }
+
+    #[test]
+    fn a_client_key_comes_from_the_file_relative_to_it_or_the_environment() {
+        let text = "data = \"d\"\n[server]\ntoken_url = \"http://t\"\n\
+                    client_key = \"keys/client.pem\"\nclient_key_id = \"k1\"";
+        let id = || Overrides {
+            client_id: Some("id".into()),
+            ..Default::default()
+        };
+        let s = settings(toml::from_str(text).unwrap(), PathBuf::from("/b"), id()).unwrap();
+        assert_eq!(
+            s.auth.client_key.as_deref(),
+            Some(Path::new("/b/keys/client.pem"))
+        );
+        assert_eq!(s.auth.client_key_id.as_deref(), Some("k1"));
+        let o = Overrides {
+            client_key: Some("/elsewhere/k.pem".into()),
+            client_key_id: Some("k2".into()),
+            ..id()
+        };
+        let s = settings(toml::from_str(text).unwrap(), PathBuf::from("/b"), o).unwrap();
+        assert_eq!(
+            s.auth.client_key.as_deref(),
+            Some(Path::new("/elsewhere/k.pem"))
+        );
+        assert_eq!(s.auth.client_key_id.as_deref(), Some("k2"));
+        let both = Overrides {
+            client_secret: Some("s".into()),
+            ..id()
+        };
+        let err = settings(toml::from_str(text).unwrap(), PathBuf::from("/b"), both)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not both"), "{err}");
     }
 
     #[test]

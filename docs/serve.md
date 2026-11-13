@@ -260,3 +260,41 @@ TOKEN=$(curl -s https://auth.example.org/realms/icr/protocol/openid-connect/toke
   -d scope=fhir-pipes.query | jq -r .access_token)
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8090/fhir/Library
 ```
+
+### SMART on FHIR Backend Services
+
+`serve` works as a SMART Backend Services resource server. All of this is
+optional and changes nothing for a config that does not use it.
+
+- **Discovery.** With `[serve.auth]` and `[serve.query]`,
+  `GET /fhir/.well-known/smart-configuration` says how to get a token: the
+  issuer's `token_endpoint` and `jwks_uri`, `grant_types_supported:
+  ["client_credentials"]`, the issuer's token endpoint authentication
+  methods and signing algorithms, `scopes_supported` (the configured
+  `query_scope` and `admin_scope`), and SMART `capabilities`. It needs no
+  token. If the issuer's configuration names no token endpoint, `serve`
+  warns at startup and the path answers `404`.
+- **The CapabilityStatement.** With `[serve.auth]`, `/fhir/metadata`
+  (which still needs a token) has a `rest.security` with the
+  `SMART-on-FHIR` service code and the token endpoint in SMART's
+  `oauth-uris` extension.
+- **SMART scopes.** Set `query_scope = "system/Library.rs"` for SMART
+  clients. When a configured scope is a SMART scope
+  (`<patient|user|system>/<resource or *>.<permissions>`), a token's scope
+  grants it if:
+  - it has the same context;
+  - its resource is the same or `*`;
+  - its permissions include the configured ones. SMART v1's `read` counts as
+    `rs`, `write` as `cud` and `*` as `cruds`.
+
+  So `system/*.rs`, `system/Library.cruds` and `system/Library.read` all
+  open `/fhir`, and `system/Library.r` and `patient/Library.rs` do not. A
+  token scope with a query part (`?…`) never grants a configured scope
+  without one. Any other configured scope, such as `fhir-pipes.admin`, is
+  matched exactly.
+
+A SMART client authenticates to the token endpoint with a private key
+(`private_key_jwt`). fhir-pipes itself can be one: see `--client-key` in
+[servers.md](servers.md#connecting-to-a-server). In Keycloak, a client
+does this with "Signed JWT" client authentication, registering its public
+key or a JWKS URL in the client's Keys tab.

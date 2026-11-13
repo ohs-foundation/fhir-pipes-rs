@@ -208,8 +208,11 @@ impl Runner {
             concurrency: cfg.concurrency,
             running: AtomicUsize::new(0),
             children: Arc::default(),
+            // And where the client key is: not a secret, but no query's
+            // business.
             hidden_env: crate::redact::SECRET_VARS
                 .iter()
+                .chain(&["FHIR_PIPES_CLIENT_KEY"])
                 .map(|v| v.to_string())
                 .collect(),
             #[cfg(test)]

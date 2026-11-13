@@ -185,6 +185,9 @@ exclusive; with none, requests carry no Authorization header.
   expires. `--token-auth post` (default) or `basic` says how the client
   ID and secret reach the token endpoint; `--scope` adds a scope to the request.
   `refresh` reads the client ID and secret only from the environment.
+  `--client-key` and `--client-key-id` (or `FHIR_PIPES_CLIENT_KEY`,
+  `FHIR_PIPES_CLIENT_KEY_ID`) replace the secret with a private key, as SMART
+  Backend Services clients use; see [docs/servers.md](docs/servers.md).
 - `--username` and `--password` (or `FHIR_PIPES_USERNAME`,
   `FHIR_PIPES_PASSWORD`): HTTP Basic auth. Use HTTPS, since Basic sends the
   password with every request. `refresh` reads the password only from the
