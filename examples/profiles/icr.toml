@@ -36,11 +36,11 @@ admin_code_column = "pcode"
 # unnamed levels are admin0, admin1, …. Left out here, as ICR covers more than
 # one country; a single-country deployment can name them, for Nigeria:
 # admin_layers = ["country", "states", "lgas"]
-# `fhir-pipes import` writes meta.profile and admin codes from these. ICR leaves
-# them out: [dhis2] location_profile and country_code_system below give the same
-# values, and a profile with them does not load in fhir-pipes 0.4.0 or earlier.
-# profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
-# admin_code_system = "https://icr.healthcampaigns.org/identifiers/national-admin-code"
+# meta.profile of the Locations `import location-boundaries` and
+# `location-sites` write, and the identifier system of the admin codes they
+# write. The first of type_systems above is the system of their type codes.
+profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+admin_code_system = "https://icr.healthcampaigns.org/identifiers/national-admin-code"
 
 # Extra Location columns, in output order. Kinds:
 #   identifier      the first identifier under one of `systems`, in order;
@@ -88,9 +88,8 @@ mirror_to_organization = true
 # gets a new Organization, with id "<id_prefix><location id>".
 facility_type = "facility"
 id_prefix = "org-"
-# meta.profile of the facility Organizations `import location-sites` writes;
-# here [dhis2] facility_organization_profile gives it.
-# profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
+# meta.profile of the facility Organizations `import location-sites` writes.
+profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
 
 # Columns read from the Organization a Location names as its
 # managingOrganization. Same kinds, applied to Organization.identifier and
@@ -114,32 +113,6 @@ system = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs"
 name = "ownership_text"
 kind = "type_text"
 system = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs"
-
-# [dhis2]: the URLs fhir-pipes dhis2 wrote before its built-in mapping was
-# removed. The dhis2 commands no longer read this section; the parameters of
-# the import package examples/import/icr-dhis2 give these values. It stays
-# because `import location-boundaries` and `location-sites` read
-# location_profile, facility_organization_profile, location_type_system and
-# country_code_system as fallbacks (see above). The other keys are ignored.
-[dhis2]
-# Identifier and code systems are minted under this base:
-# <base>/identifiers/dhis2/<instance>/orgunit, <base>/CodeSystem/dhis2/<instance>/…,
-# and Measures get canonical URLs <base>/Measure/<id>.
-base = "https://icr.healthcampaigns.org"
-project_tag_system = "https://icr.healthcampaigns.org/CodeSystem/icr-project-tag-cs"
-location_profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
-facility_organization_profile = "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
-location_type_system = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type-cs"
-# --country-code goes on the top org unit under this system, so it becomes the
-# pcode (the admin code column reads it) and the country.
-country_code_system = "https://icr.healthcampaigns.org/identifiers/national-admin-code"
-period_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-period"
-campaign_extension = "https://icr.healthcampaigns.org/StructureDefinition/campaign"
-# Where each MeasureReport came from, a CodeableConcept under source_system:
-# dhis2-analytics or dhis2-data-values (--source).
-source_extension = "https://icr.healthcampaigns.org/StructureDefinition/report-source"
-source_system = "https://icr.healthcampaigns.org/CodeSystem/icr-report-source-cs"
-indicator_extension = "https://icr.healthcampaigns.org/StructureDefinition/dhis2-indicator"
 
 # fhir-pipes population: population Groups for admin units or catchments.
 [population]

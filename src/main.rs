@@ -105,7 +105,7 @@ fn run(cli: cli::Cli) -> anyhow::Result<()> {
         cli::Command::Sync(args) => sync::run_sync(&args),
         cli::Command::Index(args) => index::command::run_index(&args, profile),
         cli::Command::Population(args) => population::run_population(&args, profile),
-        cli::Command::Dhis2(cmd) => dhis2::run(&cmd, profile),
+        cli::Command::Dhis2(cmd) => dhis2::run(&cmd),
         cli::Command::Profile(cli::ProfileCommand::Check(args)) => {
             profile::check::run(&args, profile)
         }

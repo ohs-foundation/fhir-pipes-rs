@@ -132,14 +132,6 @@ fn measures_are_written_for_every_indicator_in_the_group() {
         .assert()
         .success();
     assert!(stdout(&a).contains("Wrote 2 Measures"));
-    // The example ICR profile still has a [dhis2] section, which is not read.
-    assert!(
-        stderr(&a).contains(
-            "dhis2 no longer reads the [dhis2] section; the package's parameters give those values"
-        ),
-        "{}",
-        stderr(&a)
-    );
     let m = read_ndjson(&out);
     assert_eq!(m[0]["id"], "sl-demo-FbKK4ofIv5R");
     assert_eq!(
@@ -178,8 +170,7 @@ fn the_package_is_given_by_flag_and_its_parameters_change_the_urls() {
         if let Some(b) = base {
             c.args(["--param", &format!("base={b}")]);
         }
-        let a = c.assert().success();
-        assert!(!stderr(&a).contains("[dhis2]"), "{}", stderr(&a));
+        c.assert().success();
         let m = read_ndjson(&out);
         assert_eq!(
             m[1]["url"],

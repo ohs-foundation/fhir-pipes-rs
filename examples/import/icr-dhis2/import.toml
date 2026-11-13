@@ -5,9 +5,8 @@ title = "DHIS2 to the Integrated Campaign Registry"
 # reads its type.
 
 # The systems, profiles and extensions the maps write. The defaults are the
-# Integrated Campaign Registry's, the values the [dhis2] section of
-# examples/profiles/icr.toml gave the mapping built into fhir-pipes before it
-# was removed. Change one for a run with `--param NAME=VALUE` on `import run`
+# Integrated Campaign Registry's, the values the mapping built into
+# fhir-pipes wrote before it was removed. Change one for a run with `--param NAME=VALUE` on `import run`
 # or on `dhis2 locations|measures|reports`. `dhis2 reports` also reads `base`
 # and `periodExtension`, for `--locations` and `--previous`.
 [parameters]

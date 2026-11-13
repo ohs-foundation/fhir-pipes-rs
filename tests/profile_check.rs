@@ -96,24 +96,28 @@ facility_type = "clinic"
     }
 }
 
-/// The `[dhis2]` keys only the removed built-in DHIS2 mapping read (the
-/// MeasureReport and Measure extensions, the source system) are not
-/// checked: a value the IG does not have is no error.
+/// A profile with the removed `[dhis2]` section does not load, so it is
+/// not checked; the error says where its values go.
 #[test]
-fn the_dhis2_keys_nothing_reads_are_not_checked() {
+fn a_profile_with_a_dhis2_section_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("p.toml");
     let icr = std::fs::read_to_string(ICR_PROFILE).unwrap();
     std::fs::write(
         &p,
         icr.replace(
-            "StructureDefinition/report-source",
-            "StructureDefinition/dhis2-source",
-        )
-        .replace("icr-report-source-cs", "icr-denominator-source-cs"),
+            "[population]",
+            "[dhis2]\nbase = \"https://icr.healthcampaigns.org\"\n\n[population]",
+        ),
     )
     .unwrap();
-    let a = check(&p).success();
+    let a = check(&p).code(2);
+    let stderr = String::from_utf8_lossy(&a.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("the [dhis2] section was removed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[location] admin_code_system"), "{stderr}");
     assert_eq!(lines(&a, "error"), Vec::<String>::new());
 }
 
@@ -175,35 +179,19 @@ fn check_needs_a_profile_and_a_readable_ig() {
         .stderr(contains("no StructureDefinitions or CodeSystems"));
 }
 
-/// ICR's profile with the optional keys `import` reads, set explicitly.
-fn with_import_keys(location_profile: &str) -> String {
-    // A Windows checkout has CRLF line endings; the replacements expect LF.
-    std::fs::read_to_string(ICR_PROFILE)
-        .unwrap()
-        .replace("\r\n", "\n")
-        .replace(
-            "admin_code_column = \"pcode\"\n",
-            &format!(
-                "admin_code_column = \"pcode\"\nprofile = \"{location_profile}\"\n\
-                 admin_code_system = \"https://icr.healthcampaigns.org/identifiers/national-admin-code\"\n"
-            ),
-        )
-        .replace(
-            "id_prefix = \"org-\"\n",
-            "id_prefix = \"org-\"\nprofile = \"https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization\"\n",
-        )
+/// ICR's profile with `[location] profile` set to `location_profile`.
+fn with_location_profile(location_profile: &str) -> String {
+    let icr = std::fs::read_to_string(ICR_PROFILE).unwrap();
+    let line = "profile = \"https://icr.healthcampaigns.org/StructureDefinition/ICRLocation\"";
+    assert!(icr.contains(line));
+    icr.replace(line, &format!("profile = \"{location_profile}\""))
 }
 
 #[test]
 fn the_import_keys_are_checked() {
     let dir = tempfile::tempdir().unwrap();
-    let good = dir.path().join("good.toml");
-    std::fs::write(
-        &good,
-        with_import_keys("https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"),
-    )
-    .unwrap();
-    let a = check(&good).success();
+    // ICR's profile sets them all.
+    let a = check(Path::new(ICR_PROFILE)).success();
     assert_eq!(lines(&a, "error"), Vec::<String>::new());
     assert!(
         lines(&a, "warning")
@@ -216,7 +204,7 @@ fn the_import_keys_are_checked() {
     let bad = dir.path().join("bad.toml");
     std::fs::write(
         &bad,
-        with_import_keys(
+        with_location_profile(
             "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization",
         ),
     )

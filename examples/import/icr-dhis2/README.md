@@ -41,8 +41,7 @@ fhir-pipes import run --package examples/import/icr-dhis2 --in raw --out fhir
   steps, so each record file goes through the one map that reads its type.
   The parameters are the systems, profiles and extensions the maps write
   (`base`, `projectTagSystem`, `locationProfile`, `periodExtension` and the
-  rest), with the values the `[dhis2]` section of
-  `examples/profiles/icr.toml` gave the built-in mapping as defaults;
+  rest), with the values the built-in mapping wrote as defaults;
   `--param base=https://example.org` on `import run` or on the `dhis2`
   commands changes one for a run (see
   [Parameters](../../../docs/import.md#parameters)). The records carry none
