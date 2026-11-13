@@ -1,6 +1,6 @@
 [package]
 name = "fhir-pipes-dhis2"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "The DHIS2 connector of fhir-pipes: DHIS2 org units, indicators and values as records for `fhir-pipes import run`, or as FHIR NDJSON through an import package"
 license = "Apache-2.0"

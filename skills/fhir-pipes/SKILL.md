@@ -33,7 +33,7 @@ Do not rely on memory for them.
 ## Install
 
 Release binaries are on https://github.com/ohs-foundation/fhir-pipes-rs/releases
-(current release v0.6.0). There are five files: `fhir-pipes-aarch64-apple-darwin`,
+(current release v0.7.0). There are five files: `fhir-pipes-aarch64-apple-darwin`,
 `fhir-pipes-x86_64-apple-darwin`, `fhir-pipes-x86_64-unknown-linux-musl`,
 `fhir-pipes-aarch64-unknown-linux-musl`, `fhir-pipes-x86_64-pc-windows-msvc.exe`.
 Always check the download against `SHA256SUMS`:

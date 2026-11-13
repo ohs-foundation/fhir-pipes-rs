@@ -14,7 +14,7 @@ FHIR R4 servers.
 
 Download the binary for your platform from the
 [releases](https://github.com/ohs-foundation/fhir-pipes-rs/releases). The
-current release is v0.6.0.
+current release is v0.7.0.
 
 | Platform | File |
 |---|---|
