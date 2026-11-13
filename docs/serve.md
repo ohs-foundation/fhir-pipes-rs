@@ -15,8 +15,10 @@ fhir-pipes serve --config fhir-pipes.toml --listen 0.0.0.0:8090
 
 It reads the same `fhir-pipes.toml` as `refresh`, plus a `[serve]` section.
 `--listen` (or `FHIR_PIPES_SERVE_LISTEN`) defaults to `127.0.0.1:8090`. Callers
-send `Authorization: Bearer <token>`. Without `FHIR_PIPES_SERVE_TOKEN`, `serve`
-refuses to start on a non-loopback address. `serve` speaks plain HTTP; terminate TLS at a reverse proxy before exposing it.
+send `Authorization: Bearer <token>`. Without `FHIR_PIPES_SERVE_TOKEN` (or
+`[serve.auth]` with `admin_scope`, see [Access tokens from an identity
+provider](#access-tokens-from-an-identity-provider)), `serve` refuses to start
+on a non-loopback address. `serve` speaks plain HTTP; terminate TLS at a reverse proxy before exposing it.
 
 One `serve` looks after one warehouse and holds `.serve/serve.lock` in it. Run
 records are in `.serve/runs/<run id>/`. Do not also run `refresh` from cron on
@@ -131,10 +133,14 @@ a query is a decision to trust it.
 
 `FHIR_PIPES_QUERY_TOKEN` opens `/fhir/*` only. `FHIR_PIPES_SERVE_TOKEN` opens
 everything. Callers send either as `Authorization: Bearer <token>`. With
-`[serve.query]`, a non-loopback `--listen` needs both. A path with no token set
+`[serve.query]`, a non-loopback `--listen` needs both, or `[serve.auth]` in
+place of the query token. A path with no token set
 is open, allowed only on loopback: setting only `FHIR_PIPES_QUERY_TOKEN` leaves
 the run API open to anything on the machine, so set both. Without
 `[serve.query]`, `/fhir` paths answer `404` after authentication.
+
+For a token per caller, see [Access tokens from an identity
+provider](#access-tokens-from-an-identity-provider).
 
 ### Routes and parameters
 
@@ -188,3 +194,69 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: applic
   `503`. With a remote `source`, a query that runs while `rclone` pushes a
   refresh can read a mix of old and new files.
 - A Library's `[[parameter]]` entries are not supported yet.
+
+## Access tokens from an identity provider
+
+With a `[serve.auth]` section, `serve` also accepts OAuth 2.0 access tokens
+that an identity provider signed as JWTs: Keycloak, Microsoft Entra ID,
+Auth0, Okta and any other provider that publishes OpenID Connect discovery.
+Each caller has its own client at the provider and asks it for a
+short-lived token, with the client-credentials grant for a program. `serve`
+checks the token against the provider's published keys and shares no secret
+with it. There is no sign-in page: it is for programs.
+
+```toml
+[serve.auth]
+issuer = "https://auth.example.org/realms/icr"   # the tokens' iss, exactly
+audience = "fhir-pipes"                          # the tokens' aud must include it
+query_scope = "fhir-pipes.query"                 # optional: needed to open /fhir
+admin_scope = "fhir-pipes.admin"                 # optional: opens the run API as well
+```
+
+| Path | Opened by |
+|---|---|
+| `/fhir/*` | `FHIR_PIPES_QUERY_TOKEN`, `FHIR_PIPES_SERVE_TOKEN`, or a token with `query_scope` (any token from the issuer for the audience without it) or `admin_scope` |
+| everything else but `/health` | `FHIR_PIPES_SERVE_TOKEN`, or a token with `admin_scope`; without `admin_scope`, no provider token |
+
+- `issuer` must be `https` (`http` only on a loopback host). At startup
+  `serve` reads `<issuer>/.well-known/openid-configuration` and the keys at
+  its `jwks_uri`; if it cannot, or the configuration names another issuer
+  (a trailing slash counts), `serve` stops with exit 2.
+- A token is accepted when it is signed with one of the issuer's keys (RS256,
+  RS384, RS512, PS256, PS384, PS512, ES256, ES384 or EdDSA; never `none` or
+  an HMAC algorithm), its `iss` is `issuer`, its `aud` includes `audience`,
+  and it has not expired (`exp`, with 60 seconds of clock skew; `nbf` is
+  checked too).
+- A scope is found in the `scope` claim (space-separated), `scp` (a string
+  or an array) or `roles` (an array, as Microsoft Entra ID app roles are).
+- A token signed with a key `serve` has not seen makes it read the keys
+  again, at most once a minute, and keys are read again after an hour, so
+  the provider can change its keys without a restart.
+- The shared tokens keep working beside it.
+
+A refused token gets `401` with `WWW-Authenticate: Bearer realm="fhir-pipes",
+error="invalid_token"`; a valid token without the scope a path needs gets
+`403` with `error="insufficient_scope"` and the scope. The reason is in
+`serve`'s log, never the token: for example `auth: token refused: expired`,
+or `auth: token refused for /status: no scope fhir-pipes.admin (client
+dashboards)`.
+
+### With Keycloak
+
+1. In the realm, create a client scope `fhir-pipes.query` (and
+   `fhir-pipes.admin` for the run API), with "Include in token scope" on.
+2. For each caller, create a client with client authentication on and only
+   "Service accounts roles" (the client-credentials grant) enabled. Add the
+   scopes it should have as optional client scopes.
+3. Give the tokens the audience: on the client (or in a shared client scope),
+   add an "Audience" mapper with the included custom audience `fhir-pipes`.
+4. In `fhir-pipes.toml`, `issuer` is `https://<keycloak>/realms/<realm>`.
+
+A caller then gets a token and calls `serve` with it:
+
+```sh
+TOKEN=$(curl -s https://auth.example.org/realms/icr/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=dashboards -d client_secret="$SECRET" \
+  -d scope=fhir-pipes.query | jq -r .access_token)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8090/fhir/Library
+```

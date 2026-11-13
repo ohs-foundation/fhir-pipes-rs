@@ -22,6 +22,7 @@ struct ServeFile {
     #[serde(default)]
     notify: Vec<NotifyFile>,
     query: Option<toml::Table>,
+    auth: Option<toml::Table>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +76,8 @@ pub struct ServeConfig {
     pub schedule: Vec<Schedule>,
     pub notify: Vec<Destination>,
     pub query: Option<QueryConfig>,
+    /// `[serve.auth]`: access tokens from an identity provider.
+    pub auth: Option<super::auth::AuthConfig>,
 }
 
 /// The `[serve]` section, or the defaults without one. `base` is the
@@ -127,6 +130,7 @@ pub fn parse(section: Option<toml::Table>, base: &Path) -> Result<ServeConfig> {
         .query
         .map(|t| query_config::parse(t, base))
         .transpose()?;
+    let auth = file.auth.map(super::auth::parse).transpose()?;
     Ok(ServeConfig {
         retries: file.retries.unwrap_or(2),
         retry_delay: Duration::from_secs(file.retry_delay.unwrap_or(600)),
@@ -136,6 +140,7 @@ pub fn parse(section: Option<toml::Table>, base: &Path) -> Result<ServeConfig> {
         schedule,
         notify,
         query,
+        auth,
     })
 }
 
