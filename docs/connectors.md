@@ -48,7 +48,8 @@ A connector can be written in any language. Examples:
   or where OpenFn already has an adaptor for the source. The workflow
   extracts, runs `fhir-pipes import run`, then runs `fhir-pipes load`.
 - A database export that writes NDJSON.
-- `fhir-pipes dhis2 extract`, below.
+- `fhir-pipes-dhis2`, the DHIS2 connector, below. It is written in Rust
+  and released with fhir-pipes.
 
 ## Running a connector as a fhir-pipes command
 
@@ -68,14 +69,26 @@ program installed as `fhir-pipes-digit` can be run as `fhir-pipes digit`.
   on unchanged. `--profile` after NAME is an argument of the program.
 - When no program is found, fhir-pipes prints its usual error for an
   unknown command, then a line saying that `fhir-pipes-NAME` was not found,
-  and exits 2.
+  and exits 2. For `fhir-pipes dhis2` without `fhir-pipes-dhis2`:
+
+  ```
+  error: unrecognized subcommand 'dhis2'
+  …
+  fhir-pipes-dhis2 was not found next to fhir-pipes or on the PATH
+  ```
 
 NAME may hold letters, digits, `-` and `_`.
 
-## dhis2 extract
+## fhir-pipes-dhis2
 
-`fhir-pipes dhis2 extract` is the DHIS2 connector. It writes the records
-of the package
+`fhir-pipes-dhis2` is the DHIS2 connector: a separate program that
+fhir-pipes runs as `fhir-pipes dhis2`. Each release has it beside
+fhir-pipes, as `fhir-pipes-dhis2-<target>`; see
+[dhis2.md](dhis2.md#installing-fhir-pipes-dhis2) for how to install it. Its
+code is in [crates/dhis2](../crates/dhis2), and uses the fhir-pipes library
+for FHIR NDJSON, HTTP, run reports and import packages.
+
+`fhir-pipes dhis2 extract` writes the records of the package
 [examples/import/icr-dhis2](../examples/import/icr-dhis2):
 
 ```sh
@@ -101,8 +114,3 @@ folder.
 extraction and map each record with a package as it is read, for those who
 want one command (see
 [dhis2.md](dhis2.md#the-commands-that-write-resources)).
-
-`dhis2 extract` is built into fhir-pipes for now. It will move to its own
-program, `fhir-pipes-dhis2`; the same command line,
-`fhir-pipes dhis2 extract …`, will then run that program as an external
-command.
