@@ -17,6 +17,7 @@ mod api;
 mod calendar;
 mod config;
 mod expression;
+mod list;
 mod locations;
 mod maps;
 mod measures;
@@ -72,6 +73,7 @@ pub fn run(cli: cli::Cli, matches: &clap::ArgMatches) -> anyhow::Result<()> {
         Dhis2Command::Extract(Dhis2ExtractCommand::All(args)) => extract_all(args)?,
         Dhis2Command::Extract(cmd) => drop(extract(cmd)?),
         Dhis2Command::Config(ConfigCommand::Check(args)) => config::check(cfg.as_ref(), args)?,
+        Dhis2Command::List(args) => list::run_list(args)?,
     }
     Ok(())
 }

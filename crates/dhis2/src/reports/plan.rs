@@ -150,7 +150,7 @@ fn org_unit_ids(api: &Dhis2, level: u32, root: Option<&str>) -> Result<Vec<Strin
 }
 
 /// How many org units DHIS2 has at `level` (under `root`), to size requests.
-fn org_unit_count(api: &Dhis2, level: u32, root: Option<&str>) -> Result<u64> {
+pub(crate) fn org_unit_count(api: &Dhis2, level: u32, root: Option<&str>) -> Result<u64> {
     let mut query = vec![
         ("filter", format!("level:eq:{level}")),
         ("fields", "id".into()),

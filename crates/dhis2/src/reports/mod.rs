@@ -40,6 +40,8 @@ mod periods;
 mod plan;
 mod writer;
 
+pub(crate) use plan::org_unit_count;
+
 pub use analytics::{Analytics, AnalyticsRow};
 pub use periods::DateRange;
 

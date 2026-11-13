@@ -52,6 +52,66 @@ pub enum Dhis2Command {
     /// Check a settings file (--config FILE) without running anything
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// List the UIDs (or levels) an option or settings key takes, such as the indicator groups, from the DHIS2 metadata API. Reads nothing else and writes nothing to DHIS2
+    List(Box<ListArgs>),
+}
+
+/// What `dhis2 list` lists.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKind {
+    /// For --indicator-group
+    IndicatorGroups,
+    /// For --indicator; --group UID lists one indicator group's
+    Indicators,
+    /// For --data-element-group
+    DataElementGroups,
+    /// For --data-element-group-set and --breakdown
+    DataElementGroupSets,
+    /// Aggregate data elements, for --data-element; --group UID lists one data element group's
+    DataElements,
+    /// For --data-set
+    DataSets,
+    /// Level numbers, for --level and --facility-level
+    OrgUnitLevels,
+    /// For --group-set and --breakdown
+    OrgUnitGroupSets,
+    /// For --org-unit-group; --group UID lists one org unit group set's
+    OrgUnitGroups,
+    /// Org units, for --root; --level N lists one level's
+    OrgUnits,
+    /// Categories that are data dimensions, for --breakdown
+    Categories,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ListFormat {
+    /// Columns of UID, name and a count
+    #[default]
+    Table,
+    /// A JSON array of objects
+    Json,
+}
+
+/// `dhis2 list KIND`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ListArgs {
+    /// What to list
+    #[arg(value_enum)]
+    pub kind: ListKind,
+    #[command(flatten)]
+    pub conn: Dhis2Conn,
+    /// Only those whose name contains TEXT, ignoring case
+    #[arg(long, value_name = "TEXT")]
+    pub filter: Option<String>,
+    /// With indicators, data-elements or org-unit-groups: only the members of this group (or org unit group set)
+    #[arg(long, value_name = "UID", value_parser = parse_uid)]
+    pub group: Option<String>,
+    /// With org-units: only this level
+    #[arg(long, value_name = "N")]
+    pub level: Option<u32>,
+    /// table or json
+    #[arg(long, value_enum, default_value_t = ListFormat::Table)]
+    pub format: ListFormat,
 }
 
 #[derive(Subcommand, Debug)]

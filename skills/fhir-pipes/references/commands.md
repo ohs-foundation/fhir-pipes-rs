@@ -215,6 +215,14 @@ repeatable option replaces the file's list. Passwords and tokens are
 refused in the file (environment only). `dhis2 config check --config FILE`
 checks it and prints the settings, exit 0 or 2.
 
+`dhis2 list KIND [--filter TEXT] [--group UID] [--level N] [--format table|json]`
+prints the UIDs (or levels) an option takes, read with GET requests from the
+metadata API, all pages, sorted by name: `indicator-groups`, `indicators`,
+`data-element-groups`, `data-element-group-sets`, `data-elements`,
+`data-sets`, `org-unit-levels`, `org-unit-group-sets`, `org-unit-groups`,
+`org-units`, `categories`. Server and credentials as for the other commands
+(`--config`, `--dhis2`, environment); no `--instance`.
+
 `fhir-pipes NAME ARGS…`, where NAME is not a built-in command, runs the
 program `fhir-pipes-NAME` from the folder of fhir-pipes or the PATH. See
 docs/connectors.md.

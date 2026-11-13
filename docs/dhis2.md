@@ -73,6 +73,50 @@ before or after `dhis2`, or as `$FHIR_PIPES_PROFILE`. The systems, profiles and 
 the resources carry are parameters of the package (see
 [import.md](import.md#parameters)).
 
+## Finding the UIDs
+
+`dhis2 list` prints the UIDs, or levels, that an option or a settings key
+takes, so they need not be looked up in DHIS2:
+
+```
+fhir-pipes dhis2 list KIND [--config FILE | --dhis2 URL …] [--filter TEXT] [--format table|json]
+```
+
+| Kind | For |
+|---|---|
+| `indicator-groups` | `--indicator-group`, `[indicators] indicator_groups` |
+| `indicators` (`--group UID`: one indicator group's) | `--indicator`, `[indicators] indicators` |
+| `data-element-groups` | `--data-element-group`, `[indicators] data_element_groups` |
+| `data-element-group-sets` | `--data-element-group-set`, `[indicators] data_element_group_sets`; `--breakdown` |
+| `data-elements` (aggregate only; `--group UID`: one data element group's) | `--data-element`, `[indicators] data_elements` |
+| `data-sets` | `--data-set`, `[indicators] data_sets` |
+| `org-unit-levels` | `--level`, `[reports] levels`; `--facility-level`, `[locations] facility_level` |
+| `org-unit-group-sets` | `--group-set`, `[locations] group_sets`; `--breakdown` |
+| `org-unit-groups` (`--group UID`: one org unit group set's) | `--org-unit-group`, `[locations] org_unit_groups` |
+| `org-units` (`--level N`: one level's) | `--root`, `[locations] root`, `[reports] root` |
+| `categories` (data dimensions only) | `--breakdown`, `[reports] breakdowns` |
+
+The server and credentials are read as by the other commands: from
+`--config`, the options or the environment. No instance name is needed.
+The table has the UID, a count where there is one (members of a group,
+data elements of a data set, org units at a level, children of an org
+unit) and the name, sorted by name, ignoring case. A last line gives the
+number of rows and the option and key that take them. `--format json`
+prints an array of objects with `id` (or `level`), `name` and `count`.
+
+`--filter TEXT` keeps the names that contain `TEXT`, ignoring case (DHIS2's
+`ilike` filter). Every page is read, so nothing is left out. An instance
+can have tens of thousands of data elements or org units; use `--filter`,
+`--group` or `--level` with those.
+
+Only GET requests to the metadata API are made.
+
+```sh
+fhir-pipes dhis2 list indicator-groups --config examples/dhis2/sierra-leone.toml
+fhir-pipes dhis2 list indicators --group srxUNt2w5jn --config examples/dhis2/sierra-leone.toml
+fhir-pipes dhis2 list org-unit-levels --config examples/dhis2/sierra-leone.toml
+```
+
 ## The settings file
 
 The settings of one DHIS2 instance (its server, its instance name, and what

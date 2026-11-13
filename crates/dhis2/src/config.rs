@@ -387,6 +387,7 @@ pub fn settle(cmd: &mut Dhis2Command, m: &ArgMatches, cfg: Option<&Config>) -> R
         }
         Dhis2Command::Extract(Dhis2ExtractCommand::All(a)) => all(a, m, cfg)?,
         Dhis2Command::Config(_) => {}
+        Dhis2Command::List(a) => conn_for(&mut a.conn, m, cfg, false)?,
     }
     Ok(())
 }
@@ -435,6 +436,11 @@ fn file_of(cfg: Option<&Config>) -> File {
 
 /// The server, the instance, the user name and the HTTP settings.
 fn conn(c: &mut Dhis2Conn, m: &ArgMatches, cfg: Option<&Config>) -> Result<()> {
+    conn_for(c, m, cfg, true)
+}
+
+/// `conn`; `dhis2 list` writes no ids, and needs no instance name.
+fn conn_for(c: &mut Dhis2Conn, m: &ArgMatches, cfg: Option<&Config>, instance: bool) -> Result<()> {
     if let Some(cfg) = cfg {
         let f = &cfg.file;
         c.url = c.url.take().or_else(|| f.url.clone());
@@ -464,7 +470,7 @@ fn conn(c: &mut Dhis2Conn, m: &ArgMatches, cfg: Option<&Config>) -> Result<()> {
             cfg,
         )));
     }
-    if c.instance.is_none() {
+    if instance && c.instance.is_none() {
         return Err(PipesError::Usage(missing(
             "no instance name",
             "--instance NAME",

@@ -114,6 +114,9 @@ Each setting in it is also an option, which overrides the file (see
 [docs/dhis2.md](docs/dhis2.md#the-settings-file)). The demo's address
 carries the DHIS2 version and changes with each release;
 https://play.dhis2.org lists the current ones.
+`fhir-pipes dhis2 list indicator-groups --config examples/dhis2/sierra-leone.toml`
+lists the UIDs a key such as `indicator_groups` takes; see
+[docs/dhis2.md](docs/dhis2.md#finding-the-uids) for the other kinds.
 
 A package has parameters for the values that differ between deployments,
 such as the base URL of identifier systems. `--param NAME=VALUE` sets one
