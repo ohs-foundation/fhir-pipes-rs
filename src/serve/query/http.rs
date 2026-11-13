@@ -56,7 +56,48 @@ pub struct QueryApi {
     /// Held while the catalog is built again: a reload that runs beside
     /// the next run's waits, so an older catalog never replaces a newer one.
     pub reloading: std::sync::Mutex<()>,
+    /// With `[serve.auth]`: how a client gets a token (SMART Backend
+    /// Services).
+    pub smart: Option<Smart>,
 }
+
+/// What `serve` publishes about getting a token, with `[serve.auth]`.
+pub struct Smart {
+    /// `/fhir/.well-known/smart-configuration`; `None` when the issuer
+    /// names no token endpoint.
+    pub configuration: Option<Value>,
+    /// The CapabilityStatement's `rest.security`.
+    pub security: Value,
+}
+
+impl Smart {
+    pub fn from_verifier(v: &crate::serve::auth::Verifier) -> Smart {
+        let issuer = &v.config().issuer;
+        let mut security = json!({
+            "service": [{"coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/restful-security-service",
+                "code": "SMART-on-FHIR",
+            }]}],
+            "description": format!(
+                "SMART Backend Services: send an access token from {issuer}. \
+                 See /fhir/.well-known/smart-configuration."
+            ),
+        });
+        if let Some(token) = v.token_endpoint() {
+            security["extension"] = json!([{
+                "url": "http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
+                "extension": [{"url": "token", "valueUri": token}],
+            }]);
+        }
+        Smart {
+            configuration: v.smart_configuration(),
+            security,
+        }
+    }
+}
+
+/// The path of the SMART configuration, which needs no token.
+pub const SMART_CONFIGURATION: &str = "/fhir/.well-known/smart-configuration";
 
 impl QueryApi {
     /// Build the catalog again; on an error the last one is kept.
@@ -91,7 +132,11 @@ pub fn routes(api: Arc<QueryApi>) -> Router {
         )
         .route(
             "/fhir/metadata",
-            get(move || metadata(started.clone())).fallback(method_not_allowed),
+            get(move |state| metadata(state, started.clone())).fallback(method_not_allowed),
+        )
+        .route(
+            SMART_CONFIGURATION,
+            get(smart_configuration).fallback(method_not_allowed),
         )
         .route(
             &format!("/fhir/OperationDefinition/{OPERATION_ID}"),
@@ -553,25 +598,39 @@ fn operation_url() -> String {
 }
 
 /// The CapabilityStatement; `date` is the day serve started (UTC).
-async fn metadata(date: String) -> Response {
-    fhir(
-        StatusCode::OK,
-        json!({
-            "resourceType": "CapabilityStatement",
-            "status": "active",
-            "date": date,
-            "kind": "instance",
-            "software": {"name": "fhir-pipes", "version": env!("CARGO_PKG_VERSION")},
-            "implementation": {"description": "fhir-pipes serve"},
-            "fhirVersion": "4.0.1",
-            "format": ["json"],
-            "rest": [{
-                "mode": "server",
-                "resource": [{"type": "Library", "interaction": [{"code": "search-type"}]}],
-                "operation": [{"name": "sql-run", "definition": operation_url()}],
-            }],
-        }),
-    )
+async fn metadata(State(api): State<Arc<QueryApi>>, date: String) -> Response {
+    let mut cs = json!({
+        "resourceType": "CapabilityStatement",
+        "status": "active",
+        "date": date,
+        "kind": "instance",
+        "software": {"name": "fhir-pipes", "version": env!("CARGO_PKG_VERSION")},
+        "implementation": {"description": "fhir-pipes serve"},
+        "fhirVersion": "4.0.1",
+        "format": ["json"],
+        "rest": [{
+            "mode": "server",
+            "resource": [{"type": "Library", "interaction": [{"code": "search-type"}]}],
+            "operation": [{"name": "sql-run", "definition": operation_url()}],
+        }],
+    });
+    if let Some(smart) = &api.smart {
+        cs["rest"][0]["security"] = smart.security.clone();
+    }
+    fhir(StatusCode::OK, cs)
+}
+
+/// SMART's discovery document. Not a FHIR resource: plain JSON.
+async fn smart_configuration(State(api): State<Arc<QueryApi>>) -> Response {
+    match api.smart.as_ref().and_then(|s| s.configuration.as_ref()) {
+        Some(c) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            c.to_string(),
+        )
+            .into_response(),
+        None => not_found().await,
+    }
 }
 
 async fn operation_definition() -> Response {
@@ -751,6 +810,7 @@ mod tests {
                 .0,
             ),
             reloading: Default::default(),
+            smart: None,
         })
     }
 

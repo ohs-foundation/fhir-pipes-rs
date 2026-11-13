@@ -144,6 +144,8 @@ struct Keys {
 pub struct Verifier {
     cfg: AuthConfig,
     jwks_uri: String,
+    /// The issuer's OpenID configuration, as read at startup.
+    provider: Value,
     http: reqwest::blocking::Client,
     keys: Mutex<Keys>,
 }
@@ -181,6 +183,7 @@ impl Verifier {
         Ok(Verifier {
             cfg,
             jwks_uri,
+            provider: doc,
             http,
             keys: Mutex::new(Keys {
                 keys,
@@ -194,6 +197,59 @@ impl Verifier {
         &self.cfg
     }
 
+    /// The issuer's token endpoint, if its configuration names one.
+    pub fn token_endpoint(&self) -> Option<&str> {
+        self.provider.get("token_endpoint").and_then(Value::as_str)
+    }
+
+    /// The SMART configuration (`/.well-known/smart-configuration`) for
+    /// SMART Backend Services, built from the issuer's OpenID
+    /// configuration; `None` when it names no token endpoint.
+    pub fn smart_configuration(&self) -> Option<Value> {
+        let token_endpoint = self.token_endpoint()?;
+        let strings = |key: &str| -> Option<Vec<String>> {
+            let list: Vec<String> = self
+                .provider
+                .get(key)?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            (!list.is_empty()).then_some(list)
+        };
+        let methods = strings("token_endpoint_auth_methods_supported")
+            .unwrap_or_else(|| vec!["private_key_jwt".into()]);
+        let algs = strings("token_endpoint_auth_signing_alg_values_supported")
+            .unwrap_or_else(|| vec!["RS384".into(), "ES384".into()]);
+        let mut capabilities = Vec::new();
+        if methods.iter().any(|m| m == "private_key_jwt") {
+            capabilities.push("client-confidential-asymmetric");
+        }
+        if methods
+            .iter()
+            .any(|m| m == "client_secret_basic" || m == "client_secret_post")
+        {
+            capabilities.push("client-confidential-symmetric");
+        }
+        let scopes: Vec<&String> = self
+            .cfg
+            .query_scope
+            .iter()
+            .chain(&self.cfg.admin_scope)
+            .collect();
+        Some(serde_json::json!({
+            "issuer": self.cfg.issuer,
+            "jwks_uri": self.jwks_uri,
+            "token_endpoint": token_endpoint,
+            "grant_types_supported": ["client_credentials"],
+            "token_endpoint_auth_methods_supported": methods,
+            "token_endpoint_auth_signing_alg_values_supported": algs,
+            "scopes_supported": scopes,
+            "capabilities": capabilities,
+        }))
+    }
+
     /// Check `token` for a path that needs `need`.
     pub fn check(&self, token: &str, need: Need) -> Verdict {
         let claims = match self.verify(token, now()) {
@@ -201,7 +257,7 @@ impl Verifier {
             Err(reason) => return Verdict::Invalid(reason),
         };
         let scopes = scopes(&claims);
-        let has = |s: &Option<String>| s.as_ref().is_some_and(|s| scopes.iter().any(|x| x == s));
+        let has = |s: &Option<String>| s.as_ref().is_some_and(|s| grants(&scopes, s));
         let admin = has(&self.cfg.admin_scope);
         let ok = match need {
             Need::Admin => admin,
@@ -454,6 +510,82 @@ fn scopes(claims: &Value) -> Vec<String> {
     out
 }
 
+/// Whether a token with `held` scopes has `wanted`. A SMART scope wanted
+/// (`system/Library.rs`) is granted by one of the same context whose
+/// resource is the same or `*` and whose permissions include its own; any
+/// other scope only by itself.
+fn grants(held: &[String], wanted: &str) -> bool {
+    match Smart::parse(wanted) {
+        Some(w) => held
+            .iter()
+            .filter_map(|h| Smart::parse(h))
+            .any(|h| h.grants(&w)),
+        None => held.iter().any(|h| h == wanted),
+    }
+}
+
+/// A SMART on FHIR scope, `<context>/<resource>.<permissions>`, without a
+/// query part.
+#[derive(Debug, PartialEq, Eq)]
+struct Smart<'a> {
+    context: &'a str,
+    resource: &'a str,
+    /// The SMART v2 permissions, a subset of `cruds`; SMART v1's `read` is
+    /// `rs`, `write` is `cud` and `*` is `cruds`.
+    permissions: Vec<char>,
+}
+
+impl<'a> Smart<'a> {
+    fn parse(scope: &'a str) -> Option<Smart<'a>> {
+        // A query part (SMART v2's `?category=…`) narrows a scope: it is
+        // not parsed, so it grants nothing that is wanted without one.
+        if scope.contains('?') {
+            return None;
+        }
+        let (context, rest) = scope.split_once('/')?;
+        if !matches!(context, "patient" | "user" | "system") {
+            return None;
+        }
+        let (resource, permissions) = rest.split_once('.')?;
+        let resource_ok = resource == "*"
+            || resource
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+                && resource.chars().all(|c| c.is_ascii_alphanumeric());
+        if !resource_ok {
+            return None;
+        }
+        let permissions: Vec<char> = match permissions {
+            "read" => vec!['r', 's'],
+            "write" => vec!['c', 'u', 'd'],
+            "*" => "cruds".chars().collect(),
+            p => {
+                // SMART v2: some of c, r, u, d, s, in that order, each once.
+                let mut order = "cruds".chars();
+                if p.is_empty() || !p.chars().all(|c| order.any(|o| o == c)) {
+                    return None;
+                }
+                p.chars().collect()
+            }
+        };
+        Some(Smart {
+            context,
+            resource,
+            permissions,
+        })
+    }
+
+    fn grants(&self, wanted: &Smart) -> bool {
+        self.context == wanted.context
+            && (self.resource == "*" || self.resource == wanted.resource)
+            && wanted
+                .permissions
+                .iter()
+                .all(|p| self.permissions.contains(p))
+    }
+}
+
 /// The client a token was issued to, for the log: `azp` or `client_id`,
 /// cut short and with only printable characters.
 fn client(claims: &Value) -> Option<String> {
@@ -582,6 +714,8 @@ pub(crate) mod tests {
             .respond_with(json_encoded(json!({
                 "issuer": issuer,
                 "jwks_uri": server.url_str("/realms/test/certs"),
+                "token_endpoint": server.url_str("/realms/test/token"),
+                "token_endpoint_auth_methods_supported": ["private_key_jwt", "client_secret_basic"],
             }))),
         );
         server.expect(
@@ -853,6 +987,113 @@ pub(crate) mod tests {
             p("issuer = \"https://a.example\"\naudience = \"a\"\nquery_scope = \"a b\"").is_err()
         );
         assert!(p("issuer = \"https://a.example\"\naudience = \"a\"\nscopes = \"x\"").is_err());
+    }
+
+    #[test]
+    fn smart_scopes_grant_what_they_cover() {
+        let g = |held: &[&str], wanted: &str| {
+            grants(
+                &held.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                wanted,
+            )
+        };
+        let q = "system/Library.rs";
+        for held in [
+            "system/Library.rs",
+            "system/Library.cruds",
+            "system/*.rs",
+            "system/Library.read",
+            "system/*.read",
+            "system/*.*",
+        ] {
+            assert!(g(&[held], q), "{held}");
+        }
+        for held in [
+            "system/Library.r",
+            "patient/Library.rs",
+            "system/Patient.rs",
+            "system/Library.write",
+            "system/Library.rs?status=active",
+            "system/Library.sr",
+            "Library.rs",
+            "fhir-pipes.query",
+        ] {
+            assert!(!g(&[held], q), "{held}");
+        }
+        assert!(g(
+            &["openid", "system/Library.s", "system/Library.r"],
+            "system/Library.s"
+        ));
+        // A scope wanted that is not SMART's is matched exactly.
+        assert!(g(&["fhir-pipes.admin"], "fhir-pipes.admin"));
+        assert!(!g(&["system/*.*"], "fhir-pipes.admin"));
+        // A wanted scope with a query part is not SMART-parsed either.
+        assert!(g(&["system/Library.rs?x=1"], "system/Library.rs?x=1"));
+        assert!(!g(&["system/*.cruds"], "system/Library.rs?x=1"));
+    }
+
+    #[test]
+    fn a_smart_query_scope_opens_fhir_for_a_wildcard_token() {
+        let key = TestKey::ec();
+        let (_s, issuer) = provider(json!({"keys": [key.jwk("k1")]}));
+        let mut cfg = config(&issuer);
+        cfg.query_scope = Some("system/Library.rs".into());
+        let v = Verifier::discover(cfg).unwrap();
+        let t = key.sign(json!({"kid": "k1"}), &claims(&issuer, "system/*.read"));
+        assert_eq!(v.check(&t, Need::Query), Verdict::Accepted);
+        let t = key.sign(json!({"kid": "k1"}), &claims(&issuer, "system/Library.r"));
+        assert!(matches!(
+            v.check(&t, Need::Query),
+            Verdict::Insufficient { .. }
+        ));
+    }
+
+    #[test]
+    fn the_smart_configuration_follows_the_provider() {
+        let key = TestKey::ec();
+        let (server, _s, v) = verifier(&key);
+        let c = v.smart_configuration().unwrap();
+        assert_eq!(c["token_endpoint"], server.url_str("/realms/test/token"));
+        assert_eq!(c["jwks_uri"], server.url_str("/realms/test/certs"));
+        assert_eq!(c["grant_types_supported"], json!(["client_credentials"]));
+        assert_eq!(
+            c["token_endpoint_auth_methods_supported"],
+            json!(["private_key_jwt", "client_secret_basic"])
+        );
+        assert_eq!(
+            c["token_endpoint_auth_signing_alg_values_supported"],
+            json!(["RS384", "ES384"])
+        );
+        assert_eq!(
+            c["capabilities"],
+            json!([
+                "client-confidential-asymmetric",
+                "client-confidential-symmetric"
+            ])
+        );
+        assert_eq!(
+            c["scopes_supported"],
+            json!(["fhir-pipes.query", "fhir-pipes.admin"])
+        );
+    }
+
+    #[test]
+    fn without_a_token_endpoint_there_is_no_smart_configuration() {
+        let key = TestKey::ec();
+        let server = Server::run();
+        let issuer = server.url_str("/i");
+        server.expect(
+            Expectation::matching(request::path("/i/.well-known/openid-configuration"))
+                .respond_with(json_encoded(
+                    json!({"issuer": issuer, "jwks_uri": server.url_str("/k")}),
+                )),
+        );
+        server.expect(
+            Expectation::matching(request::path("/k"))
+                .respond_with(json_encoded(json!({"keys": [key.jwk("k1")]}))),
+        );
+        let v = Verifier::discover(config(&issuer)).unwrap();
+        assert_eq!(v.smart_configuration(), None);
     }
 
     #[test]

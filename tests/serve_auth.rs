@@ -52,6 +52,9 @@ impl Provider {
             .respond_with(json_encoded(json!({
                 "issuer": issuer,
                 "jwks_uri": server.url_str("/realms/test/certs"),
+                "token_endpoint": server.url_str("/realms/test/token"),
+                "token_endpoint_auth_methods_supported": ["private_key_jwt"],
+                "token_endpoint_auth_signing_alg_values_supported": ["RS384", "ES384"],
             }))),
         );
         server.expect(
@@ -276,4 +279,68 @@ fn an_issuer_that_does_not_match_stops_serve() {
     let (code, stderr) = serve_fails(&config, "127.0.0.1:0", &[]);
     assert_eq!(code, Some(2), "{stderr}");
     assert!(stderr.contains("names the issuer"), "{stderr}");
+}
+
+#[test]
+fn the_smart_configuration_needs_no_token_and_metadata_says_smart() {
+    let p = Provider::start();
+    let (_dir, config) = warehouse(&p.section(Some("system/Library.rs"), Some(ADMIN_SCOPE)));
+    let s = start_serve(&config, &[("FHIR_PIPES_SERVE_TOKEN", TOKEN)]);
+    let r = client()
+        .get(format!("{}/fhir/.well-known/smart-configuration", s.url))
+        .send()
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(
+        r.headers()["content-type"].to_str().unwrap(),
+        "application/json"
+    );
+    let c: serde_json::Value = serde_json::from_str(&r.text().unwrap()).unwrap();
+    assert_eq!(c["issuer"], p.issuer());
+    assert_eq!(c["token_endpoint"], p.server.url_str("/realms/test/token"));
+    assert_eq!(c["grant_types_supported"], json!(["client_credentials"]));
+    assert_eq!(c["capabilities"], json!(["client-confidential-asymmetric"]));
+    assert_eq!(
+        c["scopes_supported"],
+        json!(["system/Library.rs", ADMIN_SCOPE])
+    );
+
+    // A SMART wildcard scope opens /fhir; metadata names SMART and the
+    // token endpoint.
+    let (status, _, body) = get(&s, "/fhir/metadata", Some(&p.token("system/*.read", 300)));
+    assert_eq!(status, 200, "{body}");
+    let cs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let security = &cs["rest"][0]["security"];
+    assert_eq!(security["service"][0]["coding"][0]["code"], "SMART-on-FHIR");
+    assert_eq!(
+        security["extension"][0]["extension"][0]["valueUri"],
+        p.server.url_str("/realms/test/token")
+    );
+    assert_eq!(
+        get(
+            &s,
+            "/fhir/metadata",
+            Some(&p.token("system/Library.r", 300))
+        )
+        .0,
+        403
+    );
+}
+
+#[test]
+fn without_serve_auth_there_is_no_smart_configuration() {
+    let (_dir, config) = warehouse("");
+    let s = start_serve(&config, &[("FHIR_PIPES_SERVE_TOKEN", TOKEN)]);
+    assert_eq!(
+        get(&s, "/fhir/.well-known/smart-configuration", None).0,
+        401
+    );
+    assert_eq!(
+        get(&s, "/fhir/.well-known/smart-configuration", Some(TOKEN)).0,
+        404
+    );
+    let (status, _, body) = get(&s, "/fhir/metadata", Some(TOKEN));
+    assert_eq!(status, 200);
+    let cs: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(cs["rest"][0].get("security").is_none(), "{cs}");
 }

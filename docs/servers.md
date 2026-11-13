@@ -14,6 +14,7 @@ the options below. FHIR request credentials stay on the `--server` origin, excep
 |---|---|---|
 | Bearer token | `--token` | `FHIR_PIPES_TOKEN` |
 | OAuth client credentials | `--client-id`, `--client-secret`, `--token-url`, `--token-auth post\|basic`, `--scope` | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_SECRET`, `FHIR_PIPES_TOKEN_URL`, `FHIR_PIPES_TOKEN_AUTH`, `FHIR_PIPES_SCOPE` |
+| OAuth client credentials with a private key (SMART Backend Services) | `--client-id`, `--client-key`, `--client-key-id`, `--token-url`, `--scope` | `FHIR_PIPES_CLIENT_ID`, `FHIR_PIPES_CLIENT_KEY`, `FHIR_PIPES_CLIENT_KEY_ID`, `FHIR_PIPES_TOKEN_URL`, `FHIR_PIPES_SCOPE` |
 | Username and password (HTTP Basic) | `--username`, `--password` | `FHIR_PIPES_USERNAME`, `FHIR_PIPES_PASSWORD` |
 | Google Application Default Credentials | `--google-auth` | `FHIR_PIPES_GOOGLE_AUTH=1` |
 
@@ -21,7 +22,27 @@ the options below. FHIR request credentials stay on the `--server` origin, excep
 - Client credentials are renewed a minute before expiry. `--token-auth post`
   (default) sends the client in the form body; `basic` in a Basic header.
   `--scope` adds a `scope`, such as `system/*.read`.
-- `refresh` reads the client secret and password only from the environment.
+- A client key replaces the client secret: fhir-pipes signs a new assertion
+  for each token request (`private_key_jwt`, RFC 7523), as SMART Backend
+  Services clients do.
+  - `--client-key` is a PEM private key file: RSA (PKCS #8 or #1, signed
+    with RS384), or EC P-384 or P-256 (PKCS #8, ES384 or ES256). Convert an
+    `EC PRIVATE KEY` file with
+    `openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem`.
+  - `--client-key-id` is the key's id (`kid`), as registered with the
+    token endpoint.
+  - The assertion's `iss` and `sub` are the client id and its `aud` is the
+    token URL. It is valid for five minutes.
+  - A SMART server usually wants a `--scope`, such as `system/*.rs`.
+  - Make a key and the public key to register with:
+    ```sh
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out client.pem
+    openssl pkey -in client.pem -pubout -out client.pub.pem
+    ```
+- `refresh` reads the client secret and password only from the
+  environment. Its client key comes from `FHIR_PIPES_CLIENT_KEY` and
+  `FHIR_PIPES_CLIENT_KEY_ID`, or from `server.client_key` (relative to the
+  config file) and `server.client_key_id`.
 
 `--server-kind` (in `refresh` also `FHIR_PIPES_SERVER_KIND` or `server.kind`)
 adds the search parameters some servers need:

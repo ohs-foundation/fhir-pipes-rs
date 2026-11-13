@@ -408,6 +408,8 @@ fn overrides(args: &RefreshArgs, profile: Option<&str>) -> config::Overrides {
         token: args.token.clone(),
         client_id: env_secret("FHIR_PIPES_CLIENT_ID"),
         client_secret: env_secret("FHIR_PIPES_CLIENT_SECRET"),
+        client_key: env_secret("FHIR_PIPES_CLIENT_KEY").map(PathBuf::from),
+        client_key_id: env_secret("FHIR_PIPES_CLIENT_KEY_ID"),
         token_url: args.token_url.clone(),
         token_auth: args.token_auth,
         scope: args.scope.clone(),
