@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
+use crate::api::{Dhis2, under};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
-use crate::dhis2::api::{Dhis2, under};
-use crate::dhis2::measures::Indicator;
-use crate::dhis2::raw::{RawSource, Span, prepare};
-use crate::error::{PipesError, Result};
+use crate::measures::Indicator;
+use crate::raw::{RawSource, Span, prepare};
+use fhir_pipes::error::{PipesError, Result};
 
 use super::periods::{DateRange, period_groups, periods_label};
 use super::unique;

@@ -1,9 +1,9 @@
 //! The snapshot directory: locations.ndjson, state.json, the boundary cache,
 //! and the in-progress incoming file. See README "The snapshot".
 
-pub mod index;
+pub(crate) mod index;
 pub mod instant;
-pub mod merge;
+pub(crate) mod merge;
 
 use std::path::{Path, PathBuf};
 

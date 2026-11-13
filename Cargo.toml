@@ -2,8 +2,14 @@
 name = "fhir-pipes"
 version = "0.6.0"
 edition = "2024"
-description = "Move data into and out of FHIR servers: SQL-on-FHIR warehouses, GeoParquet, DHIS2"
+description = "Move data into and out of FHIR servers: SQL-on-FHIR warehouses, GeoParquet, import packages"
 license = "Apache-2.0"
+
+# The library holds the program's modules; the DHIS2 connector
+# (crates/dhis2, the program fhir-pipes-dhis2) uses some of them.
+[lib]
+name = "fhir_pipes"
+path = "src/lib.rs"
 
 [[bin]]
 name = "fhir-pipes"
@@ -58,7 +64,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tempfile = "3"
 fhir-pipes-sof = { workspace = true, features = ["parquet"] }
 fhir-pipes-sof-lint = { workspace = true }
-# FHIR Mapping Language: `map run`, and `dhis2 … --maps`. The engine gets its
+# FHIR Mapping Language: `map run`, `import`, and `fhir-pipes-dhis2 … --package`. The engine gets its
 # FHIRPath from the engine in crates/sof, so its own `fhirpath` feature is off.
 fml-syntax = "0.2.7"
 fml-model = "0.2.7"
@@ -124,7 +130,7 @@ debug = "line-tables-only"
 opt-level = 2
 
 [workspace]
-members = ["crates/sof", "crates/sof-lint"]
+members = ["crates/sof", "crates/sof-lint", "crates/dhis2"]
 
 # Shared by the crates under crates/. sof came from octofhir/sof, which used
 # arrow and parquet 58; it is on 59 here so the whole binary links one arrow.

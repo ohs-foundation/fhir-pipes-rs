@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::error::{PipesError, Result};
 use fhirpath::FhirPath;
 
-pub mod cli;
+pub(crate) mod cli;
 
 /// Records transformed together by the commands that read more records than
 /// they hold in memory: enough to keep every core busy, few enough to hold
@@ -477,9 +477,16 @@ pub(crate) fn first_source_url(map: &StructureMap) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::cli::BUILT_IN as MODELS;
     use super::*;
-    use crate::dhis2::maps::{INDICATOR_MODEL, MODELS, ORG_UNIT_MODEL, VALUE_MODEL};
     use serde_json::json;
+
+    const ORG_UNIT_MODEL: &str =
+        "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2OrgUnit";
+    const INDICATOR_MODEL: &str =
+        "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Indicator";
+    const VALUE_MODEL: &str =
+        "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value";
 
     const FACILITY: &str = r#"{"resourceType":"StructureDefinition","id":"Facility",
         "url":"https://example.org/StructureDefinition/Facility","name":"Facility","status":"draft",

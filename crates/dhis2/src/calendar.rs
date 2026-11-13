@@ -3,9 +3,9 @@
 //! days, ISO weeks, months, bi-months, quarters, six-months and years.
 //! Other period types (BiWeekly, weeks starting Wednesday to Sunday,
 //! financial years, relative periods) have no dates here. Days are counted
-//! by `crate::calendar`.
+//! by `fhir_pipes::calendar`.
 
-use crate::calendar::{days_from_civil, month_days};
+use fhir_pipes::calendar::{days_from_civil, month_days};
 
 /// First and last day (inclusive, as day counts) of a DHIS2 period code,
 /// or `None` for a period type this module does not know.
@@ -65,7 +65,7 @@ pub fn period_days(pe: &str) -> Option<(i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::iso;
+    use fhir_pipes::calendar::iso;
 
     fn dates(pe: &str) -> Option<(String, String)> {
         period_days(pe).map(|(a, b)| (iso(a), iso(b)))

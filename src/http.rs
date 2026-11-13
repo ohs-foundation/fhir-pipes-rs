@@ -42,7 +42,7 @@
 mod auth;
 mod body;
 mod gate;
-pub mod google;
+pub(crate) mod google;
 mod retry;
 
 pub use auth::{Auth, TokenAuth};

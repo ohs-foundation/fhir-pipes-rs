@@ -1,0 +1,33 @@
+[package]
+name = "fhir-pipes-dhis2"
+version = "0.6.0"
+edition = "2024"
+description = "The DHIS2 connector of fhir-pipes: DHIS2 org units, indicators and values as records for `fhir-pipes import run`, or as FHIR NDJSON through an import package"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "fhir-pipes-dhis2"
+path = "src/main.rs"
+
+[dependencies]
+# The fhir-pipes library: errors, FHIR NDJSON, the HTTP client, reports, the
+# maps and import packages. Without PostgreSQL, which no dhis2 command uses.
+fhir-pipes = { path = "../..", default-features = false }
+anyhow = "1"
+base64 = "0.23"
+clap = { version = "4", features = ["derive", "env"] }
+fml-model = "0.2.7"
+flate2 = "1.1"
+geo = { version = "0.33", default-features = false }
+mimalloc = { version = "0.1.52", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+url = "2.5"
+
+[dev-dependencies]
+assert_cmd = "2"
+httptest = "0.16"
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"

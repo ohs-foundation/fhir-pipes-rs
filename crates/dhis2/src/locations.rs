@@ -13,11 +13,11 @@ use super::api::{Dhis2, under};
 use super::maps::{ORG_UNIT_MODEL, RecordMap, Writes, record_type};
 use super::{Instance, valid_name};
 use crate::cli::Dhis2LocationsArgs;
-use crate::error::{PipesError, Result};
-use crate::fhir::group::is_valid_id;
-use crate::fhir::ndjson::NdjsonWriter;
-use crate::fs::check_out;
-use crate::report::{Report, write_report};
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::fhir::group::is_valid_id;
+use fhir_pipes::fhir::ndjson::NdjsonWriter;
+use fhir_pipes::fs::check_out;
+use fhir_pipes::report::{Report, write_report};
 
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
@@ -252,7 +252,7 @@ fn polygons(geometry: &Value, id: &str, report: &mut Report) -> Option<geo::Mult
     ) {
         return None;
     }
-    let parsed = crate::geometry::convert_value(geometry.clone());
+    let parsed = fhir_pipes::geometry::convert_value(geometry.clone());
     match parsed {
         Ok((geo::Geometry::Polygon(p), _)) => Some(geo::MultiPolygon(vec![p])),
         Ok((geo::Geometry::MultiPolygon(mp), _)) => Some(mp),
@@ -308,7 +308,7 @@ pub fn fill_missing_boundaries(units: &mut [OrgUnit], facility_level: u32, repor
             ),
         );
         let union = geo::Geometry::MultiPolygon(union);
-        units[i].geometry = Some(crate::geometry::to_geojson_value(&union));
+        units[i].geometry = Some(fhir_pipes::geometry::to_geojson_value(&union));
     }
 }
 
@@ -326,7 +326,7 @@ pub fn build(
     let top = units.iter().map(|u| u.level).min().unwrap_or(1);
     let mut sorted: Vec<&OrgUnit> = units.iter().collect();
     sorted.sort_by(|a, b| (a.level, &a.id).cmp(&(b.level, &b.id)));
-    for batch in sorted.chunks(crate::mapping::BATCH) {
+    for batch in sorted.chunks(fhir_pipes::mapping::BATCH) {
         // Units are prepared one after another. Each unit's issues are held
         // apart, then added with its map warnings in unit order.
         let prepared: Vec<(Report, Option<Prepared>)> = batch
@@ -632,7 +632,7 @@ mod tests {
         build_with(
             units,
             opts,
-            Writes::Maps(&crate::dhis2::maps::icr_package(ORG_UNIT_MODEL)),
+            Writes::Maps(&crate::maps::icr_package(ORG_UNIT_MODEL)),
             report,
         )
     }
@@ -759,11 +759,11 @@ mod tests {
 
         let mut report = Report::default();
         let records = build_with(&units, &o, Writes::Records, &mut report);
-        crate::dhis2::maps::case::records("org-units", &records);
+        crate::maps::case::records("org-units", &records);
         let mut mapped_report = Report::default();
         let mapped = build_all(&units, &o, &mut mapped_report);
         assert_eq!(mapped.len(), 7, "5 Locations and 2 Organizations");
-        crate::dhis2::maps::case::expected("org-units", &mapped);
+        crate::maps::case::expected("org-units", &mapped);
         assert_eq!(mapped_report.summary(), report.summary());
     }
 

@@ -20,10 +20,10 @@ use super::Instance;
 use super::api::{Dhis2, ServerInfo, in_filter};
 use super::maps::{INDICATOR_MODEL, RecordMap, Writes, record_type};
 use crate::cli::{Dhis2MeasuresArgs, IndicatorSelection};
-use crate::error::{PipesError, Result};
-use crate::fhir::ndjson::write_ndjson;
-use crate::fs::check_out;
-use crate::report::{Report, write_report};
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::fhir::ndjson::write_ndjson;
+use fhir_pipes::fs::check_out;
+use fhir_pipes::report::{Report, write_report};
 
 const INDICATOR_FIELDS: &str = "id,code,name,description,numerator,numeratorDescription,\
 denominator,denominatorDescription,decimals,annualized,lastUpdated,\
@@ -618,7 +618,7 @@ mod tests {
 
     /// The Measure the example package writes for `ind`.
     fn measure(ind: &Indicator, instance: &Instance, info: &ServerInfo) -> Value {
-        let map = crate::dhis2::maps::icr_package(INDICATOR_MODEL);
+        let map = crate::maps::icr_package(INDICATOR_MODEL);
         let mut report = Report::default();
         let mut out = map
             .run(&record(ind, instance, info), &ind.id, &mut report)
@@ -676,12 +676,12 @@ mod tests {
             .iter()
             .map(|ind| record(ind, &instance, &info))
             .collect();
-        crate::dhis2::maps::case::records("indicators", &records);
+        crate::maps::case::records("indicators", &records);
         let mapped: Vec<Value> = items
             .iter()
             .map(|ind| measure(ind, &instance, &info))
             .collect();
-        crate::dhis2::maps::case::expected("indicators", &mapped);
+        crate::maps::case::expected("indicators", &mapped);
     }
 
     #[test]
@@ -777,7 +777,9 @@ mod tests {
         assert_eq!(rate.scoring(), Scoring::Proportion);
         let m = measure(&rate, &instance, &ServerInfo::default());
         assert_eq!(m["id"], "sl-demo-QX4ZTUbOt3a.REPORTING-RATE");
-        assert!(crate::fhir::group::is_valid_id(m["id"].as_str().unwrap()));
+        assert!(fhir_pipes::fhir::group::is_valid_id(
+            m["id"].as_str().unwrap()
+        ));
         assert_eq!(m["title"], "Reproductive Health - Reporting rate");
         assert_eq!(m["identifier"][0]["system"], format!("{IDS}/data-set"));
         assert_eq!(m["identifier"][0]["value"], "QX4ZTUbOt3a");

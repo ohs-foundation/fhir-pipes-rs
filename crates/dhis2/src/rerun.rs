@@ -15,12 +15,12 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::error::{PipesError, Result};
-pub use crate::fhir::content::Change;
-use crate::fhir::content::{self, Ignore};
-use crate::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
-use crate::fs::{AtomicFile, atomic_write};
-use crate::report::Report;
+use fhir_pipes::error::{PipesError, Result};
+pub use fhir_pipes::fhir::content::Change;
+use fhir_pipes::fhir::content::{self, Ignore};
+use fhir_pipes::fhir::ndjson::{NdjsonReader, Output, is_gz, with_suffix};
+use fhir_pipes::fs::{AtomicFile, atomic_write};
+use fhir_pipes::report::Report;
 
 /// The elements of a report left out of its content hash: `date`, which is
 /// when DHIS2 last built its analytics tables and so changes every night

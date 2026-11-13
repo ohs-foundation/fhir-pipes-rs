@@ -38,13 +38,13 @@ use super::calendar::period_days;
 use super::expression::{Expr, Item};
 use super::measures::{Indicator, Kind};
 use super::reports::{Analytics, AnalyticsRow, DateRange};
-use crate::calendar::{days_in_year, iso};
-use crate::error::{PipesError, Result};
+use fhir_pipes::calendar::{days_in_year, iso};
+use fhir_pipes::error::{PipesError, Result};
 
 /// Root org units in one `dataValueSets` request: 100 `orgUnit=` parameters
 /// are about 2 KB of URL.
 const ROOTS_PER_REQUEST: usize = 100;
-use crate::fhir::ndjson::NdjsonReader;
+use fhir_pipes::fhir::ndjson::NdjsonReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Aggregation {
@@ -89,8 +89,8 @@ impl Span {
     pub fn of_range(r: &DateRange) -> Option<Self> {
         Some(Self {
             code: r.code(),
-            start: crate::calendar::day_of(&r.start)?,
-            end: crate::calendar::day_of(&r.end)?,
+            start: fhir_pipes::calendar::day_of(&r.start)?,
+            end: fhir_pipes::calendar::day_of(&r.end)?,
         })
     }
 }
@@ -709,7 +709,7 @@ impl RawSource {
             return None;
         }
         let days = (target.end - target.start + 1) as f64;
-        let year = crate::calendar::civil_from_days(target.start).0;
+        let year = fhir_pipes::calendar::civil_from_days(target.start).0;
         let annual = if ind.annualized {
             days_in_year(year) as f64 / days
         } else {

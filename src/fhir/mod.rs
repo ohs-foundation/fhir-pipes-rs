@@ -1,14 +1,14 @@
-pub mod chunks;
+pub(crate) mod chunks;
 pub mod content;
-pub mod edit;
+pub(crate) mod edit;
 pub mod group;
-pub mod head;
-pub mod input;
-pub mod location;
+pub(crate) mod head;
+pub(crate) mod input;
+pub(crate) mod location;
 pub mod ndjson;
-pub mod organization;
-pub mod package;
-pub mod spatial;
+pub(crate) mod organization;
+pub(crate) mod package;
+pub(crate) mod spatial;
 
 pub use location::{Boundary, Location};
 pub use organization::Organization;

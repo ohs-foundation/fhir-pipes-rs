@@ -1,9 +1,9 @@
 //! The DHIS2 import both ways: for the same fake DHIS2 responses,
 //!
-//! (a) `fhir-pipes dhis2 locations|measures|reports --package
+//! (a) `fhir-pipes-dhis2 locations|measures|reports --package
 //!     examples/import/icr-dhis2 --out a.ndjson`, which maps each record
 //!     as it is read, and
-//! (b) `fhir-pipes dhis2 extract locations|measures|reports --out IN` with
+//! (b) `fhir-pipes-dhis2 extract locations|measures|reports --out IN` with
 //!     the same options, writing `IN/<RecordType>.ndjson`, then
 //!     `fhir-pipes import run --package examples/import/icr-dhis2 --in IN`,
 //!
@@ -17,6 +17,9 @@
 //!
 //! The stub server helpers are shared with tests/dhis2.rs through
 //! tests/common/dhis2.rs; that file's tests are not run again here.
+//!
+//! These tests run both programs: fhir-pipes-dhis2, and fhir-pipes from the
+//! same folder (see `stub::fhir_pipes`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,10 +34,13 @@ use serde_json::{Value, json};
 mod stub;
 use stub::*;
 
-const PACKAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/import/icr-dhis2");
+const PACKAGE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../examples/import/icr-dhis2"
+);
 const MAPS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/examples/import/icr-dhis2/maps"
+    "/../../examples/import/icr-dhis2/maps"
 );
 
 /// What a scenario writes: resources with `dhis2 <command> --package
@@ -58,16 +64,15 @@ impl To<'_> {
 /// command with `--out` and `extra`, and returns what it printed.
 type Run<'a> = &'a dyn Fn(To, &[&str]) -> Assert;
 
-/// `fhir-pipes dhis2 <command> --package PACKAGE` (or `dhis2 extract
+/// `fhir-pipes-dhis2 <command> --package PACKAGE` (or `extract
 /// <command>`) against `server`, signed in, with `--out`.
 ///
 /// No `dhis2` command reads the profile: the records carry none of the
 /// URLs, and the package's parameters give the maps their values. Both run
 /// here with a profile that does not exist.
 fn dhis2(server: &Server, command: &str, to: To) -> Command {
-    let mut c = fhir_pipes();
-    c.arg("dhis2")
-        .env("FHIR_PIPES_PROFILE", "no-such-profile.toml");
+    let mut c = fhir_pipes_dhis2();
+    c.env("FHIR_PIPES_PROFILE", "no-such-profile.toml");
     if let To::Records(_) = to {
         c.arg("extract");
     }
@@ -792,6 +797,39 @@ fn three_extracts_into_one_folder_import_together() {
     assert_same(&written, &read_out(&out));
 }
 
+/// fhir-pipes runs fhir-pipes-dhis2, from the folder it is in, as its
+/// command `dhis2`. `--profile` before the command reaches the connector as
+/// `$FHIR_PIPES_PROFILE`, and `--profile` after it as an option; no dhis2
+/// command reads either, so a profile that does not exist neither fails
+/// nor is warned about. The records are the same as from fhir-pipes-dhis2.
+#[test]
+fn fhir_pipes_runs_the_connector_as_its_dhis2_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |mut c: Command, out: &Path, extra: &[&str]| {
+        let server = Server::run();
+        expect_info(&server);
+        expect_group(&server);
+        c.args(["extract", "measures", "--dhis2", &base(&server)])
+            .args(["--instance", "sl-demo", "--indicator-group", "srxUNt2w5jn"])
+            .arg("--out")
+            .arg(out)
+            .args(extra)
+            .env("FHIR_PIPES_DHIS2_TOKEN", "d2pat_test")
+            .assert()
+            .success()
+    };
+    let direct = dir.path().join("direct");
+    run(fhir_pipes_dhis2(), &direct, &[]);
+    let through = dir.path().join("through");
+    let mut c = fhir_pipes();
+    c.args(["--profile", "no-such-profile.toml", "dhis2"]);
+    let a = run(c, &through, &["--profile", "other-missing-profile.toml"]);
+    assert!(!stderr(&a).contains("profile"), "{}", stderr(&a));
+    let records = read_ndjson(&direct.join("DHIS2Indicator.ndjson"));
+    assert_eq!(records.len(), 2);
+    assert_eq!(read_ndjson(&through.join("DHIS2Indicator.ndjson")), records);
+}
+
 // ---------------------------------------------------------------------------
 // The package's test cases
 
@@ -868,8 +906,7 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
         } else {
             ("--locations", &locations)
         };
-        fhir_pipes()
-            .arg("dhis2")
+        fhir_pipes_dhis2()
             .args(command)
             .args(["--dhis2", "https://dhis2.invalid"])
             .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
@@ -906,14 +943,8 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
     assert!(e.contains("unexpected argument '--records'"), "{e}");
     let e = stderr(&reports(&["reports"], &["--org-units", l]));
     assert!(e.contains("unexpected argument '--org-units'"), "{e}");
-    let a = fhir_pipes()
-        .args([
-            "dhis2",
-            "extract",
-            "measures",
-            "--dhis2",
-            "https://dhis2.invalid",
-        ])
+    let a = fhir_pipes_dhis2()
+        .args(["extract", "measures", "--dhis2", "https://dhis2.invalid"])
         .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
         .args(["--maps", MAPS, "--out"])
         .arg(dir.path().join("m"))
@@ -923,14 +954,8 @@ fn extract_refuses_the_options_of_the_fhir_commands() {
     // --out is a folder.
     let file = dir.path().join("a-file");
     std::fs::write(&file, "").unwrap();
-    let a = fhir_pipes()
-        .args([
-            "dhis2",
-            "extract",
-            "measures",
-            "--dhis2",
-            "https://dhis2.invalid",
-        ])
+    let a = fhir_pipes_dhis2()
+        .args(["extract", "measures", "--dhis2", "https://dhis2.invalid"])
         .args([
             "--instance",
             "sl-demo",
@@ -954,13 +979,12 @@ fn the_fhir_commands_need_a_package_and_no_command_a_profile() {
     let locations = locations_for(dir.path(), &[BO]);
     let out = dir.path().join("out");
     let run = |command: &[&str], profile: Option<&str>, extra: &[&std::ffi::OsStr]| {
-        let mut c = fhir_pipes();
+        let mut c = fhir_pipes_dhis2();
         match profile {
             Some(p) => c.env("FHIR_PIPES_PROFILE", p),
             None => c.env_remove("FHIR_PIPES_PROFILE"),
         };
-        c.arg("dhis2")
-            .args(command)
+        c.args(command)
             .args(["--dhis2", "https://dhis2.invalid"])
             .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
             .args(["--period", "2025", "--level", "2"])

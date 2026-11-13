@@ -1,4 +1,4 @@
-//! Binary-level tests for `fhir-pipes dhis2` against a fake DHIS2 Web API.
+//! Binary-level tests for `fhir-pipes-dhis2` against a fake DHIS2 Web API.
 //! The commands write their resources with the example package
 //! examples/import/icr-dhis2.
 
@@ -15,14 +15,17 @@ use serde_json::{Value, json};
 mod stub;
 use stub::*;
 
-/// `fhir-pipes` with the example package examples/import/icr-dhis2, given
-/// as `$FHIR_PIPES_DHIS2_MAPS`: the `dhis2` commands write their resources
+/// `fhir-pipes-dhis2` with the example package examples/import/icr-dhis2,
+/// given as `$FHIR_PIPES_DHIS2_MAPS`: the commands write their resources
 /// with its maps.
-fn fhir_pipes() -> Command {
-    let mut c = stub::fhir_pipes();
+fn fhir_pipes_dhis2() -> Command {
+    let mut c = stub::fhir_pipes_dhis2();
     c.env(
         "FHIR_PIPES_DHIS2_MAPS",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/import/icr-dhis2"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/import/icr-dhis2"
+        ),
     );
     c
 }
@@ -73,9 +76,8 @@ fn locations_pages_through_org_units_and_pairs_facilities() {
     );
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("locations.ndjson");
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "locations",
             "--dhis2",
             &base(&server),
@@ -117,9 +119,8 @@ fn measures_are_written_for_every_indicator_in_the_group() {
     expect_group(&server);
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("measures.ndjson");
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "measures",
             "--dhis2",
             &base(&server),
@@ -145,10 +146,13 @@ fn measures_are_written_for_every_indicator_in_the_group() {
 /// it before, and `--param` to change one of the package's parameters.
 #[test]
 fn the_package_is_given_by_flag_and_its_parameters_change_the_urls() {
-    let package = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/import/icr-dhis2");
+    let package = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/import/icr-dhis2"
+    );
     let maps = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/examples/import/icr-dhis2/maps"
+        "/../../examples/import/icr-dhis2/maps"
     );
     for (flag, dir, base) in [
         ("--package", package, None),
@@ -160,8 +164,8 @@ fn the_package_is_given_by_flag_and_its_parameters_change_the_urls() {
         expect_group(&server);
         let dir_out = tempfile::tempdir().unwrap();
         let out = dir_out.path().join("measures.ndjson");
-        let mut c = stub::fhir_pipes();
-        c.args(["dhis2", "measures", flag, dir])
+        let mut c = stub::fhir_pipes_dhis2();
+        c.args(["measures", flag, dir])
             .args(["--dhis2", &stub::base(&server), "--instance", "sl-demo"])
             .args(["--indicator-group", "srxUNt2w5jn", "--out"])
             .arg(&out)
@@ -192,9 +196,8 @@ fn an_unknown_indicator_is_a_usage_error() {
             .respond_with(ok(json!({"indicators": []}))),
     );
     let dir = tempfile::tempdir().unwrap();
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "measures",
             "--dhis2",
             &base(&server),
@@ -217,9 +220,8 @@ fn refused_credentials_stop_at_sign_in() {
             .respond_with(status_code(401)),
     );
     let dir = tempfile::tempdir().unwrap();
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "measures",
             "--dhis2",
             &base(&server),
@@ -314,9 +316,8 @@ fn reports_split_a_too_large_request_and_skip_unmapped_org_units() {
     .unwrap();
     let out = dir.path().join("reports.ndjson");
     let report = dir.path().join("report.json");
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "reports",
             "--dhis2",
             &base(&server),
@@ -403,9 +404,8 @@ fn reporting_rates_and_breakdowns_come_out_as_valid_ids_and_stratifiers() {
     )
     .unwrap();
     let out = dir.path().join("reports.ndjson");
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "reports",
             "--dhis2",
             &base(&server),
@@ -467,9 +467,8 @@ fn reports_need_locations_carrying_this_instances_identifier() {
         "{\"resourceType\":\"Location\",\"id\":\"nga\",\"identifier\":[{\"system\":\"other\",\"value\":\"x\"}]}\n",
     )
     .unwrap();
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "reports",
             "--dhis2",
             "https://dhis2.invalid",
@@ -499,9 +498,8 @@ fn reports_need_locations_carrying_this_instances_identifier() {
 
 /// `fhir-pipes dhis2 reports` for the Immunization group against the stub.
 fn reports(server: &Server, locations: &Path, out: &Path) -> Command {
-    let mut c = fhir_pipes();
+    let mut c = fhir_pipes_dhis2();
     c.args([
-        "dhis2",
         "reports",
         "--dhis2",
         &base(server),
@@ -1000,9 +998,8 @@ fn bad_ranges_and_campaigns_are_usage_errors() {
         ),
     ];
     for (args, want) in cases {
-        let a = fhir_pipes()
+        let a = fhir_pipes_dhis2()
             .args([
-                "dhis2",
                 "reports",
                 "--dhis2",
                 "https://dhis2.invalid",
@@ -1020,9 +1017,8 @@ fn bad_ranges_and_campaigns_are_usage_errors() {
         assert!(stderr(&a).contains(want), "{args:?}: {}", stderr(&a));
     }
     // Neither a period nor a range.
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "reports",
             "--dhis2",
             "https://dhis2.invalid",
@@ -1059,9 +1055,8 @@ fn a_range_whose_ids_would_be_too_long_is_refused_before_any_analytics() {
         ),
     )
     .unwrap();
-    let a = fhir_pipes()
+    let a = fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "reports",
             "--dhis2",
             &base(&server),
@@ -1460,9 +1455,8 @@ fn org_unit_groups_are_coded_like_group_sets() {
         );
             groups(&server);
             let out = dir.path().join("l.ndjson");
-            fhir_pipes()
+            fhir_pipes_dhis2()
                 .args([
-                    "dhis2",
                     "locations",
                     "--dhis2",
                     &base(&server),
@@ -1625,15 +1619,8 @@ fn fixture_analytics() -> Vec<(u32, Vec<Value>, Vec<Value>)> {
 }
 
 fn fixture_reports(server: &Server, dir: &Path, out: &Path, extra: &[&str]) -> Assert {
-    fhir_pipes()
-        .args([
-            "dhis2",
-            "reports",
-            "--dhis2",
-            &base(server),
-            "--instance",
-            "sl-demo",
-        ])
+    fhir_pipes_dhis2()
+        .args(["reports", "--dhis2", &base(server), "--instance", "sl-demo"])
         .args([
             "--indicator",
             COVERAGE,
@@ -1799,9 +1786,8 @@ fn averages_annualising_option_combos_and_constants() {
     expect_values(&server, "2025-01-01", "2025-01-31", values);
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("r.ndjson");
-    fhir_pipes()
+    fhir_pipes_dhis2()
         .args([
-            "dhis2",
             "reports",
             "--dhis2",
             &base(&server),
@@ -1945,8 +1931,8 @@ fn what_data_values_cannot_compute_is_refused() {
 fn a_breakdown_with_items_and_shared_output_files_are_usage_errors() {
     let dir = tempfile::tempdir().unwrap();
     let run = |extra: &[&str]| {
-        let a = fhir_pipes()
-            .args(["dhis2", "reports", "--dhis2", "https://dhis2.invalid"])
+        let a = fhir_pipes_dhis2()
+            .args(["reports", "--dhis2", "https://dhis2.invalid"])
             .args(["--instance", "sl-demo", "--indicator", "tUIlpyeeX9N"])
             .args(["--period", "2025", "--level", "2", "--locations"])
             .arg(dir.path().join("locations.ndjson"))
@@ -1970,8 +1956,8 @@ fn a_breakdown_with_items_and_shared_output_files_are_usage_errors() {
 
 #[test]
 fn a_uid_flag_that_is_not_a_uid_is_refused_before_any_request() {
-    let a = fhir_pipes()
-        .args(["dhis2", "measures", "--dhis2", "https://dhis2.invalid"])
+    let a = fhir_pipes_dhis2()
+        .args(["measures", "--dhis2", "https://dhis2.invalid"])
         .args(["--instance", "sl-demo", "--indicator", "a],b"])
         .args(["--out", "m.ndjson"])
         .assert()

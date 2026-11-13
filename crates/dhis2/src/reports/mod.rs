@@ -56,12 +56,12 @@ use super::measures::{fetch_indicators, fhir_key};
 use super::raw::load_parents;
 use super::rerun::{Checkpoint, Previous, Scope, file_stamp, plan_differences, write_lines};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
-use crate::error::{PipesError, Result};
-use crate::fhir::group::is_valid_id;
-use crate::fhir::ndjson::NdjsonWriter;
-use crate::fs::check_out;
-use crate::report::write_report;
-use crate::snapshot::instant::format_utc;
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::fhir::group::is_valid_id;
+use fhir_pipes::fhir::ndjson::NdjsonWriter;
+use fhir_pipes::fs::check_out;
+use fhir_pipes::report::write_report;
+use fhir_pipes::snapshot::instant::format_utc;
 
 use analytics::Values;
 use build::{OrgUnits, load_mapping, load_org_unit_records};
@@ -421,7 +421,7 @@ fn fingerprint(
 ) -> Value {
     let from_values = args.opts.source == ReportSource::DataValues;
     let mut plan = json!({
-        "dhis2": crate::redact::url(&args.conn.url),
+        "dhis2": fhir_pipes::redact::url(&args.conn.url),
         "instance": instance.name,
         "source": args.opts.source.code(),
         "updated_since": args.updated_since,
