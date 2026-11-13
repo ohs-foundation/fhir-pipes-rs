@@ -475,7 +475,9 @@ fn config_check_prints_the_settings_but_no_secret() {
             && s.contains("extract all, locations: ready")
             && s.contains("extract all, measures: no indicators selected")
             && s.contains("instance = \"sl-demo\"")
-            && s.contains("pkg\""),
+            // The path ends the value. On Windows it holds backslashes, so
+            // TOML writes it between single quotes.
+            && (s.contains("pkg\"") || s.contains("pkg'")),
         "{s}"
     );
     // The package path, resolved against the file's folder.
