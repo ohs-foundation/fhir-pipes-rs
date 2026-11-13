@@ -28,6 +28,65 @@ The same `import` command also has `location-boundaries` and
 `location-sites`, which are unrelated to packages; see
 [locations.md](locations.md).
 
+## How an import works
+
+```
+source system ──connector──▶ records (NDJSON) ──import run + package──▶ FHIR NDJSON ──load──▶ FHIR server
+```
+
+1. A connector reads the source system and writes a folder of records, one
+   NDJSON file per record type. It does no mapping: a record has the
+   source's own fields. See [connectors.md](connectors.md).
+2. `import check --in` checks each record against the package's logical
+   model of its type, and type-checks the maps against the models. A field
+   that the source renamed is reported here, before anything is mapped.
+3. `import run` runs the package's steps over the folder:
+   - a record that maps on its own goes through one map and becomes one or
+     more resources;
+   - records that have to be joined or grouped first are flattened by
+     ViewDefinitions and joined by a SQLQuery Library, and each row of the
+     result then goes through a map.
+4. The output is one NDJSON file per resource type and a run report.
+   `fhir-pipes load` sends the files to a FHIR server.
+
+The package is the only place the mapping lives. `import run` has no code
+for any source system, and a connector has none for FHIR. To change how a
+field is mapped, change the package and run `import test`.
+
+## Writing a package
+
+In the order that usually works:
+
+1. **Get sample records.** Run the connector, or write a few records by
+   hand, into `tests/sample/in/<Type>.ndjson`. Do not put real personal
+   data in a test case.
+2. **Write a logical model for each record type** in `models/`: a
+   StructureDefinition of kind `logical` with a snapshot, listing each
+   field and its type. `import check --in` then reports every record that
+   does not fit.
+3. **Write a map for each record type** in `maps/`, from the logical model
+   to FHIR resources ([maps.md](maps.md)). With one map per type, no
+   `import.toml` is needed: see
+   [Without a manifest, or without steps](#without-a-manifest-or-without-steps).
+4. **Add steps where records have to be joined or grouped.** Either stage
+   the records as FHIR resources and flatten them with views
+   ([Steps](#steps)), or let a view read the record file directly
+   ([Record views](#record-views)). A SQLQuery Library joins the views, and
+   a map reads each row of its result
+   ([A Library result as records](#a-library-result-as-records)).
+5. **Declare parameters** for the values that differ between deployments:
+   id prefixes, identifier system URLs, tags ([Parameters](#parameters)).
+6. **Add data tests** on the Library results, such as a unique key
+   ([Data tests](#data-tests)).
+7. **Write the expected output.** `import test --update` writes
+   `tests/sample/expected/` from the run. Read it, correct the maps until
+   it is right, and commit it. `import test` then fails when a change to
+   the package changes the output ([import test](#import-test)).
+
+[examples/import/icr-dhis2](../examples/import/icr-dhis2) stops at step 3,
+with parameters. [examples/import/digit-visits](../examples/import/digit-visits)
+uses every step.
+
 ## The input folder
 
 `--in` is a folder with one file per record type:
