@@ -7,6 +7,7 @@
 //! `fhir-pipes refresh` in a process group of its own.
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod metrics;
 pub mod notify;
@@ -41,7 +42,8 @@ pub struct ServeArgs {
     #[arg(long, env = "FHIR_PIPES_DATA")]
     data: Option<PathBuf>,
     /// Address to listen on. Anything but a loopback address needs
-    /// FHIR_PIPES_SERVE_TOKEN, and FHIR_PIPES_QUERY_TOKEN with [serve.query].
+    /// FHIR_PIPES_SERVE_TOKEN (or [serve.auth] admin_scope), and with
+    /// [serve.query] FHIR_PIPES_QUERY_TOKEN (or [serve.auth]).
     #[arg(
         long,
         env = "FHIR_PIPES_SERVE_LISTEN",
@@ -61,6 +63,10 @@ struct App {
     query_token: Option<String>,
     /// Whether `[serve.query]` is set: without it, `/fhir` paths are 404.
     query_enabled: bool,
+    /// `[serve.auth]`: checks access tokens from an identity provider.
+    verifier: Option<Arc<auth::Verifier>>,
+    /// Where refused tokens are logged (without the token).
+    log: Option<Arc<output::StdoutQueue>>,
 }
 
 /// What the query API is built from, loaded at startup.
@@ -193,20 +199,33 @@ pub fn run(args: &ServeArgs) -> Result<()> {
         .with_context(|| format!("--listen {}: not an address and port", args.listen))
         .map_err(usage)?;
     let token = std::env::var(TOKEN_ENV).ok().filter(|t| !t.is_empty());
-    if token.is_none() && !listen.ip().is_loopback() {
+    let admin_by_jwt = cfg.auth.as_ref().is_some_and(|a| a.admin_scope.is_some());
+    if token.is_none() && !admin_by_jwt && !listen.ip().is_loopback() {
         return Err(usage(anyhow::anyhow!(
-            "--listen {listen} is not a loopback address: set {TOKEN_ENV} so callers need a token"
+            "--listen {listen} is not a loopback address: set {TOKEN_ENV}, or [serve.auth] \
+             admin_scope, so callers need a token"
         )));
     }
     let query_token = std::env::var(QUERY_TOKEN_ENV)
         .ok()
         .filter(|t| !t.is_empty());
-    if cfg.query.is_some() && query_token.is_none() && !listen.ip().is_loopback() {
+    if cfg.query.is_some()
+        && query_token.is_none()
+        && cfg.auth.is_none()
+        && !listen.ip().is_loopback()
+    {
         return Err(usage(anyhow::anyhow!(
             "--listen {listen} is not a loopback address: with [serve.query], set \
-             {QUERY_TOKEN_ENV} so query callers need a token"
+             {QUERY_TOKEN_ENV}, or [serve.auth], so query callers need a token"
         )));
     }
+    // Before anything else is started: a wrong issuer stops serve at once.
+    let verifier = match &cfg.auth {
+        Some(a) => Some(Arc::new(
+            auth::Verifier::discover(a.clone()).map_err(usage)?,
+        )),
+        None => None,
+    };
     let query = match &cfg.query {
         // The error can quote a Library source's URL, token and all.
         Some(q) => Some(query_parts(&inputs, file, q).map_err(|e| {
@@ -260,6 +279,8 @@ pub fn run(args: &ServeArgs) -> Result<()> {
         token,
         query_token,
         query_enabled,
+        verifier,
+        log: Some(server.job.stdout.clone()),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -411,8 +432,10 @@ fn stop(server: &api::Server) {
 
 /// Every path but /health needs a token, checked before anything else
 /// about the request is read. The `/fhir` paths take the query token or the
-/// serve token, the rest the serve token only; with none of the tokens a
-/// path takes set, it is open (serve then listens only on loopback).
+/// serve token, the rest the serve token only. With `[serve.auth]`, a JWT
+/// from the issuer opens `/fhir` (with `query_scope`, if set) and, with
+/// `admin_scope`, every path. With nothing set that could open a path, it
+/// is open (serve then listens only on loopback).
 async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let fhir = path == "/fhir" || path.starts_with("/fhir/");
@@ -421,21 +444,53 @@ async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
     } else {
         app.token.iter().collect()
     };
-    if !accepted.is_empty() {
+    let need = if fhir {
+        auth::Need::Query
+    } else {
+        auth::Need::Admin
+    };
+    let verifier = app
+        .verifier
+        .as_ref()
+        .filter(|v| fhir || v.config().admin_scope.is_some());
+    if !accepted.is_empty() || verifier.is_some() {
         let given = req
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
+        let Some(given) = given else {
+            return unauthorized(false);
+        };
         // Each token is compared, so the time taken does not say which
         // one matched.
-        let matched = given.is_some_and(|g| {
-            accepted
-                .iter()
-                .fold(false, |m, t| same(g.as_bytes(), t.as_bytes()) | m)
-        });
+        let matched = accepted
+            .iter()
+            .fold(false, |m, t| same(given.as_bytes(), t.as_bytes()) | m);
         if !matched {
-            return StatusCode::UNAUTHORIZED.into_response();
+            let Some(v) = verifier.cloned() else {
+                return unauthorized(true);
+            };
+            let token = given.to_string();
+            // Checking may read the issuer's keys over HTTP.
+            let verdict = tokio::task::spawn_blocking(move || v.check(&token, need))
+                .await
+                .unwrap_or(auth::Verdict::Invalid("the check did not finish"));
+            match verdict {
+                auth::Verdict::Accepted => {}
+                auth::Verdict::Invalid(reason) => {
+                    log(&app, format!("auth: token refused: {reason}"));
+                    return unauthorized(true);
+                }
+                auth::Verdict::Insufficient { scope, client } => {
+                    let client = client.map(|c| format!(" (client {c})")).unwrap_or_default();
+                    log(
+                        &app,
+                        format!("auth: token refused for {path}: no scope {scope}{client}"),
+                    );
+                    return forbidden(&scope);
+                }
+            }
         }
     }
     // Only now, so an unauthenticated caller cannot tell whether the query
@@ -444,6 +499,42 @@ async fn auth(State(app): State<App>, req: Request, next: Next) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     next.run(req).await
+}
+
+fn log(app: &App, line: String) {
+    if let Some(out) = &app.log {
+        out.push(line);
+    }
+}
+
+/// `401`, with the challenge RFC 6750 asks for; `invalid_token` when a
+/// token was sent.
+fn unauthorized(sent: bool) -> Response {
+    let challenge = if sent {
+        r#"Bearer realm="fhir-pipes", error="invalid_token""#
+    } else {
+        r#"Bearer realm="fhir-pipes""#
+    };
+    (
+        StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, challenge)],
+    )
+        .into_response()
+}
+
+/// `403` for a valid token without the scope a path needs.
+fn forbidden(scope: &str) -> Response {
+    // A scope has no quotes or spaces (checked when the config is read).
+    let challenge =
+        format!(r#"Bearer realm="fhir-pipes", error="insufficient_scope", scope="{scope}""#);
+    match axum::http::HeaderValue::from_str(&challenge) {
+        Ok(v) => (
+            StatusCode::FORBIDDEN,
+            [(axum::http::header::WWW_AUTHENTICATE, v)],
+        )
+            .into_response(),
+        Err(_) => StatusCode::FORBIDDEN.into_response(),
+    }
 }
 
 /// Constant-time comparison: the time taken does not depend on where the
