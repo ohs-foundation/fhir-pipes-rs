@@ -76,8 +76,8 @@ files, partitioning and hooks.
 An import has three parts:
 
 1. A **connector** reads the source system and writes its records as NDJSON,
-   one file per record type. `fhir-pipes dhis2 extract` is one. Any program
-   in any language can be one.
+   one file per record type. `fhir-pipes-dhis2`, run as
+   `fhir-pipes dhis2 extract`, is one. Any program in any language can be one.
 2. An **import package** is a folder that says how the records become FHIR
    resources: a logical model of each record type and FHIR Mapping Language
    maps, with ViewDefinitions and SQL where records have to be joined or
@@ -86,7 +86,8 @@ An import has three parts:
    one NDJSON file per resource type, for `fhir-pipes load`.
 
 DHIS2 org units, indicators and values from the open Sierra Leone demo, with
-the example package [examples/import/icr-dhis2](examples/import/icr-dhis2):
+the example package [examples/import/icr-dhis2](examples/import/icr-dhis2).
+`fhir-pipes dhis2` needs `fhir-pipes-dhis2` installed (see [Install](#install)):
 
 ```sh
 export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-42-7-1
