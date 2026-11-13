@@ -35,6 +35,13 @@ chmod +x fhir-pipes-aarch64-apple-darwin && mv fhir-pipes-aarch64-apple-darwin /
 
 Or build it with Rust: `cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes`.
 
+The DHIS2 connector is a separate program, `fhir-pipes-dhis2`, in the same
+release (`fhir-pipes-dhis2-<target>`). Install it as `fhir-pipes-dhis2` in
+the folder of `fhir-pipes` or on the `PATH`, and `fhir-pipes dhis2 …` runs
+it; or build it with
+`cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes-dhis2`.
+See [docs/dhis2.md](docs/dhis2.md#installing-fhir-pipes-dhis2).
+
 `--server-kind`, `--token-auth` and `--scope` need v0.6.0 or later.
 
 ## Quickstart: a SQL-on-FHIR warehouse
@@ -69,8 +76,8 @@ files, partitioning and hooks.
 An import has three parts:
 
 1. A **connector** reads the source system and writes its records as NDJSON,
-   one file per record type. `fhir-pipes dhis2 extract` is one. Any program
-   in any language can be one.
+   one file per record type. `fhir-pipes-dhis2`, run as
+   `fhir-pipes dhis2 extract`, is one. Any program in any language can be one.
 2. An **import package** is a folder that says how the records become FHIR
    resources: a logical model of each record type and FHIR Mapping Language
    maps, with ViewDefinitions and SQL where records have to be joined or
@@ -79,7 +86,8 @@ An import has three parts:
    one NDJSON file per resource type, for `fhir-pipes load`.
 
 DHIS2 org units, indicators and values from the open Sierra Leone demo, with
-the example package [examples/import/icr-dhis2](examples/import/icr-dhis2):
+the example package [examples/import/icr-dhis2](examples/import/icr-dhis2).
+`fhir-pipes dhis2` needs `fhir-pipes-dhis2` installed (see [Install](#install)):
 
 ```sh
 export FHIR_PIPES_DHIS2_URL=https://play.im.dhis2.org/stable-2-42-7-1
@@ -131,7 +139,7 @@ Run `fhir-pipes <command> --help` for every option.
 | `extract`, `transform locations`, `run`, `inspect` | Snapshot Locations and Organizations; turn them into GeoParquet | [locations.md](docs/locations.md) |
 | `diff`, `load` | Edited GeoJSON or GeoParquet to changed resources; send NDJSON to a server with version checks | [locations.md](docs/locations.md), [qgis.md](docs/qgis.md) |
 | `import location-boundaries`, `import location-sites`, `index`, `population` | Build Locations, spatial indexes and population Groups offline | [locations.md](docs/locations.md) |
-| `dhis2 extract`, `dhis2 locations`, `measures`, `reports` | DHIS2 org units, indicators and data as records for `import run` with [examples/import/icr-dhis2](examples/import/icr-dhis2); `locations`, `measures` and `reports` also map them with a package and write FHIR NDJSON | [dhis2.md](docs/dhis2.md) |
+| `dhis2 extract`, `dhis2 locations`, `measures`, `reports` | DHIS2 org units, indicators and data as records for `import run` with [examples/import/icr-dhis2](examples/import/icr-dhis2); `locations`, `measures` and `reports` also map them with a package and write FHIR NDJSON. Needs the separate program `fhir-pipes-dhis2` | [dhis2.md](docs/dhis2.md) |
 | `libraries build`, `libraries sql` | SQL on FHIR Libraries: build Library JSON from SQL files, print the SQL to run one | [libraries.md](docs/libraries.md) |
 | `profile check` | Compare a profile with its IG | [profiles.md](docs/profiles.md#checking-a-profile-against-its-ig) |
 | `terminology valueset`, `conceptmap` | A value set or concept map from FHIR packages as a table | [terminology.md](docs/terminology.md) |
@@ -203,9 +211,12 @@ the agent's skills directory, such as `~/.claude/skills/`.
 Requires a stable Rust toolchain.
 
 ```sh
-cargo build --release
+cargo build --release --workspace     # fhir-pipes and fhir-pipes-dhis2
 cargo test --workspace
 ```
+
+The tests of `crates/dhis2` also run `fhir-pipes`, which `cargo test
+--workspace` builds beside `fhir-pipes-dhis2`.
 
 Two Cargo features add optional parts: `postgres` (on in the release
 binaries; `views run --db` and `refresh` with `[database]`) and

@@ -15,9 +15,9 @@ use std::path::Path;
 use fml_model::StructureMap;
 use serde_json::Value;
 
-use crate::error::{PipesError, Result};
-use crate::mapping::{MapPackage, Output};
-use crate::report::Report;
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::mapping::{MapPackage, Output};
+use fhir_pipes::report::Report;
 
 pub const ORG_UNIT_MODEL: &str =
     "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2OrgUnit";
@@ -26,13 +26,6 @@ pub const INDICATOR_MODEL: &str =
     "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Indicator";
 pub const VALUE_MODEL: &str =
     "https://healthcampaigns.org/fhir/dhis2/StructureDefinition/DHIS2Value";
-
-/// The logical models of the records fhir-pipes prepares.
-pub const MODELS: [&str; 3] = [
-    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2OrgUnit.json"),
-    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Indicator.json"),
-    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Value.json"),
-];
 
 /// What a DHIS2 command writes for each record it prepares.
 #[derive(Clone, Copy)]
@@ -71,9 +64,9 @@ impl RecordMap {
     /// parameters set from their defaults and `params`. `dir` may also be
     /// the package's `maps/` folder, as `--maps` named it.
     pub fn load(dir: &Path, params: &[(String, String)], model: &str) -> Result<Self> {
-        let loaded = crate::import::package::package_maps(dir, params).map_err(|e| {
-            let m = crate::error::message(&e);
-            if crate::error::exit_code(&e) == 2 {
+        let loaded = fhir_pipes::import::package::package_maps(dir, params).map_err(|e| {
+            let m = fhir_pipes::error::message(&e);
+            if fhir_pipes::error::exit_code(&e) == 2 {
                 PipesError::Usage(m)
             } else {
                 PipesError::Environment(m)
@@ -90,7 +83,7 @@ impl RecordMap {
             package: loaded.maps,
             map,
             values: loaded.values,
-            threads: crate::work::default_threads(),
+            threads: fhir_pipes::work::default_threads(),
         })
     }
 
@@ -128,7 +121,7 @@ impl RecordMap {
 /// The example ICR package, for the unit tests.
 #[cfg(test)]
 pub fn icr_package(model: &str) -> RecordMap {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/import/icr-dhis2");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/import/icr-dhis2");
     RecordMap::load(&dir, &[], model).unwrap()
 }
 
@@ -152,7 +145,7 @@ pub mod case {
 
     fn dir(case: &str) -> PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/import/icr-dhis2/tests")
+            .join("../../examples/import/icr-dhis2/tests")
             .join(case)
     }
 

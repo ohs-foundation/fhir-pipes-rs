@@ -2,7 +2,7 @@
 //! that only periods of one kind share a request, and the code and label a
 //! range takes in place of a period.
 
-use crate::error::{PipesError, Result};
+use fhir_pipes::error::{PipesError, Result};
 
 /// A `--range`: two ISO dates, both included. DHIS2 is asked for it with
 /// `startDate` and `endDate` and answers one value per indicator and org
@@ -24,7 +24,7 @@ impl DateRange {
         };
         let (start, end) = s.split_once(':').ok_or_else(|| bad("no colon"))?;
         for d in [start, end] {
-            if !crate::calendar::is_date(d) {
+            if !fhir_pipes::calendar::is_date(d) {
                 return Err(bad(&format!("{d:?} is not a date")));
             }
         }

@@ -5,10 +5,19 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::{BATCH, MapPackage};
-use crate::dhis2::maps::MODELS as BUILT_IN;
 use crate::error::{PipesError, Result};
 use crate::fhir::ndjson::{Line, NdjsonReader, NdjsonWriter};
 use crate::fs::check_out;
+
+/// The logical models of the DHIS2 records that fhir-pipes-dhis2 writes
+/// (examples/import/icr-dhis2/models), built in so that `map run` and `map
+/// check` read a folder of DHIS2 maps without its models. `import` does not
+/// use them: it reads the models in the package.
+pub(crate) const BUILT_IN: [&str; 3] = [
+    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2OrgUnit.json"),
+    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Indicator.json"),
+    include_str!("../../examples/import/icr-dhis2/models/StructureDefinition-DHIS2Value.json"),
+];
 
 #[derive(clap::Subcommand, Debug)]
 pub enum MapCommand {

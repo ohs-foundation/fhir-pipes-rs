@@ -10,7 +10,8 @@ fhir-pipes map check --maps maps/
 fhir-pipes map run   --maps maps/ --in records.ndjson --out resources.ndjson
 ```
 
-`fhir-pipes dhis2 locations|measures|reports` use the same engine to write
+`fhir-pipes dhis2 locations|measures|reports`, which run the separate
+program fhir-pipes-dhis2, use the same engine to write
 Locations, Measures and MeasureReports; see
 [Maps for the DHIS2 import](#maps-for-the-dhis2-import).
 To run several maps over a folder of records as one pipeline, with views and
@@ -99,7 +100,9 @@ implementation guide without a new fhir-pipes release.
 the Integrated Campaign Registry. Copy it to start a mapping for another
 implementation guide.
 
-fhir-pipes does everything a map cannot: it reads the DHIS2 API, checks each
+fhir-pipes-dhis2, the DHIS2 connector run as `fhir-pipes dhis2` (see
+[dhis2.md](dhis2.md#installing-fhir-pipes-dhis2)), does everything a map
+cannot: it reads the DHIS2 API, checks each
 record, and works out the values that depend on other records or on the
 run. `dhis2 extract` writes the prepared records, and `import run` maps them
 (see [dhis2.md](dhis2.md#the-records)). `dhis2 locations|measures|reports
@@ -114,7 +117,8 @@ fhir-pipes dhis2 locations --dhis2 URL --instance sl-demo --id-prefix sle \
 
 The records' logical models are in
 [examples/import/icr-dhis2/models](../examples/import/icr-dhis2/models), and
-are also built into fhir-pipes for `map run` and `map check`:
+are also built into fhir-pipes for `map run` and `map check`, so that they
+read a folder of DHIS2 maps without its models:
 
 | Command | Record | What fhir-pipes prepares |
 |---|---|---|

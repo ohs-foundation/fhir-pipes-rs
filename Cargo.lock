@@ -1140,6 +1140,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fhir-pipes-dhis2"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "base64 0.23.1",
+ "clap",
+ "fhir-pipes",
+ "flate2",
+ "fml-model",
+ "geo",
+ "httptest",
+ "mimalloc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+]
+
+[[package]]
 name = "fhir-pipes-sof"
 version = "0.1.2"
 dependencies = [

@@ -61,7 +61,7 @@ From source (needs Rust): `cargo install --git https://github.com/ohs-foundation
 | Send edited Locations back after GIS work | `diff`, then `load` |
 | Admin boundaries (GeoJSON) or sites (CSV) as Locations | `import location-boundaries`, `import location-sites`, then `load` |
 | Copy an export to a second FHIR server | `sync` |
-| DHIS2 org units, indicators or values as FHIR | `dhis2 locations`, `dhis2 measures`, `dhis2 reports` |
+| DHIS2 org units, indicators or values as FHIR | `dhis2 extract` then `import run`, or `dhis2 locations`, `dhis2 measures`, `dhis2 reports` (the separate program fhir-pipes-dhis2) |
 | Check a fhir-pipes profile against its IG | `profile check` |
 | A value set or concept map as a table to join views to | `terminology valueset`, `terminology conceptmap` |
 | Turn non-FHIR records into FHIR resources with FHIR Mapping Language maps | `map check`, `map run` |
@@ -174,9 +174,9 @@ fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson --dry
 fhir-pipes load --server https://fhir.example.org/fhir --in changes.ndjson
 ```
 
-`import location-boundaries`, `import location-sites`, `index`,
-`population` and `dhis2` need a profile (`--profile` or
-`FHIR_PIPES_PROFILE`); `import check`, `run` and `test` do not. See [references/profiles.md](references/profiles.md).
+`import location-boundaries`, `import location-sites`, `index` and
+`population` need a profile (`--profile` or
+`FHIR_PIPES_PROFILE`); `import check`, `run` and `test`, and `dhis2`, do not. See [references/profiles.md](references/profiles.md).
 
 ## Safety rules
 

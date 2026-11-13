@@ -13,8 +13,12 @@ fhir-pipes import run --package examples/import/icr-dhis2 --in RAW --out FHIR
 `dhis2 extract` writes one file of records per command in the folder `RAW`.
 `import run` maps the folder with the package
 [examples/import/icr-dhis2](../examples/import/icr-dhis2) and writes one
-NDJSON file per resource type. `dhis2 extract` is the example connector of
-[connectors.md](connectors.md).
+NDJSON file per resource type.
+
+The DHIS2 commands are a separate program, `fhir-pipes-dhis2`, the DHIS2
+connector of [connectors.md](connectors.md). fhir-pipes runs it as
+`fhir-pipes dhis2 …`, which is how the examples here call it.
+`fhir-pipes-dhis2 …` with the same arguments does the same.
 
 `dhis2 locations`, `dhis2 measures` and `dhis2 reports` do both steps in one
 command, for one record type, and write one NDJSON file of resources. They
@@ -22,6 +26,27 @@ need a package; see
 [The commands that write resources](#the-commands-that-write-resources).
 
 `--help` lists every option.
+
+## Installing fhir-pipes-dhis2
+
+Download `fhir-pipes-dhis2-<target>` (`.exe` on Windows) from the same
+[release](https://github.com/ohs-foundation/fhir-pipes-rs/releases) as
+fhir-pipes; `SHA256SUMS` covers both. Rename it to `fhir-pipes-dhis2`
+(`fhir-pipes-dhis2.exe` on Windows) and put it in the folder of
+`fhir-pipes` or in a folder on the `PATH`:
+
+```sh
+curl -LO https://github.com/ohs-foundation/fhir-pipes-rs/releases/latest/download/fhir-pipes-dhis2-aarch64-apple-darwin
+chmod +x fhir-pipes-dhis2-aarch64-apple-darwin
+mv fhir-pipes-dhis2-aarch64-apple-darwin /usr/local/bin/fhir-pipes-dhis2
+```
+
+Or build it with Rust:
+`cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes-dhis2`.
+
+Without it, `fhir-pipes dhis2` stops with exit 2: `unrecognized subcommand
+'dhis2'`, then `fhir-pipes-dhis2 was not found next to fhir-pipes or on the
+PATH`.
 
 ## Common options
 
@@ -37,7 +62,8 @@ Use a read-only DHIS2 user. Keep `--instance` the same across runs: it
 prefixes every id and is in every record, and ids are deterministic, so a
 re-run replaces the same resources.
 
-No `dhis2` command reads the profile. The systems, profiles and extensions
+No `dhis2` command reads the profile, whether it is given as `--profile`
+before or after `dhis2`, or as `$FHIR_PIPES_PROFILE`. The systems, profiles and extensions
 the resources carry are parameters of the package (see
 [import.md](import.md#parameters)).
 
@@ -59,7 +85,7 @@ of one `import run`:
 
 The records' logical models are in
 [examples/import/icr-dhis2/models](../examples/import/icr-dhis2/models).
-fhir-pipes prepares each record from the DHIS2 API: the ids, the parent only
+fhir-pipes-dhis2 prepares each record from the DHIS2 API: the ids, the parent only
 when it was exported, a boundary merged from the children, counts as whole
 numbers, breakdowns attached to their totals. The records carry none of the
 URLs, profiles, extensions or type codes of the resources: the package's

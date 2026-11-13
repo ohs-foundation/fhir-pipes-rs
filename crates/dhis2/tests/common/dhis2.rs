@@ -1,27 +1,50 @@
-//! The fake DHIS2 Web API the `fhir-pipes dhis2` tests run against: the
+//! The fake DHIS2 Web API the fhir-pipes-dhis2 tests run against: the
 //! responses, the Locations files they read, and readers for what the
-//! commands write. Used by tests/dhis2.rs (and so tests/dhis2_maps.rs) and
-//! tests/dhis2_import.rs.
+//! commands write. Used by tests/dhis2.rs and tests/dhis2_import.rs.
 
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::assert::Assert;
-use assert_cmd::prelude::*;
 use httptest::{Expectation, Server, all_of, matchers::*, responders::*};
 use serde_json::{Value, json};
 
-/// `fhir-pipes` with the example ICR profile and none of the DHIS2
+/// The repository's root, where examples/ is.
+pub const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
+/// `fhir-pipes-dhis2` with the example ICR profile and none of the DHIS2
 /// environment variables, so `--maps` and the credentials are only what a
-/// test passes.
+/// test passes. No dhis2 command reads the profile.
+pub fn fhir_pipes_dhis2() -> Command {
+    with_env(Command::new(env!("CARGO_BIN_EXE_fhir-pipes-dhis2")))
+}
+
+/// The program fhir-pipes, for `import run` and for running the connector
+/// as `fhir-pipes dhis2`. Cargo writes it to the folder fhir-pipes-dhis2 is
+/// in when it builds the workspace, as `cargo test --workspace` does.
 pub fn fhir_pipes() -> Command {
+    with_env(Command::new(fhir_pipes_exe()))
+}
+
+/// Where fhir-pipes is: beside fhir-pipes-dhis2.
+pub fn fhir_pipes_exe() -> PathBuf {
+    let exe = Path::new(env!("CARGO_BIN_EXE_fhir-pipes-dhis2"))
+        .with_file_name(format!("fhir-pipes{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        exe.is_file(),
+        "{} is missing: run `cargo test --workspace`, or `cargo build -p fhir-pipes` first",
+        exe.display()
+    );
+    exe
+}
+
+fn with_env(mut c: Command) -> Command {
     // ICR-shaped fixtures: the example ICR profile.
-    let mut c = Command::cargo_bin("fhir-pipes").unwrap();
     c.env(
         "FHIR_PIPES_PROFILE",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/profiles/icr.toml"),
+        format!("{ROOT}/examples/profiles/icr.toml"),
     );
     for var in [
         "FHIR_PIPES_DHIS2_URL",

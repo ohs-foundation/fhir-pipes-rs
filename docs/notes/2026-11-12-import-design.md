@@ -18,6 +18,10 @@ maps of `examples/import/icr-dhis2`. `dhis2 locations`, `measures` and
 `reports` stay, and now need a package (`--package`), whose maps they run
 one record at a time.
 
+12 November 2026: the DHIS2 connector moved to its own crate and program,
+`fhir-pipes-dhis2` (crates/dhis2), which uses fhir-pipes as a library;
+`fhir-pipes dhis2 …` runs it as an external command (step 7 is done).
+
 ## Summary
 
 Today `fhir-pipes dhis2` reads DHIS2 and turns what it reads into FHIR in one

@@ -1,5 +1,6 @@
-//! `fhir-pipes dhis2`: read a DHIS2 instance into records, and with an
-//! import package into FHIR NDJSON for `fhir-pipes load`.
+//! fhir-pipes-dhis2: read a DHIS2 instance into records, and with an
+//! import package into FHIR NDJSON for `fhir-pipes load`. fhir-pipes runs
+//! it as `fhir-pipes dhis2` (see docs/connectors.md).
 //!
 //! - `extract locations|measures|reports`: org units, indicators and
 //!   indicator values as `DHIS2OrgUnit`, `DHIS2Indicator` and `DHIS2Value`
@@ -12,27 +13,46 @@
 //! Every id is deterministic (`INSTANCE-<uid>…`), so re-running replaces the
 //! same resources. Nothing is written to DHIS2.
 
-pub mod api;
-pub mod calendar;
-pub mod expression;
-pub mod locations;
-pub mod maps;
-pub mod measures;
-pub mod raw;
-pub mod reports;
-pub mod rerun;
+mod api;
+mod calendar;
+mod expression;
+mod locations;
+mod maps;
+mod measures;
+mod raw;
+mod reports;
+mod rerun;
+
+mod cli;
 
 use std::path::{Path, PathBuf};
 
+use clap::Parser;
+
 use crate::cli::{Dhis2Command, Dhis2ExtractCommand, Dhis2Package};
-use crate::error::{PipesError, Result};
+use fhir_pipes::error::{PipesError, Result};
 use maps::RecordMap;
 
 /// Instance names go into every id, so they are kept short.
 pub const MAX_INSTANCE_LEN: usize = 16;
 
-/// No `dhis2` command reads the profile. The URLs the resources carry are
-/// the package's parameters.
+// The same allocator as fhir-pipes (see its src/main.rs).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Exits 0 on success, and as fhir-pipes does on an error: 2 for one the
+/// user can fix before running again, 1 for a failure while running.
+fn main() {
+    let cli = cli::Cli::parse();
+    if let Err(err) = run(&cli.command) {
+        eprintln!("fhir-pipes-dhis2: {}", fhir_pipes::error::message(&err));
+        std::process::exit(fhir_pipes::error::exit_code(&err));
+    }
+}
+
+/// No `dhis2` command reads the profile, `--profile` or
+/// `$FHIR_PIPES_PROFILE`. The URLs the resources carry are the package's
+/// parameters.
 pub fn run(cmd: &Dhis2Command) -> anyhow::Result<()> {
     if let Dhis2Command::Extract(cmd) = cmd {
         return Ok(extract(cmd)?);

@@ -18,7 +18,8 @@ feature described here, on synthetic data.
 [examples/import/icr-dhis2](../examples/import/icr-dhis2) is the DHIS2
 import as a package: three record types, each through its own map, with a
 manifest that has no steps and no views or Libraries. Its records are what `fhir-pipes dhis2
-extract locations|measures|reports` writes (see
+extract locations|measures|reports` writes, with the DHIS2 connector
+fhir-pipes-dhis2 installed (see
 [dhis2.md](dhis2.md#the-records)).
 
 A program that writes such a folder from a source system is a connector.
@@ -410,8 +411,8 @@ defaults in `import.toml` of the folder given with `--maps`, or of the
 folder above it (the package of a `maps/` folder), and has no `--param`. A
 parameter with no default is an error there.
 
-`dhis2 locations|measures|reports --package DIR` load the package as
-`import run` does, and take `--param NAME=VALUE` as it does (see
+`dhis2 locations|measures|reports --package DIR` load the package with the
+same code as `import run`, and take `--param NAME=VALUE` as it does (see
 [dhis2.md](dhis2.md#the-commands-that-write-resources)).
 
 ### In views

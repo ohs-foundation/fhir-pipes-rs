@@ -143,6 +143,13 @@ package commands do not.
 
 ## dhis2
 
+The `dhis2` commands are the separate program `fhir-pipes-dhis2`, which
+`fhir-pipes dhis2 …` runs when it is in the folder of fhir-pipes or on the
+PATH. Without it, `fhir-pipes dhis2` exits 2 with
+`fhir-pipes-dhis2 was not found next to fhir-pipes or on the PATH`; see
+docs/dhis2.md for how to install it. `fhir-pipes-dhis2 …` with the same
+arguments does the same.
+
 None reads the profile. `locations`, `measures` and `reports` need an import
 package, `--package DIR` (such as `examples/import/icr-dhis2`), whose
 parameters give the URLs; `dhis2 extract …` writes the records without one.
@@ -183,9 +190,9 @@ models and profiles (StructureDefinition JSON) beside them. Exit 1 on errors.
 run one map over every record. A `Bundle` target is written as its entries'
 resources. ConceptMap JSON in the folders serves `translate()`.
 
-`dhis2 locations|measures|reports --maps DIR` writes the resources with maps
-instead of the built-in mapping; examples/import/icr-dhis2/maps holds the ICR
-maps. See docs/maps.md.
+`dhis2 locations|measures|reports --package DIR` (or `--maps DIR`) writes the
+resources with the package's maps; examples/import/icr-dhis2 holds the ICR
+package. See docs/maps.md.
 
 `dhis2 extract locations|measures|reports --out DIR` writes the prepared
 records (`DHIS2OrgUnit`, `DHIS2Indicator`, `DHIS2Value`) instead of

@@ -2,7 +2,7 @@
 
 A profile is a TOML file that describes an implementation guide (IG) to
 fhir-pipes: the extra Location and Organization columns, the admin units and
-type codes, and the URLs that `dhis2`, `population` and `import` put on new
+type codes, and the URLs that `population` and `import` put on new
 resources. Without one, fhir-pipes reads base FHIR R4 only.
 
 ## Giving a profile

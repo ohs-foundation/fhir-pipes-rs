@@ -11,15 +11,15 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::Instance;
+use crate::api::{Dhis2, ServerInfo};
 use crate::cli::{Dhis2ReportsArgs, ReportSource};
-use crate::dhis2::Instance;
-use crate::dhis2::api::{Dhis2, ServerInfo};
-use crate::dhis2::maps::{RecordMap, Writes};
-use crate::dhis2::measures::Indicator;
-use crate::dhis2::rerun::{Change, Checkpoint, Previous};
-use crate::error::{PipesError, Result};
-use crate::fhir::ndjson::NdjsonWriter;
-use crate::work::InOrder;
+use crate::maps::{RecordMap, Writes};
+use crate::measures::Indicator;
+use crate::rerun::{Change, Checkpoint, Previous};
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::fhir::ndjson::NdjsonWriter;
+use fhir_pipes::work::InOrder;
 
 use super::analytics::{Analytics, AnalyticsRow, Fetched, Values, fetch_unit};
 use super::build::{Target, report_id, stratum_record, value_record};
@@ -446,9 +446,9 @@ pub(super) fn fetch_and_write(
         drop(guard);
         written.1.notify_all();
     };
-    crate::work::run(
+    fhir_pipes::work::run(
         workers,
-        crate::work::indices(start, total),
+        fhir_pipes::work::indices(start, total),
         |i| {
             {
                 let (lock, ready) = &written;
@@ -522,7 +522,7 @@ pub(super) fn fetch_and_write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dhis2::reports::plan::tests::codes;
+    use crate::reports::plan::tests::codes;
 
     #[test]
     fn progress_reads_at_a_glance() {
@@ -553,10 +553,10 @@ mod tests {
     /// writes from them do.
     #[test]
     fn a_record_counts_as_its_measure_report() {
-        use crate::dhis2::reports::build::{Target, value_record};
-        use crate::report::Report;
+        use crate::reports::build::{Target, value_record};
+        use fhir_pipes::report::Report;
         let instance = Instance::new("sl-demo").unwrap();
-        let map = crate::dhis2::maps::icr_package(crate::dhis2::maps::VALUE_MODEL);
+        let map = crate::maps::icr_package(crate::maps::VALUE_MODEL);
         let ind = Indicator::parse(
             &json!({"id": "tUIlpyeeX9N", "indicatorType": {"factor": 100},
             "numerator": "#{a}", "denominator": "#{b}"}),

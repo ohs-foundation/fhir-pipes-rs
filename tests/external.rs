@@ -103,11 +103,38 @@ fn a_missing_program_is_an_unknown_command() {
     // An unknown subcommand of a built-in command is only clap's error.
     let out = Command::cargo_bin("fhir-pipes")
         .unwrap()
-        .args(["dhis2", "nosuch"])
+        .args(["map", "nosuch"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     let e = String::from_utf8_lossy(&out.stderr);
     assert!(e.contains("unrecognized subcommand 'nosuch'"), "{e}");
     assert!(!e.contains("fhir-pipes-nosuch"), "{e}");
+}
+
+/// `fhir-pipes dhis2` runs the DHIS2 connector, fhir-pipes-dhis2, which is
+/// not part of fhir-pipes. A fhir-pipes with no fhir-pipes-dhis2 beside it
+/// or on the PATH says so. The test runs a copy of fhir-pipes from a
+/// folder of its own, since cargo builds fhir-pipes-dhis2 beside the
+/// original.
+#[test]
+fn dhis2_without_the_connector_says_it_was_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir
+        .path()
+        .join(format!("fhir-pipes{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(env!("CARGO_BIN_EXE_fhir-pipes"), &exe).unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let out = Command::new(&exe)
+        .env("PATH", OsString::from(empty.path()))
+        .args(["dhis2", "extract", "locations"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("unrecognized subcommand 'dhis2'"), "{e}");
+    assert!(
+        e.contains("fhir-pipes-dhis2 was not found next to fhir-pipes or on the PATH"),
+        "{e}"
+    );
 }

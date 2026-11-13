@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use crate::dhis2::api::Dhis2;
-use crate::dhis2::measures::Indicator;
-use crate::dhis2::raw::{RawSource, Span};
-use crate::error::{PipesError, Result};
-use crate::http::FetchError;
+use crate::api::Dhis2;
+use crate::measures::Indicator;
+use crate::raw::{RawSource, Span};
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::http::FetchError;
 
 use super::periods::{DateRange, periods_label};
 use super::plan::Unit;

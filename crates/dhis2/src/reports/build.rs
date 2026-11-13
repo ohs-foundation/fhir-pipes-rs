@@ -6,16 +6,16 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::Instance;
+use crate::api::ServerInfo;
 use crate::cli::ReportSource;
-use crate::dhis2::Instance;
-use crate::dhis2::api::ServerInfo;
-use crate::dhis2::locations::location_id;
-use crate::dhis2::maps::{ORG_UNIT_MODEL, VALUE_MODEL, record_type};
-use crate::dhis2::measures::{Indicator, Scoring, fhir_key};
-use crate::error::{PipesError, Result};
-use crate::fhir::group::is_valid_id;
-use crate::fhir::ndjson::NdjsonReader;
-use crate::report::Report;
+use crate::locations::location_id;
+use crate::maps::{ORG_UNIT_MODEL, VALUE_MODEL, record_type};
+use crate::measures::{Indicator, Scoring, fhir_key};
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::fhir::group::is_valid_id;
+use fhir_pipes::fhir::ndjson::NdjsonReader;
+use fhir_pipes::report::Report;
 
 use super::analytics::AnalyticsRow;
 use super::periods::period_value;
@@ -323,7 +323,7 @@ pub fn stratum_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dhis2::reports::analytics::{parse_analytics, tests::analytics};
+    use crate::reports::analytics::{parse_analytics, tests::analytics};
 
     fn loc() -> Target {
         Target {
@@ -353,7 +353,7 @@ mod tests {
     }
 
     fn map(record: &Value, report: &mut Report) -> Value {
-        let maps = crate::dhis2::maps::icr_package(VALUE_MODEL);
+        let maps = crate::maps::icr_package(VALUE_MODEL);
         let mut out = maps
             .run(record, record["id"].as_str().unwrap(), report)
             .unwrap();
@@ -600,7 +600,7 @@ mod tests {
     /// them to the case's expected MeasureReports: what the built-in mapping
     /// wrote before it was removed.
     fn the_records_are_the_package_case_values() {
-        let maps = crate::dhis2::maps::icr_package(VALUE_MODEL);
+        let maps = crate::maps::icr_package(VALUE_MODEL);
         let instance = Instance::new("sl-demo").unwrap();
         let info = ServerInfo {
             system_name: Some("DHIS 2 Demo - Sierra Leone".into()),
@@ -745,8 +745,8 @@ mod tests {
             all_records.push(record);
             all_mapped.push(mapped.remove(0));
         }
-        crate::dhis2::maps::case::records("values", &all_records);
-        crate::dhis2::maps::case::expected("values", &all_mapped);
+        crate::maps::case::records("values", &all_records);
+        crate::maps::case::expected("values", &all_mapped);
     }
 
     #[test]

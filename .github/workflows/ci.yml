@@ -146,30 +146,35 @@ jobs:
       # and the glibc one links glibc-only symbols, so zig compiles and links.
       - if: matrix.target == 'aarch64-unknown-linux-musl'
         run: pip install ziglang cargo-zigbuild
+      # Two programs: fhir-pipes and the DHIS2 connector fhir-pipes-dhis2
+      # (crates/dhis2).
       - if: "!contains(matrix.target, 'musl')"
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p fhir-pipes -p fhir-pipes-dhis2
       - if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p fhir-pipes -p fhir-pipes-dhis2
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
       - if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
-      - name: Rename binary for upload
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }} -p fhir-pipes -p fhir-pipes-dhis2
+      - name: Rename binaries for upload
         shell: bash
         run: |
           set -eu
-          src="target/${{ matrix.target }}/release/fhir-pipes"
-          dest="fhir-pipes-${{ matrix.target }}"
+          ext=""
           if [ "${{ runner.os }}" = "Windows" ]; then
-            src="${src}.exe"
-            dest="${dest}.exe"
+            ext=".exe"
           fi
-          mv "$src" "$dest"
-          echo "BIN_PATH=$dest" >> "$GITHUB_ENV"
+          for bin in fhir-pipes fhir-pipes-dhis2; do
+            mv "target/${{ matrix.target }}/release/${bin}${ext}" "${bin}-${{ matrix.target }}${ext}"
+          done
+          echo "BIN_EXT=$ext" >> "$GITHUB_ENV"
+      # One artifact per target with both programs; publish merges them.
       - uses: actions/upload-artifact@v4
         with:
           name: fhir-pipes-${{ matrix.target }}
-          path: ${{ env.BIN_PATH }}
+          path: |
+            fhir-pipes-${{ matrix.target }}${{ env.BIN_EXT }}
+            fhir-pipes-dhis2-${{ matrix.target }}${{ env.BIN_EXT }}
           if-no-files-found: error
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -188,6 +193,9 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
+      # The artifacts are named fhir-pipes-<target>; each holds
+      # fhir-pipes-<target> and fhir-pipes-dhis2-<target> (.exe on Windows),
+      # which the fhir-pipes-* below selects for SHA256SUMS.
       - uses: actions/download-artifact@v4
         with:
           path: dist

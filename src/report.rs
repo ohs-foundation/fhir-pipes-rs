@@ -65,7 +65,8 @@ impl Report {
         &self.counts
     }
 
-    #[cfg(test)]
+    /// The count of `kind`, 0 when there is none. For tests, here and in
+    /// fhir-pipes-dhis2.
     pub fn count(&self, kind: &str) -> usize {
         self.counts.get(kind).copied().unwrap_or(0)
     }

@@ -6,8 +6,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::cli::Dhis2Conn;
-use crate::error::{PipesError, Result};
-use crate::http::{Auth, FetchError, FhirClient};
+use fhir_pipes::error::{PipesError, Result};
+use fhir_pipes::http::{Auth, FetchError, FhirClient};
 
 const PAGE_SIZE: usize = 500;
 
@@ -66,7 +66,7 @@ impl ServerInfo {
 /// a date alone), read as UTC: on a server in another time zone it is off
 /// by those hours, which does not matter for an age in days.
 pub fn epoch_seconds(ts: &str) -> Option<i64> {
-    let days = crate::calendar::day_of(ts.get(..10)?)?;
+    let days = fhir_pipes::calendar::day_of(ts.get(..10)?)?;
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
         let s = ts.get(r)?;
         s.bytes()
@@ -168,7 +168,7 @@ pub fn api_base(url: &str) -> Result<String> {
     if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
         return Err(PipesError::Usage(format!(
             "--dhis2 must be an http(s) URL, got {:?}",
-            crate::redact::url(url)
+            fhir_pipes::redact::url(url)
         )));
     }
     // Credentials in the URL would be printed wherever the URL is.
