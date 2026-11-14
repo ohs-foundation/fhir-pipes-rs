@@ -24,6 +24,11 @@ use super::sql::{sql_path, sql_str};
 use super::tools;
 use crate::profile::{Kind, Profile};
 
+/// Run before each duckdb command that reads geometry. `INSTALL` is a no-op
+/// once the extension is in duckdb's extension directory, and a fresh
+/// container or home directory has none: duckdb does not install it on `LOAD`.
+const SPATIAL: &str = "INSTALL spatial; LOAD spatial; SET geometry_always_xy = true;";
+
 /// The point layers' columns, `profile`'s between the built-in ones: its
 /// identifier columns (Location, then Organization); its Location type
 /// columns, a type code shown as the Organization's type text under the
@@ -149,7 +154,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         tools::duckdb(
             &s.duckdb,
             &format!(
-                "LOAD spatial; SET geometry_always_xy = true;
+                "{SPATIAL}
              COPY (SELECT id, name, admin_level, admin1_name, admin2_name, path{admin_code}, geometry
                    FROM read_parquet({poly}, union_by_name=true) WHERE admin_level = {level})
              TO {} WITH (FORMAT GDAL, DRIVER 'GeoJSON');",
@@ -203,7 +208,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         tools::duckdb(
             &s.duckdb,
             &format!(
-                "LOAD spatial; SET geometry_always_xy = true;
+                "{SPATIAL}
              COPY (SELECT {point_cols}, geometry
                    FROM read_parquet({points}, hive_partitioning=true, union_by_name=true)
                    WHERE type = '{kind}' AND geometry IS NOT NULL)
@@ -243,7 +248,7 @@ pub fn build(s: &Settings, locations: &Path, out: &Path) -> Result<()> {
         for kind in ["facility", "settlement"] {
             let file = t.join(format!("{kind}_catchments.geojson"));
             tools::duckdb(&s.duckdb, &format!(
-                "LOAD spatial; SET geometry_always_xy = true;
+                "{SPATIAL}
                  COPY (SELECT id, name, type, status, admin1_name, admin2_name, admin3_name, path, part_of,
                               {catchment_of}last_updated, geometry
                        FROM read_parquet({catch}, hive_partitioning=true, union_by_name=true)
