@@ -156,9 +156,30 @@ provider](#access-tokens-from-an-identity-provider).
 | `subjectCanonical` | `valueCanonical` | Required. The Library's url, or `url\|version`. |
 | `_format` | `valueCode` | `ndjson`, `json` or `csv`. Otherwise the `Accept` header decides; the default is NDJSON. |
 | `_limit` | `valueInteger` | The most rows to return, at least 1. |
+| `parameters` | `resource` (a Parameters resource) | In a `POST`: values for the [Library's own parameters](#a-librarys-own-parameters). |
 
-Any other parameter is `400`. A result cut at `max_rows` has the header
+A result cut at `max_rows` has the header
 `X-Fhir-Pipes-Truncated: max_rows=<n>`.
+
+#### A Library's own parameters
+
+A Library can declare parameters ([libraries.md](libraries.md#parameters)),
+such as a year or a place to filter its rows by. `GET /fhir/Library` lists
+each Library with the parameters it declares (`Library.parameter`).
+
+- In a `GET`, each is a query parameter of its name: `year=2024`.
+- In a `POST`, they go in the body's `parameters` part, a Parameters
+  resource, each in the `value[x]` of its type (`valueInteger` for
+  `integer`, `valueString` for `string`, `valueDate` for `date`), as the
+  specification's `$sqlquery-run` takes them.
+
+A parameter that is not given is NULL in the query. A name the Library does
+not declare, a name given twice, and a value that is not of the parameter's
+type are `400`; the message names the parameters the Library takes. A
+Library's parameter cannot be named `subjectCanonical`, `_format`, `_limit`
+or `parameters`, and names that differ only in case are the same; `serve`
+does not start with an approved Library that breaks either rule or declares
+a type it cannot bind.
 
 ```sh
 curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
@@ -169,6 +190,20 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
 curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: application/fhir+json' \
   'http://localhost:8090/fhir/$sql-run' -d '{"resourceType":"Parameters","parameter":[
     {"name":"subjectCanonical","valueCanonical":"https://example.org/Library/CoverageByArea"}]}'
+
+# With the Library's parameters year and state:
+curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
+  'http://localhost:8090/fhir/$sql-run' \
+  --data-urlencode 'subjectCanonical=https://example.org/Library/CoverageByArea' \
+  --data-urlencode 'year=2024' --data-urlencode 'state=Kano' \
+  --data-urlencode '_format=csv'
+
+curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: application/fhir+json' \
+  'http://localhost:8090/fhir/$sql-run' -d '{"resourceType":"Parameters","parameter":[
+    {"name":"subjectCanonical","valueCanonical":"https://example.org/Library/CoverageByArea"},
+    {"name":"parameters","resource":{"resourceType":"Parameters","parameter":[
+      {"name":"year","valueInteger":2024},
+      {"name":"state","valueString":"Kano"}]}}]}'
 ```
 
 ### Statuses
@@ -178,7 +213,7 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: applic
 
 | Status | When |
 |---|---|
-| `400` | A missing, repeated or unknown parameter; a bad `_format` or `_limit`; a body that is not a Parameters resource. |
+| `400` | A missing, repeated or unknown parameter; a bad `_format` or `_limit`; a value that is not of its parameter's type; a body that is not a Parameters resource. |
 | `401` | No token, or a wrong one. |
 | `403` | The Library is in the catalog but is not an approved SQLQuery. |
 | `404` | The canonical is not in the catalog, or a url alone matches more than one version. |
@@ -193,7 +228,8 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: applic
 - With `source = "local"`, a query overlapped twice by a refresh's publish gets
   `503`. With a remote `source`, a query that runs while `rclone` pushes a
   refresh can read a mix of old and new files.
-- A Library's `[[parameter]]` entries are not supported yet.
+- A Library's parameter takes one value: there are no lists, and no
+  required parameters. One that is not given is NULL.
 
 ## Access tokens from an identity provider
 
