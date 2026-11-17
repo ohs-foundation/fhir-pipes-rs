@@ -173,13 +173,26 @@ each Library with the parameters it declares (`Library.parameter`).
   `integer`, `valueString` for `string`, `valueDate` for `date`), as the
   specification's `$sqlquery-run` takes them.
 
-A parameter that is not given is NULL in the query. A name the Library does
-not declare, a name given twice, and a value that is not of the parameter's
-type are `400`; the message names the parameters the Library takes. A
-Library's parameter cannot be named `subjectCanonical`, `_format`, `_limit`
-or `parameters`, and names that differ only in case are the same; `serve`
-does not start with an approved Library that breaks either rule or declares
-a type it cannot bind.
+A parameter that is not given is NULL in the query. These are `400`:
+
+- a name the Library does not declare, in the letter case it declares it:
+  `Year` is not `year`. The message names the parameters the Library takes;
+- a name given twice;
+- a value that is not of the parameter's type: `integer` is from
+  -2147483648 to 2147483647, `positiveInt` from 1, `unsignedInt` from 0;
+  `date` is `YYYY-MM-DD`; `dateTime` is a date or a date and time with its
+  offset (`2026-01-31T12:00:00Z`), not a year or a month alone; `instant`
+  has the time; no leap second (`23:59:60`). The message names the type;
+- in a `POST`: a value in the `value[x]` of another type (`integer64` is a
+  JSON string, as FHIR writes it), an entry with a `resource` or `part` as
+  well as its value, and a `parameters` whose resource is not a Parameters
+  resource with an array of parameters.
+
+`serve` does not start with an approved Library that declares a parameter
+it cannot bind: one with no name or a name a `:name` placeholder cannot
+have, one named `subjectCanonical`, `_format`, `_limit` or `parameters`,
+two whose names differ only in letter case, or one of a type that has no
+duckdb type.
 
 ```sh
 curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \

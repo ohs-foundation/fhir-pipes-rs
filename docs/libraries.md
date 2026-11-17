@@ -99,11 +99,13 @@ when no value is given and the matching rows when one is.
 | `dateTime`, `instant` | `TIMESTAMPTZ` |
 | `time` | `TIME` |
 
-A value is never written into the SQL. Each `:name` becomes
-`getvariable('name')`, and the script sets that variable from a value passed
-to duckdb in its environment, cast to the parameter's type. A `:name` in a
-string, a quoted identifier or a comment is left as it is, and `::` is a
-cast. A parameter takes one value; there are no lists. A SQLView cannot
+A value is never written into the SQL. For `$sql-run` and `import run`, each
+`:name` becomes `getvariable('name')`, and the script sets that variable
+from a value passed to duckdb in its environment, cast to the parameter's
+type (in `$sql-run`, to a NULL of that type when no value is given). A
+refresh, which has no values, writes each `:name` as `CAST(NULL AS type)`.
+A `:name` in a string, a quoted identifier or a comment is left as it is,
+and `::` is a cast. A parameter takes one value; there are no lists. A SQLView cannot
 declare parameters.
 
 ## libraries build

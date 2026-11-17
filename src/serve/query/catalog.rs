@@ -105,7 +105,7 @@ impl Queries {
 /// type with a duckdb type.
 fn check_parameters(lib: &Library) -> Result<()> {
     let mut seen: Vec<String> = Vec::new();
-    for p in params::declared(lib) {
+    for p in params::declared(lib)? {
         let what = format!("SQLQuery {} declares the parameter {:?}", lib.url, p.name);
         if !params::valid_name(&p.name) {
             bail!("{what}, which is not a name a :name placeholder can have");
@@ -257,6 +257,14 @@ mod tests {
             (
                 serde_json::json!([{"name": "q", "type": "Quantity"}]),
                 "of type Quantity",
+            ),
+            (
+                serde_json::json!([{"type": "string"}]),
+                "parameter[0] has no name",
+            ),
+            (
+                serde_json::json!([{"name": "q", "type": 1}]),
+                "parameter[0].type is not a string",
             ),
         ] {
             let w = Warehouse::new();
