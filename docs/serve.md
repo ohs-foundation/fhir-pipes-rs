@@ -178,15 +178,18 @@ A parameter that is not given is NULL in the query. These are `400`:
 - a name the Library does not declare, in the letter case it declares it:
   `Year` is not `year`. The message names the parameters the Library takes;
 - a name given twice;
-- a value that is not of the parameter's type: `integer` is from
-  -2147483648 to 2147483647, `positiveInt` from 1, `unsignedInt` from 0;
-  `date` is `YYYY-MM-DD`; `dateTime` is a date or a date and time with its
-  offset (`2026-01-31T12:00:00Z`), not a year or a month alone; `instant`
-  has the time; no leap second (`23:59:60`). The message names the type;
+- a value that is not written as FHIR writes the parameter's type:
+  `integer` is from -2147483648 to 2147483647, `positiveInt` from 1,
+  `unsignedInt` from 0, with no `+`, spaces or leading zeros; `date` is
+  `YYYY-MM-DD`; `dateTime` is a date or a date and time with its offset
+  (`2026-01-31T12:00:00Z`), not a year or a month alone; `instant` has the
+  time; `time` is `HH:MM:SS`; no leap second (`23:59:60`); a `code` has no
+  space at either end; an `id` is letters, digits, `-` and `.`. A `string`
+  is any text. The message names the type;
 - in a `POST`: a value in the `value[x]` of another type (`integer64` is a
-  JSON string, as FHIR writes it), an entry with a `resource` or `part` as
-  well as its value, and a `parameters` whose resource is not a Parameters
-  resource with an array of parameters.
+  JSON string, as FHIR writes it), an entry that holds anything besides its
+  name and its one value, and a `parameters` whose resource is not a
+  Parameters resource with an array of parameters.
 
 `serve` does not start with an approved Library that declares a parameter
 it cannot bind: one with no name or a name a `:name` placeholder cannot

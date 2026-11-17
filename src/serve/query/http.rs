@@ -544,6 +544,12 @@ fn posted(
                 }
             }
             Some((_, key)) => {
+                // What else the entry holds would be ignored.
+                if p.as_object()
+                    .is_some_and(|m| m.keys().any(|k| k != "name" && k != key))
+                {
+                    return Err(bad_request(format!("{name} takes {key} and nothing else")));
+                }
                 let value = match &p[*key] {
                     Value::String(s) if *key != "valueInteger" => s.clone(),
                     Value::Number(n) if *key == "valueInteger" => n.to_string(),
@@ -583,11 +589,12 @@ fn nested_values(resource: &Value) -> Result<Vec<Given>, Refusal> {
             "{NESTED} takes resource, a Parameters resource"
         )));
     }
-    let entries = match &resource["parameter"] {
-        Value::Null => return Ok(Vec::new()),
-        Value::Array(entries) => entries,
-        // Read as no parameters, this would run the query unfiltered.
-        _ => {
+    let entries = match resource.get("parameter") {
+        None => return Ok(Vec::new()),
+        Some(Value::Array(entries)) => entries,
+        // Read as no parameters, this (a null too) would run the query
+        // unfiltered.
+        Some(_) => {
             return Err(bad_request(format!(
                 "{NESTED}: the resource's parameter must be an array"
             )));
@@ -1902,6 +1909,7 @@ mod tests {
                 "parameter must be an array",
             ),
             (json!("min"), "parameter must be an array"),
+            (json!(null), "parameter must be an array"),
         ] {
             let r = send(&api, post_filter(values.clone())).await;
             assert_eq!(r.status, StatusCode::BAD_REQUEST, "{values}");
@@ -1943,6 +1951,29 @@ mod tests {
             .await;
             assert_eq!(r.status, StatusCode::BAD_REQUEST, "{extra}");
             assert!(r.says().contains(says), "{extra}: {}", r.says());
+        }
+        // One of the operation's own parameters holds its value and no more.
+        for extra in [
+            json!({"valueString": "x"}),
+            json!({"part": []}),
+            json!({"resource": {"resourceType": "Parameters"}}),
+        ] {
+            let mut subject = json!({"name": "subjectCanonical", "valueCanonical": F});
+            for (k, v) in extra.as_object().unwrap() {
+                subject[k] = v.clone();
+            }
+            let r = send(
+                &api,
+                post(json!({"resourceType": "Parameters", "parameter": [subject]})),
+            )
+            .await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(
+                r.says()
+                    .contains("subjectCanonical takes valueCanonical and nothing else"),
+                "{extra}: {}",
+                r.says()
+            );
         }
         let twice = json!({"name": "parameters", "resource": {"resourceType": "Parameters"}});
         let r = send(
