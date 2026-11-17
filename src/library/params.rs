@@ -107,7 +107,16 @@ pub fn check_value(fhir_type: &str, text: &str) -> Result<(), &'static str> {
             integer(0, i32::MAX.into()),
             "an integer from 0 to 2147483647",
         ),
-        "integer64" => (integer(i64::MIN, i64::MAX), "an integer"),
+        // FHIR R5's rule for the type: a sign of either kind, and no -0.
+        "integer64" => (
+            (text == "0"
+                || text
+                    .strip_prefix(['+', '-'])
+                    .or(Some(text))
+                    .is_some_and(|d| d != "0" && is_unsigned(d)))
+                && text.parse::<i64>().is_ok(),
+            "an integer",
+        ),
         "decimal" => (
             is_decimal(text) && text.parse::<f64>().is_ok_and(f64::is_finite),
             "a number",
@@ -140,9 +149,10 @@ pub fn check_value(fhir_type: &str, text: &str) -> Result<(), &'static str> {
         "uri" | "url" | "canonical" => (no_space, "a value with no whitespace"),
         "oid" => (
             text.strip_prefix("urn:oid:").is_some_and(|rest| {
-                rest.split('.').count() > 1
-                    && rest.split('.').all(is_unsigned)
-                    && matches!(rest.as_bytes()[0], b'0'..=b'2')
+                let arcs: Vec<&str> = rest.split('.').collect();
+                arcs.len() > 1
+                    && arcs.iter().all(|a| is_unsigned(a))
+                    && matches!(arcs[0], "0" | "1" | "2")
             }),
             "an OID, as urn:oid:1.2.3",
         ),
@@ -152,7 +162,7 @@ pub fn check_value(fhir_type: &str, text: &str) -> Result<(), &'static str> {
                 groups.iter().map(|g| g.len()).eq([8, 4, 4, 4, 12])
                     && groups
                         .iter()
-                        .all(|g| g.bytes().all(|b| b.is_ascii_hexdigit()))
+                        .all(|g| g.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
             }),
             "a UUID, as urn:uuid:c757873d-ec9a-4326-a141-556f43239520",
         ),
@@ -202,6 +212,7 @@ fn is_date(text: &str) -> bool {
                 c.is_ascii_digit()
             }
         })
+        && !text.starts_with("0000")
         && chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").is_ok()
 }
 
@@ -247,8 +258,8 @@ fn is_instant(text: &str) -> bool {
             b.len() == 5
                 && b[2] == b':'
                 && [0, 1, 3, 4].iter().all(|i| b[*i].is_ascii_digit())
-                && o[..2].parse::<u8>().is_ok_and(|h| h <= 14)
                 && o[3..].parse::<u8>().is_ok_and(|m| m < 60)
+                && (&o[..2] < "14" || o == "14:00")
         })
         && chrono::DateTime::parse_from_rfc3339(text).is_ok()
 }
@@ -453,8 +464,17 @@ mod tests {
             ),
             (
                 "integer64",
-                vec!["9007199254740993", "-9223372036854775808"],
-                vec!["", "9223372036854775808", "1.0", "001"],
+                vec!["9007199254740993", "-9223372036854775808", "+42", "0"],
+                vec![
+                    "",
+                    "9223372036854775808",
+                    "1.0",
+                    "001",
+                    "-0",
+                    "+0",
+                    "+",
+                    "+-1",
+                ],
             ),
             (
                 "decimal",
@@ -477,6 +497,7 @@ mod tests {
                     "2024-2-9",
                     "2024",
                     "2024-01-01T00:00:00Z",
+                    "0000-01-01",
                     "2024- 1-01",
                 ],
             ),
@@ -497,6 +518,8 @@ mod tests {
                     "2024-01-31T12: 0:00Z",
                     "2024-01-31 12:00:00Z",
                     "2024-01-31t12:00:00z",
+                    "2024-01-31T12:00:00+14:59",
+                    "2024-01-31T12:00:00+15:00",
                     "2024-01-31T12:00:00+0300",
                 ],
             ),
@@ -539,12 +562,22 @@ mod tests {
             (
                 "oid",
                 vec!["urn:oid:1.2.840"],
-                vec!["1.2.3", "urn:oid:3.1", "urn:oid:1", "urn:oid:1.02"],
+                vec![
+                    "1.2.3",
+                    "urn:oid:3.1",
+                    "urn:oid:1",
+                    "urn:oid:1.02",
+                    "urn:oid:12.3",
+                ],
             ),
             (
                 "uuid",
                 vec!["urn:uuid:c757873d-ec9a-4326-a141-556f43239520"],
-                vec!["c757873d-ec9a-4326-a141-556f43239520", "urn:uuid:xyz"],
+                vec![
+                    "c757873d-ec9a-4326-a141-556f43239520",
+                    "urn:uuid:xyz",
+                    "urn:uuid:C757873D-EC9A-4326-A141-556F43239520",
+                ],
             ),
         ] {
             for v in ok {

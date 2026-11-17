@@ -544,11 +544,15 @@ fn posted(
                 }
             }
             Some((_, key)) => {
-                // What else the entry holds would be ignored.
-                if p.as_object()
-                    .is_some_and(|m| m.keys().any(|k| k != "name" && k != key))
+                // Another value, a resource or parts would be ignored;
+                // an id or an extension says nothing about the value.
+                if has_other_content(p, "value")
+                    || p.as_object()
+                        .is_some_and(|m| m.keys().any(|k| k.starts_with("value") && k != key))
                 {
-                    return Err(bad_request(format!("{name} takes {key} and nothing else")));
+                    return Err(bad_request(format!(
+                        "{name} takes {key}, and no other value, resource or part"
+                    )));
                 }
                 let value = match &p[*key] {
                     Value::String(s) if *key != "valueInteger" => s.clone(),
@@ -1970,11 +1974,21 @@ mod tests {
             assert_eq!(r.status, StatusCode::BAD_REQUEST, "{extra}");
             assert!(
                 r.says()
-                    .contains("subjectCanonical takes valueCanonical and nothing else"),
+                    .contains("subjectCanonical takes valueCanonical, and no other value"),
                 "{extra}: {}",
                 r.says()
             );
         }
+        // An element id or an extension is not a second value.
+        let r = send(
+            &api,
+            post(json!({"resourceType": "Parameters", "parameter": [
+                {"name": "subjectCanonical", "valueCanonical": F, "id": "p1",
+                 "extension": [{"url": "https://example.org/x", "valueString": "y"}]},
+            ]})),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK);
         let twice = json!({"name": "parameters", "resource": {"resourceType": "Parameters"}});
         let r = send(
             &api,

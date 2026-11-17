@@ -187,8 +187,8 @@ A parameter that is not given is NULL in the query. These are `400`:
   space at either end; an `id` is letters, digits, `-` and `.`. A `string`
   is any text. The message names the type;
 - in a `POST`: a value in the `value[x]` of another type (`integer64` is a
-  JSON string, as FHIR writes it), an entry that holds anything besides its
-  name and its one value, and a `parameters` whose resource is not a
+  JSON string, as FHIR writes it), an entry that holds a second value, a
+  resource or parts besides its one value, and a `parameters` whose resource is not a
   Parameters resource with an array of parameters.
 
 `serve` does not start with an approved Library that declares a parameter
