@@ -97,6 +97,45 @@ fn a_sqlquery_result_is_published_with_the_views() {
     assert_nothing_staged(&data);
 }
 
+/// A refresh has no caller to give a Library's parameters values, so each
+/// is NULL and the table holds what the query returns with none given.
+#[test]
+fn a_librarys_parameters_are_null_in_a_refresh() {
+    if !have_duckdb("a_librarys_parameters_are_null_in_a_refresh") {
+        return;
+    }
+    let mut filtered = library(
+        "ReadingsOver",
+        false,
+        &[("r", READING)],
+        "SELECT country, value FROM r WHERE (:min IS NULL OR value >= :min) \
+         AND (:unit IS NULL OR 'x' = :unit)",
+    );
+    filtered["parameter"] = json!([
+        {"name": "min", "use": "in", "type": "integer"},
+        {"name": "unit", "use": "in", "type": "code"},
+    ]);
+    let (dir, config, views) = setup_libraries(&[filtered.clone()]);
+    let root = dir.path();
+    let input = inputs(
+        root,
+        &[(
+            "a.ndjson",
+            lines(&[obs("o1", 30, None), obs("o2", 5, None)]),
+        )],
+    );
+    refresh(&config, &views, &input, "views")
+        .success()
+        .stdout(has("ReadingsOver → parquet/readings_over (2 rows"));
+
+    // A parameter of a type that has no SQL type stops the step.
+    filtered["parameter"] = json!([{"name": "min", "use": "in", "type": "Quantity"}]);
+    write_libraries(root, &[filtered]);
+    refresh(&config, &views, &input, "views")
+        .code(2)
+        .stderr(has("the parameter min has type Quantity"));
+}
+
 /// The step's duckdb does not read `~/.duckdbrc`, which could change
 /// settings or run statements of its own. This one fails any duckdb that
 /// reads it.

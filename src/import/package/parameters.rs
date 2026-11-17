@@ -373,18 +373,7 @@ pub fn values(declared: &[Parameter], given: &[Given], require: bool) -> Result<
 /// The duckdb type a SQLQuery Library parameter of FHIR type `fhir` is cast
 /// to, when a package parameter of type `t` can give it a value.
 pub fn sql_type(fhir: &str, t: Type) -> Option<&'static str> {
-    let sql = match fhir {
-        "string" | "code" | "id" | "uri" | "url" | "canonical" | "markdown" | "oid" | "uuid" => {
-            "VARCHAR"
-        }
-        "integer" | "positiveInt" | "unsignedInt" | "integer64" => "BIGINT",
-        "decimal" => "DOUBLE",
-        "boolean" => "BOOLEAN",
-        "date" => "DATE",
-        "dateTime" | "instant" => "TIMESTAMPTZ",
-        "time" => "TIME",
-        _ => return None,
-    };
+    let sql = crate::library::params::duckdb_type(fhir)?;
     let fits = match sql {
         "VARCHAR" | "DATE" | "TIMESTAMPTZ" | "TIME" => t == Type::String,
         "BIGINT" => t == Type::Integer,

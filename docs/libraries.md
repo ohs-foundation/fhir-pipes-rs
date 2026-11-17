@@ -50,11 +50,63 @@ resource = "https://healthcampaigns.org/fhir/analytics/Library/LocationHierarchy
 `SQLQuery`) are required. A SQLQuery's table is named from `name`. Each
 `[[depends_on]]` has a `label` (matching `[a-z_][a-z0-9_]*`) and a `resource`,
 a canonical URL (add `|version` to pick one). `version`, `title` and
-`description` are also accepted; SQLQueries also accept `[[parameter]]` metadata. `import run` gives such a parameter the value of the import package's parameter of the same name, written `:NAME` in the SQL (see [import.md](import.md#in-sqlquery-libraries)); `refresh` and `serve` do not yet bind parameters. Any other key is an error.
+`description` are also accepted; SQLQueries also accept `[[parameter]]` entries, each with a `name`, a `type` and an optional `documentation`; see [Parameters](#parameters). Any other key is an error.
 
 SQLQueries run in DuckDB; SQLViews run inline there and can also become PostgreSQL views. So write standard
 SQL that both accept, or add a `<name>.duckdb.sql` or `<name>.postgresql.sql`
 file beside the `.sql` file. A Library holds one statement.
+
+### Parameters
+
+A SQLQuery declares the values a caller can give it under `[[parameter]]`,
+and reads each as `:name` in its SQL, as the SQL on FHIR SQLQuery profile
+writes them:
+
+```toml
+[[parameter]]
+name = "year"
+type = "integer"
+documentation = "The year the campaign started"
+
+[[parameter]]
+name = "state"
+type = "string"
+```
+
+```sql
+SELECT * FROM coverage
+WHERE (:year IS NULL OR year = :year)
+  AND (:state IS NULL OR state = :state)
+```
+
+A parameter that is not given a value is NULL. Write each condition as
+above, `(:name IS NULL OR column = :name)`, so the query returns every row
+when no value is given and the matching rows when one is.
+
+| Who runs the Library | What a parameter's value is |
+|---|---|
+| `serve`'s `$sql-run` | What the caller gives it ([serve.md](serve.md#a-librarys-own-parameters)); NULL when not given |
+| `refresh` | NULL: the table holds what the query returns with no value given |
+| `import run` | The import package's parameter of the same name, which must exist ([import.md](import.md#in-sqlquery-libraries)) |
+
+| `type` | duckdb type |
+|---|---|
+| `string`, `code`, `id`, `uri`, `url`, `canonical`, `markdown`, `oid`, `uuid` | `VARCHAR` |
+| `integer`, `positiveInt`, `unsignedInt`, `integer64` | `BIGINT` |
+| `decimal` | `DOUBLE` |
+| `boolean` | `BOOLEAN` |
+| `date` | `DATE` |
+| `dateTime`, `instant` | `TIMESTAMPTZ` |
+| `time` | `TIME` |
+
+A value is never written into the SQL. For `$sql-run` and `import run`, each
+`:name` becomes `getvariable('name')`, and the script sets that variable
+from a value passed to duckdb in its environment, cast to the parameter's
+type (in `$sql-run`, to a NULL of that type when no value is given). A
+refresh, which has no values, writes each `:name` as `CAST(NULL AS type)`.
+A `:name` in a string, a quoted identifier or a comment is left as it is,
+and `::` is a cast. A parameter takes one value; there are no lists. A SQLView cannot
+declare parameters.
 
 ## libraries build
 

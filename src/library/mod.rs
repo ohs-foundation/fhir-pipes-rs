@@ -5,6 +5,7 @@
 
 pub mod builtin;
 pub mod compose;
+pub mod params;
 pub mod resolve;
 pub mod source;
 

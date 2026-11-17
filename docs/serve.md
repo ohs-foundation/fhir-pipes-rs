@@ -156,9 +156,46 @@ provider](#access-tokens-from-an-identity-provider).
 | `subjectCanonical` | `valueCanonical` | Required. The Library's url, or `url\|version`. |
 | `_format` | `valueCode` | `ndjson`, `json` or `csv`. Otherwise the `Accept` header decides; the default is NDJSON. |
 | `_limit` | `valueInteger` | The most rows to return, at least 1. |
+| `parameters` | `resource` (a Parameters resource) | In a `POST`: values for the [Library's own parameters](#a-librarys-own-parameters). |
 
-Any other parameter is `400`. A result cut at `max_rows` has the header
+A result cut at `max_rows` has the header
 `X-Fhir-Pipes-Truncated: max_rows=<n>`.
+
+#### A Library's own parameters
+
+A Library can declare parameters ([libraries.md](libraries.md#parameters)),
+such as a year or a place to filter its rows by. `GET /fhir/Library` lists
+each Library with the parameters it declares (`Library.parameter`).
+
+- In a `GET`, each is a query parameter of its name: `year=2024`.
+- In a `POST`, they go in the body's `parameters` part, a Parameters
+  resource, each in the `value[x]` of its type (`valueInteger` for
+  `integer`, `valueString` for `string`, `valueDate` for `date`), as the
+  specification's `$sqlquery-run` takes them.
+
+A parameter that is not given is NULL in the query. These are `400`:
+
+- a name the Library does not declare, in the letter case it declares it:
+  `Year` is not `year`. The message names the parameters the Library takes;
+- a name given twice;
+- a value that is not written as FHIR writes the parameter's type:
+  `integer` is from -2147483648 to 2147483647, `positiveInt` from 1,
+  `unsignedInt` from 0, with no `+`, spaces or leading zeros; `date` is
+  `YYYY-MM-DD`; `dateTime` is a date or a date and time with its offset
+  (`2026-01-31T12:00:00Z`), not a year or a month alone; `instant` has the
+  time; `time` is `HH:MM:SS`; no leap second (`23:59:60`); a `code` has no
+  space at either end; an `id` is letters, digits, `-` and `.`. A `string`
+  is any text. The message names the type;
+- in a `POST`: a value in the `value[x]` of another type (`integer64` is a
+  JSON string, as FHIR writes it), an entry that holds a second value, a
+  resource or parts besides its one value, and a `parameters` whose resource is not a
+  Parameters resource with an array of parameters.
+
+`serve` does not start with an approved Library that declares a parameter
+it cannot bind: one with no name or a name a `:name` placeholder cannot
+have, one named `subjectCanonical`, `_format`, `_limit` or `parameters`,
+two whose names differ only in letter case, or one of a type that has no
+duckdb type.
 
 ```sh
 curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
@@ -169,6 +206,20 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
 curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: application/fhir+json' \
   'http://localhost:8090/fhir/$sql-run' -d '{"resourceType":"Parameters","parameter":[
     {"name":"subjectCanonical","valueCanonical":"https://example.org/Library/CoverageByArea"}]}'
+
+# With the Library's parameters year and state:
+curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -G \
+  'http://localhost:8090/fhir/$sql-run' \
+  --data-urlencode 'subjectCanonical=https://example.org/Library/CoverageByArea' \
+  --data-urlencode 'year=2024' --data-urlencode 'state=Kano' \
+  --data-urlencode '_format=csv'
+
+curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: application/fhir+json' \
+  'http://localhost:8090/fhir/$sql-run' -d '{"resourceType":"Parameters","parameter":[
+    {"name":"subjectCanonical","valueCanonical":"https://example.org/Library/CoverageByArea"},
+    {"name":"parameters","resource":{"resourceType":"Parameters","parameter":[
+      {"name":"year","valueInteger":2024},
+      {"name":"state","valueString":"Kano"}]}}]}'
 ```
 
 ### Statuses
@@ -178,7 +229,7 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: applic
 
 | Status | When |
 |---|---|
-| `400` | A missing, repeated or unknown parameter; a bad `_format` or `_limit`; a body that is not a Parameters resource. |
+| `400` | A missing, repeated or unknown parameter; a bad `_format` or `_limit`; a value that is not of its parameter's type; a body that is not a Parameters resource. |
 | `401` | No token, or a wrong one. |
 | `403` | The Library is in the catalog but is not an approved SQLQuery. |
 | `404` | The canonical is not in the catalog, or a url alone matches more than one version. |
@@ -193,7 +244,8 @@ curl -H "Authorization: Bearer $FHIR_PIPES_QUERY_TOKEN" -H 'Content-Type: applic
 - With `source = "local"`, a query overlapped twice by a refresh's publish gets
   `503`. With a remote `source`, a query that runs while `rclone` pushes a
   refresh can read a mix of old and new files.
-- A Library's `[[parameter]]` entries are not supported yet.
+- A Library's parameter takes one value: there are no lists, and no
+  required parameters. One that is not given is NULL.
 
 ## Access tokens from an identity provider
 

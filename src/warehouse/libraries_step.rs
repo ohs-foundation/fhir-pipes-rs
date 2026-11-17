@@ -70,7 +70,9 @@ pub(super) fn libraries_step(
         let table = lib.table(&s.strip_prefix);
         check_inputs(s, stage, catalog, &view_tables, lib, lib)?;
         let bind = |a: &Artifact| bind(s, stage, a);
-        let sql = compose(lib, "duckdb", catalog, &bind).map_err(usage)?;
+        // A refresh gives no parameter a value: each is NULL.
+        let unset = crate::library::params::unset(lib).map_err(usage)?;
+        let sql = compose(&unset, "duckdb", catalog, &bind).map_err(usage)?;
         let dir = stage.table(&table);
         write(s, &sql, &dir).with_context(|| format!("Library {}", lib.name))?;
         let rows = manifest::rows(&dir, PARTITION_COLUMN)?;

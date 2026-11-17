@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 
 use super::catalog::{Lookup, Queries};
 use super::config::Approve;
-use super::run::{Format, Output, QueryError, Runner};
+use super::run::{Bound, Format, Output, QueryError, Runner};
 use crate::library::Library;
+use crate::library::params;
 use crate::serve::metrics::Metrics;
 use crate::serve::output::StdoutQueue;
 use crate::warehouse::config::Settings;
@@ -33,9 +34,9 @@ const FHIR_JSON: &str = "application/fhir+json";
 const MAX_BODY: usize = 64 * 1024;
 /// Seconds a caller is told to wait after a 503.
 const RETRY_AFTER: &str = "5";
-/// The parameters `$sql-run` takes, with the value type each takes in a
-/// Parameters body.
-const PARAMETERS: [(&str, &str); 3] = [
+/// The parameters `$sql-run` itself takes, with the value type each takes
+/// in a Parameters body. A Library cannot declare one of these names.
+pub(super) const PARAMETERS: [(&str, &str); 3] = [
     ("subjectCanonical", "valueCanonical"),
     ("_format", "valueCode"),
     ("_limit", "valueInteger"),
@@ -213,11 +214,33 @@ fn fhir(status: StatusCode, v: Value) -> Response {
     (status, [(header::CONTENT_TYPE, FHIR_JSON)], v.to_string()).into_response()
 }
 
+/// The name of the Parameters-body parameter that holds the values of the
+/// Library's own parameters, as a Parameters resource (the specification's).
+const NESTED: &str = "parameters";
+
 /// A `$sql-run` request's parameters, checked.
 struct SqlRun {
     canonical: String,
     format: Format,
     limit: Option<usize>,
+    /// What was given for the Library's own parameters; checked against
+    /// the Library once it is looked up (`bind`).
+    given: Vec<Given>,
+}
+
+/// A value given for one of the Library's own parameters.
+struct Given {
+    name: String,
+    value: GivenValue,
+}
+
+enum GivenValue {
+    /// From a query string.
+    Text(String),
+    /// From a Parameters resource: the `value[x]` member and its value.
+    Typed(String, Value),
+    /// From a Parameters resource, with no single `value[x]`.
+    NoValue,
 }
 
 fn format_code(f: Format) -> &'static str {
@@ -268,22 +291,20 @@ fn accepted(headers: &HeaderMap) -> Format {
     best.map_or(Format::Ndjson, |(_, f)| f)
 }
 
-/// Check the (name, value) pairs of a request. `_format` wins over
-/// `Accept`.
-fn sql_run(pairs: Vec<(String, String)>, headers: &HeaderMap) -> Result<SqlRun, Refusal> {
+/// Check the (name, value) pairs of a request. A pair that is not one of
+/// the operation's own is a value for a parameter of the Library, as is
+/// each of `given`. `_format` wins over `Accept`.
+fn sql_run(
+    pairs: Vec<(String, String)>,
+    mut given: Vec<Given>,
+    headers: &HeaderMap,
+) -> Result<SqlRun, Refusal> {
     let known = |n: &str| PARAMETERS.iter().any(|(p, _)| *p == n);
-    let mut unknown: Vec<&str> = Vec::new();
-    for (n, _) in &pairs {
-        if !known(n) && !unknown.contains(&n.as_str()) {
-            unknown.push(n);
-        }
-    }
-    if !unknown.is_empty() {
-        return Err(bad_request(format!(
-            "unsupported parameter(s): {}; this server takes subjectCanonical, _format and _limit",
-            unknown.join(", ")
-        )));
-    }
+    let (pairs, own): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(n, _)| known(n));
+    given.extend(own.into_iter().map(|(name, value)| Given {
+        name,
+        value: GivenValue::Text(value),
+    }));
     let one = |name: &str| -> Result<Option<&str>, Refusal> {
         let mut given = pairs.iter().filter(|(n, _)| n == name);
         let first = given.next().map(|(_, v)| v.as_str());
@@ -318,7 +339,108 @@ fn sql_run(pairs: Vec<(String, String)>, headers: &HeaderMap) -> Result<SqlRun, 
         canonical,
         format,
         limit,
+        given,
     })
+}
+
+/// The Library's parameters with what the request gave each, or why the
+/// request is refused: a name the Library does not declare, a name given
+/// twice, or a value that is not of the parameter's type.
+fn bind(lib: &Library, given: &[Given]) -> Result<Vec<Bound>, Refusal> {
+    // The catalog is loaded only with declarations that can be read and
+    // bound (`Queries::load`), so neither failure below is the caller's.
+    let unreadable = |detail: String| Refusal {
+        log: Some(detail),
+        ..internal()
+    };
+    let declared = params::declared(lib).map_err(|e| unreadable(format!("{e:#}")))?;
+    let mut unknown: Vec<&str> = Vec::new();
+    for g in given {
+        if !declared.iter().any(|p| p.name == g.name) && !unknown.contains(&g.name.as_str()) {
+            unknown.push(&g.name);
+        }
+    }
+    if !unknown.is_empty() {
+        let own = match declared.as_slice() {
+            [] => "this Library takes no parameters of its own".to_string(),
+            ps => format!(
+                "this Library takes {}",
+                ps.iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        return Err(bad_request(format!(
+            "unsupported parameter(s): {}; this server takes subjectCanonical, _format and \
+             _limit, and {own}",
+            unknown.join(", ")
+        )));
+    }
+    let mut bound = Vec::new();
+    for p in declared {
+        let Some(sql_type) = params::duckdb_type(&p.fhir_type) else {
+            return Err(unreadable(format!(
+                "Library {} parameter {} has type {}",
+                lib.name, p.name, p.fhir_type
+            )));
+        };
+        let mut values = given.iter().filter(|g| g.name == p.name);
+        let first = values.next();
+        if values.next().is_some() {
+            return Err(bad_request(format!("{} is given more than once", p.name)));
+        }
+        let value = match first.map(|g| &g.value) {
+            None => None,
+            Some(GivenValue::Text(text)) => Some(text.clone()),
+            Some(other) => {
+                let key = value_key(&p.fhir_type);
+                let text = match other {
+                    // FHIR's JSON writes integer64 as a string: a number
+                    // that large does not survive every JSON reader.
+                    GivenValue::Typed(k, v) if *k == key => match (sql_type, v) {
+                        ("BIGINT", Value::String(s)) if p.fhir_type == "integer64" => {
+                            Some(s.clone())
+                        }
+                        ("BIGINT", Value::Number(n)) if p.fhir_type != "integer64" => {
+                            Some(n.to_string())
+                        }
+                        ("DOUBLE", Value::Number(n)) => Some(n.to_string()),
+                        ("BOOLEAN", Value::Bool(b)) => Some(b.to_string()),
+                        ("BIGINT" | "DOUBLE" | "BOOLEAN", _) => None,
+                        (_, Value::String(s)) => Some(s.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                Some(text.ok_or_else(|| bad_request(format!("{} takes {key}", p.name)))?)
+            }
+        };
+        if let Some(text) = &value
+            && let Err(want) = params::check_value(&p.fhir_type, text)
+        {
+            return Err(bad_request(format!(
+                "{} is of type {}: use {want}",
+                p.name, p.fhir_type
+            )));
+        }
+        bound.push(Bound {
+            name: p.name,
+            sql_type,
+            value,
+        });
+    }
+    Ok(bound)
+}
+
+/// The `value[x]` member a Parameters resource gives a parameter of FHIR
+/// type `fhir_type` in: `valueInteger` for `integer`.
+fn value_key(fhir_type: &str) -> String {
+    let mut chars = fhir_type.chars();
+    match chars.next() {
+        Some(first) => format!("value{}{}", first.to_ascii_uppercase(), chars.as_str()),
+        None => "value".to_string(),
+    }
 }
 
 async fn run_get(
@@ -334,7 +456,7 @@ async fn run_get(
     let pairs = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
         .into_owned()
         .collect();
-    answer(api, sql_run(pairs, &headers)).await
+    answer(api, sql_run(pairs, Vec::new(), &headers)).await
 }
 
 async fn run_post(
@@ -343,16 +465,22 @@ async fn run_post(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let request = posted(query, &headers, body).and_then(|pairs| sql_run(pairs, &headers));
+    let request =
+        posted(query, &headers, body).and_then(|(pairs, given)| sql_run(pairs, given, &headers));
     answer(api, request).await
 }
 
-/// The (name, value) pairs of a POST's Parameters body.
+/// The (name, value) pairs of the operation's own parameters, and the
+/// values given for the Library's.
+type Posted = (Vec<(String, String)>, Vec<Given>);
+
+/// The (name, value) pairs of a POST's Parameters body, and the values its
+/// `parameters` part gives the Library's own parameters.
 fn posted(
     query: Option<String>,
     headers: &HeaderMap,
     body: Result<Bytes, BytesRejection>,
-) -> Result<Vec<(String, String)>, Refusal> {
+) -> Result<Posted, Refusal> {
     if query.is_some_and(|q| !q.is_empty()) {
         return Err(bad_request(
             "a POST takes its parameters in a Parameters body, not the query string",
@@ -389,22 +517,114 @@ fn posted(
         return Err(bad_request("the body must be a Parameters resource"));
     }
     let mut pairs = Vec::new();
+    let mut given = Vec::new();
+    let mut nested = false;
+    let mut unknown: Vec<&str> = Vec::new();
     for p in v["parameter"].as_array().into_iter().flatten() {
         let Some(name) = p["name"].as_str() else {
             return Err(bad_request("a parameter has no name"));
         };
-        let value = match PARAMETERS.iter().find(|(n, _)| *n == name) {
-            // Refused by name in `sql_run`.
-            None => String::new(),
-            Some((_, key)) => match &p[*key] {
-                Value::String(s) if *key != "valueInteger" => s.clone(),
-                Value::Number(n) if *key == "valueInteger" => n.to_string(),
-                _ => return Err(bad_request(format!("{name} takes {key}"))),
-            },
-        };
-        pairs.push((name.to_string(), value));
+        if name == NESTED {
+            if nested {
+                return Err(bad_request(format!("{NESTED} is given more than once")));
+            }
+            nested = true;
+            if has_other_content(p, "resource") {
+                return Err(bad_request(format!(
+                    "{NESTED} takes resource, a Parameters resource, and nothing else"
+                )));
+            }
+            given = nested_values(&p["resource"])?;
+            continue;
+        }
+        match PARAMETERS.iter().find(|(n, _)| *n == name) {
+            None => {
+                if !unknown.contains(&name) {
+                    unknown.push(name);
+                }
+            }
+            Some((_, key)) => {
+                // Another value, a resource or parts would be ignored;
+                // an id or an extension says nothing about the value.
+                if has_other_content(p, "value")
+                    || p.as_object()
+                        .is_some_and(|m| m.keys().any(|k| k.starts_with("value") && k != key))
+                {
+                    return Err(bad_request(format!(
+                        "{name} takes {key}, and no other value, resource or part"
+                    )));
+                }
+                let value = match &p[*key] {
+                    Value::String(s) if *key != "valueInteger" => s.clone(),
+                    Value::Number(n) if *key == "valueInteger" => n.to_string(),
+                    _ => return Err(bad_request(format!("{name} takes {key}"))),
+                };
+                pairs.push((name.to_string(), value));
+            }
+        }
     }
-    Ok(pairs)
+    if !unknown.is_empty() {
+        return Err(bad_request(format!(
+            "unsupported parameter(s): {}; a POST takes subjectCanonical, _format, _limit and \
+             {NESTED}, a Parameters resource with the Library's own",
+            unknown.join(", ")
+        )));
+    }
+    Ok((pairs, given))
+}
+
+/// Whether a Parameters entry that is to hold `kind` (`resource` or
+/// `value`, for a `value[x]`) also holds one of the other two contents an
+/// entry can have, which would leave what it means open.
+fn has_other_content(p: &Value, kind: &str) -> bool {
+    let Some(members) = p.as_object() else {
+        return false;
+    };
+    members.keys().any(|k| match kind {
+        "resource" => k.starts_with("value") || k == "part",
+        _ => k == "resource" || k == "part",
+    })
+}
+
+/// The values in the Parameters resource of a body's `parameters` part.
+fn nested_values(resource: &Value) -> Result<Vec<Given>, Refusal> {
+    if resource["resourceType"] != "Parameters" {
+        return Err(bad_request(format!(
+            "{NESTED} takes resource, a Parameters resource"
+        )));
+    }
+    let entries = match resource.get("parameter") {
+        None => return Ok(Vec::new()),
+        Some(Value::Array(entries)) => entries,
+        // Read as no parameters, this (a null too) would run the query
+        // unfiltered.
+        Some(_) => {
+            return Err(bad_request(format!(
+                "{NESTED}: the resource's parameter must be an array"
+            )));
+        }
+    };
+    let mut given = Vec::new();
+    for p in entries {
+        let (Some(name), Some(members)) = (p["name"].as_str(), p.as_object()) else {
+            return Err(bad_request(format!("a parameter in {NESTED} has no name")));
+        };
+        if has_other_content(p, "value") {
+            return Err(bad_request(format!(
+                "{name} in {NESTED} takes a value[x], not a resource or parts"
+            )));
+        }
+        let mut values = members.iter().filter(|(k, _)| k.starts_with("value"));
+        let value = match (values.next(), values.next()) {
+            (Some((key, v)), None) => GivenValue::Typed(key.clone(), v.clone()),
+            _ => GivenValue::NoValue,
+        };
+        given.push(Given {
+            name: name.to_string(),
+            value,
+        });
+    }
+    Ok(given)
 }
 
 /// A JSON value with no object member named twice: `Value` keeps the last
@@ -533,11 +753,13 @@ fn one_line(s: &str) -> String {
 async fn run(api: Arc<QueryApi>, r: SqlRun) -> Result<(Output, Format), Refusal> {
     let queries = api.queries();
     let ran = tokio::task::spawn_blocking(move || match queries.lookup(&r.canonical) {
-        Lookup::Run(lib) => api
-            .runner
-            .run(&queries.catalog, lib, r.format, r.limit)
-            .map(|out| (out, r.format))
-            .map_err(query_refusal),
+        Lookup::Run(lib) => {
+            let bound = bind(lib, &r.given)?;
+            api.runner
+                .run_with(&queries.catalog, lib, &bound, r.format, r.limit)
+                .map(|out| (out, r.format))
+                .map_err(query_refusal)
+        }
         Lookup::NotApproved => Err(refusal(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -659,6 +881,10 @@ async fn operation_definition() -> Response {
                       "ndjson (the default), json or csv; takes precedence over Accept."),
                 param("_limit", "in", 0, "integer",
                       "The most rows to return. The server may return fewer (max_rows)."),
+                param("parameters", "in", 0, "Parameters",
+                      "Values for the parameters the Library declares (Library.parameter), \
+                       bound by name, each in the value[x] of its type. One that is not given \
+                       is NULL in the query. In a GET, each is a query parameter of its name."),
                 param("return", "out", 1, "Binary", "The rows, in the format asked for."),
             ],
         }),
@@ -1348,7 +1574,16 @@ mod tests {
             .iter()
             .map(|p| p["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["subjectCanonical", "_format", "_limit", "return"]);
+        assert_eq!(
+            names,
+            [
+                "subjectCanonical",
+                "_format",
+                "_limit",
+                "parameters",
+                "return"
+            ]
+        );
 
         let r = send(&api, get("/fhir/Library")).await;
         assert_eq!(r.status, StatusCode::OK);
@@ -1450,6 +1685,407 @@ mod tests {
             .find(|l| l.name == "X1")
             .unwrap();
         assert_eq!(x1.json["id"], "x");
+    }
+
+    const F: &str = "https://example.org/Library/Filter";
+
+    /// The SQLQuery `Filter` over `task`: its rows with `n` at least `min`
+    /// and, with `id`, that id; `on` and `flag` are only echoed back.
+    fn write_filter(w: &Warehouse) {
+        let mut v = crate::serve::query::testing::library(
+            "Filter",
+            false,
+            &[("task", "https://example.org/ViewDefinition/Task")],
+            "SELECT id, n, CAST(:on AS VARCHAR) AS on_date, :flag AS flag, ':min' AS text \
+             FROM task WHERE (:min IS NULL OR n >= :min) AND (:id IS NULL OR id = :id) \
+             ORDER BY n -- :min",
+        );
+        v["parameter"] = json!([
+            {"name": "min", "use": "in", "type": "integer"},
+            {"name": "id", "use": "in", "type": "string"},
+            {"name": "on", "use": "in", "type": "date"},
+            {"name": "flag", "use": "in", "type": "boolean"},
+        ]);
+        w.write("filter", &v);
+    }
+
+    fn ids(r: &Reply) -> Vec<String> {
+        assert_eq!(
+            r.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&r.body)
+        );
+        lines(&r.body)
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn post_filter(values: Value) -> Request<Body> {
+        post(json!({
+            "resourceType": "Parameters",
+            "parameter": [
+                {"name": "subjectCanonical", "valueCanonical": F},
+                {"name": "parameters", "resource": {"resourceType": "Parameters", "parameter": values}},
+            ],
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_librarys_parameters_filter_its_rows() {
+        if !have_duckdb("a_librarys_parameters_filter_its_rows") {
+            return;
+        }
+        let w = Warehouse::new();
+        write_filter(&w);
+        let api = api(&w, Approve::All, 100, &Log::default());
+        // None given: each is NULL, and the query returns every row.
+        let r = send(&api, get(&[("subjectCanonical", F)])).await;
+        assert_eq!(ids(&r), ["a", "b", "c", "d"]);
+        let row = &lines(&r.body)[0];
+        assert_eq!(row["on_date"], Value::Null);
+        assert_eq!(row["flag"], Value::Null);
+        // A placeholder in a string or a comment is not one.
+        assert_eq!(row["text"], ":min");
+
+        let r = send(&api, get(&[("subjectCanonical", F), ("min", "3")])).await;
+        assert_eq!(ids(&r), ["c", "d"]);
+        let r = send(
+            &api,
+            get(&[
+                ("subjectCanonical", F),
+                ("min", "2"),
+                ("id", "c"),
+                ("_format", "json"),
+            ]),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(r.json().as_array().unwrap().len(), 1);
+        let r = send(
+            &api,
+            get(&[
+                ("subjectCanonical", F),
+                ("on", "2026-02-28"),
+                ("flag", "true"),
+                ("_limit", "1"),
+            ]),
+        )
+        .await;
+        let row = &lines(&r.body)[0];
+        assert_eq!(row["on_date"], "2026-02-28");
+        assert_eq!(row["flag"], true);
+
+        // The same through a POST's `parameters`.
+        let r = send(
+            &api,
+            post_filter(json!([
+                {"name": "min", "valueInteger": 2},
+                {"name": "id", "valueString": "c"},
+                {"name": "on", "valueDate": "2026-02-28"},
+                {"name": "flag", "valueBoolean": false},
+            ])),
+        )
+        .await;
+        assert_eq!(ids(&r), ["c"]);
+        assert_eq!(lines(&r.body)[0]["flag"], false);
+        let r = send(&api, post_filter(json!([]))).await;
+        assert_eq!(ids(&r).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_value_is_never_sql() {
+        if !have_duckdb("a_value_is_never_sql") {
+            return;
+        }
+        let w = Warehouse::new();
+        write_filter(&w);
+        let api = api(&w, Approve::All, 100, &Log::default());
+        for value in [
+            "a' OR '1'='1",
+            "a'; DROP TABLE r; --",
+            "x') OR getvariable('min') IS NULL --",
+            "\"; SELECT 1; --",
+            "$$",
+            "",
+        ] {
+            let r = send(&api, get(&[("subjectCanonical", F), ("id", value)])).await;
+            assert!(ids(&r).is_empty(), "{value:?}");
+        }
+        // An id that is one of these texts is found as that text.
+        let r = send(&api, get(&[("subjectCanonical", F), ("id", "a")])).await;
+        assert_eq!(ids(&r), ["a"]);
+    }
+
+    #[tokio::test]
+    async fn bad_library_parameters_are_400() {
+        if !have_duckdb("bad_library_parameters_are_400") {
+            return;
+        }
+        let w = Warehouse::new();
+        write_filter(&w);
+        let api = api(&w, Approve::All, 100, &Log::default());
+        for (query, says) in [
+            (
+                vec![("min", "two")],
+                "min is of type integer: use an integer",
+            ),
+            (vec![("min", "1 OR 1=1")], "min is of type integer"),
+            (vec![("min", "2147483648")], "use an integer from"),
+            (vec![("min", "")], "min is of type integer"),
+            (
+                vec![("on", "2026-02-30")],
+                "on is of type date: use a date, as YYYY-MM-DD",
+            ),
+            (
+                vec![("flag", "1")],
+                "flag is of type boolean: use true or false",
+            ),
+            (
+                vec![("min", "1"), ("min", "2")],
+                "min is given more than once",
+            ),
+            (vec![("year", "2024")], "unsupported parameter(s): year"),
+            (vec![("Min", "1")], "this Library takes min, id, on, flag"),
+        ] {
+            let mut q = vec![("subjectCanonical", F)];
+            q.extend(query.iter().copied());
+            let r = send(&api, get(&q)).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{query:?}");
+            assert!(r.says().contains(says), "{query:?}: {}", r.says());
+        }
+        // A Library with none says so.
+        let r = send(&api, get(&[("subjectCanonical", Q), ("min", "1")])).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST);
+        assert!(
+            r.says().contains("takes no parameters of its own"),
+            "{}",
+            r.says()
+        );
+
+        for (values, says) in [
+            (
+                json!([{"name": "min", "valueString": "2"}]),
+                "min takes valueInteger",
+            ),
+            (
+                json!([{"name": "min", "valueInteger": "2"}]),
+                "min takes valueInteger",
+            ),
+            (
+                json!([{"name": "min", "valueInteger": 2.5}]),
+                "min is of type integer",
+            ),
+            (
+                json!([{"name": "id", "valueInteger": 2}]),
+                "id takes valueString",
+            ),
+            (
+                json!([{"name": "flag", "valueBoolean": "true"}]),
+                "flag takes valueBoolean",
+            ),
+            (json!([{"name": "on"}]), "on takes valueDate"),
+            (
+                json!([{"name": "on", "valueDate": "2026-01-01", "valueString": "x"}]),
+                "on takes valueDate",
+            ),
+            (
+                json!([{"name": "min", "valueInteger": 1}, {"name": "min", "valueInteger": 2}]),
+                "min is given more than once",
+            ),
+            (
+                json!([{"name": "year", "valueInteger": 2024}]),
+                "unsupported parameter(s): year",
+            ),
+            (json!([{"valueInteger": 2024}]), "has no name"),
+            (
+                json!([{"name": "min", "valueInteger": 2, "part": []}]),
+                "min in parameters takes a value[x]",
+            ),
+            (
+                json!([{"name": "min", "valueInteger": 2, "resource": {}}]),
+                "min in parameters takes a value[x]",
+            ),
+            // Not an array: read as none, this would return every row.
+            (
+                json!({"name": "min", "valueInteger": 3}),
+                "parameter must be an array",
+            ),
+            (json!("min"), "parameter must be an array"),
+            (json!(null), "parameter must be an array"),
+        ] {
+            let r = send(&api, post_filter(values.clone())).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{values}");
+            assert!(r.says().contains(says), "{values}: {}", r.says());
+        }
+        // In a POST the Library's parameters go in `parameters`, which is a
+        // Parameters resource, given once.
+        for (extra, says) in [
+            (
+                json!({"name": "min", "valueInteger": 2}),
+                "unsupported parameter(s): min; a POST takes",
+            ),
+            (
+                json!({"name": "parameters", "valueString": "x"}),
+                "parameters takes resource",
+            ),
+            (
+                json!({"name": "parameters", "resource": {"resourceType": "Bundle"}}),
+                "parameters takes resource",
+            ),
+            (
+                json!({"name": "parameters", "valueString": "x",
+                       "resource": {"resourceType": "Parameters"}}),
+                "and nothing else",
+            ),
+            (
+                json!({"name": "parameters", "part": [],
+                       "resource": {"resourceType": "Parameters"}}),
+                "and nothing else",
+            ),
+        ] {
+            let r = send(
+                &api,
+                post(json!({
+                    "resourceType": "Parameters",
+                    "parameter": [{"name": "subjectCanonical", "valueCanonical": F}, extra],
+                })),
+            )
+            .await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(r.says().contains(says), "{extra}: {}", r.says());
+        }
+        // One of the operation's own parameters holds its value and no more.
+        for extra in [
+            json!({"valueString": "x"}),
+            json!({"part": []}),
+            json!({"resource": {"resourceType": "Parameters"}}),
+        ] {
+            let mut subject = json!({"name": "subjectCanonical", "valueCanonical": F});
+            for (k, v) in extra.as_object().unwrap() {
+                subject[k] = v.clone();
+            }
+            let r = send(
+                &api,
+                post(json!({"resourceType": "Parameters", "parameter": [subject]})),
+            )
+            .await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(
+                r.says()
+                    .contains("subjectCanonical takes valueCanonical, and no other value"),
+                "{extra}: {}",
+                r.says()
+            );
+        }
+        // An element id or an extension is not a second value.
+        let r = send(
+            &api,
+            post(json!({"resourceType": "Parameters", "parameter": [
+                {"name": "subjectCanonical", "valueCanonical": F, "id": "p1",
+                 "extension": [{"url": "https://example.org/x", "valueString": "y"}]},
+            ]})),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK);
+        let twice = json!({"name": "parameters", "resource": {"resourceType": "Parameters"}});
+        let r = send(
+            &api,
+            post(json!({
+                "resourceType": "Parameters",
+                "parameter": [{"name": "subjectCanonical", "valueCanonical": F}, twice, twice],
+            })),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST);
+        assert!(
+            r.says().contains("parameters is given more than once"),
+            "{}",
+            r.says()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_integer64_is_a_string_in_a_post() {
+        if !have_duckdb("an_integer64_is_a_string_in_a_post") {
+            return;
+        }
+        let w = Warehouse::new();
+        let mut v = crate::serve::query::testing::library(
+            "Big",
+            false,
+            &[],
+            "SELECT CAST(:big AS VARCHAR) AS id",
+        );
+        v["parameter"] = json!([{"name": "big", "use": "in", "type": "integer64"}]);
+        w.write("big64", &v);
+        let api = api(&w, Approve::All, 100, &Log::default());
+        let big = "https://example.org/Library/Big";
+        let body = |value: Value| {
+            post(json!({
+                "resourceType": "Parameters",
+                "parameter": [
+                    {"name": "subjectCanonical", "valueCanonical": big},
+                    {"name": "parameters", "resource": {"resourceType": "Parameters",
+                        "parameter": [{"name": "big", "valueInteger64": value}]}},
+                ],
+            }))
+        };
+        let r = send(&api, body(json!("9007199254740993"))).await;
+        assert_eq!(ids(&r), ["9007199254740993"]);
+        let r = send(
+            &api,
+            get(&[("subjectCanonical", big), ("big", "9007199254740993")]),
+        )
+        .await;
+        assert_eq!(ids(&r), ["9007199254740993"]);
+        for bad in [json!(12), json!("9223372036854775808"), json!("x")] {
+            let r = send(&api, body(bad.clone())).await;
+            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parameter_may_have_a_keywords_name() {
+        if !have_duckdb("a_parameter_may_have_a_keywords_name") {
+            return;
+        }
+        let w = Warehouse::new();
+        let mut v = crate::serve::query::testing::library(
+            "Kw",
+            false,
+            &[("task", "https://example.org/ViewDefinition/Task")],
+            "SELECT id FROM task WHERE n = :select AND id = :year ORDER BY id",
+        );
+        v["parameter"] = json!([
+            {"name": "select", "use": "in", "type": "integer"},
+            {"name": "year", "use": "in", "type": "code"},
+        ]);
+        w.write("kw", &v);
+        let api = api(&w, Approve::All, 100, &Log::default());
+        let kw = "https://example.org/Library/Kw";
+        let r = send(
+            &api,
+            get(&[("subjectCanonical", kw), ("select", "2"), ("year", "b")]),
+        )
+        .await;
+        assert_eq!(ids(&r), ["b"]);
+        let r = send(
+            &api,
+            post(json!({
+                "resourceType": "Parameters",
+                "parameter": [
+                    {"name": "subjectCanonical", "valueCanonical": kw},
+                    {"name": "parameters", "resource": {"resourceType": "Parameters", "parameter": [
+                        {"name": "select", "valueInteger": 2},
+                        {"name": "year", "valueCode": "b"},
+                    ]}},
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(ids(&r), ["b"]);
     }
 
     #[test]

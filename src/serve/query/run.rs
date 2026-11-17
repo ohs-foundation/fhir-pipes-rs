@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 
 use super::config::{QueryConfig, Source};
-use crate::library::compose::compose;
+use crate::library::compose::{bind_placeholders, compose};
 use crate::library::resolve::{Artifact, Catalog};
 use crate::library::{Library, bind_table, input_table};
 use crate::warehouse::sql::sql_path;
@@ -54,6 +54,18 @@ pub struct Output {
     pub body: Vec<u8>,
     pub rows: usize,
     pub truncated_at: Option<usize>,
+}
+
+/// A parameter of the Library being run, with what the caller gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    /// As the Library declares it; a valid placeholder name.
+    pub name: String,
+    /// The duckdb type its value is cast to.
+    pub sql_type: &'static str,
+    /// The value as text, already checked against the type; `None` when
+    /// the caller gave none, which the query reads as NULL.
+    pub value: Option<String>,
 }
 
 /// Why a query gave no result.
@@ -104,6 +116,9 @@ impl Root {
         }
     }
 }
+
+/// The environment variable that carries a parameter's value to duckdb.
+const PARAM_ENV_PREFIX: &str = "FHIR_PIPES_PARAM_";
 
 /// How long a duckdb has after SIGTERM, when serve stops, before SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -247,13 +262,27 @@ impl Runner {
         lock(&self.children).stopping
     }
 
-    /// Run `lib`, at most `limit` rows and never more than `max_rows`.
-    /// Over a local warehouse, a query that a publish may have overlapped is
-    /// run once more.
+    /// Run `lib` with none of its parameters given.
+    #[cfg(test)]
     pub fn run(
         &self,
         catalog: &Catalog,
         lib: &Library,
+        format: Format,
+        limit: Option<usize>,
+    ) -> Result<Output, QueryError> {
+        self.run_with(catalog, lib, &[], format, limit)
+    }
+
+    /// Run `lib`, at most `limit` rows and never more than `max_rows`.
+    /// `params` are the Library's parameters, each with the caller's value
+    /// or none. Over a local warehouse, a query that a publish may have
+    /// overlapped is run once more.
+    pub fn run_with(
+        &self,
+        catalog: &Catalog,
+        lib: &Library,
+        params: &[Bound],
         format: Format,
         limit: Option<usize>,
     ) -> Result<Output, QueryError> {
@@ -262,11 +291,11 @@ impl Runner {
         }
         let _slot = self.slot().ok_or(QueryError::Busy)?;
         let Root::Local(data) = &self.root else {
-            return self.attempt(catalog, lib, format, limit);
+            return self.attempt(catalog, lib, params, format, limit);
         };
         for _ in 0..2 {
             let before = publish_state(data);
-            let result = self.attempt(catalog, lib, format, limit);
+            let result = self.attempt(catalog, lib, params, format, limit);
             if matches!(result, Err(QueryError::Stopping)) {
                 return result;
             }
@@ -297,10 +326,16 @@ impl Runner {
     }
 
     /// Run `lib` once, at most `limit` rows and never more than `max_rows`.
+    ///
+    /// Each parameter's `:name` placeholders become `getvariable('name')`,
+    /// and the script sets the variable from an environment variable of
+    /// duckdb's, cast to the parameter's type, or to a NULL of that type
+    /// when no value was given. A value never becomes SQL text.
     fn attempt(
         &self,
         catalog: &Catalog,
         lib: &Library,
+        params: &[Bound],
         format: Format,
         limit: Option<usize>,
     ) -> Result<Output, QueryError> {
@@ -310,6 +345,18 @@ impl Runner {
         }
         let root = self.root.prefix();
         let bind = |a: &Artifact| Ok(bind_table(&root, &self.strip_prefix, a));
+        let with_variables;
+        let lib = if params.is_empty() {
+            lib
+        } else {
+            let names: BTreeSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            let mut copy = lib.clone();
+            for (_, sql) in &mut copy.content {
+                *sql = bind_placeholders(sql, &names, |n| format!("getvariable('{n}')"));
+            }
+            with_variables = copy;
+            &with_variables
+        };
         let sql = compose(lib, "duckdb", catalog, &bind)
             .map_err(|e| QueryError::Internal(format!("{e:#}")))?;
         let tmp = tempfile::tempdir()
@@ -326,8 +373,29 @@ impl Runner {
             Some(setup) => format!("{setup}\n;\n"),
             None => String::new(),
         };
+        // After the setup's marker, so a value duckdb cannot cast is the
+        // query's failure, not the setup's.
+        let mut variables = String::new();
+        let mut env = Vec::new();
+        for p in params {
+            let from = match &p.value {
+                Some(value) => {
+                    let var = format!("{PARAM_ENV_PREFIX}{}", p.name);
+                    let from = format!("getenv('{var}')");
+                    env.push((var, value.clone()));
+                    from
+                }
+                None => "NULL".to_string(),
+            };
+            // Quoted: a parameter may have a keyword's name, such as limit.
+            variables.push_str(&format!(
+                "SET VARIABLE \"{}\" = CAST({from} AS {});\n",
+                p.name, p.sql_type
+            ));
+        }
         script.push_str(&format!(
             "COPY (SELECT 1) TO {} (HEADER false);\n\
+             {variables}\
              CREATE TEMP TABLE r AS SELECT * FROM ({sql}) AS q LIMIT {};\n\
              COPY (SELECT count(*) FROM r) TO {} (HEADER false);\n\
              COPY (SELECT * FROM r LIMIT {cap}) TO {} ({});\n",
@@ -337,7 +405,7 @@ impl Runner {
             sql_path(&out),
             format.copy_options()
         ));
-        self.duckdb(tmp.path(), &script, &set_up)?;
+        self.duckdb(tmp.path(), &script, &set_up, &env)?;
         let read = |p: &Path| {
             fs::read(p).map_err(|e| QueryError::Internal(format!("reading {}: {e}", p.display())))
         };
@@ -393,7 +461,13 @@ impl Runner {
     /// Run `script` with duckdb in `dir`, killing it after the timeout or
     /// when serve stops. `set_up` is the file the script writes once the
     /// setup SQL has run.
-    fn duckdb(&self, dir: &Path, script: &str, set_up: &Path) -> Result<(), QueryError> {
+    fn duckdb(
+        &self,
+        dir: &Path,
+        script: &str,
+        set_up: &Path,
+        env: &[(String, String)],
+    ) -> Result<(), QueryError> {
         let internal = |what: &str, e: std::io::Error| QueryError::Internal(format!("{what}: {e}"));
         // stderr goes to a file, so a long error cannot fill a pipe and
         // stall duckdb while it is waited for.
@@ -412,6 +486,8 @@ impl Runner {
         for name in &self.hidden_env {
             command.env_remove(name);
         }
+        // The parameters' values: read by the script with `getenv`.
+        command.envs(env.iter().map(|(n, v)| (n, v)));
         let mut child = command
             .spawn()
             .map_err(|e| internal(&format!("running {}", self.duckdb), e))?;

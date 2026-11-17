@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 
 use super::config::Approve;
 use crate::library::resolve::{Artifact, Catalog};
-use crate::library::{Kind, Library, split_canonical};
+use crate::library::{Kind, Library, params, split_canonical};
 use crate::warehouse::config::Settings;
 
 /// What a requested canonical is.
@@ -56,11 +56,15 @@ impl Queries {
                 }
             }
         }
-        Ok(Queries {
+        let queries = Queries {
             catalog,
             approve: approve.clone(),
             listed,
-        })
+        };
+        for lib in queries.approved() {
+            check_parameters(lib)?;
+        }
+        Ok(queries)
     }
 
     /// `canonical` (`url` or `url|version`) as a subject of `$sql-run`.
@@ -93,6 +97,36 @@ impl Queries {
                 Approve::All => true,
             }
     }
+}
+
+/// A Library `$sql-run` may run declares only parameters it can bind: each
+/// with a name a `:name` placeholder can have, that is not one of the
+/// operation's own or another's (duckdb's variables ignore case), and a
+/// type with a duckdb type.
+fn check_parameters(lib: &Library) -> Result<()> {
+    let mut seen: Vec<String> = Vec::new();
+    for p in params::declared(lib)? {
+        let what = format!("SQLQuery {} declares the parameter {:?}", lib.url, p.name);
+        if !params::valid_name(&p.name) {
+            bail!("{what}, which is not a name a :name placeholder can have");
+        }
+        if super::http::PARAMETERS.iter().any(|(n, _)| *n == p.name) || p.name == "parameters" {
+            bail!("{what}, which is a parameter of $sql-run itself; rename it");
+        }
+        let lower = p.name.to_ascii_lowercase();
+        if seen.contains(&lower) {
+            bail!("{what} twice (names differing only in case are the same)");
+        }
+        seen.push(lower);
+        if params::duckdb_type(&p.fhir_type).is_none() {
+            bail!(
+                "{what} of type {}, which $sql-run cannot bind; use string, code, integer, \
+                 decimal, boolean, date, dateTime or time",
+                p.fhir_type
+            );
+        }
+    }
+    Ok(())
 }
 
 /// An error loading the catalog of `s`, fit to print: each Library source
@@ -196,6 +230,55 @@ mod tests {
             err.contains("SQLQuery https://example.org/Library/A|1 has a |"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_parameter_that_cannot_be_bound_is_refused() {
+        if !have_duckdb("a_parameter_that_cannot_be_bound_is_refused") {
+            return;
+        }
+        for (parameter, says) in [
+            (
+                serde_json::json!([{"name": "a-b", "type": "string"}]),
+                "not a name",
+            ),
+            (
+                serde_json::json!([{"name": "_limit", "type": "integer"}]),
+                "of $sql-run itself",
+            ),
+            (
+                serde_json::json!([{"name": "parameters", "type": "string"}]),
+                "of $sql-run itself",
+            ),
+            (
+                serde_json::json!([{"name": "x", "type": "string"}, {"name": "X", "type": "string"}]),
+                "twice",
+            ),
+            (
+                serde_json::json!([{"name": "q", "type": "Quantity"}]),
+                "of type Quantity",
+            ),
+            (
+                serde_json::json!([{"type": "string"}]),
+                "parameter[0] has no name",
+            ),
+            (
+                serde_json::json!([{"name": "q", "type": 1}]),
+                "parameter[0].type is not a string",
+            ),
+        ] {
+            let w = Warehouse::new();
+            let mut v = library("P", false, &[], "SELECT 1 AS x");
+            v["parameter"] = parameter.clone();
+            w.write("p", &v);
+            let err = Queries::load(&w.settings(), &Approve::All)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(err.contains(says), "{parameter}: {err}");
+            // Not approved, it is not checked: serve does not run it.
+            assert!(Queries::load(&w.settings(), &Approve::Active).is_ok());
+        }
     }
 
     #[test]
