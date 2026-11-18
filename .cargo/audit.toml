@@ -16,6 +16,13 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    # chrono is unmaintained (no fixed version; the advisory suggests jiff or
+    # time). arrow and parquet, which write the warehouse's files, have it in
+    # their API, and octofhir-fhirpath, octofhir-fhirschema and croner depend
+    # on it, so moving our own uses (about 20, in serve, the warehouse and
+    # the parameter checks) would not take it out of Cargo.lock. Remove this
+    # when arrow and octofhir have releases without chrono, and move ours then.
+    "RUSTSEC-2026-0543",
 ]
 
 [output]
