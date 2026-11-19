@@ -66,21 +66,22 @@ From source (needs Rust): `cargo install --git https://github.com/ohs-foundation
 | A value set or concept map as a table to join views to | `terminology valueset`, `terminology conceptmap` |
 | Turn non-FHIR records into FHIR resources with FHIR Mapping Language maps | `map check`, `map run` |
 | Run an import package (models, maps, views, Libraries) over a folder of records | `import check`, `import run`, `import test`, then `load` |
+| SQL on FHIR Libraries (SQLView, SQLQuery) from `.sql` files, or their SQL | `libraries build`, `libraries sql`; `refresh` runs them with `libraries` in the config |
+| Refreshes started over HTTP or on a schedule, with run records and notifications | `serve` |
 
 ## Choosing `--server-kind`
 
 `export`, `extract`, `run` and `refresh` take `--server-kind`. For
 `refresh` it can also be `FHIR_PIPES_SERVER_KIND` or `kind` in `[server]` in
 `fhir-pipes.toml`; the flag wins over the variable, and the variable over
-the file. `refresh --server-kind` came after the other kind flags; if
-`fhir-pipes refresh --help` does not list it, set `kind` in the file.
+the file.
 
 | Server | Kind | Notes |
 |---|---|---|
 | Any FHIR R4 server | `generic` (default) | |
 | HAPI FHIR | `generic` or `hapi` (the same) | `--bulk` needs `hapi.fhir.bulk_export_enabled=true`. Only HAPI can be read from its database (`--hapi-db`). |
 | Google Cloud Healthcare API | `generic` | `--google-auth`; `--server` can be `projects/P/locations/L/datasets/D/fhirStores/S` |
-| Medplum | `medplum` | Without it, search stops at about 11,000 resources per type |
+| Medplum | `medplum` | Without it, Medplum refuses `_offset` past 10,000, so search of a larger type fails |
 | Aidbox | `aidbox` | Base is `<aidbox>/fhir`, not the root |
 
 Auth and per-server setup: [references/servers-and-auth.md](references/servers-and-auth.md).
@@ -141,9 +142,9 @@ fhir-pipes refresh --check             # resolved settings, steps, tools found; 
 fhir-pipes refresh --only views        # download, run views, write Parquet, load PostgreSQL
 ```
 
-`--only views` also adds the manifest, and the catalog and database steps
-when their sections exist. Every other step (locations, tiles, hooks, push)
-is left out. The output goes to `warehouse/parquet/<table>/<partition>=<value>/part-0.parquet`,
+`--only views` also adds the `libraries`, manifest, catalog and database
+steps; `libraries`, catalog and database do something only when their config
+entries exist. Every other step (locations, tiles, hooks, push) is left out. The output goes to `warehouse/parquet/<table>/<partition>=<value>/part-0.parquet`,
 `warehouse/manifest.json`, and the downloads to `warehouse/raw/<name>/`. To
 use local files instead of a server: `fhir-pipes refresh --input exports/`.
 Details: [references/refresh-config.md](references/refresh-config.md).

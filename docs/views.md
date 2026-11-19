@@ -28,7 +28,7 @@ fhir-pipes views test crates/sof/tests/spec
 - `--input` is a file or a directory (read with its subdirectories, hidden files skipped). It reads `.json` and `.ndjson` files, plain or gzip. Bundles are read too; a `urn:uuid` reference to another entry is rewritten to that entry's `Type/id`, so `getReferenceKey()` and joins work.
 - A directory that holds both `X.ndjson` and `X.ndjson.gz` is refused (exit 2), since every row would appear twice.
 - NDJSON is read 20,000 lines at a time and resources no view reads are dropped as they are read.
-- `views run --db URL` (or `FHIR_PIPES_DATABASE_URL`) runs against PostgreSQL holding FHIR resources as JSONB. It needs the `postgres` feature, which the release binaries have.
+- `views run --db URL` (or `FHIR_PIPES_DATABASE_URL`) runs against PostgreSQL holding FHIR resources as JSONB. Each resource type has its own table, named as the type in lower case (`patient`, `observation`), with the resource in a `resource` JSONB column and a `status` column; rows whose `status` is `deleted` are skipped. The layout is fixed. It needs the `postgres` feature, which the release binaries have.
 
 ## Output
 

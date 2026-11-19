@@ -18,8 +18,8 @@ pub const UNKNOWN_COUNTRY: &str = "unknown";
 /// A fixed WGS84 extent for the Hilbert key, rather than the dataset's own
 /// bbox: keys stay deterministic across snapshots and are not skewed by a
 /// single outlier point far from the rest of the data. At ORDER 16 this
-/// gives roughly 5.5 km cells at the equator -- ample for clustering rows
-/// within a partition.
+/// gives cells of 360/65,536 degrees, roughly 0.6 km at the equator --
+/// ample for clustering rows within a partition.
 pub const HILBERT_EXTENT: [f64; 4] = [-180.0, -90.0, 180.0, 90.0];
 
 pub struct Index {

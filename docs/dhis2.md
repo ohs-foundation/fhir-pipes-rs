@@ -363,9 +363,14 @@ out and reported as `unmapped_org_unit`.
 ### Resuming
 
 `--resume` continues a failed or stopped run from `OUT.ndjson.resume`. It is
-refused if the arguments (other than `--concurrency`), the DHIS2 URL, an org
-unit count, the analytics build time, or the file the org units were read
-from has changed. A setting counts whether it was given as an option or in
+refused if anything that shapes the batches has changed: the DHIS2 URL, the
+instance, the indicators, `--level`, `--period`, `--range`, `--root`,
+`--breakdown`, `--chunk`, `--max-rows`, `--campaign`, `--source`,
+`--updated-since`, the `--changed` path, the package and its parameters, an
+org unit count, the analytics build time (not with `--source data-values`),
+the file the org units were read from, or the `--previous` file. Other
+options, such as `--concurrency`, `--timeout`, `--retries`,
+`--max-analytics-age`, `--removed` and `--report`, may change. A setting counts whether it was given as an option or in
 the settings file: changing `chunk` in the file is refused like changing
 `--chunk`, and moving a value from the file to the command line is not a
 change. A run of `dhis2 extract reports` is not resumed by

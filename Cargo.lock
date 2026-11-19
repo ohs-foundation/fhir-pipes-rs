@@ -1178,7 +1178,6 @@ dependencies = [
  "sqlx-postgres",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -1191,7 +1190,6 @@ dependencies = [
  "octofhir-fhirpath",
  "octofhir-fhirschema",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

@@ -109,6 +109,8 @@ mod database {
     /// so the files match the database.
     #[test]
     #[cfg(unix)]
+    // FHIR_PIPES_TEST_PAUSE works in debug builds only.
+    #[cfg(debug_assertions)]
     fn sigterm_after_the_database_commit_finishes_the_publish() {
         if url().is_none() {
             return;

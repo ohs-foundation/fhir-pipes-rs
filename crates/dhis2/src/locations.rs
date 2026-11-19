@@ -22,8 +22,7 @@ use fhir_pipes::report::Report;
 /// Location id prefixes share the id budget with the 11-character UID.
 pub const MAX_PREFIX_LEN: usize = 32;
 
-const ORG_UNIT_FIELDS: &str =
-    "id,code,name,shortName,level,parent[id],openingDate,closedDate,geometry";
+const ORG_UNIT_FIELDS: &str = "id,code,name,shortName,level,parent[id],closedDate,geometry";
 
 #[derive(Debug, Clone, Default)]
 pub struct OrgUnit {

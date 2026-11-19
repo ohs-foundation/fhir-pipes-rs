@@ -68,6 +68,8 @@ fn fhir_pipes() -> Command {
         "FHIR_PIPES_USERNAME",
         "FHIR_PIPES_PASSWORD",
         "FHIR_PIPES_GOOGLE_AUTH",
+        "FHIR_PIPES_SCOPE",
+        "FHIR_PIPES_TOKEN_AUTH",
     ] {
         c.env_remove(var);
     }
@@ -1262,7 +1264,8 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
     let server = Server::run();
     expect_counts(&server, 1, 1);
     let snap = tempfile::tempdir().unwrap();
-    // A plan 2 snapshot: locations and a state file with no organization fields.
+    // A snapshot from before Organizations were extracted: locations and a
+    // state file with no organization fields.
     std::fs::write(
         snap.path().join("locations.ndjson"),
         format!("{}\n", loc("a", "2026-01-01T00:00:00Z", None)),
@@ -1292,6 +1295,49 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
         ))),
     );
     extract(&server, snap.path(), &[]).success();
+    assert_eq!(org_lines(snap.path()).len(), 1);
+    assert_eq!(
+        state(snap.path())["organization_watermark"],
+        "2026-02-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn a_snapshot_without_organizations_fetches_them_in_full_even_with_since() {
+    let server = Server::run();
+    expect_counts(&server, 1, 1);
+    let snap = tempfile::tempdir().unwrap();
+    // A snapshot from before Organizations were extracted: locations and a
+    // state file with no organization fields.
+    std::fs::write(
+        snap.path().join("locations.ndjson"),
+        format!("{}\n", loc("a", "2026-01-01T00:00:00Z", None)),
+    )
+    .unwrap();
+    std::fs::write(
+        snap.path().join("state.json"),
+        json!({"server": server.url("/fhir").to_string(), "watermark": "2026-01-01T00:00:00Z", "count": 1,
+               "kiln_version": "0.2.0", "completed_at": "2026-01-01T00:00:00Z"}).to_string(),
+    )
+    .unwrap();
+    server.expect(
+        Expectation::matching(since_search("2026-01-01T00:00:00Z"))
+            .times(1)
+            .respond_with(ok(bundle(vec![], None))),
+    );
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Organization"),
+            request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+            request::query(url_decoded(not(contains(key("_summary"))))),
+        ])
+        .times(1)
+        .respond_with(ok(bundle(
+            vec![org("org-a", "2026-02-01T00:00:00Z", "A")],
+            None,
+        ))),
+    );
+    extract(&server, snap.path(), &["--since", "2026-01-01T00:00:00Z"]).success();
     assert_eq!(org_lines(snap.path()).len(), 1);
     assert_eq!(
         state(snap.path())["organization_watermark"],

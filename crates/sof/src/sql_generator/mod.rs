@@ -67,7 +67,7 @@ impl SqlGenerator {
     ///
     /// Returns an error if a FHIRPath selector cannot be parsed or lowered, if a
     /// referenced constant is undefined, or if the view's column shape is
-    /// inconsistent across `unionAll` branches.
+    /// inconsistent across `unionAll` branches or two columns share a name.
     pub fn generate(&self, view: &ViewDefinition) -> Result<GeneratedSql, Error> {
         if view.resource.trim().is_empty() {
             return Err(Error::InvalidViewDefinition(
@@ -116,6 +116,7 @@ impl SqlGenerator {
                 ));
             }
         }
+        crate::view_definition::check_unique_column_names(shape.iter().copied())?;
 
         // Lower top-level `where` filters to booleans over the base resource.
         let mut where_sql = Vec::new();
@@ -289,6 +290,50 @@ mod tests {
         }))
         .unwrap();
         assert!(SqlGenerator::new().generate(&v).is_err());
+    }
+
+    #[test]
+    fn duplicate_column_names_error() {
+        let v = ViewDefinition::from_json(&json!({
+            "resource": "Patient",
+            "select": [
+                { "column": [{ "name": "id", "path": "id" }] },
+                { "column": [{ "name": "id", "path": "gender" }] }
+            ]
+        }))
+        .unwrap();
+        let err = SqlGenerator::new().generate(&v).unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidViewDefinition(m) if m == "column `id` is defined more than once"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn boundary_with_precision_errors() {
+        for path in [
+            "value.ofType(Quantity).value.lowBoundary(1)",
+            "value.ofType(Quantity).value.highBoundary(2)",
+            "lowBoundary(1)",
+        ] {
+            let v = ViewDefinition::from_json(&json!({
+                "resource": "Observation",
+                "select": [{ "column": [{ "name": "b", "path": path }] }]
+            }))
+            .unwrap();
+            let err = SqlGenerator::new().generate(&v).unwrap_err();
+            assert!(
+                matches!(&err, Error::InvalidPath(m) if m.contains("(precision) is not supported in SQL")),
+                "{path}: {err}"
+            );
+        }
+        // Without a precision the boundary still lowers.
+        build_sql(json!({
+            "resource": "Observation",
+            "select": [{ "column": [
+                { "name": "b", "path": "value.ofType(Quantity).value.lowBoundary()" }
+            ] }]
+        }));
     }
 
     #[test]

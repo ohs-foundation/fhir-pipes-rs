@@ -235,7 +235,8 @@ impl FhirClient {
             match request.send() {
                 Err(e) => {
                     drop(pass);
-                    last = Some(FetchError::Transport(e.to_string()));
+                    // Without the URL, which can carry a key.
+                    last = Some(FetchError::Transport(e.without_url().to_string()));
                     if attempt < self.retries {
                         sleep(jittered(backoff_delay(attempt, None)));
                     }
@@ -532,6 +533,17 @@ mod tests {
     fn connection_refused_is_a_transport_error() {
         let err = client(1).get("http://127.0.0.1:9/nothing").unwrap_err();
         assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_transport_error_does_not_quote_the_url() {
+        let err = client(1)
+            .get("http://127.0.0.1:9/nothing?_key=s3cr3t-value")
+            .unwrap_err();
+        let FetchError::Transport(text) = &err else {
+            panic!("{err:?}");
+        };
+        assert!(!text.contains("s3cr3t-value"), "{text}");
     }
 
     #[test]

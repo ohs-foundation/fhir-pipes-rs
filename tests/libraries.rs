@@ -36,6 +36,38 @@ fn build_writes_one_library_per_sql_file() {
 }
 
 #[test]
+fn build_refuses_two_sources_with_the_same_name() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    for file in ["a", "b"] {
+        fs::write(src.path().join(format!("{file}.sql")), "SELECT 1 AS x\n").unwrap();
+        fs::write(
+            src.path().join(format!("{file}.toml")),
+            format!(
+                "url = \"https://example.org/Library/{file}\"\nname = \"Same\"\n\
+                 status = \"draft\"\nkind = \"SQLView\"\n"
+            ),
+        )
+        .unwrap();
+    }
+    let assert = Command::cargo_bin("fhir-pipes")
+        .unwrap()
+        .args(["libraries", "build"])
+        .arg(src.path())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(stderr.contains("name = \"Same\""), "{stderr}");
+    assert_eq!(
+        fs::read_dir(out.path()).unwrap().count(),
+        0,
+        "nothing written"
+    );
+}
+
+#[test]
 fn build_warns_about_a_sql_file_without_a_toml() {
     let src = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();

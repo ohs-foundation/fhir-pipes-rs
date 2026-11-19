@@ -29,6 +29,7 @@ use fhir_pipes_sof::{SqlGenerator, ViewDefinition};
 use fhir_pipes_sof_lint::{lint_core, lint_shareable, validate_structure};
 
 use crate::error::{Findings, usage};
+use crate::redact::DATABASE_URL_ENV;
 
 use check::{ReportFormat, package_findings, report_findings};
 use run::{discover, parse_view};
@@ -57,11 +58,14 @@ enum ViewsCommand {
         /// (subdirectories included), or `-` to read from stdin. A file ending
         /// in `.gz` is read as gzip. `urn:uuid` references within a Bundle are
         /// resolved to Type/id.
-        #[arg(long, conflicts_with = "db")]
+        #[arg(long)]
         input: Option<PathBuf>,
         /// PostgreSQL connection URL, for a database holding FHIR resources as
-        /// JSONB.
-        #[arg(long, env = "FHIR_PIPES_DATABASE_URL")]
+        /// JSONB: one table per resource type, named as the type in lower case,
+        /// with `resource` (JSONB) and `status` columns. Rows whose status is
+        /// `deleted` are skipped. Not used with --input, which wins over
+        /// FHIR_PIPES_DATABASE_URL.
+        #[arg(long, env = DATABASE_URL_ENV)]
         db: Option<String>,
         /// Output format: csv, ndjson, json or parquet.
         #[arg(long, default_value = "csv")]
@@ -116,9 +120,9 @@ enum ViewsCommand {
         #[arg(long, conflicts_with = "json")]
         sarif: bool,
     },
-    /// Check a ViewDefinition's FHIRPath selectors against the FHIR R4 and R5
-    /// core types built in (FH01–FH05), or against a FHIR package with
-    /// --package (FH01–FH10); with --shareable, also against the
+    /// Check a ViewDefinition's structure and its FHIRPath selectors against
+    /// the FHIR R4 and R5 core types built in, or against a FHIR package with
+    /// --package (FH01–FH10 either way); with --shareable, also against the
     /// ShareableViewDefinition subset (FH11). Exits non-zero on an error.
     Lint {
         /// The ViewDefinition JSON file.
@@ -234,6 +238,16 @@ async fn run_command(command: &ViewsCommand, color: bool) -> Result<()> {
             parquet_temporal,
             threads,
         } => {
+            // --db typed beside --input is a mistake; FHIR_PIPES_DATABASE_URL
+            // set in the environment is not, and --input wins over it.
+            if input.is_some()
+                && db.is_some()
+                && std::env::var(DATABASE_URL_ENV).ok().as_deref() != db.as_deref()
+            {
+                return Err(usage(anyhow::anyhow!(
+                    "--input and --db name two sources; pass one"
+                )));
+            }
             rows::run(
                 view,
                 input.as_ref(),

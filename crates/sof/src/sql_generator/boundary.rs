@@ -55,7 +55,7 @@ pub(super) fn datetime_bound(dialect: Dialect, t: &str, low: bool) -> String {
 }
 
 /// Widen a partial time string `t` to its low/high bound.
-pub(super) fn time_bound(_dialect: Dialect, t: &str, low: bool) -> String {
+pub(super) fn time_bound(t: &str, low: bool) -> String {
     if low {
         format!(
             "CASE length({t}) WHEN 2 THEN {t} || ':00:00.000' WHEN 5 THEN {t} || ':00.000' WHEN 8 THEN {t} || '.000' ELSE {t} END"

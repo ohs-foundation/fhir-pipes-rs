@@ -215,7 +215,24 @@ pub fn build_all(src: &Path) -> Result<Vec<(String, Value)>> {
     sql.into_iter()
         .filter(|p| p.with_extension("toml").exists())
         .map(|p| Ok((p.display().to_string(), build_source(&p)?)))
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .and_then(unique_names)
+}
+
+/// `built`, unless two Libraries have the same `name`: each would be written
+/// to the same `Library-{name}.json`.
+fn unique_names(built: Vec<(String, Value)>) -> Result<Vec<(String, Value)>> {
+    let mut names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (path, lib) in &built {
+        let name = lib["name"].as_str().unwrap_or_default();
+        if let Some(first) = names.insert(name, path) {
+            return Err(usage(anyhow::anyhow!(
+                "{first} and {path} both have name = {name:?}; each would be written to \
+                 Library-{name}.json. Give one another name"
+            )));
+        }
+    }
+    Ok(built)
 }
 
 /// The `.sql` files of `sql` with no `.toml` beside them, other than the

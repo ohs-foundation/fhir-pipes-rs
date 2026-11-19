@@ -15,7 +15,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
@@ -140,15 +139,9 @@ fn other_tables(s: &Settings, views: &[crate::views::run::View]) -> BTreeMap<Str
     taken
 }
 
-/// The table an input is read from, or `None` for a SQLView, whose SQL is
-/// inlined. The built-in LocationHierarchy is the table the locations step
-/// writes.
+/// The table an input is read from: `library::input_table`.
 fn input_table(s: &Settings, a: &Artifact) -> Option<String> {
-    match a {
-        Artifact::Library(l) if l.url == HIERARCHY_URL => Some(HIERARCHY_TABLE.to_string()),
-        Artifact::Library(l) if l.kind == Kind::SqlView => None,
-        _ => Some(a.table(&s.strip_prefix)),
-    }
+    crate::library::input_table(a, &s.strip_prefix)
 }
 
 /// Every table `lib` reads, through the SQLViews it inlines, must be there,
@@ -200,10 +193,7 @@ pub(super) fn missing(
     } else {
         format!(" (read by {})", query.name)
     };
-    let canonical = match &dep.version {
-        Some(v) => format!("{}|{v}", dep.canonical),
-        None => dep.canonical.clone(),
-    };
+    let canonical = dep.versioned();
     let why = match input {
         Artifact::Library(l) if l.url == HIERARCHY_URL => {
             "the locations step writes it; run the locations step"
@@ -318,19 +308,14 @@ fn copy(s: &Settings, sql: &str, staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// duckdb for a Library's SQL, without the user's `~/.duckdbrc`.
-fn duckdb_command(s: &Settings) -> Command {
-    tools::duckdb_command(&s.duckdb)
-}
-
-/// Run a SQL script with `duckdb_command`, discarding its result table.
+/// Run a SQL script with duckdb, discarding its result table.
 fn duckdb(s: &Settings, sql: &str) -> Result<()> {
-    tools::output(duckdb_command(s).args(["-c", sql])).map(|_| ())
+    tools::duckdb(&s.duckdb, sql)
 }
 
 /// The column names of `sql`'s result.
 fn columns(s: &Settings, sql: &str) -> Result<Vec<String>> {
-    let out = tools::output(duckdb_command(s).args([
+    let out = tools::output(tools::duckdb_command(&s.duckdb).args([
         "-noheader",
         "-list",
         "-c",

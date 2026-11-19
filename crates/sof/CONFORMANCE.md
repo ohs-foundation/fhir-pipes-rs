@@ -1,16 +1,20 @@
 # SQL-on-FHIR v2 conformance
 
-`octofhir-sof` runs the official [FHIR/sql-on-fhir.js][upstream] v2.1 content
-test suite (vendored at `crates/octofhir-sof/tests/spec/`, refresh with
-`just update-spec-tests`). Both execution paths — the database-free in-memory
-evaluator and the generated PostgreSQL — pass the full suite:
+`fhir-pipes-sof` runs the official [FHIR/sql-on-fhir.js][upstream] v2.1 content
+test suite (vendored at `crates/sof/tests/spec/`; see
+[tests/spec/SOURCE.md](tests/spec/SOURCE.md)). Both execution paths — the
+database-free in-memory evaluator and the generated SQL — pass the full suite:
 
 ```
 TOTAL  144/144
 ```
 
-- In-memory: `just conformance`
-- PostgreSQL: `just conformance-pg` (needs a running Postgres; see the recipe)
+- In-memory: `cargo test -p fhir-pipes-sof --test conformance_memory`
+- DuckDB: `cargo test -p fhir-pipes-sof --test conformance_duckdb` (needs the
+  `duckdb` CLI on `PATH`)
+- PostgreSQL: `SOF_CONFORMANCE_DB=<database URL> cargo test -p fhir-pipes-sof
+  --features postgres --test conformance` (creates a `conf` schema in that
+  database)
 
 ## Producing a result file for the registry
 
@@ -24,13 +28,13 @@ Safhire result files linked from the registry.)
 Generate our result file in that format:
 
 ```sh
-just conformance-report                 # writes conformance-results.json
-just conformance-report out=results.json # custom path
+SOF_RESULT_JSON=conformance-results.json \
+  cargo test -p fhir-pipes-sof --test conformance_memory
 ```
 
-Internally this runs the in-memory harness with `SOF_RESULT_JSON=<path>` set;
-the harness serializes every outcome (title → pass/fail, plus a `reason` on
-failure) into the registry shape.
+With `SOF_RESULT_JSON=<path>` set, the in-memory harness serializes every
+outcome (title → pass/fail, plus a `reason` on failure) into the registry
+shape.
 
 ## Submitting our entry
 

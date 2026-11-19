@@ -20,6 +20,10 @@ spatial_index_extension = "https://icr.healthcampaigns.org/StructureDefinition/s
 # The Location a catchment area is the catchment of: `catchment_of` in the
 # catchment tiles `refresh` builds.
 catchment_extension = "https://icr.healthcampaigns.org/StructureDefinition/catchment-of"
+# The admin units an operational area overlaps (a list of valueReference): the
+# overlays_admin_unit_ids column, written only when this is set. ICR does not
+# set it.
+# overlays_extension = "https://example.org/StructureDefinition/overlays"
 # The type code of an administrative unit: admin_level, tier, the adminN
 # columns and country all follow the chain of these.
 admin_unit_type = "admin-unit"
@@ -30,7 +34,7 @@ type_systems = [
     "https://icr.healthcampaigns.org/CodeSystem/icr-location-type",
 ]
 # The column holding an admin unit's code: adminN_code, country (from the
-# level 0 unit) and the duplicate_admin_code report.
+# level 0 unit) and the duplicate_pcode report (named after this column).
 admin_code_column = "pcode"
 # Names of the admin layers in refresh's tiles/admin.pmtiles, by admin level;
 # unnamed levels are admin0, admin1, …. Left out here, as ICR covers more than

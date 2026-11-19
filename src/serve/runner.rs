@@ -20,7 +20,7 @@ const SAVE_RETRY: Duration = Duration::from_secs(30);
 
 /// The failed steps after which an attempt is tried again: they change
 /// nothing outside the warehouse's staging and raw downloads.
-pub const RETRYABLE: [&str; 9] = [
+pub const RETRYABLE: [&str; 10] = [
     "lock",
     "tools",
     "start",
@@ -28,6 +28,7 @@ pub const RETRYABLE: [&str; 9] = [
     "locations",
     "views",
     "tiles",
+    "libraries",
     "manifest",
     "catalog",
 ];
@@ -448,7 +449,9 @@ fn attempt(job: &Job, rec: &RunRecord, n: u32, cancel: &CancelToken) -> (ExitKin
         s.pgid = None;
         status
     };
-    // Every process that held the pipes is gone, so both streams end.
+    // Both streams end once every process that holds the pipes has exited.
+    // A process that left the group (setsid) or outlived the wait above
+    // still holds them, and `finish` waits for it with no time limit.
     let stderr_tail = capture.finish();
     log.lock().unwrap_or_else(|e| e.into_inner()).close();
     let exit = status.map(ExitKind::from).unwrap_or(ExitKind::Code(1));
@@ -574,6 +577,19 @@ mod tests {
         assert!(!live_member("42 (sleep) Z 1 7 7 0", 7), "a zombie");
         assert!(!live_member("42 (sleep) S 7 8 8 0", 7), "another group");
         assert!(!live_member("garbage", 7));
+    }
+
+    #[test]
+    fn every_step_before_the_database_is_retried() {
+        // STEPS is in run order: those before the database are retried,
+        // the rest are not.
+        let database = super::super::api::STEPS
+            .iter()
+            .position(|s| *s == "database")
+            .unwrap();
+        for (i, step) in super::super::api::STEPS.iter().enumerate() {
+            assert_eq!(RETRYABLE.contains(step), i < database, "{step}");
+        }
     }
 
     #[test]

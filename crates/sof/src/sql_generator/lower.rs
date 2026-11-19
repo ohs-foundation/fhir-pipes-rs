@@ -437,7 +437,7 @@ impl Lower {
     /// A function applied to the current context (`name(...)` with no object).
     fn func_root(&self, name: &str, args: &[ExpressionNode], ctx: &str) -> Result<String, Error> {
         let seed = self.dialect.build_array1(ctx);
-        self.apply_on_coll(name, &seed, args, ctx)
+        self.apply_on_coll(name, &seed, args)
     }
 
     /// A method call `object.name(args)`.
@@ -456,13 +456,14 @@ impl Lower {
                     .to_json_scalar(&format!("NOT ({})", self.bool(object, ctx)?)),
             )),
             "lowBoundary" | "highBoundary" => {
+                no_boundary_precision(name, args)?;
                 let hint = boundary_hint(object);
                 let oc = self.coll(object, ctx)?;
                 Ok(self.boundary(&oc, name == "lowBoundary", hint))
             }
             _ => {
                 let oc = self.coll(object, ctx)?;
-                self.apply_on_coll(name, &oc, args, ctx)
+                self.apply_on_coll(name, &oc, args)
             }
         }
     }
@@ -473,7 +474,6 @@ impl Lower {
         name: &str,
         coll: &str,
         args: &[ExpressionNode],
-        _ctx: &str,
     ) -> Result<String, Error> {
         match name {
             "first" | "single" => Ok(self.index(coll, 0)),
@@ -512,8 +512,10 @@ impl Lower {
             }
             "getReferenceKey" => self.reference_key(coll, args.first()),
             "getResourceKey" => self.resource_key(coll),
-            "lowBoundary" => Ok(self.boundary(coll, true, BoundaryType::Unknown)),
-            "highBoundary" => Ok(self.boundary(coll, false, BoundaryType::Unknown)),
+            "lowBoundary" | "highBoundary" => {
+                no_boundary_precision(name, args)?;
+                Ok(self.boundary(coll, name == "lowBoundary", BoundaryType::Unknown))
+            }
             "toString" => Ok(coll.to_string()),
             other => Err(Error::InvalidPath(format!(
                 "unsupported function {other}()"
@@ -643,10 +645,10 @@ impl Lower {
         let string_bound = match hint {
             BoundaryType::Date => date_bound(d, &t, low),
             BoundaryType::DateTime => datetime_bound(d, &t, low),
-            BoundaryType::Time => time_bound(d, &t, low),
+            BoundaryType::Time => time_bound(&t, low),
             BoundaryType::Unknown => format!(
                 "CASE WHEN position(':' in {t}) > 0 THEN {} ELSE {} END",
-                time_bound(d, &t, low),
+                time_bound(&t, low),
                 date_bound(d, &t, low)
             ),
         };
@@ -981,4 +983,16 @@ impl Lower {
 /// from a view goes through this.
 pub(super) fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The SQL lowering has no precision support for `lowBoundary`/`highBoundary`.
+/// Fail on a precision argument rather than return the default boundary.
+fn no_boundary_precision(name: &str, args: &[ExpressionNode]) -> Result<(), Error> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::InvalidPath(format!(
+            "{name}(precision) is not supported in SQL"
+        )))
+    }
 }

@@ -386,8 +386,14 @@ impl FhirClient {
                 .timeout(timeout)
         };
         let body = |resp: Response| {
-            read(&mut decoded(resp))
-                .map_err(|e| FetchError::Transport(format!("reading body: {e}")))
+            read(&mut decoded(resp)).map_err(|e| {
+                // A read error can quote the URL, and a signed storage URL
+                // carries its signature.
+                FetchError::Transport(format!(
+                    "reading body: {}",
+                    crate::redact::urls(&e.to_string())
+                ))
+            })
         };
         let attempt = if authorize {
             Attempt::AuthorizedAnywhere

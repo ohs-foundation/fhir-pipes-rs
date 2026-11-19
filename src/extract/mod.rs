@@ -95,17 +95,15 @@ pub fn run_extract(args: &ExtractArgs, boundary_extensions: &[String]) -> anyhow
 
     // Organizations have their own watermark. A snapshot from before they
     // were extracted has no file and no watermark, so they are fetched in
-    // full while Locations stay incremental.
-    let org_since: Option<String> = if args.full {
+    // full while Locations stay incremental, even with --since.
+    let org_since: Option<String> = if args.full || !snap.organizations().exists() {
         None
     } else if let Some(s) = &args.since {
         Some(s.clone())
-    } else if snap.organizations().exists() {
+    } else {
         state
             .as_ref()
             .and_then(|st| st.organization_watermark.clone())
-    } else {
-        None
     };
     let result = run_phases(
         args,
