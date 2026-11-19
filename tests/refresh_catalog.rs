@@ -242,6 +242,9 @@ fn the_pushed_catalog_reads_the_uploaded_tables() {
 #[test]
 #[cfg(unix)]
 fn a_dry_run_push_skips_a_catalog_file_not_built_yet() {
+    if !have_duckdb("a_dry_run_push_skips_a_catalog_file_not_built_yet") {
+        return;
+    }
     let server = Server::run();
     serve_types(&server, &["Observation", "Patient"]);
     let dir = tempfile::tempdir().unwrap();
