@@ -237,7 +237,7 @@ pub(super) fn plan_run(
             ids,
             args.opts.chunk,
             args.opts.max_rows,
-            &|chunk| src.elements_of(chunk).len(),
+            &|chunk| src.combo_count_of(chunk),
         );
         eprintln!("{} batches, one dataValueSets request each", units.len());
         raw = Some(src);
@@ -388,6 +388,88 @@ pub(super) mod tests {
         // at most the budget.
         let units = plan_all_levels(&[1], 0, &periods[..2], &[], &ids[..1], 1, 1, &|_| 0);
         assert_eq!(units.len(), 2);
+    }
+
+    #[test]
+    fn from_data_values_batch_sizing_counts_category_option_combos() {
+        use crate::expression::{Expr, Item};
+        use crate::raw::{Aggregation, Element, RawSource};
+        use std::collections::HashMap;
+
+        let mut src = RawSource::default();
+        // "plain" has 1 default combo; "disagg" has 10 category option combos.
+        let mut plain_cocs = HashMap::new();
+        plain_cocs.insert("coc0".to_string(), vec![]);
+        src.elements.insert(
+            "de_plain".to_string(),
+            Element {
+                aggregation: Aggregation::Sum,
+                cocs: plain_cocs,
+                categories: vec![],
+            },
+        );
+        let mut disagg_cocs = HashMap::new();
+        for i in 0..10 {
+            disagg_cocs.insert(format!("coc{i}"), vec![format!("opt{i}")]);
+        }
+        src.elements.insert(
+            "de_disagg".to_string(),
+            Element {
+                aggregation: Aggregation::Sum,
+                cocs: disagg_cocs,
+                categories: vec!["cat1".to_string()],
+            },
+        );
+        src.exprs.insert(
+            "plain".to_string(),
+            (
+                Expr::Item(Item {
+                    de: "de_plain".to_string(),
+                    coc: None,
+                    aoc: None,
+                }),
+                Expr::Num(1.0),
+            ),
+        );
+        src.exprs.insert(
+            "disagg".to_string(),
+            (
+                Expr::Item(Item {
+                    de: "de_disagg".to_string(),
+                    coc: None,
+                    aoc: None,
+                }),
+                Expr::Num(1.0),
+            ),
+        );
+
+        assert_eq!(src.combo_count_of(&codes(&["plain"])), 1);
+        assert_eq!(src.combo_count_of(&codes(&["disagg"])), 10);
+        assert_eq!(src.combo_count_of(&codes(&["plain", "disagg"])), 11);
+
+        let periods = codes(&["202501", "202502", "202503", "202504"]);
+        // With 2 org units and max_rows = 20:
+        // "disagg" has 10 combos × 2 org units = 20 rows/period -> 1 period per batch (4 units).
+        // "plain" has 1 combo × 2 org units = 2 rows/period -> all 4 periods fit in 1 batch (1 unit).
+        let units = plan_all_levels(
+            &[1],
+            2,
+            &periods,
+            &[],
+            &codes(&["disagg", "plain"]),
+            1,
+            20,
+            &|chunk| src.combo_count_of(chunk),
+        );
+        assert_eq!(units.len(), 5);
+        assert_eq!(units[0].periods, codes(&["202501"]));
+        assert_eq!(units[1].periods, codes(&["202502"]));
+        assert_eq!(units[2].periods, codes(&["202503"]));
+        assert_eq!(units[3].periods, codes(&["202504"]));
+        assert_eq!(
+            units[4].periods,
+            codes(&["202501", "202502", "202503", "202504"])
+        );
     }
 
     #[test]
