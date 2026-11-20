@@ -435,6 +435,16 @@ impl RawSource {
         set.into_iter().collect()
     }
 
+    /// Total category option combos across the data elements `items` use
+    /// (counting at least 1 for an element without recorded combos), to size
+    /// `dataValueSets` batches.
+    pub fn combo_count_of(&self, items: &[String]) -> usize {
+        self.elements_of(items)
+            .iter()
+            .map(|de| self.elements.get(de).map_or(1, |e| e.cocs.len().max(1)))
+            .sum()
+    }
+
     /// One `dataValueSets` query per chunk of root org units: without
     /// `--root` the roots are every org unit at the top requested level,
     /// which in one URL can pass a server's 8 KB limit. The roots are at one
